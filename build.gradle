@@ -1,0 +1,44 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenLocal()
+    maven {
+        url = 'https://repo.runelite.net'
+    }
+    mavenCentral()
+}
+
+def runeLiteVersion = 'latest.release'
+
+dependencies {
+    compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion
+
+    compileOnly 'org.projectlombok:lombok:1.18.30'
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    testImplementation 'junit:junit:4.12'
+    testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
+    testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
+    testImplementation "ch.qos.logback:logback-classic:1.4.14"
+}
+
+group = 'com.osrsbestinslot.export'
+version = '0.2.0'
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+    options.release.set(11)
+}
+
+// Launches a full RuneLite client with this plugin loaded (dev / login test).
+// PC2: ./gradlew runClient  ->  RuneLite GUI opens, log in, paste the link token in the plugin config.
+tasks.register('runClient', JavaExec) {
+    group = 'application'
+    description = 'Run RuneLite with the OSRS Best in Slot plugin loaded'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.osrsbestinslot.export.AccountConnectPluginTest'
+    // RuneLite's ExternalPluginManager.loadBuiltin REQUIRES assertions enabled, or it throws on launch.
+    jvmArgs = ['-ea']
+}
