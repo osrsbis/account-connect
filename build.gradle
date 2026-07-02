@@ -22,6 +22,16 @@ dependencies {
     testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
     testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
     testImplementation "ch.qos.logback:logback-classic:1.4.14"
+
+    // Lifecycle test only: mockwebserver pinned to the okhttp version the RuneLite client ships
+    // (3.14.9), mockito to stub ConfigManager. TEST classpath only — no new runtime deps.
+    testImplementation 'com.squareup.okhttp3:mockwebserver:3.14.9'
+    testImplementation 'org.mockito:mockito-core:4.11.0'
+
+    // MP4 (H.264) encoder for the store-visit clip capability — pure Java, no native code,
+    // no subprocess.
+    implementation 'org.jcodec:jcodec:0.2.5'
+    implementation 'org.jcodec:jcodec-javase:0.2.5'
 }
 
 group = 'com.osrsbestinslot.export'

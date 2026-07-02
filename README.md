@@ -45,3 +45,17 @@ token you pasted.
 Plumbing patterns (injected client services, scheduled upload, collection-log cache walk)
 follow the open-source [WikiSync](https://github.com/weirdgloop/WikiSync) plugin by
 andmcadams (BSD-2-Clause). The data model is original.
+
+## Optional captures (off by default)
+
+Two additional features can be enabled in the plugin config — both are **off by
+default** and capture nothing until you turn them on:
+
+- **Trade screenshots** — on trade completion, uploads a screenshot of the trade
+  confirmation window (which shows the other player's name and the traded items)
+  as delivery proof.
+- **General store clips** — records a short muted video clip of the game screen
+  while a shop interface is open and uploads it as delivery proof.
+
+Each toggle shows a full plain-language disclosure of exactly what is sent.
+Everything uploads only with your link token to www.osrsbestinslot.com.
