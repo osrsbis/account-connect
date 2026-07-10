@@ -46,4 +46,18 @@ public interface AccountConnectConfig extends Config
 	{
 		return false;	// OFF by default — explicit opt-in required
 	}
+
+	@ConfigItem(
+		keyName = "syncIntervalSeconds",
+		name = "Sync interval (seconds)",
+		description =
+			"How often to sync when your account data changes (5-600). Lower = more up to date on the "
+			+ "site, slightly more network; the client only sends when something actually changed. "
+			+ "The default is right for most users.",
+		position = 4
+	)
+	default int syncIntervalSeconds()
+	{
+		return 120;	// preserves the historical cadence; the value is clamped to [5, 600] in the plugin
+	}
 }

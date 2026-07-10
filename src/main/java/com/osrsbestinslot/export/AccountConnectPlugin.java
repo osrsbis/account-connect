@@ -58,6 +58,7 @@ import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
@@ -88,7 +89,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int COINS_ID = 995;
 
 	// ---- snapshot upload gating ----
-	// The 30s @Schedule tick is only the CHECKER: it always builds + tracks the snapshot, but an
+	// The @Schedule tick (every 5s) is only the CHECKER: it always builds + tracks the snapshot, but an
 	// HTTP send happens only when the canonical hash changed, the debounce interval has passed and
 	// no 429 backoff is active. Reference behavior is Wise Old Man's event/change-driven uploads —
 	// never a clock firehose (the server allows 150 req/hr per token).
@@ -181,11 +182,37 @@ public class AccountConnectPlugin extends Plugin
 		return configManager.getConfig(AccountConnectConfig.class);
 	}
 
+	@Override
+	protected void startUp()
+	{
+		applyConfiguredInterval();
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if ("osrsbisexport".equals(event.getGroup()))
+		{
+			applyConfiguredInterval();
+		}
+	}
+
+	/**
+	 * The min gap between sends comes from the user config, clamped to [5s, 600s] so a client can
+	 * never spam the ingest endpoint (staff run this low for near-real-time; the public default keeps
+	 * the 120s cadence). Applied on startup + config change — NOT per tick — so the send loop reads a
+	 * stable field and tests can inject it directly.
+	 */
+	void applyConfiguredInterval()
+	{
+		minUploadIntervalMillis = Math.max(5L, Math.min(config.syncIntervalSeconds(), 600L)) * 1000L;
+	}
+
 	/**
 	 * Non-async @Schedule runs on the client thread, so reading client state below is safe.
 	 * The network POST itself is async (OkHttp enqueue), so it never blocks the game.
 	 */
-	@Schedule(period = 30, unit = ChronoUnit.SECONDS)
+	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
 	public void syncTask()
 	{
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
@@ -278,6 +305,29 @@ public class AccountConnectPlugin extends Plugin
 		}
 		lastSendMillis = System.currentTimeMillis();
 		postSnapshot(token, snapshot, hash);
+	}
+
+	/**
+	 * A completed trade changes wealth. Rebuild the snapshot cache immediately (client thread,
+	 * containers valid right after "Accepted trade.") so the logout flush carries POST-trade wealth
+	 * even when no periodic tick ran between the trade and logout. Independent of the trade-screenshot
+	 * opt-in — wealth tracking is separate from delivery-proof capture. If the player stays online,
+	 * the next syncTask still sends it through the change gate.
+	 */
+	private void refreshSnapshotCacheAfterTrade()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
+		{
+			return;
+		}
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$"))
+		{
+			return;
+		}
+		Map<String, Object> snapshot = buildSnapshot();
+		lastBuiltSnapshot = snapshot;
+		lastBuiltHash = canonicalHash(snapshot);
 	}
 
 	/** Each obtained collection-log slot fires script 4100 (arg[1] = item id) as the clog UI renders. */
@@ -402,6 +452,14 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
+		// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
+		// since the trade. Client thread; containers are valid right after "Accepted trade.".
+		if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
+			Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
+		{
+			refreshSnapshotCacheAfterTrade();
+		}
 		handleTradeChat(event.getMessage());
 	}
 
@@ -418,7 +476,23 @@ public class AccountConnectPlugin extends Plugin
 			resetTradeState();
 			if (frame != null)
 			{
-				submitTradeScreenshotUpload(frame);
+				submitTradeScreenshotUpload(frame, "confirm");
+			}
+			// Second proof frame: the trade just completed and the window closed, so the NEXT rendered
+			// frame shows the "Accepted trade." chat confirmation. Delivery proof needs BOTH — the
+			// confirm screen (items + partner) and the completion frame (proof it actually went through).
+			// Only capture when a valid token is configured: nothing to upload otherwise, and this also
+			// keeps the no-token path from touching drawManager.
+			String completedToken = config.linkToken() == null ? "" : config.linkToken().trim();
+			if (completedToken.matches("^[a-f0-9]{32}$"))
+			{
+				drawManager.requestNextFrameListener(image ->
+				{
+					if (config.uploadTradeScreenshots())	// re-check: toggle may flip before the frame lands
+					{
+						submitTradeScreenshotUpload(toBufferedImage(image), "completed");
+					}
+				});
 			}
 		}
 		else if (TRADE_DECLINED_MESSAGE.equalsIgnoreCase(text))
@@ -488,7 +562,7 @@ public class AccountConnectPlugin extends Plugin
 	 * PNG-encoding a full frame can hitch the render loop, so encode + upload run on the injected
 	 * background executor; the OkHttp call itself is async (enqueue), same as postSnapshot.
 	 */
-	private void submitTradeScreenshotUpload(BufferedImage frame)
+	private void submitTradeScreenshotUpload(BufferedImage frame, String phase)
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
@@ -508,19 +582,20 @@ public class AccountConnectPlugin extends Plugin
 					bytes.length, MAX_SCREENSHOT_UPLOAD_BYTES);
 				return;
 			}
-			uploadTradeScreenshot(token, bytes);
+			uploadTradeScreenshot(token, bytes, phase);
 		});
 	}
 
-	private void uploadTradeScreenshot(String token, byte[] pngBytes)
+	private void uploadTradeScreenshot(String token, byte[] pngBytes, String phase)
 	{
 		long capturedAt = System.currentTimeMillis() / 1000L;
 		RequestBody body = new MultipartBody.Builder()
 			.setType(MultipartBody.FORM)
 			.addFormDataPart("token", token)
 			.addFormDataPart("kind", "trade")
+			.addFormDataPart("phase", phase)	// "confirm" = trade window; "completed" = post-accept chat frame
 			.addFormDataPart("captured_at", Long.toString(capturedAt))
-			.addFormDataPart("file", "trade-" + capturedAt + ".png", RequestBody.create(PNG, pngBytes))
+			.addFormDataPart("file", "trade-" + phase + "-" + capturedAt + ".png", RequestBody.create(PNG, pngBytes))
 			.build();
 
 		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");

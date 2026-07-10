@@ -99,9 +99,12 @@ public class TradeScreenshotTest
 	// ---- toggle ON: arm -> frame -> commit uploads one multipart PNG ----
 
 	@Test
-	public void armCommitUploadsMultipartPngToIngestRoute() throws Exception
+	public void armCommitUploadsBothConfirmAndCompletedScreenshots() throws Exception
 	{
-		CompletableFuture<Capture> received = new CompletableFuture<>();
+		// Delivery proof = TWO shots per completed trade: the confirm window (items + partner) and the
+		// post-accept frame (the "Accepted trade." chat line, window closed). Both must reach the ingest
+		// route, each tagged with its phase.
+		java.util.concurrent.BlockingQueue<Capture> received = new java.util.concurrent.LinkedBlockingQueue<>();
 		HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		server.createContext("/", exchange ->
 		{
@@ -110,7 +113,7 @@ public class TradeScreenshotTest
 			exchange.sendResponseHeaders(200, resp.length);
 			exchange.getResponseBody().write(resp);
 			exchange.close();
-			received.complete(new Capture(exchange.getRequestURI().getPath(),
+			received.add(new Capture(exchange.getRequestURI().getPath(),
 				exchange.getRequestHeaders().getFirst("Content-Type"), reqBody));
 		});
 		server.start();
@@ -128,23 +131,35 @@ public class TradeScreenshotTest
 			assertTrue(plugin.tradeActive);
 
 			plugin.handleTradeWidgetLoaded(334);	// confirm screen -> one-shot frame request
-			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the frame
+			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the confirm frame
 			assertNotNull("frame must be buffered after 334-load + draw", plugin.pendingTradeFrame.get());
 
-			plugin.handleTradeChat("Accepted trade.");	// commit
+			plugin.handleTradeChat("Accepted trade.");	// commit: uploads confirm + arms the completed grab
 			assertFalse(plugin.tradeActive);
 			assertNull("commit must consume the buffered frame", plugin.pendingTradeFrame.get());
+			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the completed frame
 
-			Capture c = received.get(15, TimeUnit.SECONDS);
-			assertEquals("/wp-json/osrsbis/v1/screenshot-ingest", c.path);
-			assertTrue("not multipart: " + c.contentType, c.contentType.startsWith("multipart/form-data"));
-			String bodyText = new String(c.body, StandardCharsets.ISO_8859_1);
-			assertTrue("token field missing", bodyText.contains("name=\"token\"") && bodyText.contains(TEST_TOKEN));
-			assertTrue("kind field missing", bodyText.contains("name=\"kind\"") && bodyText.contains("trade"));
-			assertTrue("captured_at field missing", bodyText.contains("name=\"captured_at\""));
-			assertTrue("file part missing", bodyText.contains("name=\"file\""));
-			assertTrue("file part not image/png", bodyText.contains("image/png"));
-			assertTrue("body carries no PNG payload", indexOf(c.body, PNG_MAGIC) >= 0);
+			Capture a = received.poll(15, TimeUnit.SECONDS);
+			Capture b = received.poll(15, TimeUnit.SECONDS);
+			assertNotNull("first screenshot upload missing", a);
+			assertNotNull("second (completed) screenshot upload missing", b);
+			String phases = "";
+			for (Capture c : new Capture[] {a, b})
+			{
+				assertEquals("/wp-json/osrsbis/v1/screenshot-ingest", c.path);
+				assertTrue("not multipart: " + c.contentType, c.contentType.startsWith("multipart/form-data"));
+				String body = new String(c.body, StandardCharsets.ISO_8859_1);
+				assertTrue("token field missing", body.contains("name=\"token\"") && body.contains(TEST_TOKEN));
+				assertTrue("kind field missing", body.contains("name=\"kind\"") && body.contains("trade"));
+				assertTrue("phase field missing", body.contains("name=\"phase\""));
+				assertTrue("captured_at field missing", body.contains("name=\"captured_at\""));
+				assertTrue("file part missing", body.contains("name=\"file\""));
+				assertTrue("file part not image/png", body.contains("image/png"));
+				assertTrue("body carries no PNG payload", indexOf(c.body, PNG_MAGIC) >= 0);
+				phases += body;
+			}
+			assertTrue("confirm-phase screenshot not uploaded", phases.contains("confirm"));
+			assertTrue("completed-phase screenshot not uploaded", phases.contains("completed"));
 		}
 		finally
 		{
