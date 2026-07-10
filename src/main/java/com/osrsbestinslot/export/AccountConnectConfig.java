@@ -47,17 +47,7 @@ public interface AccountConnectConfig extends Config
 		return false;	// OFF by default — explicit opt-in required
 	}
 
-	@ConfigItem(
-		keyName = "syncIntervalSeconds",
-		name = "Sync interval (seconds)",
-		description =
-			"How often to sync when your account data changes (5-600). Lower = more up to date on the "
-			+ "site, slightly more network; the client only sends when something actually changed. "
-			+ "The default is right for most users.",
-		position = 4
-	)
-	default int syncIntervalSeconds()
-	{
-		return 120;	// preserves the historical cadence; the value is clamped to [5, 600] in the plugin
-	}
+	// Sync cadence is no longer a user setting: osrsbestinslot.com dictates it per link token in the
+	// ingest response (X-Sync-Interval header), so it can be tuned centrally without a client change.
+	// The client starts at a safe 120s default until the server's first response arrives.
 }
