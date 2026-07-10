@@ -261,4 +261,48 @@ public class UploadGatingTest
 			server.takeRequest(5, TimeUnit.SECONDS));
 		assertEquals(2, server.getRequestCount());
 	}
+
+	@Test
+	public void syncIntervalClampsUpToFiveSecondFloor() throws Exception
+	{
+		buildPlugin();
+		inject("config", new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+
+			@Override
+			public int syncIntervalSeconds()
+			{
+				return 1;	// below the floor
+			}
+		});
+		plugin.applyConfiguredInterval();
+		assertEquals("interval must clamp up to the 5s floor", 5_000L, plugin.minUploadIntervalMillis);
+	}
+
+	@Test
+	public void syncIntervalClampsDownToSixHundredSecondCeiling() throws Exception
+	{
+		buildPlugin();
+		inject("config", new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+
+			@Override
+			public int syncIntervalSeconds()
+			{
+				return 99_999;	// above the ceiling
+			}
+		});
+		plugin.applyConfiguredInterval();
+		assertEquals("interval must clamp down to the 600s ceiling", 600_000L, plugin.minUploadIntervalMillis);
+	}
 }
