@@ -84,7 +84,7 @@ import okhttp3.Response;
 public class AccountConnectPlugin extends Plugin
 {
 	private static final int SCHEMA_V = 1;
-	private static final String PLUGIN_VERSION = "0.4.0";
+	private static final String PLUGIN_VERSION = "0.5.0";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
