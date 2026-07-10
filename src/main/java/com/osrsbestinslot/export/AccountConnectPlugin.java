@@ -58,7 +58,6 @@ import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
-import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
@@ -182,30 +181,18 @@ public class AccountConnectPlugin extends Plugin
 		return configManager.getConfig(AccountConnectConfig.class);
 	}
 
-	@Override
-	protected void startUp()
-	{
-		applyConfiguredInterval();
-	}
-
-	@Subscribe
-	public void onConfigChanged(ConfigChanged event)
-	{
-		if ("osrsbisexport".equals(event.getGroup()))
-		{
-			applyConfiguredInterval();
-		}
-	}
-
 	/**
-	 * The min gap between sends comes from the user config, clamped to [5s, 600s] so a client can
-	 * never spam the ingest endpoint (staff run this low for near-real-time; the public default keeps
-	 * the 120s cadence). Applied on startup + config change — NOT per tick — so the send loop reads a
-	 * stable field and tests can inject it directly.
+	 * Server-dictated policy, read from the ingest response on every accepted upload (see
+	 * applyServerPolicy). Volatile: written by the OkHttp callback thread, read by the client thread.
+	 * serverScreenshotsDisabled lets osrsbestinslot.com force trade-screenshot capture OFF for a token
+	 * remotely (it can never force it ON — that stays a local opt-in for Plugin Hub compliance).
 	 */
-	void applyConfiguredInterval()
+	volatile boolean serverScreenshotsDisabled;
+
+	/** Trade-screenshot capture requires BOTH the local opt-in AND no server force-disable. */
+	boolean screenshotsEnabled()
 	{
-		minUploadIntervalMillis = Math.max(5L, Math.min(config.syncIntervalSeconds(), 600L)) * 1000L;
+		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled;
 	}
 
 	/**
@@ -412,7 +399,7 @@ public class AccountConnectPlugin extends Plugin
 			tradeArmed = true;
 			drawManager.requestNextFrameListener(image ->
 			{
-				if (config.uploadTradeScreenshots())	// re-check: toggle may flip before the frame lands
+				if (screenshotsEnabled())	// re-check: toggle may flip before the frame lands
 				{
 					pendingTradeFrame.set(toBufferedImage(image));
 				}
@@ -488,7 +475,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				drawManager.requestNextFrameListener(image ->
 				{
-					if (config.uploadTradeScreenshots())	// re-check: toggle may flip before the frame lands
+					if (screenshotsEnabled())	// re-check: toggle may flip before the frame lands
 					{
 						submitTradeScreenshotUpload(toBufferedImage(image), "completed");
 					}
@@ -507,7 +494,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private boolean tradeScreenshotsDisabled()
 	{
-		if (config.uploadTradeScreenshots())
+		if (screenshotsEnabled())
 		{
 			return false;
 		}
@@ -926,6 +913,7 @@ public class AccountConnectPlugin extends Plugin
 				try
 				{
 					int code = response.code();
+					applyServerPolicy(response);	// server dictates cadence / screenshot-disable per token
 					if (response.isSuccessful())
 					{
 						onUploadAccepted(hash);
@@ -952,6 +940,53 @@ public class AccountConnectPlugin extends Plugin
 		lastUploadedHash = hash;
 		backoffUntilMillis = 0L;
 		nextBackoffMillis = BACKOFF_START_MILLIS;
+	}
+
+	/**
+	 * Apply the per-token policy osrsbestinslot.com returns on the ingest response. All directives are
+	 * "narrow/control" only (Hub-safe): the server can set the sync cadence, force trade screenshots
+	 * OFF, and soft-pause a token — it can never force screenshots ON or expand what's collected.
+	 *   X-Sync-Interval    seconds, clamped [5, 600] — the minimum gap between sends.
+	 *   X-Screenshots      "off"/"disabled"/"false" force-disables trade-screenshot capture.
+	 *   X-Uploads-Enabled  "false"/"0" soft-pauses the token: cadence drops to the 600s max so the
+	 *                      policy channel stays open (the hard data-stop is enforced server-side by
+	 *                      dropping the token's snapshots — the client never goes dark, so it can be
+	 *                      re-enabled on the next poll). Any header absent = that directive unchanged.
+	 */
+	void applyServerPolicy(Response response)
+	{
+		String screenshots = response.header("X-Screenshots");
+		if (screenshots != null)
+		{
+			String v = screenshots.trim().toLowerCase(java.util.Locale.ROOT);
+			serverScreenshotsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
+		}
+
+		boolean paused = false;
+		String uploadsEnabled = response.header("X-Uploads-Enabled");
+		if (uploadsEnabled != null)
+		{
+			String v = uploadsEnabled.trim().toLowerCase(java.util.Locale.ROOT);
+			paused = "false".equals(v) || "0".equals(v) || "off".equals(v);
+		}
+
+		String interval = response.header("X-Sync-Interval");
+		if (paused)
+		{
+			minUploadIntervalMillis = 600_000L;	// soft-pause: max cadence, still polls for re-enable
+		}
+		else if (interval != null)
+		{
+			try
+			{
+				long s = Long.parseLong(interval.trim());
+				minUploadIntervalMillis = Math.max(5L, Math.min(s, 600L)) * 1000L;
+			}
+			catch (NumberFormatException ignored)
+			{
+				// malformed directive — keep the current cadence
+			}
+		}
 	}
 
 	/**

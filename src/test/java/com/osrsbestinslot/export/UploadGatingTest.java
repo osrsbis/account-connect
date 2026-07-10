@@ -1,7 +1,9 @@
 package com.osrsbestinslot.export;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
@@ -22,6 +24,9 @@ import net.runelite.api.WorldType;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.game.ItemManager;
 import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.Response;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -262,32 +267,47 @@ public class UploadGatingTest
 		assertEquals(2, server.getRequestCount());
 	}
 
-	@Test
-	public void syncIntervalClampsUpToFiveSecondFloor() throws Exception
+	/** Build a bare 200 response carrying the given header key/value pairs, for applyServerPolicy. */
+	private static Response policyResponse(String... headerKV)
 	{
-		buildPlugin();
-		inject("config", new AccountConnectConfig()
+		Response.Builder b = new Response.Builder()
+			.request(new Request.Builder().url("http://localhost/account-ingest").build())
+			.protocol(Protocol.HTTP_1_1)
+			.code(200)
+			.message("OK");
+		for (int i = 0; i + 1 < headerKV.length; i += 2)
 		{
-			@Override
-			public String linkToken()
-			{
-				return TOKEN;
-			}
-
-			@Override
-			public int syncIntervalSeconds()
-			{
-				return 1;	// below the floor
-			}
-		});
-		plugin.applyConfiguredInterval();
-		assertEquals("interval must clamp up to the 5s floor", 5_000L, plugin.minUploadIntervalMillis);
+			b.header(headerKV[i], headerKV[i + 1]);
+		}
+		return b.build();
 	}
 
 	@Test
-	public void syncIntervalClampsDownToSixHundredSecondCeiling() throws Exception
+	public void serverSyncIntervalHeaderSetsAndClampsCadence() throws Exception
 	{
 		buildPlugin();
+		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		assertEquals("server cadence directive applies", 5_000L, plugin.minUploadIntervalMillis);
+
+		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "1"));	// below floor
+		assertEquals("clamps up to the 5s floor", 5_000L, plugin.minUploadIntervalMillis);
+
+		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "99999"));	// above ceiling
+		assertEquals("clamps down to the 600s ceiling", 600_000L, plugin.minUploadIntervalMillis);
+
+		long before = plugin.minUploadIntervalMillis;
+		plugin.applyServerPolicy(policyResponse());	// no header
+		assertEquals("absent directive leaves cadence unchanged", before, plugin.minUploadIntervalMillis);
+
+		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "notanumber"));
+		assertEquals("malformed directive leaves cadence unchanged", before, plugin.minUploadIntervalMillis);
+	}
+
+	@Test
+	public void serverCanForceScreenshotsOffButNeverOn() throws Exception
+	{
+		buildPlugin();
+		// local opt-in ON
 		inject("config", new AccountConnectConfig()
 		{
 			@Override
@@ -297,12 +317,26 @@ public class UploadGatingTest
 			}
 
 			@Override
-			public int syncIntervalSeconds()
+			public boolean uploadTradeScreenshots()
 			{
-				return 99_999;	// above the ceiling
+				return true;
 			}
 		});
-		plugin.applyConfiguredInterval();
-		assertEquals("interval must clamp down to the 600s ceiling", 600_000L, plugin.minUploadIntervalMillis);
+		assertTrue("opt-in on + no server override -> enabled", plugin.screenshotsEnabled());
+
+		plugin.applyServerPolicy(policyResponse("X-Screenshots", "off"));
+		assertFalse("server force-disable overrides the local opt-in", plugin.screenshotsEnabled());
+
+		plugin.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
+		assertTrue("server can re-allow (local opt-in still governs)", plugin.screenshotsEnabled());
+	}
+
+	@Test
+	public void serverPauseCapsCadenceToMaxAndBeatsInterval() throws Exception
+	{
+		buildPlugin();
+		// even with a fast interval in the same response, a pause wins and caps to the 600s max
+		plugin.applyServerPolicy(policyResponse("X-Uploads-Enabled", "false", "X-Sync-Interval", "5"));
+		assertEquals("pause soft-throttles to the 600s max", 600_000L, plugin.minUploadIntervalMillis);
 	}
 }
