@@ -189,10 +189,45 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	volatile boolean serverScreenshotsDisabled;
 
-	/** Trade-screenshot capture requires BOTH the local opt-in AND no server force-disable. */
+	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
 	boolean screenshotsEnabled()
 	{
-		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled;
+		// toggle first: when off, short-circuit before touching client (the feature is off regardless).
+		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled && !isCurrentAccountExcluded();
+	}
+
+	/** True if the logged-in character is on the user's "don't sync these accounts" list (personal opt-out). */
+	boolean isCurrentAccountExcluded()
+	{
+		if (client == null)
+		{
+			return false;
+		}
+		net.runelite.api.Player p = client.getLocalPlayer();
+		return p != null && isAccountExcluded(p.getName());
+	}
+
+	/** Case-insensitive membership test of a character name against the comma-separated excluded list. */
+	boolean isAccountExcluded(String playerName)
+	{
+		if (playerName == null)
+		{
+			return false;
+		}
+		String excluded = config.excludedAccounts();
+		if (excluded == null || excluded.trim().isEmpty())
+		{
+			return false;
+		}
+		String target = playerName.trim().toLowerCase(java.util.Locale.ROOT);
+		for (String name : excluded.split(","))
+		{
+			if (name.trim().toLowerCase(java.util.Locale.ROOT).equals(target))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -205,6 +240,10 @@ public class AccountConnectPlugin extends Plugin
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
+		}
+		if (isCurrentAccountExcluded())
+		{
+			return; // personal account on the user's opt-out list — never build, track, or send it
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
@@ -306,6 +345,10 @@ public class AccountConnectPlugin extends Plugin
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
+		}
+		if (isCurrentAccountExcluded())
+		{
+			return; // opted-out account — don't cache its post-trade wealth either
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))

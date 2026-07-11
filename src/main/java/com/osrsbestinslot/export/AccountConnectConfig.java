@@ -47,6 +47,20 @@ public interface AccountConnectConfig extends Config
 		return false;	// OFF by default — explicit opt-in required
 	}
 
+	@ConfigItem(
+		keyName = "excludedAccounts",
+		name = "Don't sync these accounts",
+		description =
+			"Comma-separated account display names that should NEVER sync, even while logged in with a "
+			+ "token set (e.g. a personal alt you don't want tracked). Matched on the logged-in "
+			+ "character name, case-insensitive. Leave blank to sync every account you log in.",
+		position = 4
+	)
+	default String excludedAccounts()
+	{
+		return "";
+	}
+
 	// Sync cadence is no longer a user setting: osrsbestinslot.com dictates it per link token in the
 	// ingest response (X-Sync-Interval header), so it can be tuned centrally without a client change.
 	// The client starts at a safe 120s default until the server's first response arrives.

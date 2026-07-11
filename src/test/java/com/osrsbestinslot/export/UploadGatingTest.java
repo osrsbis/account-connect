@@ -339,4 +339,61 @@ public class UploadGatingTest
 		plugin.applyServerPolicy(policyResponse("X-Uploads-Enabled", "false", "X-Sync-Interval", "5"));
 		assertEquals("pause soft-throttles to the 600s max", 600_000L, plugin.minUploadIntervalMillis);
 	}
+
+	@Test
+	public void excludedListMatchesCaseInsensitivelyAndTrimmed() throws Exception
+	{
+		buildPlugin();
+		inject("config", new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+
+			@Override
+			public String excludedAccounts()
+			{
+				return "My Alt , Personal Main";
+			}
+		});
+		assertTrue(plugin.isAccountExcluded("personal main"));   // case-insensitive
+		assertTrue(plugin.isAccountExcluded("My Alt"));           // trimmed
+		assertFalse(plugin.isAccountExcluded("TestPlayer"));      // not listed
+		assertFalse(plugin.isAccountExcluded(null));
+	}
+
+	@Test
+	public void excludedCurrentAccountUploadsNothingAndBlocksScreenshots() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		inject("config", new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+
+			@Override
+			public boolean uploadTradeScreenshots()
+			{
+				return true;	// opt-in ON — exclusion must still win
+			}
+
+			@Override
+			public String excludedAccounts()
+			{
+				return "TestPlayer";	// buildPlugin's logged-in character
+			}
+		});
+		setSkillXp(1000);
+		plugin.syncTask();
+		assertNull("excluded account must never upload a snapshot",
+			server.takeRequest(500, TimeUnit.MILLISECONDS));
+		assertEquals(0, server.getRequestCount());
+		assertFalse("excluded account must not capture screenshots either", plugin.screenshotsEnabled());
+	}
 }
