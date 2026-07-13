@@ -17,25 +17,29 @@ import static org.junit.Assert.assertTrue;
  */
 public class EventLogTest
 {
+	private static final String TEST_TOKEN = "0123456789abcdef0123456789abcdef";
+
+	/** A linked config: valid token → activity log active (core sync, no toggle). client is null in tests,
+	 *  so isCurrentAccountExcluded() short-circuits false. */
 	private static AccountConnectConfig onConfig()
 	{
 		return new AccountConnectConfig()
 		{
 			@Override
-			public boolean syncActivityLog()
+			public String linkToken()
 			{
-				return true;
+				return TEST_TOKEN;
 			}
 		};
 	}
 
 	@Test
-	public void toggleOffEmitIsNoOp() throws Exception
+	public void noTokenEmitIsNoOp() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", new AccountConnectConfig() {}); // syncActivityLog() == false (default)
+		inject(plugin, "config", new AccountConnectConfig() {}); // linkToken() == "" → activity log inactive
 		plugin.emitEvent("login", null);
-		assertTrue("toggle off must buffer nothing", plugin.pendingEvents.isEmpty());
+		assertTrue("no token must buffer nothing", plugin.pendingEvents.isEmpty());
 	}
 
 	@Test

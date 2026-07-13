@@ -10,7 +10,11 @@ public interface AccountConnectConfig extends Config
 	@ConfigItem(
 		keyName = "linkToken",
 		name = "Link token",
-		description = "Paste the token from osrsbestinslot.com (Connect account) to link this client.",
+		description =
+			"Paste the token from osrsbestinslot.com (Connect account) to link this client. While linked, "
+			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats and quests, plus your "
+			+ "account activity (GE and general-store buys/sells, completed trades, and login/logout "
+			+ "times) — to power your calculators and account dashboard. Clear the token to stop syncing.",
 		position = 1
 	)
 	default String linkToken()
@@ -48,33 +52,13 @@ public interface AccountConnectConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "syncActivityLog",
-		name = "Sync account activity log",
-		description =
-			"When enabled, this records YOUR OWN account activity — logins and logouts (with times), GE "
-			+ "buys and sells, general-store buys and sells, completed trades (items and value), and item "
-			+ "movements — and syncs it with your osrsbestinslot.com link token to build your account "
-			+ "activity & merchanting dashboard on osrsbestinslot.com. Only your own account's data is "
-			+ "sent; nothing is captured while this is off.",
-		position = 4,
-		warning =
-			"This uploads a log of your own account activity (trades, GE and general-store transactions, "
-			+ "item movements, and login/logout times) to osrsbestinslot.com. Only enable it if you agree "
-			+ "to that."
-	)
-	default boolean syncActivityLog()
-	{
-		return false;	// OFF by default — explicit opt-in required
-	}
-
-	@ConfigItem(
 		keyName = "excludedAccounts",
 		name = "Don't sync these accounts",
 		description =
 			"Comma-separated account display names that should NEVER sync, even while logged in with a "
 			+ "token set (e.g. a personal alt you don't want tracked). Matched on the logged-in "
 			+ "character name, case-insensitive. Leave blank to sync every account you log in.",
-		position = 5
+		position = 4
 	)
 	default String excludedAccounts()
 	{
