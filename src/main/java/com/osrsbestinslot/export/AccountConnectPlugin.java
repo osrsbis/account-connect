@@ -189,6 +189,20 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	volatile boolean serverScreenshotsDisabled;
 
+	/**
+	 * Own-account activity log (syncActivityLog opt-in): buffered structured events — logins/logouts,
+	 * and later GE / general-store / trade / item movements — POSTed to /event-ingest. Only the user's
+	 * OWN account data; nothing about other players is sent to the default backend. Written on the
+	 * client thread, flushed on the @Schedule tick.
+	 */
+	final java.util.List<Map<String, Object>> pendingEvents =
+		java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+	private static final int MAX_PENDING_EVENTS = 500;
+	private volatile boolean sessionActive;
+	private volatile String activeRsn;
+	private volatile String activeHash;
+	private volatile long sessionStartMillis;
+
 	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
 	boolean screenshotsEnabled()
 	{
@@ -230,6 +244,136 @@ public class AccountConnectPlugin extends Plugin
 		return false;
 	}
 
+	/** Activity-log capture requires the local opt-in AND a non-excluded account (mirrors screenshotsEnabled). */
+	boolean activityLogEnabled()
+	{
+		return config.syncActivityLog() && !isCurrentAccountExcluded();
+	}
+
+	/**
+	 * Buffer one own-account activity event. No-op when the toggle is off. account_hash/rsn are the
+	 * currently-tracked session's, stamped at emit time so a logout (player already null) still
+	 * self-describes. Bounded to MAX_PENDING_EVENTS (drop oldest) so a long offline burst can't grow unbounded.
+	 */
+	void emitEvent(String type, Map<String, Object> fields)
+	{
+		if (!config.syncActivityLog())
+		{
+			return;
+		}
+		Map<String, Object> ev = new LinkedHashMap<>();
+		ev.put("type", type);
+		ev.put("ts", System.currentTimeMillis());
+		if (activeHash != null)
+		{
+			ev.put("account_hash", activeHash);
+		}
+		if (activeRsn != null)
+		{
+			ev.put("rsn", activeRsn);
+		}
+		if (fields != null)
+		{
+			ev.putAll(fields);
+		}
+		synchronized (pendingEvents)
+		{
+			pendingEvents.add(ev);
+			while (pendingEvents.size() > MAX_PENDING_EVENTS)
+			{
+				pendingEvents.remove(0);
+			}
+		}
+	}
+
+	/**
+	 * Detect session start on the client thread (player available): the first logged-in tick, or a hop
+	 * into a different account, emits a "login" event and stamps the session. Called from syncTask.
+	 */
+	void trackSessionStart()
+	{
+		String rsn = client.getLocalPlayer().getName();
+		String hash = Long.toString(client.getAccountHash());
+		if (!sessionActive || !hash.equals(activeHash))
+		{
+			activeRsn = rsn;
+			activeHash = hash;
+			sessionActive = true;
+			sessionStartMillis = System.currentTimeMillis();
+			emitEvent("login", null);
+		}
+		else
+		{
+			activeRsn = rsn; // keep the display name fresh
+		}
+	}
+
+	/** Emit a "logout" event (with session duration) for the tracked account, if a session was active. */
+	void trackLogout()
+	{
+		if (!sessionActive)
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		if (sessionStartMillis > 0)
+		{
+			fields.put("session_ms", System.currentTimeMillis() - sessionStartMillis);
+		}
+		emitEvent("logout", fields);
+		sessionActive = false;
+	}
+
+	/**
+	 * POST buffered activity events to /event-ingest, then clear them. Fire-and-forget like the
+	 * screenshot upload. Runs on every @Schedule tick (including at the login screen) so a logout event
+	 * flushes promptly. Own-account data only; token-gated exactly like the snapshot path.
+	 */
+	void flushEvents()
+	{
+		if (!config.syncActivityLog())
+		{
+			return;
+		}
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$"))
+		{
+			return;
+		}
+		List<Map<String, Object>> batch;
+		synchronized (pendingEvents)
+		{
+			if (pendingEvents.isEmpty())
+			{
+				return;
+			}
+			batch = new ArrayList<>(pendingEvents);
+			pendingEvents.clear();
+		}
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("token", token);
+		body.put("events", batch);
+		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+		Request request = new Request.Builder()
+			.url(base + "/event-ingest")
+			.post(RequestBody.create(JSON, gson.toJson(body)))
+			.build();
+		okHttpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("OSRS BiS event sync failed", e);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				response.close();
+			}
+		});
+	}
+
 	/**
 	 * Non-async @Schedule runs on the client thread, so reading client state below is safe.
 	 * The network POST itself is async (OkHttp enqueue), so it never blocks the game.
@@ -237,6 +381,9 @@ public class AccountConnectPlugin extends Plugin
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
 	public void syncTask()
 	{
+		// Flush buffered activity events on every tick — even at the login screen, so a "logout" event
+		// (emitted during the logout transition) reaches the server promptly. Self-gates on the toggle+token.
+		flushEvents();
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
@@ -249,6 +396,10 @@ public class AccountConnectPlugin extends Plugin
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return; // no / malformed token configured yet
+		}
+		if (config.syncActivityLog())
+		{
+			trackSessionStart(); // emits a "login" event on the first tick of a session / after a hop
 		}
 		Map<String, Object> snapshot = buildSnapshot();
 		String hash = canonicalHash(snapshot);
@@ -391,6 +542,7 @@ public class AccountConnectPlugin extends Plugin
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
+				trackLogout(); // buffer a "logout" event (session duration); flushed by the next syncTask tick
 				flushPendingSnapshot();
 				break;
 			default:
