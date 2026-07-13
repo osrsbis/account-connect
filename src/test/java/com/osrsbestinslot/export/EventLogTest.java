@@ -3,11 +3,17 @@ package com.osrsbestinslot.export;
 import java.lang.reflect.Field;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import net.runelite.api.ChatMessageType;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.GrandExchangeOfferChanged;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for the own-account activity log (syncActivityLog). No live client needed: exercises the
@@ -102,6 +108,56 @@ public class EventLogTest
 			plugin.emitEvent("tick", null);
 		}
 		assertEquals("buffer must be capped at MAX_PENDING_EVENTS", 500, plugin.pendingEvents.size());
+	}
+
+	@Test
+	public void chatGameMessageEmitsEvent() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
+		when(ev.getMessage()).thenReturn("Oh dear, you are dead!");
+		plugin.emitChatActivity(ev);
+		assertEquals(1, plugin.pendingEvents.size());
+		assertEquals("chat", plugin.pendingEvents.get(0).get("type"));
+		assertEquals("Oh dear, you are dead!", plugin.pendingEvents.get(0).get("text"));
+	}
+
+	@Test
+	public void chatPublicMessageIgnored() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
+		when(ev.getMessage()).thenReturn("buying gf");
+		plugin.emitChatActivity(ev);
+		assertTrue("public/other-player chat must not be captured", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void geFillEmitsOncePerTransition() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		GrandExchangeOffer offer = mock(GrandExchangeOffer.class);
+		when(offer.getState()).thenReturn(GrandExchangeOfferState.BOUGHT);
+		when(offer.getItemId()).thenReturn(20997);
+		when(offer.getQuantitySold()).thenReturn(3);
+		when(offer.getPrice()).thenReturn(100);
+		when(offer.getSpent()).thenReturn(300);
+		GrandExchangeOfferChanged ev = mock(GrandExchangeOfferChanged.class);
+		when(ev.getOffer()).thenReturn(offer);
+		when(ev.getSlot()).thenReturn(2);
+
+		plugin.onGrandExchangeOfferChanged(ev);
+		plugin.onGrandExchangeOfferChanged(ev); // unchanged terminal state → dedup, no second event
+
+		assertEquals("GE terminal state should emit exactly once", 1, plugin.pendingEvents.size());
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("ge_buy", e.get("type"));
+		assertEquals(Integer.valueOf(20997), e.get("item"));
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

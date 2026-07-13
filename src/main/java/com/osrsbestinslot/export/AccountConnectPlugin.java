@@ -50,10 +50,13 @@ import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
 import net.runelite.api.Varbits;
 import net.runelite.api.WorldType;
+import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.ScriptPreFired;
+import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.client.config.ConfigManager;
@@ -202,6 +205,10 @@ public class AccountConnectPlugin extends Plugin
 	private volatile String activeRsn;
 	private volatile String activeHash;
 	private volatile long sessionStartMillis;
+	/** Dedup state for the broad activity sweep: emit a level event only on a real level change, a GE event
+	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
+	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
+	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
 
 	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
 	boolean screenshotsEnabled()
@@ -595,6 +602,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		// Receive-side fix: the first trade window (335) opening marks the trade active regardless of
+		// which side put items up. Previously tradeActive was set only when OUR offer container (90)
+		// changed, so a receive-only trade (we add nothing) never armed the confirm capture.
+		if (groupId == TRADE_MAIN_GROUP_ID)
+		{
+			tradeActive = true;
+		}
 		if (groupId == TRADE_CONFIRM_GROUP_ID && tradeActive)
 		{
 			tradeArmed = true;
@@ -649,6 +663,107 @@ public class AccountConnectPlugin extends Plugin
 			refreshSnapshotCacheAfterTrade();
 		}
 		handleTradeChat(event.getMessage());
+		emitChatActivity(event);
+	}
+
+	/**
+	 * Broad activity sweep — own-account game chat only (GAMEMESSAGE / SPAM). Captures deaths, drops,
+	 * pet/untradeable/clue rewards, level-ups, quest completions, GE collect lines, etc. as timestamped
+	 * events. Deliberately EXCLUDES player/private/clan/friends chat (other-player content = PII / the
+	 * Hub's "crowdsource other players" rejection). Own account, structured, disclosed.
+	 */
+	void emitChatActivity(ChatMessage event)
+	{
+		if (event == null)
+		{
+			return;
+		}
+		ChatMessageType t = event.getType();
+		if (t != ChatMessageType.GAMEMESSAGE && t != ChatMessageType.SPAM)
+		{
+			return;
+		}
+		String text = Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim();
+		if (text.isEmpty())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("text", text);
+		emitEvent("chat", fields);
+	}
+
+	/** Own-account death (item-loss context). ActorDeath fires for any nearby actor, so filter to self. */
+	@Subscribe
+	public void onActorDeath(ActorDeath event)
+	{
+		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
+		{
+			emitEvent("death", null);
+		}
+	}
+
+	/** Level-ups: StatChanged fires on every xp drop, so emit only when the real level increases. */
+	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		if (event.getSkill() == null)
+		{
+			return;
+		}
+		String skill = event.getSkill().getName();
+		int level = event.getLevel();
+		Integer prev = lastSkillLevel.put(skill, level);
+		if (prev != null && level > prev && activityLogActive())
+		{
+			Map<String, Object> fields = new LinkedHashMap<>();
+			fields.put("skill", skill);
+			fields.put("level", level);
+			emitEvent("level_up", fields);
+		}
+	}
+
+	/**
+	 * GE buys/sells as discrete events — emit once per terminal-state transition (BOUGHT / SOLD /
+	 * CANCELLED), not on every partial-fill tick. Own-account GE only.
+	 */
+	@Subscribe
+	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
+	{
+		GrandExchangeOffer offer = event.getOffer();
+		if (offer == null)
+		{
+			return;
+		}
+		int slot = event.getSlot();
+		GrandExchangeOfferState state = offer.getState();
+		GrandExchangeOfferState prev = lastGeState.put(slot, state);
+		if (state == prev)
+		{
+			return;
+		}
+		String type;
+		switch (state)
+		{
+			case BOUGHT:
+				type = "ge_buy";
+				break;
+			case SOLD:
+				type = "ge_sell";
+				break;
+			case CANCELLED_BUY:
+			case CANCELLED_SELL:
+				type = "ge_cancel";
+				break;
+			default:
+				return; // BUYING / SELLING / EMPTY — not a terminal event
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", offer.getItemId());
+		fields.put("qty", offer.getQuantitySold());
+		fields.put("price", offer.getPrice());
+		fields.put("gp", offer.getSpent());
+		emitEvent(type, fields);
 	}
 
 	void handleTradeChat(String message)
