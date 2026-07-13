@@ -55,10 +55,12 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
@@ -130,6 +132,10 @@ public class AccountConnectPlugin extends Plugin
 	private static final int TRADE_OFFER_CONTAINER_ID = net.runelite.api.gameval.InventoryID.TRADEOFFER;	// 90
 	private static final int TRADE_CONFIRM_GROUP_ID = net.runelite.api.gameval.InterfaceID.TRADECONFIRM;	// 334
 	private static final int TRADE_MAIN_GROUP_ID = net.runelite.api.gameval.InterfaceID.TRADEMAIN;			// 335
+	// Activity-log capture (verified vs runelite-api 1.12.32 gameval enums):
+	private static final int SHOP_GROUP_ID = net.runelite.api.gameval.InterfaceID.SHOPMAIN;					// 300
+	private static final int TRADE_TITLE_COMPONENT = net.runelite.api.gameval.InterfaceID.Trademain.TITLE;	// 21954591 ("Trading with X")
+	private static final String DEFAULT_PUBLIC_API = "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
@@ -209,6 +215,11 @@ public class AccountConnectPlugin extends Plugin
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
 	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
+	/** Shop interface (SHOPMAIN 300) open — so a Buy/Sell menu click is a general-store transaction. */
+	private volatile boolean shopOpen;
+	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
+	private volatile List<Map<String, Object>> pendingTradeGiven;
+	private volatile String pendingCounterparty;
 
 	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
 	boolean screenshotsEnabled()
@@ -594,6 +605,68 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetLoaded(WidgetLoaded event)
 	{
 		handleTradeWidgetLoaded(event.getGroupId());
+		handleActivityWidgetLoaded(event.getGroupId());
+	}
+
+	/**
+	 * Activity log (independent of the screenshot opt-in): track the general-store window opening, and at
+	 * the trade confirm screen snapshot our own offer + the partner name so a structured "trade" event can
+	 * be emitted on "Accepted trade.". Own-account items; counterparty forwarded only to a staff backend.
+	 */
+	void handleActivityWidgetLoaded(int groupId)
+	{
+		if (!activityLogActive())
+		{
+			return;
+		}
+		if (groupId == SHOP_GROUP_ID)
+		{
+			shopOpen = true;
+		}
+		else if (groupId == TRADE_CONFIRM_GROUP_ID)
+		{
+			pendingTradeGiven = readOwnOffer();
+			pendingCounterparty = counterpartyName();
+		}
+	}
+
+	/** Snapshot the items in our own trade offer (container 90) as [{id, qty}]. */
+	private List<Map<String, Object>> readOwnOffer()
+	{
+		ItemContainer c = client.getItemContainer(TRADE_OFFER_CONTAINER_ID);
+		List<Map<String, Object>> items = new ArrayList<>();
+		if (c != null)
+		{
+			for (Item it : c.getItems())
+			{
+				if (it != null && it.getId() >= 0 && it.getQuantity() > 0)
+				{
+					Map<String, Object> m = new LinkedHashMap<>();
+					m.put("id", it.getId());
+					m.put("qty", it.getQuantity());
+					items.add(m);
+				}
+			}
+		}
+		return items;
+	}
+
+	/** Trade partner name from the trade window title ("Trading With: Name"), or null. */
+	private String counterpartyName()
+	{
+		Widget w = client.getWidget(TRADE_TITLE_COMPONENT);
+		if (w == null)
+		{
+			return null;
+		}
+		String t = Text.removeTags(w.getText() == null ? "" : w.getText()).trim();
+		int idx = t.toLowerCase(java.util.Locale.ROOT).indexOf("with");
+		if (idx >= 0)
+		{
+			String name = t.substring(idx + 4).replaceFirst("^[:\\s]+", "").trim();
+			return name.isEmpty() ? null : name;
+		}
+		return t.isEmpty() ? null : t;
 	}
 
 	void handleTradeWidgetLoaded(int groupId)
@@ -632,6 +705,10 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		handleTradeWidgetClosed(event.getGroupId());
+		if (event.getGroupId() == SHOP_GROUP_ID)
+		{
+			shopOpen = false;
+		}
 	}
 
 	void handleTradeWidgetClosed(int groupId)
@@ -661,9 +738,83 @@ public class AccountConnectPlugin extends Plugin
 			Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
 		{
 			refreshSnapshotCacheAfterTrade();
+			emitTradeEvent();
 		}
 		handleTradeChat(event.getMessage());
 		emitChatActivity(event);
+	}
+
+	/**
+	 * On "Accepted trade.", emit a structured "trade" event from what was captured at the confirm screen:
+	 * the items WE gave (own offer) plus, ONLY on a staff backend, the counterparty name. The default
+	 * public backend never receives a counterparty (no other-player data over the default path).
+	 */
+	void emitTradeEvent()
+	{
+		List<Map<String, Object>> given = pendingTradeGiven;
+		String counterparty = pendingCounterparty;
+		pendingTradeGiven = null;
+		pendingCounterparty = null;
+		if (given == null)
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("given", given);
+		if (counterparty != null && staffBackend())
+		{
+			fields.put("counterparty", counterparty);
+		}
+		emitEvent("trade", fields);
+	}
+
+	/** True only when pointed at a non-default (staff) backend — gates the counterparty RSN forward. */
+	private boolean staffBackend()
+	{
+		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+		return !base.equalsIgnoreCase(DEFAULT_PUBLIC_API);
+	}
+
+	/** General-store buy/sell: a Buy/Sell menu click while the shop (SHOPMAIN 300) is open. Own-account. */
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event)
+	{
+		if (!shopOpen || !activityLogActive())
+		{
+			return;
+		}
+		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
+		String type;
+		if (opt.startsWith("Buy"))
+		{
+			type = "store_buy";
+		}
+		else if (opt.startsWith("Sell"))
+		{
+			type = "store_sell";
+		}
+		else
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", event.getItemId());
+		fields.put("qty", parseTrailingQty(opt));
+		emitEvent(type, fields);
+	}
+
+	/** "Buy 10" -> 10, "Sell 1" -> 1, "Buy" -> 1 (default). */
+	static int parseTrailingQty(String option)
+	{
+		String[] parts = option.trim().split("\\s+");
+		try
+		{
+			return Integer.parseInt(parts[parts.length - 1]);
+		}
+		catch (NumberFormatException e)
+		{
+			return 1;
+		}
 	}
 
 	/**
@@ -826,6 +977,8 @@ public class AccountConnectPlugin extends Plugin
 		tradeActive = false;
 		tradeArmed = false;
 		pendingTradeFrame.set(null);
+		pendingTradeGiven = null;	// activity-log trade capture — drop on decline/abandon/hop so it never leaks
+		pendingCounterparty = null;
 	}
 
 	// ---- trade screenshot: capture + upload ----

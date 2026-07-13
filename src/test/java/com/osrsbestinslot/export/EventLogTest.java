@@ -3,14 +3,17 @@ package com.osrsbestinslot.export;
 import java.lang.reflect.Field;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.ArrayList;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.events.MenuOptionClicked;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -158,6 +161,71 @@ public class EventLogTest
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("ge_buy", e.get("type"));
 		assertEquals(Integer.valueOf(20997), e.get("item"));
+	}
+
+	@Test
+	public void parseTrailingQtyParses()
+	{
+		assertEquals(10, AccountConnectPlugin.parseTrailingQty("Sell 10"));
+		assertEquals(50, AccountConnectPlugin.parseTrailingQty("Buy 50"));
+		assertEquals(1, AccountConnectPlugin.parseTrailingQty("Buy"));
+	}
+
+	@Test
+	public void storeSellEmitsOnlyWhenShopOpen() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		MenuOptionClicked ev = mock(MenuOptionClicked.class);
+		when(ev.getMenuOption()).thenReturn("Sell 10");
+		when(ev.getItemId()).thenReturn(995);
+
+		plugin.onMenuOptionClicked(ev); // shop closed → ignored
+		assertTrue("no store event when shop closed", plugin.pendingEvents.isEmpty());
+
+		inject(plugin, "shopOpen", true);
+		plugin.onMenuOptionClicked(ev);
+		assertEquals(1, plugin.pendingEvents.size());
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("store_sell", e.get("type"));
+		assertEquals(995, e.get("item"));
+		assertEquals(10, e.get("qty"));
+	}
+
+	@Test
+	public void tradeCounterpartyForwardedOnlyToStaffBackend() throws Exception
+	{
+		// default (public) backend: counterparty withheld
+		AccountConnectPlugin pub = new AccountConnectPlugin();
+		inject(pub, "config", onConfig()); // apiBaseUrl == default public
+		injectPendingTrade(pub, "Bob");
+		pub.emitTradeEvent();
+		Map<String, Object> pe = pub.pendingEvents.get(0);
+		assertEquals("trade", pe.get("type"));
+		assertTrue("given items present", pe.containsKey("given"));
+		assertFalse("public backend must NOT forward counterparty", pe.containsKey("counterparty"));
+
+		// staff backend: counterparty included
+		AccountConnectPlugin staff = new AccountConnectPlugin();
+		inject(staff, "config", new AccountConnectConfig()
+		{
+			@Override public String linkToken() { return TEST_TOKEN; }
+			@Override public String apiBaseUrl() { return "https://staff.internal/api"; }
+		});
+		injectPendingTrade(staff, "Bob");
+		staff.emitTradeEvent();
+		assertEquals("Bob", staff.pendingEvents.get(0).get("counterparty"));
+	}
+
+	private static void injectPendingTrade(AccountConnectPlugin plugin, String counterparty) throws Exception
+	{
+		java.util.List<Map<String, Object>> given = new ArrayList<>();
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("id", 20997);
+		item.put("qty", 1);
+		given.add(item);
+		inject(plugin, "pendingTradeGiven", given);
+		inject(plugin, "pendingCounterparty", counterparty);
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception
