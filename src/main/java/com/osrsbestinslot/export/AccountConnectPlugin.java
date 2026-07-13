@@ -244,20 +244,25 @@ public class AccountConnectPlugin extends Plugin
 		return false;
 	}
 
-	/** Activity-log capture requires the local opt-in AND a non-excluded account (mirrors screenshotsEnabled). */
-	boolean activityLogEnabled()
+	/**
+	 * The activity log is part of core sync — no separate toggle. It's active whenever a valid link
+	 * token is set and the logged-in account isn't on the opt-out list: the SAME gate as the snapshot
+	 * upload. Disclosed on the link-token config + the osrsbestinslot connect flow.
+	 */
+	boolean activityLogActive()
 	{
-		return config.syncActivityLog() && !isCurrentAccountExcluded();
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		return token.matches("^[a-f0-9]{32}$") && !isCurrentAccountExcluded();
 	}
 
 	/**
-	 * Buffer one own-account activity event. No-op when the toggle is off. account_hash/rsn are the
-	 * currently-tracked session's, stamped at emit time so a logout (player already null) still
-	 * self-describes. Bounded to MAX_PENDING_EVENTS (drop oldest) so a long offline burst can't grow unbounded.
+	 * Buffer one own-account activity event. No-op unless the activity log is active (token linked +
+	 * account not opted out). account_hash/rsn are the currently-tracked session's, stamped at emit time
+	 * so a logout (player already null) still self-describes. Bounded to MAX_PENDING_EVENTS (drop oldest).
 	 */
 	void emitEvent(String type, Map<String, Object> fields)
 	{
-		if (!config.syncActivityLog())
+		if (!activityLogActive())
 		{
 			return;
 		}
@@ -331,10 +336,6 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void flushEvents()
 	{
-		if (!config.syncActivityLog())
-		{
-			return;
-		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -378,12 +379,20 @@ public class AccountConnectPlugin extends Plugin
 	 * Non-async @Schedule runs on the client thread, so reading client state below is safe.
 	 * The network POST itself is async (OkHttp enqueue), so it never blocks the game.
 	 */
+	/**
+	 * Activity-log flush runs on its own schedule (not piggybacked on syncTask) so it fires even at the
+	 * login screen — a "logout" event reaches the server promptly — and stays independent of the
+	 * snapshot change-gate. Self-gates on the link token; no-op when nothing is buffered.
+	 */
+	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
+	public void eventFlushTask()
+	{
+		flushEvents();
+	}
+
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
 	public void syncTask()
 	{
-		// Flush buffered activity events on every tick — even at the login screen, so a "logout" event
-		// (emitted during the logout transition) reaches the server promptly. Self-gates on the toggle+token.
-		flushEvents();
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
@@ -397,10 +406,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return; // no / malformed token configured yet
 		}
-		if (config.syncActivityLog())
-		{
-			trackSessionStart(); // emits a "login" event on the first tick of a session / after a hop
-		}
+		trackSessionStart(); // core sync: emits a "login" event on the first tick of a session / after a hop
 		Map<String, Object> snapshot = buildSnapshot();
 		String hash = canonicalHash(snapshot);
 		// Track on EVERY tick regardless of the gates below: the logout flush sends this cache.
