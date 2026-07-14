@@ -13,9 +13,11 @@ public interface AccountConnectConfig extends Config
 		name = "Link token",
 		description =
 			"Paste the token from osrsbestinslot.com (Connect account) to link this client. While linked, "
-			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats and quests, plus your "
-			+ "account activity (GE and general-store buys/sells, completed trades, and login/logout "
-			+ "times) — to power your calculators and account dashboard. Clear the token to stop syncing.",
+			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats, quests and bank — plus your "
+			+ "account activity: GE and shop buys/sells, completed trades INCLUDING the other player's name "
+			+ "and the items each side exchanged, items you loot from kills, deaths, level-ups, and "
+			+ "login/logout times — to power your calculators and account dashboard. Clear the token to "
+			+ "stop syncing.",
 		position = 1
 	)
 	default String linkToken()
