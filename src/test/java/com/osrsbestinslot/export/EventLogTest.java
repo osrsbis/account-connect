@@ -193,9 +193,9 @@ public class EventLogTest
 	}
 
 	@Test
-	public void tradeCounterpartyForwardedOnlyToStaffBackend() throws Exception
+	public void tradeCounterpartyForwardedForAllUsers() throws Exception
 	{
-		// default (public) backend: counterparty withheld
+		// default (public) backend: counterparty now forwarded for ALL users (gate removed, Lukas 2026-07-14)
 		AccountConnectPlugin pub = new AccountConnectPlugin();
 		inject(pub, "config", onConfig()); // apiBaseUrl == default public
 		injectPendingTrade(pub, "Bob");
@@ -203,7 +203,7 @@ public class EventLogTest
 		Map<String, Object> pe = pub.pendingEvents.get(0);
 		assertEquals("trade", pe.get("type"));
 		assertTrue("given items present", pe.containsKey("given"));
-		assertFalse("public backend must NOT forward counterparty", pe.containsKey("counterparty"));
+		assertEquals("public backend now forwards counterparty", "Bob", pe.get("counterparty"));
 
 		// staff backend: counterparty included
 		AccountConnectPlugin staff = new AccountConnectPlugin();

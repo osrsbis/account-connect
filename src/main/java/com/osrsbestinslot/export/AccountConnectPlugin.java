@@ -145,7 +145,6 @@ public class AccountConnectPlugin extends Plugin
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
 	private static final int BANK_GROUP_ID = net.runelite.api.gameval.InterfaceID.BANKMAIN;					// 12
 	private static final int COLLECTION_LOG_GROUP_ID = net.runelite.api.gameval.InterfaceID.COLLECTION;		// 621
-	private static final String DEFAULT_PUBLIC_API = "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
@@ -845,8 +844,8 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * On "Accepted trade.", emit a structured "trade" event from what was captured at the confirm screen:
-	 * the items WE gave (own offer) plus, ONLY on a staff backend, the counterparty name. The default
-	 * public backend never receives a counterparty (no other-player data over the default path).
+	 * the items WE gave (own offer) and the counterparty name (forwarded for ALL users, disclosed). The
+	 * received[] side is added in a follow-up (read from the confirm-screen YOU_WILL_RECEIVE widget).
 	 */
 	void emitTradeEvent()
 	{
@@ -860,18 +859,13 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("given", given);
-		if (counterparty != null && staffBackend())
+		// Counterparty RSN forwarded for ALL users (staff-backend gate removed — Lukas 2026-07-14). It is the
+		// one other-player field we send, on purpose, disclosed in the config item + Hub warning text.
+		if (counterparty != null)
 		{
 			fields.put("counterparty", counterparty);
 		}
 		emitEvent("trade", fields);
-	}
-
-	/** True only when pointed at a non-default (staff) backend — gates the counterparty RSN forward. */
-	private boolean staffBackend()
-	{
-		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
-		return !base.equalsIgnoreCase(DEFAULT_PUBLIC_API);
 	}
 
 	/** General-store buy/sell: a Buy/Sell menu click while the shop (SHOPMAIN 300) is open. Own-account. */
