@@ -886,7 +886,7 @@ public class AccountConnectPlugin extends Plugin
 	/**
 	 * Activity log (independent of the screenshot opt-in): track the general-store window opening, and at
 	 * the trade confirm screen snapshot our own offer + the partner name so a structured "trade" event can
-	 * be emitted on "Accepted trade.". Own-account items; counterparty forwarded only to a staff backend.
+	 * be emitted on "Accepted trade.". Own-account items; counterparty forwarded for ALL users (disclosed).
 	 */
 	void handleActivityWidgetLoaded(int groupId)
 	{
