@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.google.gson.Gson;
 import java.lang.reflect.Field;
 import java.util.EnumSet;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -395,5 +396,120 @@ public class UploadGatingTest
 			server.takeRequest(500, TimeUnit.MILLISECONDS));
 		assertEquals(0, server.getRequestCount());
 		assertFalse("excluded account must not capture screenshots either", plugin.screenshotsEnabled());
+	}
+
+	// ---- FIX 1: the wire actually carries the current plugin version (not a drifted constant) ----
+
+	@Test
+	public void snapshotReportsCurrentPluginVersionOnTheWire() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+
+		plugin.syncTask();
+		RecordedRequest req = server.takeRequest(5, TimeUnit.SECONDS);
+		assertNotNull("first tick must upload", req);
+
+		Map<?, ?> body = new Gson().fromJson(req.getBody().readUtf8(), Map.class);
+		Map<?, ?> snapshot = (Map<?, ?>) body.get("snapshot");
+		Map<?, ?> source = (Map<?, ?>) snapshot.get("source");
+		String wireVersion = (String) source.get("plugin_version");
+
+		Field f = AccountConnectPlugin.class.getDeclaredField("PLUGIN_VERSION");
+		f.setAccessible(true);
+		assertEquals("snapshot must report the current PLUGIN_VERSION on the wire",
+			f.get(null), wireVersion);
+	}
+
+	// ---- FIX 2: manual re-sync force-send bypasses the hash gate + debounce (but not the 429 backoff) ----
+
+	@Test
+	public void forceSendBypassesHashGateAndDebounce() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 120_000L;	// debounce WOULD hold a scheduled send back
+		server.enqueue(new MockResponse().setResponseCode(200));
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+
+		// Normal tick: uploads once, records lastUploadedHash AND trips the debounce (lastSendMillis=now).
+		plugin.syncTask();
+		assertNotNull("first tick must upload", server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		assertEquals(1, server.getRequestCount());
+
+		// Prove BOTH gates are now blocking: an ordinary tick with identical state sends nothing
+		// (unchanged hash) and, even if it changed, the 120s debounce would hold it.
+		plugin.syncTask();
+		assertNull("sanity: hash gate + debounce block the scheduled tick",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
+
+		// Force-send with the SAME unchanged state must override both gates and send immediately.
+		plugin.forceSendSnapshot();
+		assertNotNull("force must send despite the unchanged-hash gate and the debounce",
+			server.takeRequest(5, TimeUnit.SECONDS));
+		assertEquals(2, server.getRequestCount());
+	}
+
+	@Test
+	public void forceSendStillHonorsActiveServerBackoff() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		plugin.backoffUntilMillis = System.currentTimeMillis() + 60_000L;	// server 429 said stop
+		setSkillXp(1000);
+
+		plugin.forceSendSnapshot();
+		assertNull("force must NOT override an active server-imposed 429 backoff",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(0, server.getRequestCount());
+	}
+
+	// ---- FIX 3: opening the bank / collection log forces an immediate send (no debounce wait) ----
+
+	@Test
+	public void bankOpenForcesImmediateSend() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 120_000L;	// without capture-on-open, the bank would wait this long
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+
+		plugin.handleCaptureOnOpenWidgetLoaded(12);	// BANKMAIN (verified via javap)
+
+		assertNotNull("opening the bank must sync immediately", server.takeRequest(5, TimeUnit.SECONDS));
+		assertEquals(1, server.getRequestCount());
+	}
+
+	@Test
+	public void collectionLogOpenForcesImmediateSend() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 120_000L;
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+
+		plugin.handleCaptureOnOpenWidgetLoaded(621);	// COLLECTION (verified via javap)
+
+		assertNotNull("opening the collection log must sync immediately",
+			server.takeRequest(5, TimeUnit.SECONDS));
+		assertEquals(1, server.getRequestCount());
+	}
+
+	@Test
+	public void unrelatedWidgetOpenDoesNotForceSend() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 120_000L;
+		setSkillXp(1000);
+
+		plugin.handleCaptureOnOpenWidgetLoaded(161);	// an unrelated interface group
+
+		assertNull("an unrelated widget open must not trigger a send",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(0, server.getRequestCount());
 	}
 }
