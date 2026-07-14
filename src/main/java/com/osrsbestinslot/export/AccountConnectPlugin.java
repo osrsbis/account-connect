@@ -33,6 +33,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -263,6 +265,18 @@ public class AccountConnectPlugin extends Plugin
 	private volatile List<Map<String, Object>> pendingTradeGiven;
 	private volatile String pendingCounterparty;
 
+	// ---- WAVE 2: real-time sync ----
+	// On any emitEvent we flush live instead of waiting for the 5s eventFlushTask. A burst (e.g. rapid chat
+	// lines) is micro-coalesced into a single ~1s window so it becomes ONE /event-ingest POST, not one HTTP
+	// call per line (still sub-second-to-~1s = real-time). The first event opens the window; the rest ride it.
+	private static final long EVENT_COALESCE_MILLIS = 1000L;
+	long eventCoalesceMillis = EVENT_COALESCE_MILLIS;	// field (not const) so tests can shrink the window
+	private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
+	// State-changing events whose wealth/state must land immediately also force a snapshot. Chat / level_up
+	// are excluded (too frequent / not wealth-moving); login is bound separately by syncTask's new-login send.
+	private static final java.util.Set<String> SNAPSHOT_TRIGGER_EVENTS = new java.util.HashSet<>(
+		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death"));
+
 	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
 	boolean screenshotsEnabled()
 	{
@@ -349,13 +363,53 @@ public class AccountConnectPlugin extends Plugin
 				pendingEvents.remove(0);
 			}
 		}
+		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
+		// event schedules a coalesced flush so it ships in ~1s instead of on the next 5s tick.
+		maybeForceSnapshotForEvent(type);
+		scheduleCoalescedFlush();
+	}
+
+	/**
+	 * State-changing events (trade / ge_* / store_* / death) push a fresh snapshot immediately so post-event
+	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, excluded, backoff)
+	 * and is async. client is null only in buffer-only unit tests — real runtime always has it injected.
+	 */
+	private void maybeForceSnapshotForEvent(String type)
+	{
+		if (client != null && SNAPSHOT_TRIGGER_EVENTS.contains(type))
+		{
+			forceSendSnapshot();
+		}
+	}
+
+	/**
+	 * Micro-coalesce the event flush: the first event schedules a one-shot flush on the background executor;
+	 * further events within the window coalesce into it (compareAndSet keeps it to a single scheduled task),
+	 * so a burst becomes ONE POST. The flag is cleared before flushing so events arriving during the flush
+	 * open a fresh window (never lost). executor is null only in buffer-only unit tests; the 5s eventFlushTask
+	 * remains as a safety net. Fire-and-forget — never blocks the client thread.
+	 */
+	void scheduleCoalescedFlush()
+	{
+		if (executor == null)
+		{
+			return;
+		}
+		if (flushScheduled.compareAndSet(false, true))
+		{
+			executor.schedule(() ->
+			{
+				flushScheduled.set(false);
+				flushEvents();
+			}, eventCoalesceMillis, TimeUnit.MILLISECONDS);
+		}
 	}
 
 	/**
 	 * Detect session start on the client thread (player available): the first logged-in tick, or a hop
 	 * into a different account, emits a "login" event and stamps the session. Called from syncTask.
 	 */
-	void trackSessionStart()
+	boolean trackSessionStart()
 	{
 		String rsn = client.getLocalPlayer().getName();
 		String hash = Long.toString(client.getAccountHash());
@@ -365,12 +419,17 @@ public class AccountConnectPlugin extends Plugin
 			activeHash = hash;
 			sessionActive = true;
 			sessionStartMillis = System.currentTimeMillis();
-			emitEvent("login", null);
+			emitEvent("login", loginFields());
+			return true;
 		}
-		else
-		{
-			activeRsn = rsn; // keep the display name fresh
-		}
+		activeRsn = rsn; // keep the display name fresh
+		return false;
+	}
+
+	/** Extra fields carried on the login event. WAVE 2: none yet (wealth added in WAVE 3). */
+	private Map<String, Object> loginFields()
+	{
+		return new LinkedHashMap<>();
 	}
 
 	/** Emit a "logout" event (with session duration) for the tracked account, if a session was active. */
@@ -466,17 +525,29 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return; // no / malformed token configured yet
 		}
-		trackSessionStart(); // core sync: emits a "login" event on the first tick of a session / after a hop
+		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
+		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
 		String hash = canonicalHash(snapshot);
 		// Track on EVERY tick regardless of the gates below: the logout flush sends this cache.
 		lastBuiltSnapshot = snapshot;
 		lastBuiltHash = hash;
 
+		boolean newLogin = trackSessionStart(); // emits a "login" event on the first tick of a session / after a hop
+
 		long now = System.currentTimeMillis();
 		if (now < backoffUntilMillis)
 		{
 			return; // rate-limited by the server — build + track only, never send
+		}
+		if (newLogin)
+		{
+			// WAVE 2: bind the login server-side immediately. Send this snapshot now, bypassing the
+			// unchanged-hash gate AND the debounce, so login (and wealth-at-login) lands live even on a
+			// re-link to the same state — the "login drops on a fresh link" race. Still honors the 429 backoff.
+			lastSendMillis = now;
+			postSnapshot(token, snapshot, hash);
+			return;
 		}
 		if (hash.equals(lastUploadedHash))
 		{
