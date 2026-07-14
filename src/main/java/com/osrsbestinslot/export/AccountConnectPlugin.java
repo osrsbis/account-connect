@@ -61,14 +61,18 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.util.HotkeyListener;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -88,7 +92,9 @@ import okhttp3.Response;
 public class AccountConnectPlugin extends Plugin
 {
 	private static final int SCHEMA_V = 1;
-	private static final String PLUGIN_VERSION = "0.5.0";
+	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
+	// every snapshot's source.plugin_version honestly reports which build the account is running.
+	private static final String PLUGIN_VERSION = "0.7.0";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -135,6 +141,10 @@ public class AccountConnectPlugin extends Plugin
 	// Activity-log capture (verified vs runelite-api 1.12.32 gameval enums):
 	private static final int SHOP_GROUP_ID = net.runelite.api.gameval.InterfaceID.SHOPMAIN;					// 300
 	private static final int TRADE_TITLE_COMPONENT = net.runelite.api.gameval.InterfaceID.Trademain.TITLE;	// 21954591 ("Trading with X")
+	// Capture-on-open groups: opening either forces an immediate snapshot so the bank / collection log
+	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
+	private static final int BANK_GROUP_ID = net.runelite.api.gameval.InterfaceID.BANKMAIN;					// 12
+	private static final int COLLECTION_LOG_GROUP_ID = net.runelite.api.gameval.InterfaceID.COLLECTION;		// 621
 	private static final String DEFAULT_PUBLIC_API = "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
@@ -184,10 +194,43 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ScheduledExecutorService executor;
 
+	@Inject
+	private KeyManager keyManager;
+
+	@Inject
+	private ClientThread clientThread;
+
+	/**
+	 * Manual "Re-sync now" hotkey (FIX: the site tells users to Re-sync but the plugin only auto-sent on a
+	 * change + debounce). Pressing the configured key forces one immediate snapshot send. The keypress
+	 * arrives on the AWT event thread, so it is marshalled onto the client thread before building the
+	 * snapshot (buildSnapshot reads live client containers). NOT_SET until the user assigns a key.
+	 */
+	private final HotkeyListener resyncHotkeyListener = new HotkeyListener(() -> config.resyncHotkey())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			clientThread.invoke(AccountConnectPlugin.this::forceSendSnapshot);
+		}
+	};
+
 	@Provides
 	AccountConnectConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(AccountConnectConfig.class);
+	}
+
+	@Override
+	protected void startUp()
+	{
+		keyManager.registerKeyListener(resyncHotkeyListener);
+	}
+
+	@Override
+	protected void shutDown()
+	{
+		keyManager.unregisterKeyListener(resyncHotkeyListener);
 	}
 
 	/**
@@ -449,6 +492,45 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Force one snapshot send NOW, bypassing the unchanged-hash gate AND the debounce interval. Shared by
+	 * the manual "Re-sync now" hotkey and capture-on-open (bank / collection log). It still honors the
+	 * guards that make a send valid at all — logged in, token set, account not excluded — and an active
+	 * 429 backoff (the server explicitly said stop; a client-side force never overrides that). It
+	 * deliberately does NOT touch lastSendMillis: a capture-on-open send can land a tick before the data
+	 * finishes populating (the collection log fills as its draw scripts run), and updating the debounce
+	 * clock here would hold back the real snapshot the next tick sends. lastUploadedHash is still recorded
+	 * on accept (shared postSnapshot callback), so an unchanged follow-up tick won't re-send; the only
+	 * cost is at most one duplicate POST if a scheduled tick races the async accept, which the server
+	 * dedupes by hash. Must run on the client thread (WidgetLoaded delivery, or ClientThread.invoke from
+	 * the hotkey) so reading client containers is safe.
+	 */
+	void forceSendSnapshot()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
+		{
+			return;
+		}
+		if (isCurrentAccountExcluded())
+		{
+			return; // personal account on the user's opt-out list — never build, track or send it
+		}
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$"))
+		{
+			return; // no / malformed token configured yet
+		}
+		if (System.currentTimeMillis() < backoffUntilMillis)
+		{
+			return; // server-imposed 429 backoff still wins — a manual force never overrides it
+		}
+		Map<String, Object> snapshot = buildSnapshot();
+		String hash = canonicalHash(snapshot);
+		lastBuiltSnapshot = snapshot;	// keep the logout-flush cache coherent, exactly like syncTask
+		lastBuiltHash = hash;
+		postSnapshot(token, snapshot, hash);
+	}
+
+	/**
 	 * Change-detection hash: SHA-256 of the snapshot JSON minus the volatile fields. captured_at
 	 * moves every build, and the wealth block derives from GE prices, which jitter without any
 	 * real account change — the underlying items are still hashed via the container blocks.
@@ -606,6 +688,23 @@ public class AccountConnectPlugin extends Plugin
 	{
 		handleTradeWidgetLoaded(event.getGroupId());
 		handleActivityWidgetLoaded(event.getGroupId());
+		handleCaptureOnOpenWidgetLoaded(event.getGroupId());
+	}
+
+	/**
+	 * Capture-on-open: opening the bank (BANKMAIN 12) or the collection log (COLLECTION 621) forces an
+	 * immediate snapshot so those containers sync the moment they become readable, instead of waiting up
+	 * to a full debounce interval for the next scheduled tick (the "opened my bank, still says not synced"
+	 * complaint). WidgetLoaded is delivered on the client thread, so forceSendSnapshot reads containers
+	 * directly. Its own guards (token / excluded / backoff) still apply — an unlinked or opted-out account
+	 * opening its bank sends nothing.
+	 */
+	void handleCaptureOnOpenWidgetLoaded(int groupId)
+	{
+		if (groupId == BANK_GROUP_ID || groupId == COLLECTION_LOG_GROUP_ID)
+		{
+			forceSendSnapshot();
+		}
 	}
 
 	/**
