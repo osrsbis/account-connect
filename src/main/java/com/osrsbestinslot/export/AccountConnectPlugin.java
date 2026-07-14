@@ -145,6 +145,9 @@ public class AccountConnectPlugin extends Plugin
 	// Activity-log capture (verified vs runelite-api 1.12.32 gameval enums):
 	private static final int SHOP_GROUP_ID = net.runelite.api.gameval.InterfaceID.SHOPMAIN;					// 300
 	private static final int TRADE_TITLE_COMPONENT = net.runelite.api.gameval.InterfaceID.Trademain.TITLE;	// 21954591 ("Trading with X")
+	// WAVE 1b: the confirm screen's "You will receive" column — the ONLY place the counterparty's side is
+	// shown (there is no counterparty ItemContainer). Packed component id = group 334 << 16 | child 24.
+	private static final int TRADE_CONFIRM_RECEIVE_COMPONENT = net.runelite.api.gameval.InterfaceID.Tradeconfirm.YOU_WILL_RECEIVE;	// 21889048
 	// Capture-on-open groups: opening either forces an immediate snapshot so the bank / collection log
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
 	private static final int BANK_GROUP_ID = net.runelite.api.gameval.InterfaceID.BANKMAIN;					// 12
@@ -274,6 +277,11 @@ public class AccountConnectPlugin extends Plugin
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
 	private volatile List<Map<String, Object>> pendingTradeGiven;
 	private volatile String pendingCounterparty;
+	// WAVE 1b: the counterparty's side (what WE receive), read from the confirm-screen YOU_WILL_RECEIVE widget
+	// at 334-load. pendingTradeReceived = structured [{id,qty}] if the widget exposes item children;
+	// pendingReceivedText = the raw "Blood rune x 100 ..." summary as a lossless fallback when it does not.
+	private volatile List<Map<String, Object>> pendingTradeReceived;
+	private volatile String pendingReceivedText;
 
 	// ---- WAVE 2: real-time sync ----
 	// On any emitEvent we flush live instead of waiting for the 5s eventFlushTask. A burst (e.g. rapid chat
@@ -889,6 +897,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			pendingTradeGiven = readOwnOffer();
 			pendingCounterparty = counterpartyName();
+			// WAVE 1b: capture what we RECEIVE. Prefer structured item children; if the widget carries only a
+			// text summary (the likely runtime shape), keep that raw text so nothing is lost.
+			pendingTradeReceived = readReceivedOffer();
+			if (pendingTradeReceived.isEmpty())
+			{
+				pendingReceivedText = readReceivedText();
+			}
 		}
 	}
 
@@ -911,6 +926,120 @@ public class AccountConnectPlugin extends Plugin
 			}
 		}
 		return items;
+	}
+
+	/**
+	 * WAVE 1b — read the counterparty's side (what WE receive) from the confirm-screen "You will receive"
+	 * widget (component {@link #TRADE_CONFIRM_RECEIVE_COMPONENT}). There is NO counterparty ItemContainer, so
+	 * this widget is the only source. Tries item-bearing children first → [{id, qty}]; returns an EMPTY list if
+	 * none are present (the caller then falls back to {@link #readReceivedText}). Null-safe throughout: the
+	 * widget, its child arrays and per-child item fields may all be absent.
+	 *
+	 * ⚠ NOT unit-verifiable against real runtime. Two things need one in-game two-sided trade to confirm:
+	 * (1) whether this widget exposes item CHILDREN at all (it is likely a text summary — item sprites may
+	 * instead live under Tradeconfirm.OTHER_OFFER / 21889053), and (2) whether it is even populated at
+	 * WidgetLoaded time (the confirm-screen CS2 scripts may run a tick later). Written defensively so an empty
+	 * read never throws and never blocks the text fallback.
+	 */
+	List<Map<String, Object>> readReceivedOffer()
+	{
+		List<Map<String, Object>> items = new ArrayList<>();
+		if (client == null)
+		{
+			return items;
+		}
+		collectReceivedItems(client.getWidget(TRADE_CONFIRM_RECEIVE_COMPONENT), items);
+		return items;
+	}
+
+	/** Collect item-bearing widgets (the widget itself + its children) as [{id, qty}]. Null-safe. */
+	private void collectReceivedItems(Widget w, List<Map<String, Object>> out)
+	{
+		if (w == null)
+		{
+			return;
+		}
+		addReceivedItem(w, out);
+		Widget[] kids = w.getChildren();
+		if (kids == null || kids.length == 0)
+		{
+			kids = w.getDynamicChildren();	// some interfaces expose item slots only via the dynamic-child array
+		}
+		if (kids != null)
+		{
+			for (Widget k : kids)
+			{
+				addReceivedItem(k, out);
+			}
+		}
+	}
+
+	/** Append {id, qty} if this widget carries a real item (id/qty > 0). */
+	private void addReceivedItem(Widget w, List<Map<String, Object>> out)
+	{
+		if (w == null)
+		{
+			return;
+		}
+		int id = w.getItemId();
+		int qty = w.getItemQuantity();
+		if (id > 0 && qty > 0)
+		{
+			out.add(itemMap(id, qty));
+		}
+	}
+
+	/**
+	 * WAVE 1b fallback — the "You will receive" column is likely a TEXT summary ("Blood rune x 100<br>Coins
+	 * x 5,000"), not item sprites. When no item children are found, capture that RAW text (tags/&lt;br&gt;
+	 * intact so nothing is lost, child lines joined) as received_text. Returns null only when there is no
+	 * actual content (emptiness is tested tag-stripped). Null-safe.
+	 */
+	String readReceivedText()
+	{
+		if (client == null)
+		{
+			return null;
+		}
+		Widget w = client.getWidget(TRADE_CONFIRM_RECEIVE_COMPONENT);
+		if (w == null)
+		{
+			return null;
+		}
+		StringBuilder sb = new StringBuilder();
+		appendReceivedText(w, sb);
+		Widget[] kids = w.getChildren();
+		if (kids == null || kids.length == 0)
+		{
+			kids = w.getDynamicChildren();
+		}
+		if (kids != null)
+		{
+			for (Widget k : kids)
+			{
+				appendReceivedText(k, sb);
+			}
+		}
+		String raw = sb.toString().trim();
+		return Text.removeTags(raw).trim().isEmpty() ? null : raw;
+	}
+
+	/** Append a widget's non-empty raw text as its own line. */
+	private void appendReceivedText(Widget w, StringBuilder sb)
+	{
+		if (w == null)
+		{
+			return;
+		}
+		String t = w.getText();
+		if (t != null && !t.isEmpty())
+		{
+			if (sb.length() > 0)
+			{
+				sb.append('\n');
+			}
+			sb.append(t);
+		}
 	}
 
 	/** Trade partner name from the trade window title ("Trading With: Name"), or null. */
@@ -1008,15 +1137,20 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * On "Accepted trade.", emit a structured "trade" event from what was captured at the confirm screen:
-	 * the items WE gave (own offer) and the counterparty name (forwarded for ALL users, disclosed). The
-	 * received[] side is added in a follow-up (read from the confirm-screen YOU_WILL_RECEIVE widget).
+	 * the items WE gave (own offer), the counterparty name (forwarded for ALL users, disclosed), and the items
+	 * WE receive (WAVE 1b — structured [{id,qty}] from the YOU_WILL_RECEIVE widget, or a raw received_text
+	 * summary fallback when that widget carries text rather than item sprites).
 	 */
 	void emitTradeEvent()
 	{
 		List<Map<String, Object>> given = pendingTradeGiven;
 		String counterparty = pendingCounterparty;
+		List<Map<String, Object>> received = pendingTradeReceived;
+		String receivedText = pendingReceivedText;
 		pendingTradeGiven = null;
 		pendingCounterparty = null;
+		pendingTradeReceived = null;
+		pendingReceivedText = null;
 		if (given == null)
 		{
 			return;
@@ -1028,6 +1162,13 @@ public class AccountConnectPlugin extends Plugin
 		if (counterparty != null)
 		{
 			fields.put("counterparty", counterparty);
+		}
+		// WAVE 1b: the received side. Always carry received[] (may be empty if the widget was text-only or not
+		// yet populated); attach received_text only when the structured read came back empty and text was found.
+		fields.put("received", received == null ? new ArrayList<>() : received);
+		if (receivedText != null && !receivedText.isEmpty())
+		{
+			fields.put("received_text", receivedText);
 		}
 		emitEvent("trade", fields);
 	}
@@ -1258,6 +1399,8 @@ public class AccountConnectPlugin extends Plugin
 		pendingTradeFrame.set(null);
 		pendingTradeGiven = null;	// activity-log trade capture — drop on decline/abandon/hop so it never leaks
 		pendingCounterparty = null;
+		pendingTradeReceived = null;	// WAVE 1b: received side — drop with the rest so it never leaks across trades
+		pendingReceivedText = null;
 	}
 
 	// ---- trade screenshot: capture + upload ----
