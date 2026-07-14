@@ -29,6 +29,7 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,7 @@ import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.NPCComposition;
 import net.runelite.api.Prayer;
 import net.runelite.api.Quest;
 import net.runelite.api.QuestState;
@@ -70,7 +72,10 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.Keybind;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
+import net.runelite.client.events.PlayerLootReceived;
+import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
 import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -1335,6 +1340,82 @@ public class AccountConnectPlugin extends Plugin
 		fields.put("price", offer.getPrice());
 		fields.put("gp", offer.getSpent());
 		emitEvent(type, fields);
+	}
+
+	/**
+	 * WAVE 4 — structured NPC loot. The whole drop for one kill arrives as a single Collection&lt;ItemStack&gt;,
+	 * so one kill = one "loot" event (already coalesced by the API — no time window needed). Fired by
+	 * LootManager, a core RuneLite service that is ALWAYS running (NOT the optional loot-tracker plugin), for
+	 * the local player's kills — so this is own-account by construction.
+	 *
+	 * We subscribe to ServerNpcLoot ONLY. LootManager fires BOTH ServerNpcLoot and NpcLootReceived for the same
+	 * server-authoritative kill (verified in its bytecode), so taking both would double-count; this mirrors
+	 * RuneLite's own maintained LootTrackerPlugin (onServerNpcLoot + onPlayerLootReceived). Trade-off: kills
+	 * that ONLY fire via LootManager's older ground-detection path (NpcLootReceived alone) are not captured —
+	 * a rare edge case in modern OSRS; adding it would require subscribing to both with dedup state.
+	 * javap-verified vs client 1.12.32 (ServerNpcLoot.getComposition/getItems, NPCComposition.getName).
+	 */
+	@Subscribe
+	public void onServerNpcLoot(ServerNpcLoot event)
+	{
+		NPCComposition comp = event.getComposition();
+		emitLoot(comp == null ? null : comp.getName(), "npc", event.getItems());
+	}
+
+	/**
+	 * WAVE 4 — PvP player loot (e.g. a Wilderness kill). Capture the ITEMS only. The victim's name is available
+	 * (event.getPlayer().getName()) but is deliberately NOT sent: forwarding a killed player's name on the
+	 * public path is a compliance decision for Lukas, not an auto-send.
+	 * TODO(Lukas): decide whether to attach the victim RSN as loot source_name — left OUT until then.
+	 * javap-verified vs client 1.12.32 (PlayerLootReceived.getItems).
+	 */
+	@Subscribe
+	public void onPlayerLootReceived(PlayerLootReceived event)
+	{
+		emitLoot(null, "player", event.getItems());
+	}
+
+	/**
+	 * Build + buffer a structured "loot" event: {source_name?, source_type, items:[{id,qty}], value}. value is
+	 * the summed GE price via ItemManager when reachable (0 when itemManager is absent, e.g. buffer-only tests).
+	 * No-op on an empty/blank drop. Gated inside emitEvent exactly like every other event (token set + account
+	 * not excluded). Deliberately NOT a SNAPSHOT_TRIGGER_EVENT: loot fires many times a minute at a boss/slayer
+	 * task — forcing a snapshot per kill would be a firehose; the wealth/inventory change lands on the next
+	 * syncTask through the normal change-gate, while the loot event itself still ships in real time (WAVE 2).
+	 */
+	void emitLoot(String sourceName, String sourceType, Collection<ItemStack> stacks)
+	{
+		if (stacks == null || stacks.isEmpty())
+		{
+			return;
+		}
+		List<Map<String, Object>> items = new ArrayList<>();
+		long value = 0L;
+		for (ItemStack st : stacks)
+		{
+			if (st == null || st.getId() <= 0 || st.getQuantity() <= 0)
+			{
+				continue;
+			}
+			items.add(itemMap(st.getId(), st.getQuantity()));
+			if (itemManager != null)
+			{
+				value += (long) itemManager.getItemPrice(st.getId()) * st.getQuantity();
+			}
+		}
+		if (items.isEmpty())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		if (sourceName != null && !sourceName.isEmpty())
+		{
+			fields.put("source_name", sourceName);
+		}
+		fields.put("source_type", sourceType);
+		fields.put("items", items);
+		fields.put("value", value);
+		emitEvent("loot", fields);
 	}
 
 	void handleTradeChat(String message)
