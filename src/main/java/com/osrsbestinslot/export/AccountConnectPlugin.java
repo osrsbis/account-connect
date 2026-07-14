@@ -255,6 +255,14 @@ public class AccountConnectPlugin extends Plugin
 	private volatile String activeRsn;
 	private volatile String activeHash;
 	private volatile long sessionStartMillis;
+	// WAVE 3: idle counters sampled on the last logged-in tick (syncTask), used to classify the logout reason.
+	private volatile int lastKeyboardIdleTicks;
+	private volatile int lastMouseIdleTicks;
+	// Logout-reason heuristics: a session within this window of 6h is the in-game six-hour cap; both idle
+	// counters above this tick count (0.6s/tick, ~5 min) at logout = an idle timeout, else a manual logout.
+	private static final long SIX_HOUR_MS = 6L * 60L * 60L * 1000L;
+	private static final long SIX_HOUR_SLACK_MS = 3L * 60L * 1000L;
+	private static final int IDLE_LOGOUT_TICKS = 500;
 	/** Dedup state for the broad activity sweep: emit a level event only on a real level change, a GE event
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
@@ -426,14 +434,58 @@ public class AccountConnectPlugin extends Plugin
 		return false;
 	}
 
-	/** Extra fields carried on the login event. WAVE 2: none yet (wealth added in WAVE 3). */
+	/** Extra fields carried on the login event. WAVE 3: net worth at login (from the just-built snapshot). */
 	private Map<String, Object> loginFields()
 	{
-		return new LinkedHashMap<>();
+		Map<String, Object> fields = new LinkedHashMap<>();
+		Long netWorth = lastKnownNetWorth();
+		if (netWorth != null)
+		{
+			fields.put("wealth", netWorth);
+		}
+		return fields;
 	}
 
-	/** Emit a "logout" event (with session duration) for the tracked account, if a session was active. */
+	/**
+	 * Net worth (gp) from the most recently built snapshot's wealth block, for the login/logout events. Prefers
+	 * net_worth_gp (inventory + equipment + bank, populated once the bank has been opened); before then falls
+	 * back to the carried inventory + worn equipment value. null only if no snapshot has been built yet.
+	 */
+	Long lastKnownNetWorth()
+	{
+		Map<String, Object> snap = lastBuiltSnapshot;
+		if (snap == null)
+		{
+			return null;
+		}
+		Object w = snap.get("wealth");
+		if (!(w instanceof Map))
+		{
+			return null;
+		}
+		Map<?, ?> wealth = (Map<?, ?>) w;
+		Object net = wealth.get("net_worth_gp");
+		if (net instanceof Number)
+		{
+			return ((Number) net).longValue();
+		}
+		long inv = wealth.get("inventory_gp") instanceof Number ? ((Number) wealth.get("inventory_gp")).longValue() : 0L;
+		long eqp = wealth.get("equipment_gp") instanceof Number ? ((Number) wealth.get("equipment_gp")).longValue() : 0L;
+		return inv + eqp;
+	}
+
+	/** Emit a "logout" event (duration + classified reason) for the tracked account, if a session was active. */
 	void trackLogout()
+	{
+		trackLogout(classifyLogoutReason());
+	}
+
+	/**
+	 * WAVE 3: emit a "logout" with an explicit reason (idle / manual / six_hour_cap / connection_lost) plus
+	 * session duration and the account's net worth at logout. reason=connection_lost is passed by the
+	 * CONNECTION_LOST game-state (which previously emitted nothing).
+	 */
+	void trackLogout(String reason)
 	{
 		if (!sessionActive)
 		{
@@ -444,8 +496,37 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("session_ms", System.currentTimeMillis() - sessionStartMillis);
 		}
+		if (reason != null)
+		{
+			fields.put("reason", reason);
+		}
+		Long netWorth = lastKnownNetWorth();
+		if (netWorth != null)
+		{
+			fields.put("wealth", netWorth);
+		}
 		emitEvent("logout", fields);
 		sessionActive = false;
+	}
+
+	/**
+	 * Best-effort logout classification from the last logged-in tick's idle counters + session length. A
+	 * session length within {@link #SIX_HOUR_SLACK_MS} of the 6h cap is the in-game six-hour logout; both
+	 * idle counters high = an idle timeout; otherwise a manual logout. Heuristic (no client API says WHY the
+	 * client logged out) — connection loss is signalled explicitly via {@link #trackLogout(String)} instead.
+	 */
+	String classifyLogoutReason()
+	{
+		long sessionMs = sessionStartMillis > 0 ? System.currentTimeMillis() - sessionStartMillis : 0L;
+		if (sessionMs >= SIX_HOUR_MS - SIX_HOUR_SLACK_MS)
+		{
+			return "six_hour_cap";
+		}
+		if (Math.min(lastKeyboardIdleTicks, lastMouseIdleTicks) >= IDLE_LOGOUT_TICKS)
+		{
+			return "idle";
+		}
+		return "manual";
 	}
 
 	/**
@@ -525,6 +606,9 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return; // no / malformed token configured yet
 		}
+		// WAVE 3: sample idle counters on the last logged-in tick so a later logout can be classified idle/manual.
+		lastKeyboardIdleTicks = client.getKeyboardIdleTicks();
+		lastMouseIdleTicks = client.getMouseIdleTicks();
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
@@ -711,14 +795,21 @@ public class AccountConnectPlugin extends Plugin
 		{
 			case HOPPING:
 			case LOGGING_IN:
-			case CONNECTION_LOST:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				break;
+			case CONNECTION_LOST:
+				clogObtained.clear();
+				clogSeen = false;
+				resetTradeState();
+				// WAVE 3: a dropped connection previously emitted NOTHING. Emit an explicit logout so a crash /
+				// disconnect is distinguishable from a clean logout. Ends the session; a reconnect re-logs in.
+				trackLogout("connection_lost");
+				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
-				trackLogout(); // buffer a "logout" event (session duration); flushed by the next syncTask tick
+				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
 				break;
 			default:
@@ -964,6 +1055,10 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", event.getItemId());
 		fields.put("qty", parseTrailingQty(opt));
+		// WAVE 3: unit price intentionally omitted. The actual transacted store price (base value * buy/sell %
+		// scaled by live stock) is not cleanly reachable — MenuOptionClicked carries no price, the shop stock
+		// container holds only ids/quantities, and the shop widget's VALUE text tracks the hovered item, not
+		// the clicked one. Deferred rather than send a misleading GE/base value labelled "price".
 		emitEvent(type, fields);
 	}
 
@@ -1014,8 +1109,29 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
 		{
-			emitEvent("death", null);
+			// WAVE 3: attach {region_id, plane} from the player's world location. Items-lost is deferred (no
+			// clean items-lost API in RuneLite) — left for the in-game loop to reconstruct server-side.
+			emitEvent("death", deathLocationFields());
 		}
+	}
+
+	/** {location:{region_id, plane}} of the local player, or empty if the world location isn't readable. */
+	private Map<String, Object> deathLocationFields()
+	{
+		Map<String, Object> fields = new LinkedHashMap<>();
+		net.runelite.api.Player p = client.getLocalPlayer();
+		if (p != null)
+		{
+			net.runelite.api.coords.WorldPoint wp = p.getWorldLocation();
+			if (wp != null)
+			{
+				Map<String, Object> loc = new LinkedHashMap<>();
+				loc.put("region_id", wp.getRegionID());
+				loc.put("plane", wp.getPlane());
+				fields.put("location", loc);
+			}
+		}
+		return fields;
 	}
 
 	/** Level-ups: StatChanged fires on every xp drop, so emit only when the real level increases. */
@@ -1034,6 +1150,10 @@ public class AccountConnectPlugin extends Plugin
 			Map<String, Object> fields = new LinkedHashMap<>();
 			fields.put("skill", skill);
 			fields.put("level", level);
+			if (client != null)
+			{
+				fields.put("xp", client.getSkillExperience(event.getSkill()));	// WAVE 3: total xp at level-up
+			}
 			emitEvent("level_up", fields);
 		}
 	}
