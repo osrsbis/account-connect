@@ -47,9 +47,11 @@ import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.Prayer;
 import net.runelite.api.Quest;
 import net.runelite.api.QuestState;
 import net.runelite.api.Skill;
+import net.runelite.api.VarPlayer;
 import net.runelite.api.Varbits;
 import net.runelite.api.WorldType;
 import net.runelite.api.events.ActorDeath;
@@ -1119,17 +1121,10 @@ public class AccountConnectPlugin extends Plugin
 	private Map<String, Object> deathLocationFields()
 	{
 		Map<String, Object> fields = new LinkedHashMap<>();
-		net.runelite.api.Player p = client.getLocalPlayer();
-		if (p != null)
+		Map<String, Object> loc = currentLocation();
+		if (loc != null)
 		{
-			net.runelite.api.coords.WorldPoint wp = p.getWorldLocation();
-			if (wp != null)
-			{
-				Map<String, Object> loc = new LinkedHashMap<>();
-				loc.put("region_id", wp.getRegionID());
-				loc.put("plane", wp.getPlane());
-				fields.put("location", loc);
-			}
+			fields.put("location", loc);
 		}
 		return fields;
 	}
@@ -1570,7 +1565,58 @@ public class AccountConnectPlugin extends Plugin
 		wealth.put("net_worth_gp", bankSynced ? (invValue + eqpValue + bankValue) : null); // null until bank opened
 		snap.put("wealth", wealth);
 
+		// ---- WAVE 5: live state (all ids javap-verified vs runelite-api 1.12.32; raw values, decoded server-side) ----
+		snap.put("spellbook", client.getVarbitValue(Varbits.SPELLBOOK));          // 0 standard / 1 ancient / 2 lunar / 3 arceuus
+		snap.put("attack_style", client.getVarpValue(VarPlayer.ATTACK_STYLE));    // 0..3 = the selected style slot
+		snap.put("world", client.getWorld());
+		snap.put("location", currentLocation());                                  // {region_id, plane} or null if unreadable
+
+		List<String> activePrayers = new ArrayList<>();
+		for (Prayer prayer : Prayer.values())
+		{
+			if (client.isPrayerActive(prayer))
+			{
+				activePrayers.add(prayer.name());
+			}
+		}
+		snap.put("prayer_active", activePrayers);
+
+		// Kourend house favour — 5 raw varbits (server divides by 10 for the %). Spelled FAVOR in the api enum.
+		Map<String, Object> favour = new LinkedHashMap<>();
+		favour.put("arceuus", client.getVarbitValue(Varbits.KOUREND_FAVOR_ARCEUUS));
+		favour.put("hosidius", client.getVarbitValue(Varbits.KOUREND_FAVOR_HOSIDIUS));
+		favour.put("lovakengj", client.getVarbitValue(Varbits.KOUREND_FAVOR_LOVAKENGJ));
+		favour.put("piscarilius", client.getVarbitValue(Varbits.KOUREND_FAVOR_PISCARILIUS));
+		favour.put("shayzien", client.getVarbitValue(Varbits.KOUREND_FAVOR_SHAYZIEN));
+		snap.put("kourend_favour", favour);
+
+		// Minigame points. NMZ + Tithe have clean point varbits; LMS has none in this jar (only IN_LMS state) so
+		// LMS points are omitted rather than invented.
+		Map<String, Object> minigames = new LinkedHashMap<>();
+		minigames.put("nmz", client.getVarbitValue(Varbits.NMZ_POINTS));
+		minigames.put("tithe", client.getVarbitValue(Varbits.TITHE_FARM_POINTS));
+		snap.put("minigame_points", minigames);
+
 		return snap;
+	}
+
+	/** {region_id, plane} of the local player's world location, or null if it isn't currently readable. */
+	private Map<String, Object> currentLocation()
+	{
+		net.runelite.api.Player p = client.getLocalPlayer();
+		if (p == null)
+		{
+			return null;
+		}
+		net.runelite.api.coords.WorldPoint wp = p.getWorldLocation();
+		if (wp == null)
+		{
+			return null;
+		}
+		Map<String, Object> loc = new LinkedHashMap<>();
+		loc.put("region_id", wp.getRegionID());
+		loc.put("plane", wp.getPlane());
+		return loc;
 	}
 
 	// ---- container helpers ----
