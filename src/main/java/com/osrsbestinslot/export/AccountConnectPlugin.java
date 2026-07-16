@@ -69,19 +69,16 @@ import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.config.Keybind;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.events.PlayerLootReceived;
 import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
-import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.DrawManager;
-import net.runelite.client.util.HotkeyListener;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -207,25 +204,7 @@ public class AccountConnectPlugin extends Plugin
 	private ScheduledExecutorService executor;
 
 	@Inject
-	private KeyManager keyManager;
-
-	@Inject
 	private ClientThread clientThread;
-
-	/**
-	 * Manual "Re-sync now" hotkey (FIX: the site tells users to Re-sync but the plugin only auto-sent on a
-	 * change + debounce). Pressing the configured key forces one immediate snapshot send. The keypress
-	 * arrives on the AWT event thread, so it is marshalled onto the client thread before building the
-	 * snapshot (buildSnapshot reads live client containers). NOT_SET until the user assigns a key.
-	 */
-	private final HotkeyListener resyncHotkeyListener = new HotkeyListener(() -> config.resyncHotkey())
-	{
-		@Override
-		public void hotkeyPressed()
-		{
-			clientThread.invoke(AccountConnectPlugin.this::forceSendSnapshot);
-		}
-	};
 
 	@Provides
 	AccountConnectConfig provideConfig(ConfigManager configManager)
@@ -236,13 +215,11 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		keyManager.registerKeyListener(resyncHotkeyListener);
 	}
 
 	@Override
 	protected void shutDown()
 	{
-		keyManager.unregisterKeyListener(resyncHotkeyListener);
 		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
 	}
 
@@ -302,11 +279,11 @@ public class AccountConnectPlugin extends Plugin
 	private static final java.util.Set<String> SNAPSHOT_TRIGGER_EVENTS = new java.util.HashSet<>(
 		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death"));
 
-	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
+	/** Trade-screenshot capture requires the local opt-in AND no server force-disable. */
 	boolean screenshotsEnabled()
 	{
 		// toggle first: when off, short-circuit before touching client (the feature is off regardless).
-		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled && !isCurrentAccountExcluded();
+		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled;
 	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
@@ -598,49 +575,15 @@ public class AccountConnectPlugin extends Plugin
 		return builder.build();
 	}
 
-	/** True if the logged-in character is on the user's "don't sync these accounts" list (personal opt-out). */
-	boolean isCurrentAccountExcluded()
-	{
-		if (client == null)
-		{
-			return false;
-		}
-		net.runelite.api.Player p = client.getLocalPlayer();
-		return p != null && isAccountExcluded(p.getName());
-	}
-
-	/** Case-insensitive membership test of a character name against the comma-separated excluded list. */
-	boolean isAccountExcluded(String playerName)
-	{
-		if (playerName == null)
-		{
-			return false;
-		}
-		String excluded = config.excludedAccounts();
-		if (excluded == null || excluded.trim().isEmpty())
-		{
-			return false;
-		}
-		String target = playerName.trim().toLowerCase(java.util.Locale.ROOT);
-		for (String name : excluded.split(","))
-		{
-			if (name.trim().toLowerCase(java.util.Locale.ROOT).equals(target))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
 	/**
 	 * The activity log is part of core sync — no separate toggle. It's active whenever a valid link
-	 * token is set and the logged-in account isn't on the opt-out list: the SAME gate as the snapshot
-	 * upload. Disclosed on the link-token config + the osrsbestinslot connect flow.
+	 * token is set: the SAME gate as the snapshot upload. Disclosed on the link-token config + the
+	 * osrsbestinslot connect flow.
 	 */
 	boolean activityLogActive()
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
-		return token.matches("^[a-f0-9]{32}$") && !isCurrentAccountExcluded();
+		return token.matches("^[a-f0-9]{32}$");
 	}
 
 	/**
@@ -685,7 +628,7 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * State-changing events (trade / ge_* / store_* / death) push a fresh snapshot immediately so post-event
-	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, excluded, backoff)
+	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, backoff)
 	 * and is async. client is null only in buffer-only unit tests — real runtime always has it injected.
 	 */
 	private void maybeForceSnapshotForEvent(String type)
@@ -903,10 +846,6 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // personal account on the user's opt-out list — never build, track, or send it
-		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -953,26 +892,22 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * Force one snapshot send NOW, bypassing the unchanged-hash gate AND the debounce interval. Shared by
-	 * the manual "Re-sync now" hotkey and capture-on-open (bank / collection log). It still honors the
-	 * guards that make a send valid at all — logged in, token set, account not excluded — and an active
+	 * capture-on-open (bank / collection log) and the snapshot-trigger events. It still honors the
+	 * guards that make a send valid at all — logged in, token set — and an active
 	 * 429 backoff (the server explicitly said stop; a client-side force never overrides that). It
 	 * deliberately does NOT touch lastSendMillis: a capture-on-open send can land a tick before the data
 	 * finishes populating (the collection log fills as its draw scripts run), and updating the debounce
 	 * clock here would hold back the real snapshot the next tick sends. lastUploadedHash is still recorded
 	 * on accept (shared postSnapshot callback), so an unchanged follow-up tick won't re-send; the only
 	 * cost is at most one duplicate POST if a scheduled tick races the async accept, which the server
-	 * dedupes by hash. Must run on the client thread (WidgetLoaded delivery, or ClientThread.invoke from
-	 * the hotkey) so reading client containers is safe.
+	 * dedupes by hash. Must run on the client thread (WidgetLoaded delivery, or ClientThread.invoke) so
+	 * reading client containers is safe.
 	 */
 	void forceSendSnapshot()
 	{
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
-		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // personal account on the user's opt-out list — never build, track or send it
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
@@ -1062,10 +997,6 @@ public class AccountConnectPlugin extends Plugin
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
-		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // opted-out account — don't cache its post-trade wealth either
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
@@ -1171,7 +1102,7 @@ public class AccountConnectPlugin extends Plugin
 	 * immediate snapshot so those containers sync the moment they become readable, instead of waiting up
 	 * to a full debounce interval for the next scheduled tick (the "opened my bank, still says not synced"
 	 * complaint). WidgetLoaded is delivered on the client thread, so forceSendSnapshot reads containers
-	 * directly. Its own guards (token / excluded / backoff) still apply — an unlinked or opted-out account
+	 * directly. Its own guards (token / backoff) still apply — an unlinked account
 	 * opening its bank sends nothing.
 	 */
 	void handleCaptureOnOpenWidgetLoaded(int groupId)

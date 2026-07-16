@@ -28,8 +28,7 @@ public class EventLogTest
 {
 	private static final String TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
-	/** A linked config: valid token → activity log active (core sync, no toggle). client is null in tests,
-	 *  so isCurrentAccountExcluded() short-circuits false. */
+	/** A linked config: valid token → activity log active (core sync, no toggle). */
 	private static AccountConnectConfig onConfig()
 	{
 		return new AccountConnectConfig()

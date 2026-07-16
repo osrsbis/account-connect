@@ -3,7 +3,6 @@ package com.osrsbestinslot.export;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.Keybind;
 
 @ConfigGroup("osrsbisexport")
 public interface AccountConnectConfig extends Config
@@ -71,35 +70,6 @@ public interface AccountConnectConfig extends Config
 	default boolean recordStoreClips()
 	{
 		return false;	// OFF by default — explicit opt-in required
-	}
-
-	@ConfigItem(
-		keyName = "excludedAccounts",
-		name = "Don't sync these accounts",
-		description =
-			"Comma-separated account display names that should NEVER sync, even while logged in with a "
-			+ "token set (e.g. a personal alt you don't want tracked). Matched on the logged-in "
-			+ "character name, case-insensitive. Leave blank to sync every account you log in.",
-		position = 4
-	)
-	default String excludedAccounts()
-	{
-		return "";
-	}
-
-	@ConfigItem(
-		keyName = "resyncHotkey",
-		name = "Re-sync now hotkey",
-		description =
-			"Press this key in-game to re-sync your account to osrsbestinslot.com immediately — it sends a "
-			+ "fresh snapshot right away instead of waiting for the next automatic sync. Handy right after "
-			+ "the site tells you to \"Re-sync\", or after opening your bank. Unset by default: click the "
-			+ "field and press a key to assign one.",
-		position = 5
-	)
-	default Keybind resyncHotkey()
-	{
-		return Keybind.NOT_SET;	// no key bound until the user assigns one
 	}
 
 	// Sync cadence is no longer a user setting: osrsbestinslot.com dictates it per link token in the
