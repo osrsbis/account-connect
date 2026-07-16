@@ -242,6 +242,7 @@ public class AccountConnectPlugin extends Plugin
 	protected void shutDown()
 	{
 		keyManager.unregisterKeyListener(resyncHotkeyListener);
+		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
 	}
 
 	/**
@@ -305,6 +306,194 @@ public class AccountConnectPlugin extends Plugin
 	{
 		// toggle first: when off, short-circuit before touching client (the feature is off regardless).
 		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled && !isCurrentAccountExcluded();
+	}
+
+	// ---- store delivery-proof: burst frame capture (Task B2) ----
+	// While a shop is open, sample the render at a low WALL-CLOCK rate into a bounded ring buffer. On
+	// shop-close, if the visit had a buy/sell the frames go to the (B3) uploader; otherwise they are
+	// dropped. Frames are captured raw here — no video encode in the plugin; the server stitches them.
+	static final int CLIP_FPS = 1;					// sample rate (constant, NOT a user setting)
+	static final int CLIP_SECONDS = 120;				// max clip length retained
+	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// ring capacity = 120 frames
+	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
+	// (Plan body text says 640px; 768 is the ratified Task-0 override.)
+	static final int MAX_FRAME_WIDTH = 768;
+
+	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
+	 *  (it can never force it ON — that stays a local opt-in, mirroring serverScreenshotsDisabled). */
+	volatile boolean serverClipsDisabled;
+	/** Armed between shop-open and shop-close while capture is running. */
+	private volatile boolean clipCapturing;
+	/** Set the moment a general-store buy/sell fires during the visit — a visit without one is dropped. */
+	volatile boolean storeTxThisVisit;
+	/** Bounded FIFO of sampled frames; created per capture, snapshotted + cleared on stop. */
+	private volatile ClipRingBuffer clipRing;
+	/** Wall-clock (nanoTime) of the next frame to sample; a render tick before this is skipped. */
+	private volatile long nextClipSampleAt;
+	/** Set on a sampled tick to request one frame from DrawManager; cleared when that frame arrives. */
+	private volatile boolean clipFramePending;
+	/** Per-frame render callback, registered with DrawManager only while capturing. */
+	private final Runnable clipFrameTick = this::onClipFrameTick;
+
+	/** Store-clip capture requires the local opt-in AND no server force-disable (both read live per call). */
+	boolean storeClipsEnabled()
+	{
+		return config.recordStoreClips() && !serverClipsDisabled;
+	}
+
+	/**
+	 * Arm capture for a shop visit: fresh ring, reset the decimation clock + tx flag, and start listening
+	 * to the render loop. Idempotent — a second shop-open while already capturing is ignored.
+	 */
+	void startStoreClipCapture()
+	{
+		if (clipCapturing || !storeClipsEnabled())
+		{
+			return;
+		}
+		clipRing = new ClipRingBuffer(MAX_CLIP_FRAMES);
+		storeTxThisVisit = false;
+		nextClipSampleAt = 0L;			// 0 => the first render tick samples immediately
+		clipFramePending = false;
+		clipCapturing = true;
+		drawManager.registerEveryFrameListener(clipFrameTick);
+	}
+
+	/**
+	 * Wall-clock 1-in-time decimation: returns true at most once per (1/CLIP_FPS) second regardless of
+	 * render fps (render fluctuates ~20-50fps, so a frame-count divisor would drift). Advances the gate
+	 * on every hit so it is a steady rate, not a one-shot.
+	 */
+	boolean shouldSampleClipFrame(long nowNanos)
+	{
+		if (nowNanos < nextClipSampleAt)
+		{
+			return false;
+		}
+		nextClipSampleAt = nowNanos + 1_000_000_000L / CLIP_FPS;
+		return true;
+	}
+
+	/**
+	 * Render-loop callback (runs every frame while capturing). Decimates by wall clock, then asks
+	 * DrawManager for the next composited frame; that frame arrives on the consumer, is converted to an
+	 * RGB (no-alpha) buffer, downscaled, and stored. One request outstanding at a time (clipFramePending).
+	 */
+	void onClipFrameTick()
+	{
+		if (!clipCapturing || clipFramePending)
+		{
+			return;
+		}
+		if (!shouldSampleClipFrame(System.nanoTime()))
+		{
+			return;
+		}
+		clipFramePending = true;
+		drawManager.requestNextFrameListener(img ->
+		{
+			try
+			{
+				ClipRingBuffer ring = clipRing;
+				if (ring != null && img != null)
+				{
+					ring.add(downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH));
+				}
+			}
+			finally
+			{
+				clipFramePending = false;
+			}
+		});
+	}
+
+	/**
+	 * Stop capturing: unregister the render listener, snapshot the ring, and — only when upload is
+	 * requested AND the visit had a buy/sell — hand the frames to the uploader. Always clears state so a
+	 * dropped visit leaks nothing. Idempotent.
+	 */
+	void stopStoreClipCapture(boolean upload)
+	{
+		if (!clipCapturing)
+		{
+			return;
+		}
+		clipCapturing = false;
+		drawManager.unregisterEveryFrameListener(clipFrameTick);
+		ClipRingBuffer ring = clipRing;
+		clipRing = null;
+		clipFramePending = false;
+		boolean hadTx = storeTxThisVisit;
+		storeTxThisVisit = false;
+		if (ring == null)
+		{
+			return;
+		}
+		if (!upload || !hadTx)
+		{
+			ring.clear();		// no purchase, or shutdown/hop drop — discard without uploading
+			return;
+		}
+		List<BufferedImage> frames = ring.snapshot();
+		ring.clear();
+		if (!frames.isEmpty())
+		{
+			submitStoreClipUpload(frames);
+		}
+	}
+
+	/**
+	 * Copy any rendered Image into a TYPE_INT_RGB (no-alpha) BufferedImage. The JDK JPEG writer corrupts
+	 * ARGB rasters, so store-clip frames are always RGB. This is deliberately SEPARATE from the trade
+	 * path's ARGB toBufferedImage — never reuse that here.
+	 */
+	static BufferedImage toRgbFrame(java.awt.Image img)
+	{
+		if (img == null)
+		{
+			return null;
+		}
+		int w = img.getWidth(null);
+		int h = img.getHeight(null);
+		if (w <= 0 || h <= 0)
+		{
+			return null;
+		}
+		BufferedImage rgb = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = rgb.createGraphics();
+		g.drawImage(img, 0, 0, null);
+		g.dispose();
+		return rgb;
+	}
+
+	/**
+	 * Downscale to at most maxWidth (aspect preserved) into a fresh TYPE_INT_RGB buffer. Frames already
+	 * within maxWidth are returned unchanged. Keeps store text legible at the server stitch size (Task-0).
+	 */
+	static BufferedImage downscaleRgb(BufferedImage src, int maxWidth)
+	{
+		if (src == null || maxWidth <= 0 || src.getWidth() <= maxWidth)
+		{
+			return src;
+		}
+		int w = maxWidth;
+		int h = Math.max(1, (int) Math.round(src.getHeight() * (maxWidth / (double) src.getWidth())));
+		BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = dst.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+			java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		g.drawImage(src, 0, 0, w, h, null);
+		g.dispose();
+		return dst;
+	}
+
+	/**
+	 * B3 will JPEG-encode the frames and POST them as a multipart burst to /store-frames-ingest.
+	 * B2 stub: the capture path is complete; upload is intentionally not wired yet.
+	 */
+	void submitStoreClipUpload(java.util.List<BufferedImage> frames)
+	{
+		// TODO(B3): encode + multipart upload to /store-frames-ingest. Intentional no-op stub for B2.
 	}
 
 	/** True if the logged-in character is on the user's "don't sync these accounts" list (personal opt-out). */
@@ -806,6 +995,14 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
+		GameState state = event.getGameState();
+		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
+		// valid delivery proof if the visit had a buy/sell (upload=true only uploads when it did), else dropped.
+		if (clipCapturing
+			&& (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST))
+		{
+			stopStoreClipCapture(true);
+		}
 		switch (event.getGameState())
 		{
 			case HOPPING:
@@ -897,6 +1094,7 @@ public class AccountConnectPlugin extends Plugin
 		if (groupId == SHOP_GROUP_ID)
 		{
 			shopOpen = true;
+			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
 		}
 		else if (groupId == TRADE_CONFIRM_GROUP_ID)
 		{
@@ -1104,6 +1302,7 @@ public class AccountConnectPlugin extends Plugin
 		if (event.getGroupId() == SHOP_GROUP_ID)
 		{
 			shopOpen = false;
+			stopStoreClipCapture(true);	// end the visit; upload only if it had a buy/sell, else drop
 		}
 	}
 
@@ -1182,24 +1381,22 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
+		// Delivery-proof tx flag — hoisted ABOVE the activity-log gate (grill F5): a clip's buy/sell must
+		// not be dropped just because activity logging is off. Only relevant while a clip is capturing.
+		if (clipCapturing && shopOpen && isStoreBuyOrSell(event))
+		{
+			storeTxThisVisit = true;
+		}
 		if (!shopOpen || !activityLogActive())
 		{
 			return;
 		}
-		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
-		String type;
-		if (opt.startsWith("Buy"))
-		{
-			type = "store_buy";
-		}
-		else if (opt.startsWith("Sell"))
-		{
-			type = "store_sell";
-		}
-		else
+		String type = storeTxType(event);
+		if (type == null)
 		{
 			return;
 		}
+		String opt = event.getMenuOption();	// non-null here: storeTxType only matches a "Buy"/"Sell" prefix
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", event.getItemId());
 		fields.put("qty", parseTrailingQty(opt));
@@ -1208,6 +1405,31 @@ public class AccountConnectPlugin extends Plugin
 		// container holds only ids/quantities, and the shop widget's VALUE text tracks the hovered item, not
 		// the clicked one. Deferred rather than send a misleading GE/base value labelled "price".
 		emitEvent(type, fields);
+	}
+
+	/**
+	 * The general-store transaction type for a menu click — "store_buy", "store_sell", or null if it is
+	 * neither. SINGLE source of truth for what counts as a store buy/sell: the emit path derives its event
+	 * type from this and isStoreBuyOrSell delegates to it, so the two can never drift (grill F5).
+	 */
+	static String storeTxType(MenuOptionClicked event)
+	{
+		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
+		if (opt.startsWith("Buy"))
+		{
+			return "store_buy";
+		}
+		if (opt.startsWith("Sell"))
+		{
+			return "store_sell";
+		}
+		return null;
+	}
+
+	/** True when a menu click is a general-store buy/sell (delegates to storeTxType — never a second match). */
+	static boolean isStoreBuyOrSell(MenuOptionClicked event)
+	{
+		return storeTxType(event) != null;
 	}
 
 	/** "Buy 10" -> 10, "Sell 1" -> 1, "Buy" -> 1 (default). */
@@ -1971,6 +2193,7 @@ public class AccountConnectPlugin extends Plugin
 	 * OFF, and soft-pause a token — it can never force screenshots ON or expand what's collected.
 	 *   X-Sync-Interval    seconds, clamped [5, 600] — the minimum gap between sends.
 	 *   X-Screenshots      "off"/"disabled"/"false" force-disables trade-screenshot capture.
+	 *   X-Clips            "off"/"disabled"/"false" force-disables store delivery-clip capture.
 	 *   X-Uploads-Enabled  "false"/"0" soft-pauses the token: cadence drops to the 600s max so the
 	 *                      policy channel stays open (the hard data-stop is enforced server-side by
 	 *                      dropping the token's snapshots — the client never goes dark, so it can be
@@ -1983,6 +2206,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			String v = screenshots.trim().toLowerCase(java.util.Locale.ROOT);
 			serverScreenshotsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
+		}
+
+		String clips = response.header("X-Clips");
+		if (clips != null)
+		{
+			String v = clips.trim().toLowerCase(java.util.Locale.ROOT);
+			serverClipsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
 		}
 
 		boolean paused = false;

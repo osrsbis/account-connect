@@ -55,6 +55,25 @@ public interface AccountConnectConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "recordStoreClips",
+		name = "Record store delivery clips",
+		description =
+			"When enabled, this captures a low-rate (1 per second) series of screenshots of your game "
+			+ "while a shop window is open, and uploads them with your osrsbestinslot.com link token to "
+			+ "osrsbestinslot.com's servers as delivery proof. Nothing is captured while this is off, "
+			+ "and visits without a purchase or sale are discarded without uploading.",
+		position = 4,
+		warning =
+			"This submits screenshots of your game while shop windows are open (which may include chat "
+			+ "messages and other players' names on screen) to osrsbestinslot.com, a 3rd-party server "
+			+ "not controlled or verified by the RuneLite developers. Only enable it if you agree to that."
+	)
+	default boolean recordStoreClips()
+	{
+		return false;	// OFF by default — explicit opt-in required
+	}
+
+	@ConfigItem(
 		keyName = "excludedAccounts",
 		name = "Don't sync these accounts",
 		description =
