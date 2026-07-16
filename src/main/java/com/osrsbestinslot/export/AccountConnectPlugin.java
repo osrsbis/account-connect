@@ -1351,24 +1351,27 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
-	/** "Accepted trade." commits the buffered frame; a decline discards it. Tag-tolerant match. */
+	/**
+	 * TRADE messages drive the trade-completion path ("Accepted trade." commits the buffered frame;
+	 * a decline discards it — tag-tolerant match). All messages then fall through to the activity
+	 * sweep, which self-filters to own-account game chat (GAMEMESSAGE / SPAM).
+	 */
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (event.getType() != ChatMessageType.TRADE)
+		if (event.getType() == ChatMessageType.TRADE)
 		{
-			return;
+			// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
+			// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
+			// since the trade. Client thread; containers are valid right after "Accepted trade.".
+			if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
+				Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
+			{
+				refreshSnapshotCacheAfterTrade();
+				emitTradeEvent();
+			}
+			handleTradeChat(event.getMessage());
 		}
-		// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
-		// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
-		// since the trade. Client thread; containers are valid right after "Accepted trade.".
-		if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
-			Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
-		{
-			refreshSnapshotCacheAfterTrade();
-			emitTradeEvent();
-		}
-		handleTradeChat(event.getMessage());
 		emitChatActivity(event);
 	}
 

@@ -139,6 +139,35 @@ public class EventLogTest
 	}
 
 	@Test
+	public void onChatMessageRoutesGameMessageToSweep() throws Exception
+	{
+		// reachability: a non-TRADE game message must fall through onChatMessage to the chat sweep,
+		// not be eaten by the trade early-return.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
+		when(ev.getMessage()).thenReturn("Congratulations, you've completed a quest!");
+		plugin.onChatMessage(ev);
+		assertEquals(1, plugin.pendingEvents.size());
+		assertEquals("chat", plugin.pendingEvents.get(0).get("type"));
+		assertEquals("Congratulations, you've completed a quest!", plugin.pendingEvents.get(0).get("text"));
+	}
+
+	@Test
+	public void onChatMessageDoesNotSweepPublicChat() throws Exception
+	{
+		// the revived sweep keeps the original filter: public/other-player chat stays excluded.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
+		when(ev.getMessage()).thenReturn("buying gf");
+		plugin.onChatMessage(ev);
+		assertTrue("public/other-player chat must not be swept", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
 	public void geFillEmitsOncePerTransition() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
