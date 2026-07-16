@@ -160,6 +160,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
+	private static final MediaType JPEG = MediaType.parse("image/jpeg");	// store delivery-proof burst frames
 	static final int MAX_SCREENSHOT_UPLOAD_BYTES = 5 * 1024 * 1024;	// enforced client-side and server-side
 
 	// Trade state machine (package-private so unit tests can assert on it without a live client).
@@ -318,6 +319,10 @@ public class AccountConnectPlugin extends Plugin
 	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
 	// (Plan body text says 640px; 768 is the ratified Task-0 override.)
 	static final int MAX_FRAME_WIDTH = 768;
+	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the burst keeps the
+	// newest suffix that fits both the frame-count cap and this total-bytes cap.
+	static final int MAX_CLIP_FRAME_BYTES = 1_000_000;		// 1MB per frame
+	static final int MAX_CLIP_BURST_BYTES = 12_000_000;		// 12MB per burst
 
 	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
 	 *  (it can never force it ON — that stays a local opt-in, mirroring serverScreenshotsDisabled). */
@@ -488,12 +493,109 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * B3 will JPEG-encode the frames and POST them as a multipart burst to /store-frames-ingest.
-	 * B2 stub: the capture path is complete; upload is intentionally not wired yet.
+	 * Encode the visit's frames to JPEG on the background executor, keep the newest suffix that fits the
+	 * server caps, and POST them as ONE multipart burst to /store-frames-ingest. Mirrors the trade-upload
+	 * okhttp idioms: token guard, apiBaseUrl trim, RequestBody.create(MediaType, bytes), async enqueue.
+	 * Encoding + upload run off the render thread; a bad token or an empty burst is a silent no-op.
 	 */
 	void submitStoreClipUpload(java.util.List<BufferedImage> frames)
 	{
-		// TODO(B3): encode + multipart upload to /store-frames-ingest. Intentional no-op stub for B2.
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty())
+		{
+			return;	// same guard as the trade path — no / malformed token, or nothing to send
+		}
+		long capturedAt = System.currentTimeMillis() / 1000L;
+		executor.submit(() ->
+		{
+			java.util.List<byte[]> encoded = new java.util.ArrayList<>(frames.size());
+			for (BufferedImage frame : frames)
+			{
+				encoded.add(encodeJpeg(frame));	// null / oversized entries are filtered by selectStoreClipFrames
+			}
+			java.util.List<byte[]> kept = selectStoreClipFrames(
+				encoded, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
+			if (kept.isEmpty())
+			{
+				return;
+			}
+			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			Request request = new Request.Builder()
+				.url(base + "/store-frames-ingest")
+				.post(buildStoreClipBody(kept, token, capturedAt, CLIP_FPS))
+				.build();
+
+			okHttpClient.newCall(request).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException e)
+				{
+					log.debug("OSRS BiS store-clip burst upload failed", e);
+				}
+
+				@Override
+				public void onResponse(Call call, Response response)
+				{
+					try
+					{
+						log.debug("OSRS BiS store-clip burst upload response: {}", response.code());
+					}
+					finally
+					{
+						response.close();
+					}
+				}
+			});
+		});
+	}
+
+	/**
+	 * Choose which encoded frames go in the burst. Pass 1: drop any frame that failed to encode or exceeds
+	 * the per-frame cap. Pass 2: keep the NEWEST suffix that fits both maxFrames and maxBurstBytes, walking
+	 * from the END — the shop-close / sale frames are the actual delivery evidence, so an oversized burst
+	 * must drop the OLDEST frames, never the newest. Chronological order within the kept suffix is preserved.
+	 */
+	static java.util.List<byte[]> selectStoreClipFrames(java.util.List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
+	{
+		java.util.List<byte[]> valid = new java.util.ArrayList<>(encoded.size());
+		for (byte[] b : encoded)
+		{
+			if (b != null && b.length > 0 && b.length <= maxFrameBytes)
+			{
+				valid.add(b);
+			}
+		}
+		int start = valid.size();
+		long total = 0;
+		int kept = 0;
+		while (start > 0 && kept < maxFrames && total + valid.get(start - 1).length <= maxBurstBytes)
+		{
+			total += valid.get(start - 1).length;
+			start--;
+			kept++;
+		}
+		return new java.util.ArrayList<>(valid.subList(start, valid.size()));
+	}
+
+	/**
+	 * Build the one multipart burst body: token, captured_at, fps, then the kept frames[] parts, then
+	 * frame_count LAST so it always equals the number of parts actually attached (the server 400s on a
+	 * mismatch). Frames are JPEG, named frame-000.jpg upward in chronological order.
+	 */
+	static okhttp3.MultipartBody buildStoreClipBody(java.util.List<byte[]> kept, String token, long capturedAt, int fps)
+	{
+		MultipartBody.Builder builder = new MultipartBody.Builder()
+			.setType(MultipartBody.FORM)
+			.addFormDataPart("token", token)
+			.addFormDataPart("captured_at", Long.toString(capturedAt))
+			.addFormDataPart("fps", Integer.toString(fps));
+		for (int i = 0; i < kept.size(); i++)
+		{
+			builder.addFormDataPart("frames[]", String.format("frame-%03d.jpg", i),
+				RequestBody.create(JPEG, kept.get(i)));
+		}
+		builder.addFormDataPart("frame_count", Integer.toString(kept.size()));
+		return builder.build();
 	}
 
 	/** True if the logged-in character is on the user's "don't sync these accounts" list (personal opt-out). */
@@ -1723,20 +1825,60 @@ public class AccountConnectPlugin extends Plugin
 		return bi;
 	}
 
-	/** In-memory PNG encode via JDK ImageIO (same encoder core ImageCapture uses). Null on failure. */
-	static byte[] encodePng(BufferedImage image)
+	/** In-memory encode via JDK ImageIO (same encoder core ImageCapture uses). fmt e.g. "png". Null on failure. */
+	static byte[] encodeImage(BufferedImage image, String fmt)
 	{
 		java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
 		try
 		{
-			javax.imageio.ImageIO.write(image, "png", buf);
+			javax.imageio.ImageIO.write(image, fmt, buf);
 		}
 		catch (IOException e)
 		{
-			log.debug("OSRS BiS trade screenshot PNG encode failed", e);
+			log.debug("OSRS BiS image encode ({}) failed", fmt, e);
 			return null;
 		}
 		return buf.toByteArray();
+	}
+
+	/** In-memory PNG encode (trade path). Delegates to the generalized encoder. */
+	static byte[] encodePng(BufferedImage image)
+	{
+		return encodeImage(image, "png");
+	}
+
+	/**
+	 * In-memory JPEG encode at an explicit quality (store delivery-proof frames). The default ImageIO.write
+	 * path can't set quality, so drive the writer directly with ImageWriteParam. Input must be TYPE_INT_RGB
+	 * (the JDK JPEG writer corrupts ARGB rasters). Null on failure.
+	 */
+	static byte[] encodeJpeg(BufferedImage image)
+	{
+		javax.imageio.ImageWriter writer = null;
+		try (java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+			javax.imageio.stream.ImageOutputStream ios = javax.imageio.ImageIO.createImageOutputStream(buf))
+		{
+			writer = javax.imageio.ImageIO.getImageWritersByFormatName("jpg").next();
+			writer.setOutput(ios);
+			javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+			param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+			param.setCompressionQuality(0.7f);
+			writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+			ios.flush();
+			return buf.toByteArray();
+		}
+		catch (Exception e)
+		{
+			log.debug("OSRS BiS store-clip JPEG encode failed", e);
+			return null;
+		}
+		finally
+		{
+			if (writer != null)
+			{
+				writer.dispose();
+			}
+		}
 	}
 
 	/**
