@@ -181,6 +181,66 @@ public class OffBookEventsTest
 		assertTrue("no fabricated drop from death loot", plugin.pendingEvents.isEmpty());
 	}
 
+	/**
+	 * Order-independence (verifier BLOCKING find): if the client processes the ground spawn BEFORE the
+	 * inventory decrement, the spawn must record a corroboration and the later inventory-change path must
+	 * complete the emit — otherwise every drop in that event order is silently missed with no retry.
+	 */
+	@Test
+	public void spawnFirstThenInventoryLossStillEmitsDrop() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		AccountConnectPlugin.InvDeltaPending p =
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.TRUE, 5);
+		inject(plugin, "invDeltaPending", p);
+
+		// spawn arrives while the inventory still shows the full count -> no emit yet, corroboration recorded
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
+		assertTrue("no emit while the inventory loss is unconfirmed", plugin.pendingEvents.isEmpty());
+		assertNotNull("pending kept", invDeltaPending(plugin));
+
+		// the inventory decrement lands next -> the inv-change path completes the dual signal
+		plugin.resolveInvDeltaPending(0L, 0L, 6);
+		assertNull("pending consumed", invDeltaPending(plugin));
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("drop", e.get("type"));
+		assertEquals(560, e.get("item"));
+		assertEquals(5L, e.get("qty"));
+		assertEquals(true, e.get("wilderness"));
+	}
+
+	/** A stale spawn corroboration must not pair with a much-later unrelated inventory removal. */
+	@Test
+	public void staleSpawnCorroborationDoesNotPairWithLateRemoval() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6); // corroborated at tick 6, no loss yet
+		plugin.resolveInvDeltaPending(0L, 0L, 14); // loss lands 8 ticks later (bank deposit) -> too stale
+		assertTrue("stale corroboration never pairs", plugin.pendingEvents.isEmpty());
+	}
+
+	/**
+	 * Verifier minor: a SHRINKING nearby ground stack (another player looting it) is not our drop landing —
+	 * only a fresh spawn or a GROWING stack corroborates.
+	 */
+	@Test
+	public void shrinkingGroundStackDoesNotCorroborate() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		AccountConnectPlugin.InvDeltaPending p =
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5);
+		inject(plugin, "invDeltaPending", p);
+		// direct core call with grew=false must record nothing
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 6, false);
+		assertTrue("shrinking stack is never our drop", plugin.pendingEvents.isEmpty());
+		assertEquals("no corroboration recorded", -1, p.spawnCorroboratedTick);
+	}
+
 	/** Distance guard: a matching spawn far from the player is someone else's item, never ours. */
 	@Test
 	public void groundSpawnFarAwayIsIgnored() throws Exception

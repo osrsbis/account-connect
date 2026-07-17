@@ -335,6 +335,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int ALCH_PENDING_MAX_TICKS = 2;		// an alch lands next tick — short window, nothing to wait for
 	static final int DROP_PENDING_MAX_TICKS = 16;		// drop: the warning dialog can sit ~10s before the player confirms
 	static final int DROP_SPAWN_MAX_DIST = 2;			// own drops land on/adjacent to the player's tile
+	static final int DROP_CORROBORATION_MAX_TICKS = 2;	// spawn + inventory loss must land within ~1 tick of each other
 	private volatile InvDeltaPending invDeltaPending;
 
 	static final class InvDeltaPending
@@ -347,6 +348,10 @@ public class AccountConnectPlugin extends Plugin
 		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
 		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
 		final int tick;
+		// drop only: tick a matching ground spawn was seen at our tile BEFORE the inventory loss was visible.
+		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
+		// first records itself; the second completes the emit. -1 = no corroboration yet.
+		volatile int spawnCorroboratedTick = -1;
 
 		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
 			Map<String, Object> location, Boolean wilderness, int tick)
@@ -1845,12 +1850,18 @@ public class AccountConnectPlugin extends Plugin
 	 * fabricate a drop; a ground item alone (another player's drop becoming visible) shows no inventory loss,
 	 * so it never resolves either. Package-private + primitives so it is unit-testable without a client.
 	 */
+	/** Backwards-compatible overload — a plain ItemSpawned is always a fresh (grown) ground item. */
 	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick)
 	{
+		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, true);
+	}
+
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew)
+	{
 		InvDeltaPending p = invDeltaPending;
-		if (p == null || !"drop".equals(p.base) || spawnedItemId != p.item || dist > DROP_SPAWN_MAX_DIST)
+		if (p == null || !"drop".equals(p.base) || spawnedItemId != p.item || dist > DROP_SPAWN_MAX_DIST || !stackGrew)
 		{
-			return;
+			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
 		}
 		if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 		{
@@ -1860,16 +1871,26 @@ public class AccountConnectPlugin extends Plugin
 		long delta = p.beforeCount - invCountAfter;
 		if (delta <= 0)
 		{
-			return;	// no inventory loss — someone else's item appeared; keep waiting for the real drop
+			// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a server
+			// packet detail we don't control). Record the corroboration; the inventory-change path completes
+			// the emit when the loss lands. Without this, spawn-first ordering would miss EVERY drop.
+			p.spawnCorroboratedTick = currentTick;
+			return;
 		}
 		invDeltaPending = null;	// consume — both signals confirmed
+		emitDropEvent(p, delta);
+	}
+
+	/** Shared drop emit — reached from either signal order. */
+	private void emitDropEvent(InvDeltaPending p, long qty)
+	{
 		if (!activityLogActive())
 		{
 			return;
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", p.item);
-		fields.put("qty", delta);
+		fields.put("qty", qty);
 		if (p.location != null)
 		{
 			fields.put("location", p.location);
@@ -1879,7 +1900,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
-	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile)
+	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile, boolean stackGrew)
 	{
 		InvDeltaPending p = invDeltaPending;
 		if (p == null || !"drop".equals(p.base) || client == null || it == null || tile == null)
@@ -1895,21 +1916,25 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int dist = Math.abs(pw.getX() - tw.getX()) + Math.abs(pw.getY() - tw.getY());
 		long invCount = countItem(client.getItemContainer(InventoryID.INVENTORY), it.getId());
-		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, client.getTickCount());
+		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, client.getTickCount(), stackGrew);
 	}
 
 	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
 	@Subscribe
 	public void onItemSpawned(net.runelite.api.events.ItemSpawned event)
 	{
-		handleGroundItemForDropPending(event.getItem(), event.getTile());
+		handleGroundItemForDropPending(event.getItem(), event.getTile(), true);
 	}
 
-	/** Dropping a stackable onto an existing ground stack merges instead of spawning — same confirmation. */
+	/**
+	 * Dropping a stackable onto an existing ground stack merges instead of spawning — same confirmation, but
+	 * ONLY when the stack GREW (a shrinking stack is another player looting it, never our drop landing).
+	 */
 	@Subscribe
 	public void onItemQuantityChanged(net.runelite.api.events.ItemQuantityChanged event)
 	{
-		handleGroundItemForDropPending(event.getItem(), event.getTile());
+		handleGroundItemForDropPending(event.getItem(), event.getTile(),
+			event.getNewQuantity() > event.getOldQuantity());
 	}
 
 	/**
@@ -1963,6 +1988,16 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if ("drop".equals(p.base))
 		{
+			// Order-independence: if a matching ground spawn already corroborated (spawn processed before the
+			// inventory decrement) and the loss now lands within the corroboration window, complete the emit.
+			long dropDelta = p.beforeCount - itemCountAfter;
+			int spawnTick = p.spawnCorroboratedTick;
+			if (dropDelta > 0 && spawnTick >= 0 && currentTick - spawnTick <= DROP_CORROBORATION_MAX_TICKS)
+			{
+				invDeltaPending = null;
+				emitDropEvent(p, dropDelta);
+				return;
+			}
 			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 			{
 				invDeltaPending = null;	// no ground spawn ever confirmed it — expire silently, emit nothing
