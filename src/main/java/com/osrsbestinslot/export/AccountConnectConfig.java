@@ -37,37 +37,20 @@ public interface AccountConnectConfig extends Config
 
 	@ConfigItem(
 		keyName = "uploadTradeScreenshots",
-		name = "Upload trade screenshots",
+		name = "Upload delivery screenshots",
 		description =
-			"When enabled, this captures a screenshot of your trade confirmation window — which shows "
-			+ "the other player's name and the items traded — when a trade completes, and uploads it with "
-			+ "your osrsbestinslot.com link token to osrsbestinslot.com's servers as delivery proof. "
-			+ "Nothing else is sent, and nothing is captured while this is off.",
+			"When enabled, this captures screenshots as delivery proof and uploads them with your "
+			+ "osrsbestinslot.com link token to osrsbestinslot.com's servers: your trade confirmation "
+			+ "window when a trade completes (which shows the other player's name and the items traded), "
+			+ "and a low-rate (1 per second) series while a shop window is open (discarded if the visit "
+			+ "had no purchase or sale). Nothing is captured while this is off.",
 		position = 3,
 		warning =
-			"This uploads a screenshot of your trade window (which includes the other player's name and "
-			+ "the traded items) to osrsbestinslot.com. Only enable it if you agree to that."
+			"This uploads screenshots — your trade window, and your game screen while a shop is open "
+			+ "(which may include on-screen chat messages and other players' names) — to osrsbestinslot.com, "
+			+ "a 3rd-party server not controlled or verified by the RuneLite developers. Only enable it if you agree to that."
 	)
 	default boolean uploadTradeScreenshots()
-	{
-		return false;	// OFF by default — explicit opt-in required
-	}
-
-	@ConfigItem(
-		keyName = "recordStoreClips",
-		name = "Record store delivery clips",
-		description =
-			"When enabled, this captures a low-rate (1 per second) series of screenshots of your game "
-			+ "while a shop window is open, and uploads them with your osrsbestinslot.com link token to "
-			+ "osrsbestinslot.com's servers as delivery proof. Nothing is captured while this is off, "
-			+ "and visits without a purchase or sale are discarded without uploading.",
-		position = 4,
-		warning =
-			"This submits screenshots of your game while shop windows are open (which may include chat "
-			+ "messages and other players' names on screen) to osrsbestinslot.com, a 3rd-party server "
-			+ "not controlled or verified by the RuneLite developers. Only enable it if you agree to that."
-	)
-	default boolean recordStoreClips()
 	{
 		return false;	// OFF by default — explicit opt-in required
 	}

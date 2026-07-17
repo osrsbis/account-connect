@@ -297,7 +297,7 @@ public class StoreClipUploadTest
 		return new AccountConnectConfig()
 		{
 			@Override
-			public boolean recordStoreClips()
+			public boolean uploadTradeScreenshots()
 			{
 				return true;
 			}

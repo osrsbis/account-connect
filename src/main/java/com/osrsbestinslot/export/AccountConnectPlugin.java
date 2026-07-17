@@ -346,7 +346,7 @@ public class AccountConnectPlugin extends Plugin
 	/** Store-clip capture requires the local opt-in AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
 	{
-		return config.recordStoreClips() && !serverClipsDisabled;
+		return config.uploadTradeScreenshots() && !serverClipsDisabled;
 	}
 
 	/**
