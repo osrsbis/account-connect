@@ -65,7 +65,7 @@ public class OffBookEventsTest
 	// ---------- drop ----------
 
 	@Test
-	public void dropArmsWithWildernessThenResolvesQtyFromDelta() throws Exception
+	public void dropArmsThenResolvesOnlyViaGroundSpawn() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
@@ -86,9 +86,15 @@ public class OffBookEventsTest
 		assertEquals(560, p.item);
 		assertEquals(5L, p.beforeCount);
 		assertEquals(Boolean.TRUE, p.wilderness);
-		assertTrue("drop defers emit to the inventory-change resolve", plugin.pendingEvents.isEmpty());
+		assertTrue("drop defers emit", plugin.pendingEvents.isEmpty());
 
-		plugin.resolveInvDeltaPending(0L, 0L, 11); // all 5 gone one tick later
+		// an inventory removal ALONE must never emit a drop (it could be a bank / destroy / equip)
+		plugin.resolveInvDeltaPending(0L, 0L, 11);
+		assertTrue("inventory delta alone never emits a drop", plugin.pendingEvents.isEmpty());
+		assertNotNull("pending survives awaiting the ground spawn", invDeltaPending(plugin));
+
+		// the ground spawn at our tile + the inventory loss together confirm the drop
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 11);
 		assertNull("pending consumed", invDeltaPending(plugin));
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("drop", e.get("type"));
@@ -105,8 +111,59 @@ public class OffBookEventsTest
 		inject(plugin, "config", onConfig());
 		inject(plugin, "invDeltaPending",
 			new AccountConnectPlugin.InvDeltaPending("drop", 526, null, 1L, 0L, null, Boolean.FALSE, 5));
-		plugin.resolveInvDeltaPending(0L, 0L, 6);
+		plugin.resolveDropPendingOnGroundSpawn(526, 1, 0L, 6);
 		assertEquals(false, plugin.pendingEvents.get(0).get("wilderness"));
+	}
+
+	/**
+	 * M3 core guarantee: an armed drop whose item leaves the inventory for a NON-drop reason (equip after a
+	 * cancelled drop-warning, bank "Deposit inventory", a Destroy confirm) spawns NO ground item — so no drop
+	 * event can be fabricated, no matter what the inventory does.
+	 */
+	@Test
+	public void inventoryRemovalWithoutGroundSpawnNeverFabricatesDrop() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.FALSE, 5));
+		// tbow leaves the inventory (equip / deposit / destroy) — inv-change path sees it, must not emit
+		plugin.resolveInvDeltaPending(0L, 0L, 6);
+		assertTrue("no fabricated drop", plugin.pendingEvents.isEmpty());
+		// window passes with no ground spawn -> pending expires silently
+		plugin.resolveInvDeltaPending(0L, 0L, 30);
+		assertNull("stale drop pending expired", invDeltaPending(plugin));
+		assertTrue(plugin.pendingEvents.isEmpty());
+	}
+
+	/**
+	 * The reverse guard: a ground item appearing at our tile that we did NOT lose from the inventory
+	 * (another player's drop becoming visible) must not resolve the pending.
+	 */
+	@Test
+	public void groundSpawnWithoutInventoryLossDoesNotEmit() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		// same item id spawns at our feet but our inventory still holds all 5 -> not our drop
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
+		assertTrue("no emit without a matching inventory loss", plugin.pendingEvents.isEmpty());
+		assertNotNull("pending kept (the real drop may still land)", invDeltaPending(plugin));
+	}
+
+	/** Distance guard: a matching spawn far from the player is someone else's item, never ours. */
+	@Test
+	public void groundSpawnFarAwayIsIgnored() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		plugin.resolveDropPendingOnGroundSpawn(560, 7, 0L, 6);
+		assertTrue("distant spawn ignored", plugin.pendingEvents.isEmpty());
+		assertNotNull(invDeltaPending(plugin));
 	}
 
 	// ---------- pickup ----------
@@ -148,17 +205,23 @@ public class OffBookEventsTest
 		assertEquals(1200L, e.get("gp")); // confirmed via the coin delta
 	}
 
+	/**
+	 * Alch hardening: an alch always yields coins, so an item removal WITHOUT a coin gain is not an alch
+	 * (e.g. the item was equipped/banked after the cast was cancelled). No coin gain -> no emit at all.
+	 */
 	@Test
-	public void alchOmitsGpWhenCoinDeltaNotPositive() throws Exception
+	public void alchWithoutCoinGainNeverEmits() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		inject(plugin, "invDeltaPending",
 			new AccountConnectPlugin.InvDeltaPending("alch", 1305, "low", 1L, 100L, null, null, 5));
-		plugin.resolveInvDeltaPending(0L, 100L, 6); // no coin gain observed on this change
-		Map<String, Object> e = plugin.pendingEvents.get(0);
-		assertEquals("alch", e.get("type"));
-		assertFalse("omit gp when the coin delta is not cleanly positive", e.containsKey("gp"));
+		plugin.resolveInvDeltaPending(0L, 100L, 6); // item left but no coin gain -> not an alch
+		assertTrue("no alch emit without a confirmed coin gain", plugin.pendingEvents.isEmpty());
+		// window passes -> stale pending expires silently
+		plugin.resolveInvDeltaPending(0L, 100L, 12);
+		assertNull("stale alch pending expired", invDeltaPending(plugin));
+		assertTrue(plugin.pendingEvents.isEmpty());
 	}
 
 	// ---------- resolve discipline ----------
@@ -169,13 +232,13 @@ public class OffBookEventsTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.TRUE, 5));
+			new AccountConnectPlugin.InvDeltaPending("pickup", 560, null, 0L, 0L, null, null, 5));
 		// an unrelated inventory change (item unchanged) within the window must NOT emit and must keep waiting
-		plugin.resolveInvDeltaPending(5L, 0L, 6);
+		plugin.resolveInvDeltaPending(0L, 0L, 6);
 		assertTrue("no emit before the expected delta lands", plugin.pendingEvents.isEmpty());
 		assertNotNull("pending kept until it lands or expires", invDeltaPending(plugin));
-		// past the window with still no drop -> drop the pending, emit nothing
-		plugin.resolveInvDeltaPending(5L, 0L, 12);
+		// past the window with still no gain -> drop the pending, emit nothing
+		plugin.resolveInvDeltaPending(0L, 0L, 12);
 		assertTrue(plugin.pendingEvents.isEmpty());
 		assertNull("stale pending cleared", invDeltaPending(plugin));
 	}
@@ -262,12 +325,12 @@ public class OffBookEventsTest
 	}
 
 	/**
-	 * M3: the headline false-fire. Arm a drop on a high-value item, then the player CANCELS the drop-warning
-	 * and instead equips the same item. The Wield MenuOptionClicked on that item must disarm the pending
-	 * BEFORE its inventory change resolves — so no fabricated drop alert on the account's best item.
+	 * A conflicting same-item click (Wield after a cancelled drop-warning) must NOT kill the pending —
+	 * the ground-spawn requirement already makes the equip unable to fabricate, and a REAL drop that
+	 * follows must still log (the old disarm approach silently missed every warned drop).
 	 */
 	@Test
-	public void dropDisarmsWhenSameItemIsEquippedAfterCancel() throws Exception
+	public void conflictingClickDoesNotKillPendingAndRealDropStillLogs() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
@@ -281,13 +344,16 @@ public class OffBookEventsTest
 		plugin.onMenuOptionClicked(menu("Drop", "", 20997));
 		assertNotNull("drop armed a pending", invDeltaPending(plugin));
 
-		// player cancels the warning, then equips the same item — a non-drop removal
-		plugin.onMenuOptionClicked(menu("Wield", "", 20997));
-		assertNull("conflicting same-item action disarms the pending", invDeltaPending(plugin));
+		// the drop-warning confirmation (or any same-item click) must not disarm
+		plugin.onMenuOptionClicked(menu("Yes", "", 20997));
+		assertNotNull("pending survives the confirmation click", invDeltaPending(plugin));
 
-		// the equip's inventory change lands (tbow left the inventory) — must NOT be read as a drop
-		plugin.resolveInvDeltaPending(0L, 0L, 11);
-		assertTrue("no fabricated drop event", plugin.pendingEvents.isEmpty());
+		// the real drop lands: ground spawn at our feet + the item left the inventory
+		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 12);
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("drop", e.get("type"));
+		assertEquals(20997, e.get("item"));
+		assertEquals(1L, e.get("qty"));
 	}
 
 	// ---------- snapshot container blocks ----------
