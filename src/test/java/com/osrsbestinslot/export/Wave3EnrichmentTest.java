@@ -181,8 +181,11 @@ public class Wave3EnrichmentTest
 	}
 
 	@Test
-	public void deathCarriesLocation() throws Exception
+	public void deathDefersThenCarriesLocationKindAndItemsLost() throws Exception
 	{
+		// Deferred model: ActorDeath arms a pending (reads pre-death inv+equip live) and emits NOTHING; the
+		// death event with location + death_kind + items_lost is emitted once the containers settle (syncTask)
+		// or on logout. Here the mocked containers are null, so items_lost is empty but location + kind still ship.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		Client client = mock(Client.class);
@@ -194,10 +197,14 @@ public class Wave3EnrichmentTest
 
 		// ActorDeath is a final class -> construct directly with the (mockable) player as the dead actor.
 		plugin.onActorDeath(new ActorDeath((Actor) player));
+		assertTrue("death emit is deferred to the settle/logout resolve", plugin.pendingEvents.isEmpty());
 
+		plugin.resolveDeathPending(new LinkedHashMap<>());
 		assertEquals(1, plugin.pendingEvents.size());
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
+		assertEquals("safe", e.get("death_kind")); // no wilderness varbit / pvp world in the mock
+		assertTrue("items_lost is always present (possibly empty)", e.containsKey("items_lost"));
 		@SuppressWarnings("unchecked")
 		Map<String, Object> loc = (Map<String, Object>) e.get("location");
 		assertEquals(wp.getRegionID(), loc.get("region_id"));
