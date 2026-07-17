@@ -99,7 +99,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.8.0";
+	private static final String PLUGIN_VERSION = "0.9.0";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -153,6 +153,11 @@ public class AccountConnectPlugin extends Plugin
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
 	private static final int BANK_GROUP_ID = net.runelite.api.gameval.InterfaceID.BANKMAIN;					// 12
 	private static final int COLLECTION_LOG_GROUP_ID = net.runelite.api.gameval.InterfaceID.COLLECTION;		// 621
+	// Off-book snapshot containers (verified vs runelite-api 1.12.32 gameval enums, javap). gameval int ids so
+	// they match ItemContainerChanged.getContainerId(); Group-Ironman shared storage has no gameval constant, so
+	// its snapshot read uses the legacy InventoryID.GROUP_STORAGE overload of client.getItemContainer(...).
+	private static final int LOOTING_BAG_CONTAINER_ID = net.runelite.api.gameval.InventoryID.LOOTING_BAG;	// 516
+	private static final int SEED_VAULT_CONTAINER_ID = net.runelite.api.gameval.InventoryID.SEED_VAULT;		// 626
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
@@ -293,6 +298,57 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	// ---- off-book value events: drop / pickup / alch. A menu click arms an inventory-delta pending, resolved
+	// on the next INVENTORY change from the item-count delta (reuses the store-pending arm/resolve discipline). ----
+	static final int INV_DELTA_PENDING_MAX_TICKS = 5;	// wait a few ticks (a "Take" pickup may land after a walk)
+	private volatile InvDeltaPending invDeltaPending;
+
+	static final class InvDeltaPending
+	{
+		final String base;			// "drop" | "pickup" | "alch"
+		final int item;
+		final String spell;			// "high" | "low" for alch, else null
+		final long beforeCount;		// count of `item` in the inventory at click time
+		final long beforeCoins;		// carried coins at click time (alch gp confirmation)
+		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
+		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
+		final int tick;
+
+		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
+			Map<String, Object> location, Boolean wilderness, int tick)
+		{
+			this.base = base;
+			this.item = item;
+			this.spell = spell;
+			this.beforeCount = beforeCount;
+			this.beforeCoins = beforeCoins;
+			this.location = location;
+			this.wilderness = wilderness;
+			this.tick = tick;
+		}
+	}
+
+	// ---- death items-lost: read pre-death inv+equip live at ActorDeath, resolve the loss diff once the
+	// containers have settled (a few ticks later, at syncTask) or on logout — whichever comes first. ----
+	static final int DEATH_SETTLE_TICKS = 4;	// item removal follows the death animation by a few ticks
+	private volatile DeathPending deathPending;
+
+	static final class DeathPending
+	{
+		final Map<String, Object> location;	// {region_id, plane} at death, or null
+		final String kind;					// "wilderness" | "pvp" | "safe" (only wilderness/pvp is a transfer)
+		final Map<Integer, Long> preCounts;	// merged inventory + equipment item -> qty just before death
+		final int tick;
+
+		DeathPending(Map<String, Object> location, String kind, Map<Integer, Long> preCounts, int tick)
+		{
+			this.location = location;
+			this.kind = kind;
+			this.preCounts = preCounts;
+			this.tick = tick;
+		}
+	}
+
 	// ---- WAVE 2: real-time sync ----
 	// On any emitEvent we flush live instead of waiting for the 5s eventFlushTask. A burst (e.g. rapid chat
 	// lines) is micro-coalesced into a single ~1s window so it becomes ONE /event-ingest POST, not one HTTP
@@ -303,7 +359,7 @@ public class AccountConnectPlugin extends Plugin
 	// State-changing events whose wealth/state must land immediately also force a snapshot. Chat / level_up
 	// are excluded (too frequent / not wealth-moving); login is bound separately by syncTask's new-login send.
 	private static final java.util.Set<String> SNAPSHOT_TRIGGER_EVENTS = new java.util.HashSet<>(
-		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death"));
+		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death", "drop", "alch"));
 
 	/** Trade-screenshot capture requires the local opt-in AND no server force-disable. */
 	boolean screenshotsEnabled()
@@ -880,6 +936,12 @@ public class AccountConnectPlugin extends Plugin
 		// WAVE 3: sample idle counters on the last logged-in tick so a later logout can be classified idle/manual.
 		lastKeyboardIdleTicks = client.getKeyboardIdleTicks();
 		lastMouseIdleTicks = client.getMouseIdleTicks();
+		// Resolve a deferred death once the containers have settled (a few ticks after ActorDeath). If a syncTask
+		// fires too soon after death, wait for the next one — items may not be removed yet.
+		if (deathPending != null && client.getTickCount() - deathPending.tick >= DEATH_SETTLE_TICKS)
+		{
+			resolveDeathPendingViaLiveContainers();
+		}
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
@@ -1074,12 +1136,14 @@ public class AccountConnectPlugin extends Plugin
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();
+				resolveDeathPendingViaLiveContainers();	// a feed-death then instant disconnect resolves here
 				// WAVE 3: a dropped connection previously emitted NOTHING. Emit an explicit logout so a crash /
 				// disconnect is distinguishable from a clean logout. Ends the session; a reconnect re-logs in.
 				trackLogout("connection_lost");
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
+				resolveDeathPendingViaLiveContainers();	// a feed-death then instant logout resolves here, pre-logout
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
 				break;
@@ -1099,8 +1163,16 @@ public class AccountConnectPlugin extends Plugin
 		// from the changed container itself (final post-transaction state) — independent of the trade gate above.
 		if (event.getContainerId() == INVENTORY_CONTAINER_ID)
 		{
-			long coinsAfter = countItem(event.getItemContainer(), COINS_ID);
-			resolveStorePendingOnInventoryChange(coinsAfter, client == null ? 0 : client.getTickCount());
+			ItemContainer inv = event.getItemContainer();
+			long coinsAfter = countItem(inv, COINS_ID);
+			int tick = client == null ? 0 : client.getTickCount();
+			resolveStorePendingOnInventoryChange(coinsAfter, tick);
+			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
+			InvDeltaPending idp = invDeltaPending;
+			if (idp != null)
+			{
+				resolveInvDeltaPending(countItem(inv, idp.item), coinsAfter, tick);
+			}
 		}
 	}
 
@@ -1457,6 +1529,10 @@ public class AccountConnectPlugin extends Plugin
 		{
 			storeTxThisVisit = true;
 		}
+		// Off-book value events (drop / pickup / alch): own gate (not shop-scoped) — arm an inventory-delta
+		// pending resolved on the next INVENTORY change. BEFORE the store gate so the shop-open early-return
+		// below never swallows it.
+		maybeArmInvDeltaPending(event);
 		if (!shopOpen || !activityLogActive())
 		{
 			return;
@@ -1571,6 +1647,133 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Off-book value events. A "Drop", ground-item "Take", or High/Low-Alchemy cast arms an inventory-delta
+	 * pending, resolved on the next INVENTORY change from the item-count delta (alch also confirms the gp gained
+	 * from the coin delta). Own gate on the activity log; not shop-scoped. Last-click-wins like the store pending
+	 * (a fresh click supersedes an unresolved one — rapid drop-all logs the last drop; the wealth snapshot nets
+	 * the rest). getItemId() carries the item for Drop/Take (same accessor the store path uses); for alch it is
+	 * [verify in-client] (a spell-on-item click may report -1), so an unresolvable item id is skipped, not guessed.
+	 */
+	void maybeArmInvDeltaPending(MenuOptionClicked event)
+	{
+		if (!activityLogActive())
+		{
+			return;
+		}
+		String action = offBookMenuAction(event);
+		if (action == null)
+		{
+			return;
+		}
+		int item = event.getItemId();
+		if (item <= 0)
+		{
+			return;	// no resolvable item id (e.g. alch spell-on-item may report -1) — skip rather than guess
+		}
+		String base = action.startsWith("alch") ? "alch" : action;
+		String spell = "alch_high".equals(action) ? "high" : ("alch_low".equals(action) ? "low" : null);
+		ItemContainer inv = client == null ? null : client.getItemContainer(InventoryID.INVENTORY);
+		long beforeCount = countItem(inv, item);
+		long beforeCoins = countItem(inv, COINS_ID);
+		int tick = client == null ? 0 : client.getTickCount();
+		Map<String, Object> location = "alch".equals(base) ? null : currentLocation();
+		Boolean wilderness = "drop".equals(base)
+			? (client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
+			: null;
+		invDeltaPending = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick);
+	}
+
+	/**
+	 * Classify a menu click as an off-book value action: "drop" (inventory Drop), "pickup" (ground Take), or
+	 * "alch_high"/"alch_low" (High/Low Level Alchemy cast). Alch menu shape varies — option "Cast High Level
+	 * Alchemy", or option "Cast" with the spell name in the target — so it matches the spell name across the
+	 * combined option+target text. Returns null for anything else. Static + pure (no client) so it is unit-testable.
+	 */
+	static String offBookMenuAction(MenuOptionClicked event)
+	{
+		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
+		if (opt.equals("Drop"))
+		{
+			return "drop";
+		}
+		if (opt.equals("Take"))
+		{
+			return "pickup";
+		}
+		if (opt.startsWith("Cast"))
+		{
+			String combined = opt + " " + (event.getMenuTarget() == null ? "" : event.getMenuTarget());
+			if (combined.contains("High Level Alchemy"))
+			{
+				return "alch_high";
+			}
+			if (combined.contains("Low Level Alchemy"))
+			{
+				return "alch_low";
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Resolve an armed drop/pickup/alch pending against the post-change inventory. Fires only when the expected
+	 * item-count delta has landed (drop/alch: item fell; pickup: item rose) — an unrelated inventory change in
+	 * between is ignored and the pending kept until it lands or the tick window expires (so a "Take" that
+	 * completes after a short walk still logs). qty is the exact count that moved; alch attaches the gp gained
+	 * only when the coin delta is cleanly positive. Package-private + primitive args so it is unit-testable.
+	 */
+	void resolveInvDeltaPending(long itemCountAfter, long coinsAfter, int currentTick)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null)
+		{
+			return;
+		}
+		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
+		if (delta <= 0)
+		{
+			// the expected change has not landed yet (or a failed click) — wait out the window, then drop
+			if (currentTick - p.tick > INV_DELTA_PENDING_MAX_TICKS)
+			{
+				invDeltaPending = null;
+			}
+			return;
+		}
+		invDeltaPending = null;	// consume — the expected delta landed
+		if (!activityLogActive())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", p.item);
+		fields.put("qty", delta);
+		if ("alch".equals(p.base))
+		{
+			fields.put("spell", p.spell);
+			long gp = coinsAfter - p.beforeCoins;
+			if (gp > 0)
+			{
+				fields.put("gp", gp);	// gp gained, confirmed via the coin delta; omit if not cleanly positive
+			}
+			emitEvent("alch", fields);
+			return;
+		}
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		if ("drop".equals(p.base))
+		{
+			fields.put("wilderness", p.wilderness != null && p.wilderness);
+			emitEvent("drop", fields);
+		}
+		else
+		{
+			emitEvent("pickup", fields);
+		}
+	}
+
+	/**
 	 * Broad activity sweep — own-account game chat only (GAMEMESSAGE / SPAM). Captures deaths, drops,
 	 * pet/untradeable/clue rewards, level-ups, quest completions, GE collect lines, etc. as timestamped
 	 * events. Deliberately EXCLUDES player/private/clan/friends chat (other-player content = PII / the
@@ -1603,22 +1806,110 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
 		{
-			// WAVE 3: attach {region_id, plane} from the player's world location. Items-lost is deferred (no
-			// clean items-lost API in RuneLite) — left for the in-game loop to reconstruct server-side.
-			emitEvent("death", deathLocationFields());
+			// Capture the pre-death inventory + equipment LIVE now: OSRS removes items a few ticks AFTER the death
+			// animation, so the containers are still intact at ActorDeath ([verify in-client] — the standard
+			// RuneLite death-tracking timing assumption). Defer the emit; items_lost is the pre/post diff resolved
+			// once the containers settle (at syncTask, DEATH_SETTLE_TICKS later) or on logout — whichever first.
+			deathPending = new DeathPending(currentLocation(), deathKind(),
+				mergedInvEquipCounts(), client == null ? 0 : client.getTickCount());
 		}
 	}
 
-	/** {location:{region_id, plane}} of the local player, or empty if the world location isn't readable. */
-	private Map<String, Object> deathLocationFields()
+	/**
+	 * death_kind: "wilderness" (inside the Wilderness — items drop to the killer), "pvp" (a PvP / DMM / high-risk
+	 * world), or "safe" (PvM / minigame — a gp-sink item-retrieval reclaim, NOT a transfer). Only wilderness/pvp is
+	 * an inter-account transfer. IN_WILDERNESS is the standard client wilderness signal.
+	 */
+	private String deathKind()
 	{
-		Map<String, Object> fields = new LinkedHashMap<>();
-		Map<String, Object> loc = currentLocation();
-		if (loc != null)
+		if (client == null)
 		{
-			fields.put("location", loc);
+			return "safe";
 		}
-		return fields;
+		if (client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
+		{
+			return "wilderness";
+		}
+		java.util.Set<WorldType> wt = client.getWorldType();
+		if (wt != null && (wt.contains(WorldType.PVP) || wt.contains(WorldType.DEADMAN) || wt.contains(WorldType.HIGH_RISK)))
+		{
+			return "pvp";
+		}
+		return "safe";
+	}
+
+	/** Merged inventory + equipment item -> total qty, read live. Null-safe (empty when a container is absent). */
+	private Map<Integer, Long> mergedInvEquipCounts()
+	{
+		Map<Integer, Long> counts = new LinkedHashMap<>();
+		if (client == null)
+		{
+			return counts;
+		}
+		addContainerCounts(counts, client.getItemContainer(InventoryID.INVENTORY));
+		addContainerCounts(counts, client.getItemContainer(InventoryID.EQUIPMENT));
+		return counts;
+	}
+
+	private void addContainerCounts(Map<Integer, Long> counts, ItemContainer c)
+	{
+		if (c == null)
+		{
+			return;
+		}
+		for (Item item : c.getItems())
+		{
+			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+			{
+				counts.merge(item.getId(), (long) item.getQuantity(), Long::sum);
+			}
+		}
+	}
+
+	/** Resolve a deferred death via a live read of the current inventory + equipment (caller decides when). */
+	private void resolveDeathPendingViaLiveContainers()
+	{
+		if (deathPending != null)
+		{
+			resolveDeathPending(mergedInvEquipCounts());
+		}
+	}
+
+	/**
+	 * Emit the deferred death event: {location?, death_kind, items_lost[]}. items_lost is the pre/post positive
+	 * diff of the merged inventory + equipment (what left the account across the death). Unconditional — the
+	 * caller gates on the settle window / logout. Package-private + map arg so it is unit-testable without a client.
+	 */
+	void resolveDeathPending(Map<Integer, Long> postCounts)
+	{
+		DeathPending p = deathPending;
+		if (p == null)
+		{
+			return;
+		}
+		deathPending = null;
+		List<Map<String, Object>> lost = new ArrayList<>();
+		for (Map.Entry<Integer, Long> e : p.preCounts.entrySet())
+		{
+			long before = e.getValue();
+			long after = postCounts == null ? 0L : postCounts.getOrDefault(e.getKey(), 0L);
+			long d = before - after;
+			if (d > 0)
+			{
+				Map<String, Object> m = new LinkedHashMap<>();
+				m.put("id", e.getKey());
+				m.put("qty", d);
+				lost.add(m);
+			}
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		fields.put("death_kind", p.kind);
+		fields.put("items_lost", lost);
+		emitEvent("death", fields);
 	}
 
 	/** Level-ups: StatChanged fires on every xp drop, so emit only when the real level increases. */
@@ -2151,7 +2442,12 @@ public class AccountConnectPlugin extends Plugin
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
 		snap.put("bank", bankBlock);
 
-		// (looting bag / seed vault deferred: InventoryID member names need verification vs this client)
+		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
+		// only when non-null = opened at least once this session, so a normal snapshot never carries empty blocks.
+		// group_storage is a GENUINE cross-account container (shared between Group-Ironman members) — disclosed. ----
+		addContainerSnapshot(snap, "looting_bag", client.getItemContainer(LOOTING_BAG_CONTAINER_ID));
+		addContainerSnapshot(snap, "seed_vault", client.getItemContainer(SEED_VAULT_CONTAINER_ID));
+		addContainerSnapshot(snap, "group_storage", client.getItemContainer(InventoryID.GROUP_STORAGE));
 
 		// ---- collection log: obtained item ids (partial until the player opens the clog tabs) ----
 		Map<String, Object> collog = new LinkedHashMap<>();
@@ -2288,6 +2584,19 @@ public class AccountConnectPlugin extends Plugin
 			}
 		}
 		return v;
+	}
+
+	/** Add a {items, value_gp} block for a container, but only when it is present (opened this session). */
+	void addContainerSnapshot(Map<String, Object> snap, String key, ItemContainer c)
+	{
+		if (c == null)
+		{
+			return;
+		}
+		Map<String, Object> block = new LinkedHashMap<>();
+		block.put("items", itemList(c));
+		block.put("value_gp", containerValue(c));
+		snap.put(key, block);
 	}
 
 	/**

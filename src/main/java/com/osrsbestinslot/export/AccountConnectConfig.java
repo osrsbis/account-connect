@@ -15,7 +15,9 @@ public interface AccountConnectConfig extends Config
 			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats, quests and bank — plus your "
 			+ "account activity: GE and shop buys/sells, completed trades INCLUDING the other player's name "
 			+ "and the items each side exchanged, items you loot from kills, deaths, level-ups, and "
-			+ "login/logout times — to power your calculators and account dashboard. Clear the token to "
+			+ "login/logout times — to power your calculators and account dashboard. If you are in a Group "
+			+ "Ironman group, this also includes your shared group storage contents, which can include items "
+			+ "other group members deposited. Clear the token to "
 			+ "stop syncing.",
 		position = 1
 	)
