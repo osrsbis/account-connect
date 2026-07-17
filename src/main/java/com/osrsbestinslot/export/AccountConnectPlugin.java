@@ -301,7 +301,9 @@ public class AccountConnectPlugin extends Plugin
 	// ---- off-book value events: drop / pickup / alch. A menu click arms an inventory-delta pending, resolved
 	// on the next INVENTORY change from the item-count delta (reuses the store-pending arm/resolve discipline). ----
 	static final int INV_DELTA_PENDING_MAX_TICKS = 5;	// pickup: wait a few ticks (a "Take" may land after a walk)
-	static final int DROP_ALCH_PENDING_MAX_TICKS = 2;	// drop/alch land next tick — a short window shrinks the false-fire gap
+	static final int ALCH_PENDING_MAX_TICKS = 2;		// an alch lands next tick — short window, nothing to wait for
+	static final int DROP_PENDING_MAX_TICKS = 16;		// drop: the warning dialog can sit ~10s before the player confirms
+	static final int DROP_SPAWN_MAX_DIST = 2;			// own drops land on/adjacent to the player's tile
 	private volatile InvDeltaPending invDeltaPending;
 
 	static final class InvDeltaPending
@@ -1669,7 +1671,6 @@ public class AccountConnectPlugin extends Plugin
 		String action = offBookMenuAction(event);
 		if (action == null)
 		{
-			disarmInvDeltaPendingOnConflict(event);	// a non-drop action on the pending item cancels a false drop
 			return;
 		}
 		int item = event.getItemId();
@@ -1691,25 +1692,78 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * A non-off-book menu click on the SAME item as an armed drop/alch pending means the item is about to leave
-	 * the inventory for a NON-drop reason (equip / eat / drink / bank / deposit / use — the classic false-fire is
-	 * cancelling a drop-warning then equipping the item). Disarm the pending so its imminent inventory change is
-	 * not misread as a drop. Default-safe: a MISSED drop log beats a FABRICATED high-value drop alert accusing the
-	 * account. pickup is exempt — it resolves on the item RISING, which a removal can't fake. This relies on the
-	 * disarming MenuOptionClicked firing before the item's ItemContainerChanged [verify in-client].
+	 * Ground-spawn confirmation for drops (the M3 redesign). A "drop" pending resolves ONLY when BOTH signals
+	 * co-occur: the armed item APPEARS ON THE GROUND on/adjacent to the player's tile, AND the player's
+	 * inventory holds fewer of it than at click time. An inventory removal alone (equip / eat / bank deposit /
+	 * destroy — including via widget buttons that carry no item id) spawns no ground item, so it can never
+	 * fabricate a drop; a ground item alone (another player's drop becoming visible) shows no inventory loss,
+	 * so it never resolves either. Package-private + primitives so it is unit-testable without a client.
 	 */
-	private void disarmInvDeltaPendingOnConflict(MenuOptionClicked event)
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick)
 	{
 		InvDeltaPending p = invDeltaPending;
-		if (p == null || "pickup".equals(p.base))
+		if (p == null || !"drop".equals(p.base) || spawnedItemId != p.item || dist > DROP_SPAWN_MAX_DIST)
 		{
 			return;
 		}
-		int item = event.getItemId();
-		if (item > 0 && item == p.item)
+		if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 		{
-			invDeltaPending = null;
+			invDeltaPending = null;	// stale — the click this pending belonged to is long over
+			return;
 		}
+		long delta = p.beforeCount - invCountAfter;
+		if (delta <= 0)
+		{
+			return;	// no inventory loss — someone else's item appeared; keep waiting for the real drop
+		}
+		invDeltaPending = null;	// consume — both signals confirmed
+		if (!activityLogActive())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", p.item);
+		fields.put("qty", delta);
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		fields.put("wilderness", p.wilderness != null && p.wilderness);
+		emitEvent("drop", fields);
+	}
+
+	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
+	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null || !"drop".equals(p.base) || client == null || it == null || tile == null)
+		{
+			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
+		}
+		net.runelite.api.Player me = client.getLocalPlayer();
+		net.runelite.api.coords.WorldPoint pw = me == null ? null : me.getWorldLocation();
+		net.runelite.api.coords.WorldPoint tw = tile.getWorldLocation();
+		if (pw == null || tw == null || pw.getPlane() != tw.getPlane())
+		{
+			return;
+		}
+		int dist = Math.abs(pw.getX() - tw.getX()) + Math.abs(pw.getY() - tw.getY());
+		long invCount = countItem(client.getItemContainer(InventoryID.INVENTORY), it.getId());
+		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, client.getTickCount());
+	}
+
+	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
+	@Subscribe
+	public void onItemSpawned(net.runelite.api.events.ItemSpawned event)
+	{
+		handleGroundItemForDropPending(event.getItem(), event.getTile());
+	}
+
+	/** Dropping a stackable onto an existing ground stack merges instead of spawning — same confirmation. */
+	@Subscribe
+	public void onItemQuantityChanged(net.runelite.api.events.ItemQuantityChanged event)
+	{
+		handleGroundItemForDropPending(event.getItem(), event.getTile());
 	}
 
 	/**
@@ -1745,11 +1799,14 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Resolve an armed drop/pickup/alch pending against the post-change inventory. Fires only when the expected
-	 * item-count delta has landed (drop/alch: item fell; pickup: item rose) — an unrelated inventory change in
-	 * between is ignored and the pending kept until it lands or the tick window expires (so a "Take" that
-	 * completes after a short walk still logs). qty is the exact count that moved; alch attaches the gp gained
-	 * only when the coin delta is cleanly positive. Package-private + primitive args so it is unit-testable.
+	 * Resolve an armed pickup/alch pending against the post-change inventory. pickup fires when the item count
+	 * ROSE (an inventory removal can't fake a rise); alch fires only when the item fell AND coins rose in the
+	 * same change (an alch always yields coins — an item removal without a coin gain is an equip/bank/destroy,
+	 * never an alch). "drop" pendings NEVER resolve here: an inventory removal alone could be a bank deposit /
+	 * destroy / equip, so drops resolve exclusively via ground-spawn confirmation
+	 * (resolveDropPendingOnGroundSpawn) — this path only expires a stale drop pending. Unrelated inventory
+	 * changes are ignored and the pending kept until it lands or its tick window expires (so a "Take" that
+	 * completes after a short walk still logs). Package-private + primitive args so it is unit-testable.
 	 */
 	void resolveInvDeltaPending(long itemCountAfter, long coinsAfter, int currentTick)
 	{
@@ -1758,13 +1815,20 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
-		if (delta <= 0)
+		if ("drop".equals(p.base))
 		{
-			// the expected change has not landed yet (or a failed click) — wait out the window, then drop. drop/alch
-			// land next tick so their window is short (shrinks the gap where an unrelated same-item removal could
-			// resolve as a drop); pickup keeps the longer window because a "Take" may land after a walk.
-			int window = "pickup".equals(p.base) ? INV_DELTA_PENDING_MAX_TICKS : DROP_ALCH_PENDING_MAX_TICKS;
+			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
+			{
+				invDeltaPending = null;	// no ground spawn ever confirmed it — expire silently, emit nothing
+			}
+			return;
+		}
+		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
+		long gp = coinsAfter - p.beforeCoins;
+		boolean landed = delta > 0 && (!"alch".equals(p.base) || gp > 0);
+		if (!landed)
+		{
+			int window = "pickup".equals(p.base) ? INV_DELTA_PENDING_MAX_TICKS : ALCH_PENDING_MAX_TICKS;
 			if (currentTick - p.tick > window)
 			{
 				invDeltaPending = null;
@@ -1782,11 +1846,7 @@ public class AccountConnectPlugin extends Plugin
 		if ("alch".equals(p.base))
 		{
 			fields.put("spell", p.spell);
-			long gp = coinsAfter - p.beforeCoins;
-			if (gp > 0)
-			{
-				fields.put("gp", gp);	// gp gained, confirmed via the coin delta; omit if not cleanly positive
-			}
+			fields.put("gp", gp);	// always present now — the coin gain is the alch confirmation itself
 			emitEvent("alch", fields);
 			return;
 		}
@@ -1794,15 +1854,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("location", p.location);
 		}
-		if ("drop".equals(p.base))
-		{
-			fields.put("wilderness", p.wilderness != null && p.wilderness);
-			emitEvent("drop", fields);
-		}
-		else
-		{
-			emitEvent("pickup", fields);
-		}
+		emitEvent("pickup", fields);	// only pickup reaches here — drop is spawn-confirmed, alch returned above
 	}
 
 	/**
