@@ -1890,6 +1890,10 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
 		{
+			// A death spawns the player's items on the ground at their tile WITH an inventory loss — exactly the
+			// drop pending's dual confirmation signal. Kill any armed drop/pickup/alch pending: the loss belongs
+			// to the death event's items_lost, never to a fabricated player-initiated drop.
+			invDeltaPending = null;
 			// Capture the pre-death inventory + equipment LIVE now: OSRS removes items a few ticks AFTER the death
 			// animation, so the containers are still intact at ActorDeath ([verify in-client] — the standard
 			// RuneLite death-tracking timing assumption). Defer the emit; items_lost is the pre/post diff resolved

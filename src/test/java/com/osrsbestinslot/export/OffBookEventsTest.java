@@ -153,6 +153,34 @@ public class OffBookEventsTest
 		assertNotNull("pending kept (the real drop may still land)", invDeltaPending(plugin));
 	}
 
+	/**
+	 * Death guard: dying spawns YOUR items on the ground at your tile WITH an inventory loss — exactly the
+	 * dual drop signal. An armed drop pending must be killed by the death (the loss belongs to the death
+	 * event's items_lost, not a fabricated player-initiated drop).
+	 */
+	@Test
+	public void deathKillsArmedDropPendingSoDeathLootIsNotADrop() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		Player player = mock(Player.class);
+		ItemContainer inv = container(20997, 1);
+		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
+		when(client.getLocalPlayer()).thenReturn(player);
+		when(player.getWorldLocation()).thenReturn(new WorldPoint(3100, 3900, 0));
+		inject(plugin, "client", client);
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+
+		plugin.onActorDeath(new net.runelite.api.events.ActorDeath((net.runelite.api.Actor) player));
+		assertNull("death disarms any pending drop/pickup/alch", invDeltaPending(plugin));
+
+		// the death's ground spawns + inventory wipe must not resolve as a drop
+		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6);
+		assertTrue("no fabricated drop from death loot", plugin.pendingEvents.isEmpty());
+	}
+
 	/** Distance guard: a matching spawn far from the player is someone else's item, never ours. */
 	@Test
 	public void groundSpawnFarAwayIsIgnored() throws Exception
