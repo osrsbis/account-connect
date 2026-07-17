@@ -197,7 +197,7 @@ public class OffBookEventsTest
 
 		Map<Integer, Long> post = new LinkedHashMap<>();
 		post.put(560, 100L); // kept the runes, lost the whip
-		plugin.resolveDeathPending(post);
+		plugin.resolveDeathPending(post, true); // settle-window path: live+settled containers -> compute the loss
 
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
@@ -208,6 +208,86 @@ public class OffBookEventsTest
 		assertEquals(4151, lost.get(0).get("id"));
 		assertEquals(1L, lost.get(0).get("qty"));
 		assertNull("death is consumed", deathPending(plugin));
+	}
+
+	/**
+	 * M1: a feed-death then instant logout resolves via the logout path (computeLoss=false), where the
+	 * containers may be null OR readable-but-not-yet-settled — either way we CANNOT trust a diff. Emit the
+	 * death with kind + location but OMIT items_lost (a wrong items_lost on a monitoring feed is worse than none).
+	 */
+	@Test
+	public void deathOnLogoutOmitsItemsLostWhenContainersUntrustworthy() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Map<Integer, Long> pre = new LinkedHashMap<>();
+		pre.put(4151, 1L);
+		pre.put(560, 100L);
+		Map<String, Object> loc = new LinkedHashMap<>();
+		loc.put("region_id", 12345);
+		loc.put("plane", 0);
+		inject(plugin, "deathPending", new AccountConnectPlugin.DeathPending(loc, "wilderness", pre, 5));
+
+		plugin.resolveDeathPending(null, false); // logout path: containers untrustworthy
+
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("death", e.get("type"));
+		assertEquals("wilderness", e.get("death_kind"));
+		assertNotNull("still records where the death happened", e.get("location"));
+		assertFalse("items_lost OMITTED when the post-death containers can't be trusted", e.containsKey("items_lost"));
+		assertNull("death is consumed", deathPending(plugin));
+	}
+
+	/**
+	 * M2: a safe (PvM / minigame) death is a gp-sink reclaim, NOT an inter-account transfer. Emit the death
+	 * with kind + location for the timeline, but never an items_lost list (it would be polluted by the
+	 * post-death consumption in the settle window and misread as a transfer).
+	 */
+	@Test
+	public void safeDeathOmitsItemsLostEvenOnSettlePath() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Map<Integer, Long> pre = new LinkedHashMap<>();
+		pre.put(4151, 1L);
+		inject(plugin, "deathPending", new AccountConnectPlugin.DeathPending(null, "safe", pre, 5));
+
+		Map<Integer, Long> post = new LinkedHashMap<>(); // whip "gone" (e.g. eaten/left inv) but it's a safe death
+		plugin.resolveDeathPending(post, true);
+
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("death", e.get("type"));
+		assertEquals("safe", e.get("death_kind"));
+		assertFalse("safe deaths never carry items_lost", e.containsKey("items_lost"));
+	}
+
+	/**
+	 * M3: the headline false-fire. Arm a drop on a high-value item, then the player CANCELS the drop-warning
+	 * and instead equips the same item. The Wield MenuOptionClicked on that item must disarm the pending
+	 * BEFORE its inventory change resolves — so no fabricated drop alert on the account's best item.
+	 */
+	@Test
+	public void dropDisarmsWhenSameItemIsEquippedAfterCancel() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		ItemContainer inv = container(20997, 1); // twisted bow
+		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
+		when(client.getVarbitValue(Varbits.IN_WILDERNESS)).thenReturn(0);
+		when(client.getTickCount()).thenReturn(10);
+		inject(plugin, "client", client);
+
+		plugin.onMenuOptionClicked(menu("Drop", "", 20997));
+		assertNotNull("drop armed a pending", invDeltaPending(plugin));
+
+		// player cancels the warning, then equips the same item — a non-drop removal
+		plugin.onMenuOptionClicked(menu("Wield", "", 20997));
+		assertNull("conflicting same-item action disarms the pending", invDeltaPending(plugin));
+
+		// the equip's inventory change lands (tbow left the inventory) — must NOT be read as a drop
+		plugin.resolveInvDeltaPending(0L, 0L, 11);
+		assertTrue("no fabricated drop event", plugin.pendingEvents.isEmpty());
 	}
 
 	// ---------- snapshot container blocks ----------

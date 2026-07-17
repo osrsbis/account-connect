@@ -300,7 +300,8 @@ public class AccountConnectPlugin extends Plugin
 
 	// ---- off-book value events: drop / pickup / alch. A menu click arms an inventory-delta pending, resolved
 	// on the next INVENTORY change from the item-count delta (reuses the store-pending arm/resolve discipline). ----
-	static final int INV_DELTA_PENDING_MAX_TICKS = 5;	// wait a few ticks (a "Take" pickup may land after a walk)
+	static final int INV_DELTA_PENDING_MAX_TICKS = 5;	// pickup: wait a few ticks (a "Take" may land after a walk)
+	static final int DROP_ALCH_PENDING_MAX_TICKS = 2;	// drop/alch land next tick — a short window shrinks the false-fire gap
 	private volatile InvDeltaPending invDeltaPending;
 
 	static final class InvDeltaPending
@@ -1131,19 +1132,24 @@ public class AccountConnectPlugin extends Plugin
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
+				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
 				break;
 			case CONNECTION_LOST:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();
-				resolveDeathPendingViaLiveContainers();	// a feed-death then instant disconnect resolves here
+				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a disconnect
+				// a feed-death then instant disconnect: record the death, but the containers here are null or
+				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
+				resolveDeathPending(null, false);
 				// WAVE 3: a dropped connection previously emitted NOTHING. Emit an explicit logout so a crash /
 				// disconnect is distinguishable from a clean logout. Ends the session; a reconnect re-logs in.
 				trackLogout("connection_lost");
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
-				resolveDeathPendingViaLiveContainers();	// a feed-death then instant logout resolves here, pre-logout
+				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a logout
+				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
 				break;
@@ -1663,6 +1669,7 @@ public class AccountConnectPlugin extends Plugin
 		String action = offBookMenuAction(event);
 		if (action == null)
 		{
+			disarmInvDeltaPendingOnConflict(event);	// a non-drop action on the pending item cancels a false drop
 			return;
 		}
 		int item = event.getItemId();
@@ -1681,6 +1688,28 @@ public class AccountConnectPlugin extends Plugin
 			? (client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
 			: null;
 		invDeltaPending = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick);
+	}
+
+	/**
+	 * A non-off-book menu click on the SAME item as an armed drop/alch pending means the item is about to leave
+	 * the inventory for a NON-drop reason (equip / eat / drink / bank / deposit / use — the classic false-fire is
+	 * cancelling a drop-warning then equipping the item). Disarm the pending so its imminent inventory change is
+	 * not misread as a drop. Default-safe: a MISSED drop log beats a FABRICATED high-value drop alert accusing the
+	 * account. pickup is exempt — it resolves on the item RISING, which a removal can't fake. This relies on the
+	 * disarming MenuOptionClicked firing before the item's ItemContainerChanged [verify in-client].
+	 */
+	private void disarmInvDeltaPendingOnConflict(MenuOptionClicked event)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null || "pickup".equals(p.base))
+		{
+			return;
+		}
+		int item = event.getItemId();
+		if (item > 0 && item == p.item)
+		{
+			invDeltaPending = null;
+		}
 	}
 
 	/**
@@ -1732,8 +1761,11 @@ public class AccountConnectPlugin extends Plugin
 		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
 		if (delta <= 0)
 		{
-			// the expected change has not landed yet (or a failed click) — wait out the window, then drop
-			if (currentTick - p.tick > INV_DELTA_PENDING_MAX_TICKS)
+			// the expected change has not landed yet (or a failed click) — wait out the window, then drop. drop/alch
+			// land next tick so their window is short (shrinks the gap where an unrelated same-item removal could
+			// resolve as a drop); pickup keeps the longer window because a "Take" may land after a walk.
+			int window = "pickup".equals(p.base) ? INV_DELTA_PENDING_MAX_TICKS : DROP_ALCH_PENDING_MAX_TICKS;
+			if (currentTick - p.tick > window)
 			{
 				invDeltaPending = null;
 			}
@@ -1866,21 +1898,27 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
-	/** Resolve a deferred death via a live read of the current inventory + equipment (caller decides when). */
+	/** Resolve a deferred death from the settle-window path: containers are live AND settled, so the loss diff
+	 * is trustworthy (computeLoss=true). The logout/disconnect path calls resolveDeathPending(null, false). */
 	private void resolveDeathPendingViaLiveContainers()
 	{
 		if (deathPending != null)
 		{
-			resolveDeathPending(mergedInvEquipCounts());
+			resolveDeathPending(mergedInvEquipCounts(), true);
 		}
 	}
 
 	/**
-	 * Emit the deferred death event: {location?, death_kind, items_lost[]}. items_lost is the pre/post positive
-	 * diff of the merged inventory + equipment (what left the account across the death). Unconditional — the
-	 * caller gates on the settle window / logout. Package-private + map arg so it is unit-testable without a client.
+	 * Emit the deferred death event: {location?, death_kind, items_lost[]?}. death + kind + location are always
+	 * recorded. items_lost is emitted ONLY when it can be trusted: (a) computeLoss — the settle-window path where
+	 * the containers are live AND settled (the logout/disconnect path passes false, where the containers are null
+	 * or not-yet-settled and a diff would over- or under-report), AND (b) the death is a real inter-account
+	 * transfer (wilderness/pvp). A safe death is a gp-sink reclaim, not a transfer, and its settle-window diff is
+	 * polluted by post-death eating/drinking — so it never carries items_lost. A wrong items_lost on a monitoring
+	 * feed is worse than an absent one; the server wealth-reconciliation still catches the delta either way.
+	 * Package-private + map arg so it is unit-testable without a client.
 	 */
-	void resolveDeathPending(Map<Integer, Long> postCounts)
+	void resolveDeathPending(Map<Integer, Long> postCounts, boolean computeLoss)
 	{
 		DeathPending p = deathPending;
 		if (p == null)
@@ -1888,27 +1926,30 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		deathPending = null;
-		List<Map<String, Object>> lost = new ArrayList<>();
-		for (Map.Entry<Integer, Long> e : p.preCounts.entrySet())
-		{
-			long before = e.getValue();
-			long after = postCounts == null ? 0L : postCounts.getOrDefault(e.getKey(), 0L);
-			long d = before - after;
-			if (d > 0)
-			{
-				Map<String, Object> m = new LinkedHashMap<>();
-				m.put("id", e.getKey());
-				m.put("qty", d);
-				lost.add(m);
-			}
-		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		if (p.location != null)
 		{
 			fields.put("location", p.location);
 		}
 		fields.put("death_kind", p.kind);
-		fields.put("items_lost", lost);
+		if (computeLoss && ("wilderness".equals(p.kind) || "pvp".equals(p.kind)))
+		{
+			List<Map<String, Object>> lost = new ArrayList<>();
+			for (Map.Entry<Integer, Long> e : p.preCounts.entrySet())
+			{
+				long before = e.getValue();
+				long after = postCounts == null ? 0L : postCounts.getOrDefault(e.getKey(), 0L);
+				long d = before - after;
+				if (d > 0)
+				{
+					Map<String, Object> m = new LinkedHashMap<>();
+					m.put("id", e.getKey());
+					m.put("qty", d);
+					lost.add(m);
+				}
+			}
+			fields.put("items_lost", lost);
+		}
 		emitEvent("death", fields);
 	}
 

@@ -181,11 +181,12 @@ public class Wave3EnrichmentTest
 	}
 
 	@Test
-	public void deathDefersThenCarriesLocationKindAndItemsLost() throws Exception
+	public void deathDefersThenCarriesLocationAndKind() throws Exception
 	{
 		// Deferred model: ActorDeath arms a pending (reads pre-death inv+equip live) and emits NOTHING; the
-		// death event with location + death_kind + items_lost is emitted once the containers settle (syncTask)
-		// or on logout. Here the mocked containers are null, so items_lost is empty but location + kind still ship.
+		// death event with location + death_kind is emitted once the containers settle (syncTask) or on logout.
+		// This mock is a SAFE death (no wilderness varbit / pvp world), so it carries NO items_lost — a safe death
+		// is a gp-sink reclaim, not an inter-account transfer, and its diff would be polluted by post-death eating.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		Client client = mock(Client.class);
@@ -199,12 +200,12 @@ public class Wave3EnrichmentTest
 		plugin.onActorDeath(new ActorDeath((Actor) player));
 		assertTrue("death emit is deferred to the settle/logout resolve", plugin.pendingEvents.isEmpty());
 
-		plugin.resolveDeathPending(new LinkedHashMap<>());
+		plugin.resolveDeathPending(new LinkedHashMap<>(), true); // settle-window path
 		assertEquals(1, plugin.pendingEvents.size());
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
 		assertEquals("safe", e.get("death_kind")); // no wilderness varbit / pvp world in the mock
-		assertTrue("items_lost is always present (possibly empty)", e.containsKey("items_lost"));
+		assertFalse("safe death carries no items_lost (not a transfer)", e.containsKey("items_lost"));
 		@SuppressWarnings("unchecked")
 		Map<String, Object> loc = (Map<String, Object>) e.get("location");
 		assertEquals(wp.getRegionID(), loc.get("region_id"));
