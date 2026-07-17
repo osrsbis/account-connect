@@ -384,6 +384,58 @@ public class OffBookEventsTest
 		assertEquals(1L, e.get("qty"));
 	}
 
+	// ---------- chest / reward-interface loot (the raid income blind spot) ----------
+
+	@Test
+	public void raidChestEmitsLootOnceThenDedupes() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ItemManager im = mock(ItemManager.class);
+		when(im.getItemPrice(anyInt())).thenReturn(1000);
+		inject(plugin, "itemManager", im);
+		Client client = mock(Client.class);
+		ItemContainer reward = container(20997, 1, 995, 250000); // tbow + coins
+		when(client.getItemContainer(581)).thenReturn(reward); // RAIDS_REWARDS container
+		inject(plugin, "client", client);
+
+		plugin.handleChestLootWidgetLoaded(539); // RAIDS_REWARDS widget group (CoX)
+		assertEquals(1, plugin.pendingEvents.size());
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("loot", e.get("type"));
+		assertEquals("Chambers of Xeric", e.get("source_name"));
+		assertEquals("event", e.get("source_type"));
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> items = (List<Map<String, Object>>) e.get("items");
+		assertEquals(2, items.size());
+
+		// the same chest re-viewed in the same instance visit must NOT double-count
+		plugin.handleChestLootWidgetLoaded(539);
+		assertEquals("re-opened chest deduped", 1, plugin.pendingEvents.size());
+	}
+
+	@Test
+	public void emptyOrAbsentRewardContainerEmitsNothing() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		when(client.getItemContainer(581)).thenReturn(null); // container not readable
+		inject(plugin, "client", client);
+		plugin.handleChestLootWidgetLoaded(539);
+		assertTrue("no fabricated loot from an unreadable container", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void unknownWidgetGroupIsIgnored() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "client", mock(Client.class));
+		plugin.handleChestLootWidgetLoaded(12); // bank group — not a loot widget
+		assertTrue(plugin.pendingEvents.isEmpty());
+	}
+
 	// ---------- snapshot container blocks ----------
 
 	@Test

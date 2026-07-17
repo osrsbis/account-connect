@@ -158,6 +158,37 @@ public class AccountConnectPlugin extends Plugin
 	// its snapshot read uses the legacy InventoryID.GROUP_STORAGE overload of client.getItemContainer(...).
 	private static final int LOOTING_BAG_CONTAINER_ID = net.runelite.api.gameval.InventoryID.LOOTING_BAG;	// 516
 	private static final int SEED_VAULT_CONTAINER_ID = net.runelite.api.gameval.InventoryID.SEED_VAULT;		// 626
+	private static final int BONDS_POUCH_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_POUCH;	// 536
+	private static final int BONDS_ESCROW_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_ESCROW;	// 534
+	private static final int QUIVER_AMMO_CONTAINER_ID = net.runelite.api.gameval.InventoryID.DIZANAS_QUIVER_AMMO; // 879
+
+	// ---- chest / reward-interface loot (gap audit 2026-07-18): raids, Barrows, clues, Colosseum, Lunar,
+	// wildy loot chest. These NEVER fire LootManager (ServerNpcLoot) — RuneLite itself captures them only in
+	// the OPTIONAL LootTrackerPlugin via WidgetLoaded + a reward-container read, which a user can disable.
+	// We replicate the same widget-group -> container reads here (ids javap-verified vs 1.12.33 gameval). ----
+	private static final int RAIDS_REWARDS_GROUP = net.runelite.api.gameval.InterfaceID.RAIDS_REWARDS;			// 539 CoX
+	private static final int RAIDS_REWARDS_CONTAINER = net.runelite.api.gameval.InventoryID.RAIDS_REWARDS;		// 581
+	private static final int TOB_CHESTS_GROUP = net.runelite.api.gameval.InterfaceID.TOB_CHESTS;				// 23
+	private static final int TOB_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOB_CHESTS;			// 612
+	private static final int TOA_CHESTS_GROUP = net.runelite.api.gameval.InterfaceID.TOA_CHESTS;				// 771
+	private static final int TOA_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOA_CHESTS;			// 811 (personal split)
+	private static final int BARROWS_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.BARROWS_REWARD;		// 155
+	private static final int TRAIL_REWARDSCREEN_GROUP = net.runelite.api.gameval.InterfaceID.TRAIL_REWARDSCREEN;	// 73 (clue)
+	private static final int TRAIL_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.TRAIL_REWARDINV;		// 141 (Barrows + clues share it)
+	private static final int COLOSSEUM_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.COLOSSEUM_REWARD_CHEST_2;	// 864
+	private static final int COLOSSEUM_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.COLOSSEUM_REWARDS;	// 843
+	private static final int PMOON_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.PMOON_REWARD;			// 868 Lunar Chest
+	private static final int PMOON_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.PMOON_REWARDINV;		// 847
+	private static final int WILDY_LOOT_CHEST_GROUP = net.runelite.api.gameval.InterfaceID.WILDY_LOOT_CHEST;	// 742
+	private static final int[] WILDY_LOOT_CONTAINERS = {
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV0, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV1,
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV2, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV3,
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV4,	// 558-562
+	};
+	private static final int TOB_REGION = 12867;		// Theatre of Blood — the chest widget only counts inside
+	private static final int TOB_LOBBY_REGION = 14642;
+	private boolean chestLooted;		// one instanced-chest emit per visit; reset on LOADING (region change)
+	private String lastChestEmitKey;	// consecutive-identical belt (same widget + same contents = a re-view, not new loot)
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
@@ -1129,12 +1160,19 @@ public class AccountConnectPlugin extends Plugin
 		}
 		switch (event.getGameState())
 		{
+			case LOADING:
+				// Region transition — a NEW instanced chest may lie ahead; the belt keys are per-visit.
+				chestLooted = false;
+				lastChestEmitKey = null;
+				break;
 			case HOPPING:
 			case LOGGING_IN:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
+				chestLooted = false;
+				lastChestEmitKey = null;
 				break;
 			case CONNECTION_LOST:
 				clogObtained.clear();
@@ -1208,6 +1246,114 @@ public class AccountConnectPlugin extends Plugin
 		handleTradeWidgetLoaded(event.getGroupId());
 		handleActivityWidgetLoaded(event.getGroupId());
 		handleCaptureOnOpenWidgetLoaded(event.getGroupId());
+		handleChestLootWidgetLoaded(event.getGroupId());
+	}
+
+	/**
+	 * Chest / reward-interface loot (the raid-income blind spot — gap audit 2026-07-18). Mirrors RuneLite's
+	 * own LootTrackerPlugin widget handlers so the capture works even with LootTracker disabled. Emits through
+	 * the existing emitLoot as source_type "event". Dedup is two-belt: instanced chests (raids / Colosseum /
+	 * Lunar) emit once per visit via chestLooted (reset on LOADING = region transition); ALL groups also skip a
+	 * consecutive re-emit of identical contents (a re-viewed chest is the same loot, not new income). An
+	 * unreadable/empty container emits nothing — no fabrication. ToA's container already holds only this
+	 * player's split; ToB is region-gated like LootTracker. Package-private for unit tests.
+	 */
+	void handleChestLootWidgetLoaded(int groupId)
+	{
+		if (!activityLogActive() || client == null)
+		{
+			return;
+		}
+		String source;
+		int[] containers;
+		boolean instanced = false;
+		switch (groupId)
+		{
+			case RAIDS_REWARDS_GROUP:
+				source = "Chambers of Xeric";
+				containers = new int[]{RAIDS_REWARDS_CONTAINER};
+				instanced = true;
+				break;
+			case TOB_CHESTS_GROUP:
+			{
+				Map<String, Object> loc = currentLocation();
+				int region = loc == null ? -1 : (Integer) loc.get("region_id");
+				if (region != TOB_REGION && region != TOB_LOBBY_REGION)
+				{
+					return;	// the group can load outside the chest room — only count in ToB itself
+				}
+				source = "Theatre of Blood";
+				containers = new int[]{TOB_CHESTS_CONTAINER};
+				instanced = true;
+				break;
+			}
+			case TOA_CHESTS_GROUP:
+				source = "Tombs of Amascut";
+				containers = new int[]{TOA_CHESTS_CONTAINER};
+				instanced = true;
+				break;
+			case BARROWS_REWARD_GROUP:
+				source = "Barrows";
+				containers = new int[]{TRAIL_REWARD_CONTAINER};
+				break;
+			case TRAIL_REWARDSCREEN_GROUP:
+				source = "Clue Scroll";
+				containers = new int[]{TRAIL_REWARD_CONTAINER};
+				break;
+			case COLOSSEUM_REWARD_GROUP:
+				source = "Fortis Colosseum";
+				containers = new int[]{COLOSSEUM_REWARD_CONTAINER};
+				instanced = true;
+				break;
+			case PMOON_REWARD_GROUP:
+				source = "Lunar Chest";
+				containers = new int[]{PMOON_REWARD_CONTAINER};
+				instanced = true;
+				break;
+			case WILDY_LOOT_CHEST_GROUP:
+				source = "Loot Chest";
+				containers = WILDY_LOOT_CONTAINERS;
+				break;
+			default:
+				return;
+		}
+		if (instanced && chestLooted)
+		{
+			return;	// this instance visit's chest is already counted
+		}
+		List<ItemStack> stacks = new ArrayList<>();
+		StringBuilder key = new StringBuilder().append(groupId);
+		for (int containerId : containers)
+		{
+			ItemContainer c = client.getItemContainer(containerId);
+			if (c == null)
+			{
+				continue;
+			}
+			for (Item item : c.getItems())
+			{
+				if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+				{
+					stacks.add(new ItemStack(item.getId(), item.getQuantity()));
+					key.append(':').append(item.getId()).append('x').append(item.getQuantity());
+				}
+			}
+		}
+		if (stacks.isEmpty())
+		{
+			return;	// unreadable or empty reward — emit nothing rather than fabricate
+		}
+		String k = key.toString();
+		if (k.equals(lastChestEmitKey))
+		{
+			return;	// same widget re-showing the same contents = a re-view, not new loot
+		}
+		lastChestEmitKey = k;
+		if (instanced)
+		{
+			chestLooted = true;
+		}
+		emitLoot(source, "event", stacks);
 	}
 
 	/**
@@ -2494,6 +2640,7 @@ public class AccountConnectPlugin extends Plugin
 
 		// ---- grand exchange: active buy/sell offers ----
 		List<Map<String, Object>> geOffers = new ArrayList<>();
+		long geEscrowGp = 0L;	// wealth locked in GE offers (see the per-offer accumulation below)
 		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
 		if (offers != null)
 		{
@@ -2513,6 +2660,28 @@ public class AccountConnectPlugin extends Plugin
 				m.put("price_per_item", o.getPrice());
 				m.put("spent", o.getSpent());
 				geOffers.add(m);
+				// GE escrow (gap audit 2026-07-18): wealth locked in the GE that bank+inv can't see — a placed
+				// buy removes gp, an in-flight sell removes items, and either reads as a FALSE leak without this.
+				// Buy-side: the full committed gp (bought-but-uncollected items stand in for the spent part).
+				// Sell-side: remaining items at GE value + uncollected proceeds. Approximation is deliberate —
+				// partial mid-offer collection can briefly double-count, and the reconcile engine already
+				// downgrades confidence on GE-active windows.
+				GrandExchangeOfferState st = o.getState();
+				boolean buySide = st == GrandExchangeOfferState.BUYING || st == GrandExchangeOfferState.BOUGHT
+					|| st == GrandExchangeOfferState.CANCELLED_BUY;
+				if (buySide)
+				{
+					geEscrowGp += (long) o.getTotalQuantity() * o.getPrice();
+				}
+				else
+				{
+					long remaining = (long) o.getTotalQuantity() - o.getQuantitySold();
+					if (remaining > 0 && itemManager != null)
+					{
+						geEscrowGp += remaining * itemManager.getItemPrice(o.getItemId());
+					}
+					geEscrowGp += o.getSpent();	// proceeds not yet collected
+				}
 			}
 		}
 		snap.put("ge_offers", geOffers);
@@ -2545,6 +2714,11 @@ public class AccountConnectPlugin extends Plugin
 		addContainerSnapshot(snap, "looting_bag", client.getItemContainer(LOOTING_BAG_CONTAINER_ID));
 		addContainerSnapshot(snap, "seed_vault", client.getItemContainer(SEED_VAULT_CONTAINER_ID));
 		addContainerSnapshot(snap, "group_storage", client.getItemContainer(InventoryID.GROUP_STORAGE));
+		// Storage-visibility (gap audit 2026-07-18): real wealth a bank+inv+equip snapshot can't see — a bond
+		// is ~30M+ parked invisibly; quiver ammo can be a large stacked value. False-residual sources closed.
+		addContainerSnapshot(snap, "bonds_pouch", client.getItemContainer(BONDS_POUCH_CONTAINER_ID));
+		addContainerSnapshot(snap, "bonds_escrow", client.getItemContainer(BONDS_ESCROW_CONTAINER_ID));
+		addContainerSnapshot(snap, "quiver_ammo", client.getItemContainer(QUIVER_AMMO_CONTAINER_ID));
 
 		// ---- collection log: obtained item ids (partial until the player opens the clog tabs) ----
 		Map<String, Object> collog = new LinkedHashMap<>();
@@ -2565,7 +2739,8 @@ public class AccountConnectPlugin extends Plugin
 		wealth.put("inventory_gp", invValue);         // total GE value of carried inventory (incl. coins)
 		wealth.put("equipment_gp", eqpValue);         // GE value of worn / on-character gear
 		wealth.put("bank_gp", bankSynced ? bankValue : null);
-		wealth.put("net_worth_gp", bankSynced ? (invValue + eqpValue + bankValue) : null); // null until bank opened
+		wealth.put("ge_escrow_gp", geEscrowGp);       // wealth locked in GE offers — invisible to bank+inv+equip
+		wealth.put("net_worth_gp", bankSynced ? (invValue + eqpValue + bankValue + geEscrowGp) : null); // null until bank opened
 		snap.put("wealth", wealth);
 
 		// ---- WAVE 5: live state (all ids javap-verified vs runelite-api 1.12.32; raw values, decoded server-side) ----
