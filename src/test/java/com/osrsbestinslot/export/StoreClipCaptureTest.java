@@ -19,7 +19,7 @@ import static org.junit.Assert.assertTrue;
  */
 public class StoreClipCaptureTest
 {
-	// (a) opt-in: capture is OFF by default — recordStoreClips() defaults false.
+	// (a) opt-in: capture is OFF by default — uploadTradeScreenshots() defaults false.
 	@Test
 	public void storeClipsDisabledByDefault() throws Exception
 	{
@@ -37,7 +37,7 @@ public class StoreClipCaptureTest
 		inject(plugin, "config", new AccountConnectConfig()
 		{
 			@Override
-			public boolean recordStoreClips()
+			public boolean uploadTradeScreenshots()
 			{
 				return true;
 			}
