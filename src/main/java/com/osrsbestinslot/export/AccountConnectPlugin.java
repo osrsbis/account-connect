@@ -1169,6 +1169,10 @@ public class AccountConnectPlugin extends Plugin
 				// Region transition — a NEW instanced chest may lie ahead; the belt keys are per-visit.
 				chestLooted = false;
 				lastChestEmitKey = null;
+				// Scene reload replays existing ground piles as fresh ItemSpawned events (Codex consult
+				// 2026-07-18) — a surviving pending could pair a replayed same-id pile with an unrelated
+				// inventory loss. A drop clicked right before a region boundary is lost; miss beats fabricate.
+				invDeltaPending = null;
 				break;
 			case HOPPING:
 			case LOGGING_IN:
@@ -1863,6 +1867,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
 		}
+		if (deathPending != null)
+		{
+			// Death belt (backs the onActorDeath disarm): mid-death ground spawns + inventory wipe are the
+			// death's items, never a player-initiated drop — refuse all corroboration while a death settles.
+			invDeltaPending = null;
+			return;
+		}
 		if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 		{
 			invDeltaPending = null;	// stale — the click this pending belonged to is long over
@@ -1906,6 +1917,14 @@ public class AccountConnectPlugin extends Plugin
 		if (p == null || !"drop".equals(p.base) || client == null || it == null || tile == null)
 		{
 			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
+		}
+		// Ownership discriminator (Codex consult 2026-07-18): the client tags ground items with ownership,
+		// and a fresh OWN drop is always OWNERSHIP_SELF. Anything else (another player's pile, an NPC drop,
+		// an ownerless world spawn, a GIM partner's item) can never corroborate OUR drop — this closes the
+		// whole coincidental-foreign-source fabrication class in one check. [verify in-client]
+		if (it.getOwnership() != net.runelite.api.TileItem.OWNERSHIP_SELF)
+		{
+			return;
 		}
 		net.runelite.api.Player me = client.getLocalPlayer();
 		net.runelite.api.coords.WorldPoint pw = me == null ? null : me.getWorldLocation();

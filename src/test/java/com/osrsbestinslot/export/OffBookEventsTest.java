@@ -241,6 +241,51 @@ public class OffBookEventsTest
 		assertEquals("no corroboration recorded", -1, p.spawnCorroboratedTick);
 	}
 
+	/** Death belt: while a death is settling, NO ground spawn may corroborate a drop (they're the death's items). */
+	@Test
+	public void spawnDuringDeathSettleNeverCorroborates() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+		inject(plugin, "deathPending",
+			new AccountConnectPlugin.DeathPending(null, "wilderness", new LinkedHashMap<>(), 5));
+		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6); // the death's tbow hits the floor
+		assertTrue("death-settle spawns never become drops", plugin.pendingEvents.isEmpty());
+		assertNull("pending killed by the death belt", invDeltaPending(plugin));
+	}
+
+	/** Ownership discriminator: a ground item not owned by US can never corroborate our drop. */
+	@Test
+	public void foreignOwnedGroundItemNeverCorroborates() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		Player player = mock(Player.class);
+		ItemContainer inv = container(560, 0); // build the stub before nesting it in when()
+		when(client.getLocalPlayer()).thenReturn(player);
+		when(player.getWorldLocation()).thenReturn(new WorldPoint(3200, 3200, 0));
+		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
+		when(client.getTickCount()).thenReturn(6);
+		inject(plugin, "client", client);
+		inject(plugin, "invDeltaPending",
+			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+
+		net.runelite.api.TileItem it = mock(net.runelite.api.TileItem.class);
+		when(it.getId()).thenReturn(560);
+		when(it.getOwnership()).thenReturn(net.runelite.api.TileItem.OWNERSHIP_OTHER);
+		net.runelite.api.Tile tile = mock(net.runelite.api.Tile.class);
+		when(tile.getWorldLocation()).thenReturn(new WorldPoint(3200, 3200, 0));
+
+		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tile, it));
+		assertTrue("foreign-owned pile rejected", plugin.pendingEvents.isEmpty());
+		AccountConnectPlugin.InvDeltaPending p = invDeltaPending(plugin);
+		assertNotNull("pending untouched", p);
+		assertEquals("no corroboration recorded either", -1, p.spawnCorroboratedTick);
+	}
+
 	/** Distance guard: a matching spawn far from the player is someone else's item, never ours. */
 	@Test
 	public void groundSpawnFarAwayIsIgnored() throws Exception
