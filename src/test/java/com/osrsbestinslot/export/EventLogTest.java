@@ -228,6 +228,44 @@ public class EventLogTest
 	}
 
 	@Test
+	public void unresolvableItemIdArmsNothing() throws Exception
+	{
+		// A store click whose menu entry carries no item id (getItemId() == -1) must NOT arm a pending.
+		// Such clicks were observed in testing; comparing inventory contents either side of them showed
+		// no item entering the inventory, so the click is a no-op rather than a purchase of an unknown
+		// item, and there is nothing to recover. Mirrors the off-book path's own <= 0 guard.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "shopOpen", true);
+		MenuOptionClicked ev = mock(MenuOptionClicked.class);
+		when(ev.getMenuOption()).thenReturn("Buy 1");
+		when(ev.getItemId()).thenReturn(-1);
+
+		plugin.onMenuOptionClicked(ev);
+		assertNull("an itemless store click must not arm a pending", storePending(plugin));
+		assertTrue("an itemless store click must emit nothing", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void unresolvableItemIdDoesNotClobberAnArmedPending() throws Exception
+	{
+		// The skip must be a plain return, not a null-item pending: a real armed buy waiting on its
+		// inventory resolve must survive a stray itemless click.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "shopOpen", true);
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		MenuOptionClicked ev = mock(MenuOptionClicked.class);
+		when(ev.getMenuOption()).thenReturn("Buy 1");
+		when(ev.getItemId()).thenReturn(-1);
+
+		plugin.onMenuOptionClicked(ev);
+		AccountConnectPlugin.StorePending p = storePending(plugin);
+		assertNotNull("the real armed pending must survive an itemless click", p);
+		assertEquals("the surviving pending must be the original", 4151, p.item);
+	}
+
+	@Test
 	public void resolveEmitsBuyWithExactDelta() throws Exception
 	{
 		// (a) buy → coins fell exactly; gp_total is the coins that left, qty==1 so no unit average.

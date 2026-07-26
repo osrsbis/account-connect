@@ -1705,6 +1705,11 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		int item = event.getItemId();
+		if (item <= 0)
+		{
+			return;	// no resolvable item id — same guard the off-book path uses; skip rather than emit -1
+		}
 		String opt = event.getMenuOption();	// non-null here: storeTxType only matches a "Buy"/"Sell" prefix
 		// WAVE 6 (store price): don't emit here — arm a pending and let the next INVENTORY change resolve the
 		// exact transacted gp from the coin-count delta (store-price-feasibility.md option B). Snapshot coins
@@ -1714,7 +1719,7 @@ public class AccountConnectPlugin extends Plugin
 		int tick = client == null ? 0 : client.getTickCount();
 		StorePending prev = storePending;
 		boolean ambiguous = prev != null && prev.tick == tick;
-		storePending = new StorePending(type, event.getItemId(), parseTrailingQty(opt), coinsBefore, tick, ambiguous);
+		storePending = new StorePending(type, item, parseTrailingQty(opt), coinsBefore, tick, ambiguous);
 	}
 
 	/**
