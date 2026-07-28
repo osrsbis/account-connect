@@ -288,6 +288,36 @@ public class AccountConnectPlugin extends Plugin
 	private volatile List<Map<String, Object>> pendingTradeReceived;
 	private volatile String pendingReceivedText;
 
+	// Store transacted-price capture: a store buy/sell click snapshots the pre-transaction coin count and
+	// arms this pending; the next INVENTORY change reads the post count and the |delta| is the exact gp that
+	// changed hands (see store-price-feasibility.md). Emit is deferred to that inventory change, not the click.
+	private volatile StorePending storePending;
+	/** Ticks after which an unresolved store pending is stale (a failed click fires no inventory change). */
+	static final int STORE_PENDING_MAX_TICKS = 3;
+	/** gameval INVENTORY container id (93) — matches ItemContainerChanged.getContainerId(), not legacy InventoryID. */
+	private static final int INVENTORY_CONTAINER_ID = net.runelite.api.gameval.InventoryID.INV;
+
+	/** An armed store buy/sell awaiting its inventory-change resolution. coinsBefore is a long: bank-stack totals overflow int. */
+	static final class StorePending
+	{
+		final String type;			// "store_buy" | "store_sell"
+		final int item;
+		final int qty;
+		final long coinsBefore;
+		final int tick;				// client tick at arm time, for the staleness window
+		final boolean ambiguous;	// overwrote an unresolved click → delta may belong to that one, omit price
+
+		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous)
+		{
+			this.type = type;
+			this.item = item;
+			this.qty = qty;
+			this.coinsBefore = coinsBefore;
+			this.tick = tick;
+			this.ambiguous = ambiguous;
+		}
+	}
+
 	// ---- WAVE 2: real-time sync ----
 	// On any emitEvent we flush live instead of waiting for the 5s eventFlushTask. A burst (e.g. rapid chat
 	// lines) is micro-coalesced into a single ~1s window so it becomes ONE /event-ingest POST, not one HTTP
@@ -839,6 +869,13 @@ public class AccountConnectPlugin extends Plugin
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
 		handleTradeContainerChanged(event.getContainerId());
+		// WAVE 6 (store price): resolve a store buy/sell against the live inventory coin count. Read the coins
+		// from the changed container itself (final post-transaction state) — independent of the trade gate above.
+		if (event.getContainerId() == INVENTORY_CONTAINER_ID)
+		{
+			long coinsAfter = countItem(event.getItemContainer(), COINS_ID);
+			resolveStorePendingOnInventoryChange(coinsAfter, client == null ? 0 : client.getTickCount());
+		}
 	}
 
 	void handleTradeContainerChanged(int containerId)
@@ -1104,7 +1141,26 @@ public class AccountConnectPlugin extends Plugin
 		if (event.getGroupId() == SHOP_GROUP_ID)
 		{
 			shopOpen = false;
+			flushStorePendingOnShopClose();
 		}
+	}
+
+	/**
+	 * Shop closed with a click still awaiting its inventory change (buy-then-close is a common sequence).
+	 * The coin delta can no longer be attributed, but the transaction itself did happen — emit the degraded
+	 * {item, qty} form rather than losing the event, which is what the pre-price behaviour reported anyway.
+	 * Package-private seam so the close path is unit testable without a live client.
+	 */
+	void flushStorePendingOnShopClose()
+	{
+		StorePending p = storePending;
+		storePending = null;
+		if (p == null || !activityLogActive())
+		{
+			return;
+		}
+		// coinsAfter == coinsBefore -> zero delta -> fails the sign check -> {item, qty} only, never a guess.
+		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, p.coinsBefore, p.ambiguous));
 	}
 
 	void handleTradeWidgetClosed(int groupId)
@@ -1200,14 +1256,71 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		// WAVE 6 (store price): don't emit here — arm a pending and let the next INVENTORY change resolve the
+		// exact transacted gp from the coin-count delta. Snapshot coins BEFORE the transaction.
+		// Last-click-wins: overwriting a pending that has NOT yet resolved means the incoming coin delta may
+		// belong to the click being dropped rather than this one (the inventory change can lag the click by a
+		// tick or more), so the new pending is marked ambiguous and the resolver omits gp_total rather than
+		// misattribute one click's price to another.
+		long coinsBefore = countItem(client == null ? null : client.getItemContainer(InventoryID.INVENTORY), COINS_ID);
+		int tick = client == null ? 0 : client.getTickCount();
+		boolean ambiguous = storePending != null;
+		storePending = new StorePending(type, event.getItemId(), parseTrailingQty(opt), coinsBefore, tick, ambiguous);
+	}
+
+	/**
+	 * Resolve an armed store pending against the post-transaction coin count. Consumes the pending (one
+	 * inventory change resolves at most one click) and emits the store event, with the exact-gp price when it
+	 * can be cleanly attributed. Stale pendings (a failed click that never moved the inventory, then some
+	 * unrelated later change) are dropped rather than paired. Package-private seam so the async path is unit
+	 * testable without a live client.
+	 */
+	void resolveStorePendingOnInventoryChange(long coinsAfter, int currentTick)
+	{
+		StorePending p = storePending;
+		if (p == null)
+		{
+			return;
+		}
+		// Two-sided window on purpose: a backwards jump in the tick counter (login / world hop with the shop
+		// still open) would otherwise leave a long-stale coinsBefore paired with a fresh inventory change.
+		if (Math.abs(currentTick - p.tick) > STORE_PENDING_MAX_TICKS)
+		{
+			storePending = null;	// stale: a failed click's pending paired with an unrelated later change
+			return;
+		}
+		storePending = null;		// consume — last-click-wins already collapsed repeats to this one
+		if (!activityLogActive())
+		{
+			return;
+		}
+		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous));
+	}
+
+	/**
+	 * Build the store event fields. {item, qty} always; gp_total = the exact coins that moved, added ONLY
+	 * when the delta is cleanly attributable — right sign for the direction (buy → coins fell, sell → rose)
+	 * and not ambiguous (no unresolved earlier click whose delta this might be). unit_price_gp is a LABELLED average (gp_total/qty), only meaningful for
+	 * qty>1; per-item price scales mid-batch as stock moves, so it is never a flat rate. When the delta can't
+	 * be trusted, degrade to {item, qty} only (option D) rather than emit a guess. Pure/static: no client.
+	 */
+	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter, boolean ambiguous)
+	{
 		Map<String, Object> fields = new LinkedHashMap<>();
-		fields.put("item", event.getItemId());
-		fields.put("qty", parseTrailingQty(opt));
-		// WAVE 3: unit price intentionally omitted. The actual transacted store price (base value * buy/sell %
-		// scaled by live stock) is not cleanly reachable — MenuOptionClicked carries no price, the shop stock
-		// container holds only ids/quantities, and the shop widget's VALUE text tracks the hovered item, not
-		// the clicked one. Deferred rather than send a misleading GE/base value labelled "price".
-		emitEvent(type, fields);
+		fields.put("item", item);
+		fields.put("qty", qty);
+		long delta = coinsAfter - coinsBefore;
+		boolean signOk = "store_buy".equals(type) ? delta < 0 : delta > 0;
+		if (!ambiguous && signOk)
+		{
+			long gp = Math.abs(delta);
+			fields.put("gp_total", gp);
+			if (qty > 1)
+			{
+				fields.put("unit_price_gp", gp / qty);	// average — see note above
+			}
+		}
+		return fields;
 	}
 
 	/** "Buy 10" -> 10, "Sell 1" -> 1, "Buy" -> 1 (default). */
