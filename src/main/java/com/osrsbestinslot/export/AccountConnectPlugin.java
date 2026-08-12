@@ -67,21 +67,17 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
-import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.config.Keybind;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.events.PlayerLootReceived;
 import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
-import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.DrawManager;
-import net.runelite.client.util.HotkeyListener;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -103,7 +99,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.1";
+	private static final String PLUGIN_VERSION = "0.7.2";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -157,9 +153,46 @@ public class AccountConnectPlugin extends Plugin
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
 	private static final int BANK_GROUP_ID = net.runelite.api.gameval.InterfaceID.BANKMAIN;					// 12
 	private static final int COLLECTION_LOG_GROUP_ID = net.runelite.api.gameval.InterfaceID.COLLECTION;		// 621
+	// Off-book snapshot containers (verified vs runelite-api 1.12.32 gameval enums, javap). gameval int ids so
+	// they match ItemContainerChanged.getContainerId(); Group-Ironman shared storage has no gameval constant, so
+	// its snapshot read uses the legacy InventoryID.GROUP_STORAGE overload of client.getItemContainer(...).
+	private static final int LOOTING_BAG_CONTAINER_ID = net.runelite.api.gameval.InventoryID.LOOTING_BAG;	// 516
+	private static final int SEED_VAULT_CONTAINER_ID = net.runelite.api.gameval.InventoryID.SEED_VAULT;		// 626
+	private static final int BONDS_POUCH_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_POUCH;	// 536
+	private static final int BONDS_ESCROW_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_ESCROW;	// 534
+	private static final int QUIVER_AMMO_CONTAINER_ID = net.runelite.api.gameval.InventoryID.DIZANAS_QUIVER_AMMO; // 879
+
+	// ---- chest / reward-interface loot (gap audit 2026-07-18): raids, Barrows, clues, Colosseum, Lunar,
+	// wildy loot chest. These NEVER fire LootManager (ServerNpcLoot) — RuneLite itself captures them only in
+	// the OPTIONAL LootTrackerPlugin via WidgetLoaded + a reward-container read, which a user can disable.
+	// We replicate the same widget-group -> container reads here (ids javap-verified vs 1.12.33 gameval). ----
+	private static final int RAIDS_REWARDS_GROUP = net.runelite.api.gameval.InterfaceID.RAIDS_REWARDS;			// 539 CoX
+	private static final int RAIDS_REWARDS_CONTAINER = net.runelite.api.gameval.InventoryID.RAIDS_REWARDS;		// 581
+	private static final int TOB_CHESTS_GROUP = net.runelite.api.gameval.InterfaceID.TOB_CHESTS;				// 23
+	private static final int TOB_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOB_CHESTS;			// 612
+	private static final int TOA_CHESTS_GROUP = net.runelite.api.gameval.InterfaceID.TOA_CHESTS;				// 771
+	private static final int TOA_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOA_CHESTS;			// 811 (personal split)
+	private static final int BARROWS_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.BARROWS_REWARD;		// 155
+	private static final int TRAIL_REWARDSCREEN_GROUP = net.runelite.api.gameval.InterfaceID.TRAIL_REWARDSCREEN;	// 73 (clue)
+	private static final int TRAIL_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.TRAIL_REWARDINV;		// 141 (Barrows + clues share it)
+	private static final int COLOSSEUM_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.COLOSSEUM_REWARD_CHEST_2;	// 864
+	private static final int COLOSSEUM_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.COLOSSEUM_REWARDS;	// 843
+	private static final int PMOON_REWARD_GROUP = net.runelite.api.gameval.InterfaceID.PMOON_REWARD;			// 868 Lunar Chest
+	private static final int PMOON_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.PMOON_REWARDINV;		// 847
+	private static final int WILDY_LOOT_CHEST_GROUP = net.runelite.api.gameval.InterfaceID.WILDY_LOOT_CHEST;	// 742
+	private static final int[] WILDY_LOOT_CONTAINERS = {
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV0, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV1,
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV2, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV3,
+		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV4,	// 558-562
+	};
+	private static final int TOB_REGION = 12867;		// Theatre of Blood — the chest widget only counts inside
+	private static final int TOB_LOBBY_REGION = 14642;
+	private boolean chestLooted;		// one instanced-chest emit per visit; reset on LOADING (region change)
+	private String lastChestEmitKey;	// consecutive-identical belt (same widget + same contents = a re-view, not new loot)
 	private static final String TRADE_ACCEPTED_MESSAGE = "Accepted trade.";
 	private static final String TRADE_DECLINED_MESSAGE = "Other player declined trade.";
 	private static final MediaType PNG = MediaType.parse("image/png");
+	private static final MediaType JPEG = MediaType.parse("image/jpeg");	// store delivery-proof burst frames
 	static final int MAX_SCREENSHOT_UPLOAD_BYTES = 5 * 1024 * 1024;	// enforced client-side and server-side
 
 	// Trade state machine (package-private so unit tests can assert on it without a live client).
@@ -205,27 +238,6 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ScheduledExecutorService executor;
 
-	@Inject
-	private KeyManager keyManager;
-
-	@Inject
-	private ClientThread clientThread;
-
-	/**
-	 * Manual "Re-sync now" hotkey (FIX: the site tells users to Re-sync but the plugin only auto-sent on a
-	 * change + debounce). Pressing the configured key forces one immediate snapshot send. The keypress
-	 * arrives on the AWT event thread, so it is marshalled onto the client thread before building the
-	 * snapshot (buildSnapshot reads live client containers). NOT_SET until the user assigns a key.
-	 */
-	private final HotkeyListener resyncHotkeyListener = new HotkeyListener(() -> config.resyncHotkey())
-	{
-		@Override
-		public void hotkeyPressed()
-		{
-			clientThread.invoke(AccountConnectPlugin.this::forceSendSnapshot);
-		}
-	};
-
 	@Provides
 	AccountConnectConfig provideConfig(ConfigManager configManager)
 	{
@@ -235,13 +247,12 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		keyManager.registerKeyListener(resyncHotkeyListener);
 	}
 
 	@Override
 	protected void shutDown()
 	{
-		keyManager.unregisterKeyListener(resyncHotkeyListener);
+		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
 	}
 
 	/**
@@ -304,8 +315,8 @@ public class AccountConnectPlugin extends Plugin
 		final int item;
 		final int qty;
 		final long coinsBefore;
-		final int tick;				// client tick at arm time, for the staleness window
-		final boolean ambiguous;	// overwrote an unresolved click → delta may belong to that one, omit price
+		final int tick;				// client tick at arm time, for staleness + same-tick-batch detection
+		final boolean ambiguous;	// a second click landed on the same tick → delta merges two txns, omit price
 
 		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous)
 		{
@@ -315,6 +326,65 @@ public class AccountConnectPlugin extends Plugin
 			this.coinsBefore = coinsBefore;
 			this.tick = tick;
 			this.ambiguous = ambiguous;
+		}
+	}
+
+	// ---- off-book value events: drop / pickup / alch. A menu click arms an inventory-delta pending, resolved
+	// on the next INVENTORY change from the item-count delta (reuses the store-pending arm/resolve discipline). ----
+	static final int INV_DELTA_PENDING_MAX_TICKS = 5;	// pickup: wait a few ticks (a "Take" may land after a walk)
+	static final int ALCH_PENDING_MAX_TICKS = 2;		// an alch lands next tick — short window, nothing to wait for
+	static final int DROP_PENDING_MAX_TICKS = 16;		// drop: the warning dialog can sit ~10s before the player confirms
+	static final int DROP_SPAWN_MAX_DIST = 2;			// own drops land on/adjacent to the player's tile
+	static final int DROP_CORROBORATION_MAX_TICKS = 2;	// spawn + inventory loss must land within ~1 tick of each other
+	private volatile InvDeltaPending invDeltaPending;
+
+	static final class InvDeltaPending
+	{
+		final String base;			// "drop" | "pickup" | "alch"
+		final int item;
+		final String spell;			// "high" | "low" for alch, else null
+		final long beforeCount;		// count of `item` in the inventory at click time
+		final long beforeCoins;		// carried coins at click time (alch gp confirmation)
+		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
+		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
+		final int tick;
+		// drop only: tick a matching ground spawn was seen at our tile BEFORE the inventory loss was visible.
+		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
+		// first records itself; the second completes the emit. -1 = no corroboration yet.
+		volatile int spawnCorroboratedTick = -1;
+
+		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
+			Map<String, Object> location, Boolean wilderness, int tick)
+		{
+			this.base = base;
+			this.item = item;
+			this.spell = spell;
+			this.beforeCount = beforeCount;
+			this.beforeCoins = beforeCoins;
+			this.location = location;
+			this.wilderness = wilderness;
+			this.tick = tick;
+		}
+	}
+
+	// ---- death items-lost: read pre-death inv+equip live at ActorDeath, resolve the loss diff once the
+	// containers have settled (a few ticks later, at syncTask) or on logout — whichever comes first. ----
+	static final int DEATH_SETTLE_TICKS = 4;	// item removal follows the death animation by a few ticks
+	private volatile DeathPending deathPending;
+
+	static final class DeathPending
+	{
+		final Map<String, Object> location;	// {region_id, plane} at death, or null
+		final String kind;					// "wilderness" | "pvp" | "safe" (only wilderness/pvp is a transfer)
+		final Map<Integer, Long> preCounts;	// merged inventory + equipment item -> qty just before death
+		final int tick;
+
+		DeathPending(Map<String, Object> location, String kind, Map<Integer, Long> preCounts, int tick)
+		{
+			this.location = location;
+			this.kind = kind;
+			this.preCounts = preCounts;
+			this.tick = tick;
 		}
 	}
 
@@ -328,58 +398,313 @@ public class AccountConnectPlugin extends Plugin
 	// State-changing events whose wealth/state must land immediately also force a snapshot. Chat / level_up
 	// are excluded (too frequent / not wealth-moving); login is bound separately by syncTask's new-login send.
 	private static final java.util.Set<String> SNAPSHOT_TRIGGER_EVENTS = new java.util.HashSet<>(
-		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death"));
+		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death", "drop", "alch"));
 
-	/** Trade-screenshot capture requires the local opt-in, no server force-disable, AND a non-excluded account. */
+	/** Trade-screenshot capture requires the local opt-in AND no server force-disable. */
 	boolean screenshotsEnabled()
 	{
 		// toggle first: when off, short-circuit before touching client (the feature is off regardless).
-		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled && !isCurrentAccountExcluded();
+		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled;
 	}
 
-	/** True if the logged-in character is on the user's "don't sync these accounts" list (personal opt-out). */
-	boolean isCurrentAccountExcluded()
+	// ---- store delivery-proof: burst frame capture (Task B2) ----
+	// While a shop is open, sample the render at a low WALL-CLOCK rate into a bounded ring buffer. On
+	// shop-close, if the visit had a buy/sell the frames go to the (B3) uploader; otherwise they are
+	// dropped. Frames are captured raw here — no video encode in the plugin; the server stitches them.
+	static final int CLIP_FPS = 1;					// sample rate (constant, NOT a user setting)
+	static final int CLIP_SECONDS = 120;				// max clip length retained
+	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// ring capacity = 120 frames
+	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
+	// (Plan body text says 640px; 768 is the ratified Task-0 override.)
+	static final int MAX_FRAME_WIDTH = 768;
+	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the burst keeps the
+	// newest suffix that fits both the frame-count cap and this total-bytes cap.
+	static final int MAX_CLIP_FRAME_BYTES = 1_000_000;		// 1MB per frame
+	static final int MAX_CLIP_BURST_BYTES = 12_000_000;		// 12MB per burst
+
+	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
+	 *  (it can never force it ON — that stays a local opt-in, mirroring serverScreenshotsDisabled). */
+	volatile boolean serverClipsDisabled;
+	/** Armed between shop-open and shop-close while capture is running. */
+	private volatile boolean clipCapturing;
+	/** Set the moment a general-store buy/sell fires during the visit — a visit without one is dropped. */
+	volatile boolean storeTxThisVisit;
+	/** Bounded FIFO of sampled frames; created per capture, snapshotted + cleared on stop. */
+	private volatile ClipRingBuffer clipRing;
+	/** Wall-clock (nanoTime) of the next frame to sample; a render tick before this is skipped. */
+	private volatile long nextClipSampleAt;
+	/** Set on a sampled tick to request one frame from DrawManager; cleared when that frame arrives. */
+	private volatile boolean clipFramePending;
+	/** Per-frame render callback, registered with DrawManager only while capturing. */
+	private final Runnable clipFrameTick = this::onClipFrameTick;
+
+	/** Store-clip capture requires the local opt-in AND no server force-disable (both read live per call). */
+	boolean storeClipsEnabled()
 	{
-		if (client == null)
-		{
-			return false;
-		}
-		net.runelite.api.Player p = client.getLocalPlayer();
-		return p != null && isAccountExcluded(p.getName());
+		return config.uploadTradeScreenshots() && !serverClipsDisabled;
 	}
 
-	/** Case-insensitive membership test of a character name against the comma-separated excluded list. */
-	boolean isAccountExcluded(String playerName)
+	/**
+	 * Arm capture for a shop visit: fresh ring, reset the decimation clock + tx flag, and start listening
+	 * to the render loop. Idempotent — a second shop-open while already capturing is ignored.
+	 */
+	void startStoreClipCapture()
 	{
-		if (playerName == null)
+		if (clipCapturing || !storeClipsEnabled())
+		{
+			return;
+		}
+		clipRing = new ClipRingBuffer(MAX_CLIP_FRAMES);
+		storeTxThisVisit = false;
+		nextClipSampleAt = 0L;			// 0 => the first render tick samples immediately
+		clipFramePending = false;
+		clipCapturing = true;
+		drawManager.registerEveryFrameListener(clipFrameTick);
+	}
+
+	/**
+	 * Wall-clock 1-in-time decimation: returns true at most once per (1/CLIP_FPS) second regardless of
+	 * render fps (render fluctuates ~20-50fps, so a frame-count divisor would drift). Advances the gate
+	 * on every hit so it is a steady rate, not a one-shot.
+	 */
+	boolean shouldSampleClipFrame(long nowNanos)
+	{
+		if (nowNanos < nextClipSampleAt)
 		{
 			return false;
 		}
-		String excluded = config.excludedAccounts();
-		if (excluded == null || excluded.trim().isEmpty())
+		nextClipSampleAt = nowNanos + 1_000_000_000L / CLIP_FPS;
+		return true;
+	}
+
+	/**
+	 * Render-loop callback (runs every frame while capturing). Decimates by wall clock, then asks
+	 * DrawManager for the next composited frame; that frame arrives on the consumer, is converted to an
+	 * RGB (no-alpha) buffer, downscaled, and stored. One request outstanding at a time (clipFramePending).
+	 */
+	void onClipFrameTick()
+	{
+		if (!clipCapturing || clipFramePending)
 		{
-			return false;
+			return;
 		}
-		String target = playerName.trim().toLowerCase(java.util.Locale.ROOT);
-		for (String name : excluded.split(","))
+		if (!shouldSampleClipFrame(System.nanoTime()))
 		{
-			if (name.trim().toLowerCase(java.util.Locale.ROOT).equals(target))
+			return;
+		}
+		clipFramePending = true;
+		drawManager.requestNextFrameListener(img ->
+		{
+			try
 			{
-				return true;
+				ClipRingBuffer ring = clipRing;
+				if (ring != null && img != null)
+				{
+					ring.add(downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH));
+				}
+			}
+			finally
+			{
+				clipFramePending = false;
+			}
+		});
+	}
+
+	/**
+	 * Stop capturing: unregister the render listener, snapshot the ring, and — only when upload is
+	 * requested AND the visit had a buy/sell — hand the frames to the uploader. Always clears state so a
+	 * dropped visit leaks nothing. Idempotent.
+	 */
+	void stopStoreClipCapture(boolean upload)
+	{
+		if (!clipCapturing)
+		{
+			return;
+		}
+		clipCapturing = false;
+		drawManager.unregisterEveryFrameListener(clipFrameTick);
+		ClipRingBuffer ring = clipRing;
+		clipRing = null;
+		clipFramePending = false;
+		boolean hadTx = storeTxThisVisit;
+		storeTxThisVisit = false;
+		if (ring == null)
+		{
+			return;
+		}
+		if (!upload || !hadTx)
+		{
+			ring.clear();		// no purchase, or shutdown/hop drop — discard without uploading
+			return;
+		}
+		List<BufferedImage> frames = ring.snapshot();
+		ring.clear();
+		if (!frames.isEmpty())
+		{
+			submitStoreClipUpload(frames);
+		}
+	}
+
+	/**
+	 * Copy any rendered Image into a TYPE_INT_RGB (no-alpha) BufferedImage. The JDK JPEG writer corrupts
+	 * ARGB rasters, so store-clip frames are always RGB. This is deliberately SEPARATE from the trade
+	 * path's ARGB toBufferedImage — never reuse that here.
+	 */
+	static BufferedImage toRgbFrame(java.awt.Image img)
+	{
+		if (img == null)
+		{
+			return null;
+		}
+		int w = img.getWidth(null);
+		int h = img.getHeight(null);
+		if (w <= 0 || h <= 0)
+		{
+			return null;
+		}
+		BufferedImage rgb = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = rgb.createGraphics();
+		g.drawImage(img, 0, 0, null);
+		g.dispose();
+		return rgb;
+	}
+
+	/**
+	 * Downscale to at most maxWidth (aspect preserved) into a fresh TYPE_INT_RGB buffer. Frames already
+	 * within maxWidth are returned unchanged. Keeps store text legible at the server stitch size (Task-0).
+	 */
+	static BufferedImage downscaleRgb(BufferedImage src, int maxWidth)
+	{
+		if (src == null || maxWidth <= 0 || src.getWidth() <= maxWidth)
+		{
+			return src;
+		}
+		int w = maxWidth;
+		int h = Math.max(1, (int) Math.round(src.getHeight() * (maxWidth / (double) src.getWidth())));
+		BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = dst.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+			java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		g.drawImage(src, 0, 0, w, h, null);
+		g.dispose();
+		return dst;
+	}
+
+	/**
+	 * Encode the visit's frames to JPEG on the background executor, keep the newest suffix that fits the
+	 * server caps, and POST them as ONE multipart burst to /store-frames-ingest. Mirrors the trade-upload
+	 * okhttp idioms: token guard, apiBaseUrl trim, RequestBody.create(MediaType, bytes), async enqueue.
+	 * Encoding + upload run off the render thread; a bad token or an empty burst is a silent no-op.
+	 */
+	void submitStoreClipUpload(java.util.List<BufferedImage> frames)
+	{
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty())
+		{
+			return;	// same guard as the trade path — no / malformed token, or nothing to send
+		}
+		long capturedAt = System.currentTimeMillis() / 1000L;
+		executor.submit(() ->
+		{
+			java.util.List<byte[]> encoded = new java.util.ArrayList<>(frames.size());
+			for (BufferedImage frame : frames)
+			{
+				encoded.add(encodeJpeg(frame));	// null / oversized entries are filtered by selectStoreClipFrames
+			}
+			java.util.List<byte[]> kept = selectStoreClipFrames(
+				encoded, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
+			if (kept.isEmpty())
+			{
+				return;
+			}
+			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			Request request = new Request.Builder()
+				.url(base + "/store-frames-ingest")
+				.post(buildStoreClipBody(kept, token, capturedAt, CLIP_FPS))
+				.build();
+
+			okHttpClient.newCall(request).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException e)
+				{
+					log.debug("OSRS BiS store-clip burst upload failed", e);
+				}
+
+				@Override
+				public void onResponse(Call call, Response response)
+				{
+					try
+					{
+						log.debug("OSRS BiS store-clip burst upload response: {}", response.code());
+					}
+					finally
+					{
+						response.close();
+					}
+				}
+			});
+		});
+	}
+
+	/**
+	 * Choose which encoded frames go in the burst. Pass 1: drop any frame that failed to encode or exceeds
+	 * the per-frame cap. Pass 2: keep the NEWEST suffix that fits both maxFrames and maxBurstBytes, walking
+	 * from the END — the shop-close / sale frames are the actual delivery evidence, so an oversized burst
+	 * must drop the OLDEST frames, never the newest. Chronological order within the kept suffix is preserved.
+	 */
+	static java.util.List<byte[]> selectStoreClipFrames(java.util.List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
+	{
+		java.util.List<byte[]> valid = new java.util.ArrayList<>(encoded.size());
+		for (byte[] b : encoded)
+		{
+			if (b != null && b.length > 0 && b.length <= maxFrameBytes)
+			{
+				valid.add(b);
 			}
 		}
-		return false;
+		int start = valid.size();
+		long total = 0;
+		int kept = 0;
+		while (start > 0 && kept < maxFrames && total + valid.get(start - 1).length <= maxBurstBytes)
+		{
+			total += valid.get(start - 1).length;
+			start--;
+			kept++;
+		}
+		return new java.util.ArrayList<>(valid.subList(start, valid.size()));
+	}
+
+	/**
+	 * Build the one multipart burst body: token, captured_at, fps, then the kept frames[] parts, then
+	 * frame_count LAST so it always equals the number of parts actually attached (the server 400s on a
+	 * mismatch). Frames are JPEG, named frame-000.jpg upward in chronological order.
+	 */
+	static okhttp3.MultipartBody buildStoreClipBody(java.util.List<byte[]> kept, String token, long capturedAt, int fps)
+	{
+		MultipartBody.Builder builder = new MultipartBody.Builder()
+			.setType(MultipartBody.FORM)
+			.addFormDataPart("token", token)
+			.addFormDataPart("captured_at", Long.toString(capturedAt))
+			.addFormDataPart("fps", Integer.toString(fps));
+		for (int i = 0; i < kept.size(); i++)
+		{
+			builder.addFormDataPart("frames[]", String.format("frame-%03d.jpg", i),
+				RequestBody.create(JPEG, kept.get(i)));
+		}
+		builder.addFormDataPart("frame_count", Integer.toString(kept.size()));
+		return builder.build();
 	}
 
 	/**
 	 * The activity log is part of core sync — no separate toggle. It's active whenever a valid link
-	 * token is set and the logged-in account isn't on the opt-out list: the SAME gate as the snapshot
-	 * upload. Disclosed on the link-token config + the osrsbestinslot connect flow.
+	 * token is set: the SAME gate as the snapshot upload. Disclosed on the link-token config + the
+	 * osrsbestinslot connect flow.
 	 */
 	boolean activityLogActive()
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
-		return token.matches("^[a-f0-9]{32}$") && !isCurrentAccountExcluded();
+		return token.matches("^[a-f0-9]{32}$");
 	}
 
 	/**
@@ -424,7 +749,7 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * State-changing events (trade / ge_* / store_* / death) push a fresh snapshot immediately so post-event
-	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, excluded, backoff)
+	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, backoff)
 	 * and is async. client is null only in buffer-only unit tests — real runtime always has it injected.
 	 */
 	private void maybeForceSnapshotForEvent(String type)
@@ -642,10 +967,6 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // personal account on the user's opt-out list — never build, track, or send it
-		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -654,6 +975,12 @@ public class AccountConnectPlugin extends Plugin
 		// WAVE 3: sample idle counters on the last logged-in tick so a later logout can be classified idle/manual.
 		lastKeyboardIdleTicks = client.getKeyboardIdleTicks();
 		lastMouseIdleTicks = client.getMouseIdleTicks();
+		// Resolve a deferred death once the containers have settled (a few ticks after ActorDeath). If a syncTask
+		// fires too soon after death, wait for the next one — items may not be removed yet.
+		if (deathPending != null && client.getTickCount() - deathPending.tick >= DEATH_SETTLE_TICKS)
+		{
+			resolveDeathPendingViaLiveContainers();
+		}
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
@@ -692,26 +1019,22 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * Force one snapshot send NOW, bypassing the unchanged-hash gate AND the debounce interval. Shared by
-	 * the manual "Re-sync now" hotkey and capture-on-open (bank / collection log). It still honors the
-	 * guards that make a send valid at all — logged in, token set, account not excluded — and an active
+	 * capture-on-open (bank / collection log) and the snapshot-trigger events. It still honors the
+	 * guards that make a send valid at all — logged in, token set — and an active
 	 * 429 backoff (the server explicitly said stop; a client-side force never overrides that). It
 	 * deliberately does NOT touch lastSendMillis: a capture-on-open send can land a tick before the data
 	 * finishes populating (the collection log fills as its draw scripts run), and updating the debounce
 	 * clock here would hold back the real snapshot the next tick sends. lastUploadedHash is still recorded
 	 * on accept (shared postSnapshot callback), so an unchanged follow-up tick won't re-send; the only
 	 * cost is at most one duplicate POST if a scheduled tick races the async accept, which the server
-	 * dedupes by hash. Must run on the client thread (WidgetLoaded delivery, or ClientThread.invoke from
-	 * the hotkey) so reading client containers is safe.
+	 * dedupes by hash. Must run on the client thread (WidgetLoaded delivery, or ClientThread.invoke) so
+	 * reading client containers is safe.
 	 */
 	void forceSendSnapshot()
 	{
 		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
-		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // personal account on the user's opt-out list — never build, track or send it
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
@@ -802,10 +1125,6 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (isCurrentAccountExcluded())
-		{
-			return; // opted-out account — don't cache its post-trade wealth either
-		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -836,24 +1155,50 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
+		GameState state = event.getGameState();
+		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
+		// valid delivery proof if the visit had a buy/sell (upload=true only uploads when it did), else dropped.
+		if (clipCapturing
+			&& (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST))
+		{
+			stopStoreClipCapture(true);
+		}
 		switch (event.getGameState())
 		{
+			case LOADING:
+				// Region transition — a NEW instanced chest may lie ahead; the belt keys are per-visit.
+				chestLooted = false;
+				lastChestEmitKey = null;
+				// Scene reload replays existing ground piles as fresh ItemSpawned events (Codex consult
+				// 2026-07-18) — a surviving pending could pair a replayed same-id pile with an unrelated
+				// inventory loss. A drop clicked right before a region boundary is lost; miss beats fabricate.
+				invDeltaPending = null;
+				break;
 			case HOPPING:
 			case LOGGING_IN:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
+				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
+				chestLooted = false;
+				lastChestEmitKey = null;
 				break;
 			case CONNECTION_LOST:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();
+				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a disconnect
+				// a feed-death then instant disconnect: record the death, but the containers here are null or
+				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
+				resolveDeathPending(null, false);
 				// WAVE 3: a dropped connection previously emitted NOTHING. Emit an explicit logout so a crash /
 				// disconnect is distinguishable from a clean logout. Ends the session; a reconnect re-logs in.
 				trackLogout("connection_lost");
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
+				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a logout
+				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
 				break;
@@ -873,8 +1218,16 @@ public class AccountConnectPlugin extends Plugin
 		// from the changed container itself (final post-transaction state) — independent of the trade gate above.
 		if (event.getContainerId() == INVENTORY_CONTAINER_ID)
 		{
-			long coinsAfter = countItem(event.getItemContainer(), COINS_ID);
-			resolveStorePendingOnInventoryChange(coinsAfter, client == null ? 0 : client.getTickCount());
+			ItemContainer inv = event.getItemContainer();
+			long coinsAfter = countItem(inv, COINS_ID);
+			int tick = client == null ? 0 : client.getTickCount();
+			resolveStorePendingOnInventoryChange(coinsAfter, tick);
+			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
+			InvDeltaPending idp = invDeltaPending;
+			if (idp != null)
+			{
+				resolveInvDeltaPending(countItem(inv, idp.item), coinsAfter, tick);
+			}
 		}
 	}
 
@@ -902,6 +1255,114 @@ public class AccountConnectPlugin extends Plugin
 		handleTradeWidgetLoaded(event.getGroupId());
 		handleActivityWidgetLoaded(event.getGroupId());
 		handleCaptureOnOpenWidgetLoaded(event.getGroupId());
+		handleChestLootWidgetLoaded(event.getGroupId());
+	}
+
+	/**
+	 * Chest / reward-interface loot (the raid-income blind spot — gap audit 2026-07-18). Mirrors RuneLite's
+	 * own LootTrackerPlugin widget handlers so the capture works even with LootTracker disabled. Emits through
+	 * the existing emitLoot as source_type "event". Dedup is two-belt: instanced chests (raids / Colosseum /
+	 * Lunar) emit once per visit via chestLooted (reset on LOADING = region transition); ALL groups also skip a
+	 * consecutive re-emit of identical contents (a re-viewed chest is the same loot, not new income). An
+	 * unreadable/empty container emits nothing — no fabrication. ToA's container already holds only this
+	 * player's split; ToB is region-gated like LootTracker. Package-private for unit tests.
+	 */
+	void handleChestLootWidgetLoaded(int groupId)
+	{
+		if (!activityLogActive() || client == null)
+		{
+			return;
+		}
+		String source;
+		int[] containers;
+		boolean instanced = false;
+		switch (groupId)
+		{
+			case RAIDS_REWARDS_GROUP:
+				source = "Chambers of Xeric";
+				containers = new int[]{RAIDS_REWARDS_CONTAINER};
+				instanced = true;
+				break;
+			case TOB_CHESTS_GROUP:
+			{
+				Map<String, Object> loc = currentLocation();
+				int region = loc == null ? -1 : (Integer) loc.get("region_id");
+				if (region != TOB_REGION && region != TOB_LOBBY_REGION)
+				{
+					return;	// the group can load outside the chest room — only count in ToB itself
+				}
+				source = "Theatre of Blood";
+				containers = new int[]{TOB_CHESTS_CONTAINER};
+				instanced = true;
+				break;
+			}
+			case TOA_CHESTS_GROUP:
+				source = "Tombs of Amascut";
+				containers = new int[]{TOA_CHESTS_CONTAINER};
+				instanced = true;
+				break;
+			case BARROWS_REWARD_GROUP:
+				source = "Barrows";
+				containers = new int[]{TRAIL_REWARD_CONTAINER};
+				break;
+			case TRAIL_REWARDSCREEN_GROUP:
+				source = "Clue Scroll";
+				containers = new int[]{TRAIL_REWARD_CONTAINER};
+				break;
+			case COLOSSEUM_REWARD_GROUP:
+				source = "Fortis Colosseum";
+				containers = new int[]{COLOSSEUM_REWARD_CONTAINER};
+				instanced = true;
+				break;
+			case PMOON_REWARD_GROUP:
+				source = "Lunar Chest";
+				containers = new int[]{PMOON_REWARD_CONTAINER};
+				instanced = true;
+				break;
+			case WILDY_LOOT_CHEST_GROUP:
+				source = "Loot Chest";
+				containers = WILDY_LOOT_CONTAINERS;
+				break;
+			default:
+				return;
+		}
+		if (instanced && chestLooted)
+		{
+			return;	// this instance visit's chest is already counted
+		}
+		List<ItemStack> stacks = new ArrayList<>();
+		StringBuilder key = new StringBuilder().append(groupId);
+		for (int containerId : containers)
+		{
+			ItemContainer c = client.getItemContainer(containerId);
+			if (c == null)
+			{
+				continue;
+			}
+			for (Item item : c.getItems())
+			{
+				if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+				{
+					stacks.add(new ItemStack(item.getId(), item.getQuantity()));
+					key.append(':').append(item.getId()).append('x').append(item.getQuantity());
+				}
+			}
+		}
+		if (stacks.isEmpty())
+		{
+			return;	// unreadable or empty reward — emit nothing rather than fabricate
+		}
+		String k = key.toString();
+		if (k.equals(lastChestEmitKey))
+		{
+			return;	// same widget re-showing the same contents = a re-view, not new loot
+		}
+		lastChestEmitKey = k;
+		if (instanced)
+		{
+			chestLooted = true;
+		}
+		emitLoot(source, "event", stacks);
 	}
 
 	/**
@@ -909,7 +1370,7 @@ public class AccountConnectPlugin extends Plugin
 	 * immediate snapshot so those containers sync the moment they become readable, instead of waiting up
 	 * to a full debounce interval for the next scheduled tick (the "opened my bank, still says not synced"
 	 * complaint). WidgetLoaded is delivered on the client thread, so forceSendSnapshot reads containers
-	 * directly. Its own guards (token / excluded / backoff) still apply — an unlinked or opted-out account
+	 * directly. Its own guards (token / backoff) still apply — an unlinked account
 	 * opening its bank sends nothing.
 	 */
 	void handleCaptureOnOpenWidgetLoaded(int groupId)
@@ -934,6 +1395,7 @@ public class AccountConnectPlugin extends Plugin
 		if (groupId == SHOP_GROUP_ID)
 		{
 			shopOpen = true;
+			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
 		}
 		else if (groupId == TRADE_CONFIRM_GROUP_ID)
 		{
@@ -1142,6 +1604,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			shopOpen = false;
 			flushStorePendingOnShopClose();
+			stopStoreClipCapture(true);	// end the visit; upload only if it had a buy/sell, else drop
 		}
 	}
 
@@ -1150,6 +1613,9 @@ public class AccountConnectPlugin extends Plugin
 	 * The coin delta can no longer be attributed, but the transaction itself did happen — emit the degraded
 	 * {item, qty} form rather than losing the event, which is what the pre-price behaviour reported anyway.
 	 * Package-private seam so the close path is unit testable without a live client.
+	 *
+	 * Carried forward from 0.7.1 (the build currently on the Hub). Dropping the pending here, as this
+	 * branch previously did, silently loses every buy-then-close transaction.
 	 */
 	void flushStorePendingOnShopClose()
 	{
@@ -1175,24 +1641,27 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
-	/** "Accepted trade." commits the buffered frame; a decline discards it. Tag-tolerant match. */
+	/**
+	 * TRADE messages drive the trade-completion path ("Accepted trade." commits the buffered frame;
+	 * a decline discards it — tag-tolerant match). All messages then fall through to the activity
+	 * sweep, which self-filters to own-account game chat (GAMEMESSAGE / SPAM).
+	 */
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (event.getType() != ChatMessageType.TRADE)
+		if (event.getType() == ChatMessageType.TRADE)
 		{
-			return;
+			// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
+			// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
+			// since the trade. Client thread; containers are valid right after "Accepted trade.".
+			if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
+				Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
+			{
+				refreshSnapshotCacheAfterTrade();
+				emitTradeEvent();
+			}
+			handleTradeChat(event.getMessage());
 		}
-		// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
-		// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
-		// since the trade. Client thread; containers are valid right after "Accepted trade.".
-		if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
-			Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
-		{
-			refreshSnapshotCacheAfterTrade();
-			emitTradeEvent();
-		}
-		handleTradeChat(event.getMessage());
 		emitChatActivity(event);
 	}
 
@@ -1238,34 +1707,40 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
+		// Delivery-proof tx flag — hoisted ABOVE the activity-log gate (grill F5): a clip's buy/sell must
+		// not be dropped just because activity logging is off. Only relevant while a clip is capturing.
+		if (clipCapturing && shopOpen && isStoreBuyOrSell(event))
+		{
+			storeTxThisVisit = true;
+		}
+		// Off-book value events (drop / pickup / alch): own gate (not shop-scoped) — arm an inventory-delta
+		// pending resolved on the next INVENTORY change. BEFORE the store gate so the shop-open early-return
+		// below never swallows it.
+		maybeArmInvDeltaPending(event);
 		if (!shopOpen || !activityLogActive())
 		{
 			return;
 		}
-		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
-		String type;
-		if (opt.startsWith("Buy"))
-		{
-			type = "store_buy";
-		}
-		else if (opt.startsWith("Sell"))
-		{
-			type = "store_sell";
-		}
-		else
+		String type = storeTxType(event);
+		if (type == null)
 		{
 			return;
 		}
+		int item = event.getItemId();
+		if (item <= 0)
+		{
+			return;	// no resolvable item id — same guard the off-book path uses; skip rather than emit -1
+		}
+		String opt = event.getMenuOption();	// non-null here: storeTxType only matches a "Buy"/"Sell" prefix
 		// WAVE 6 (store price): don't emit here — arm a pending and let the next INVENTORY change resolve the
-		// exact transacted gp from the coin-count delta. Snapshot coins BEFORE the transaction.
-		// Last-click-wins: overwriting a pending that has NOT yet resolved means the incoming coin delta may
-		// belong to the click being dropped rather than this one (the inventory change can lag the click by a
-		// tick or more), so the new pending is marked ambiguous and the resolver omits gp_total rather than
-		// misattribute one click's price to another.
+		// exact transacted gp from the coin-count delta (store-price-feasibility.md option B). Snapshot coins
+		// BEFORE the transaction. Last-click-wins: a second click on the same tick marks the pending ambiguous
+		// (its delta would merge two txns), so the resolver omits gp_total rather than misattribute it.
 		long coinsBefore = countItem(client == null ? null : client.getItemContainer(InventoryID.INVENTORY), COINS_ID);
 		int tick = client == null ? 0 : client.getTickCount();
-		boolean ambiguous = storePending != null;
-		storePending = new StorePending(type, event.getItemId(), parseTrailingQty(opt), coinsBefore, tick, ambiguous);
+		StorePending prev = storePending;
+		boolean ambiguous = prev != null && prev.tick == tick;
+		storePending = new StorePending(type, item, parseTrailingQty(opt), coinsBefore, tick, ambiguous);
 	}
 
 	/**
@@ -1282,9 +1757,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		// Two-sided window on purpose: a backwards jump in the tick counter (login / world hop with the shop
-		// still open) would otherwise leave a long-stale coinsBefore paired with a fresh inventory change.
-		if (Math.abs(currentTick - p.tick) > STORE_PENDING_MAX_TICKS)
+		if (currentTick - p.tick > STORE_PENDING_MAX_TICKS)
 		{
 			storePending = null;	// stale: a failed click's pending paired with an unrelated later change
 			return;
@@ -1300,7 +1773,7 @@ public class AccountConnectPlugin extends Plugin
 	/**
 	 * Build the store event fields. {item, qty} always; gp_total = the exact coins that moved, added ONLY
 	 * when the delta is cleanly attributable — right sign for the direction (buy → coins fell, sell → rose)
-	 * and not ambiguous (no unresolved earlier click whose delta this might be). unit_price_gp is a LABELLED average (gp_total/qty), only meaningful for
+	 * and not a same-tick batch. unit_price_gp is a LABELLED average (gp_total/qty), only meaningful for
 	 * qty>1; per-item price scales mid-batch as stock moves, so it is never a flat rate. When the delta can't
 	 * be trusted, degrade to {item, qty} only (option D) rather than emit a guess. Pure/static: no client.
 	 */
@@ -1323,6 +1796,31 @@ public class AccountConnectPlugin extends Plugin
 		return fields;
 	}
 
+	/**
+	 * The general-store transaction type for a menu click — "store_buy", "store_sell", or null if it is
+	 * neither. SINGLE source of truth for what counts as a store buy/sell: the emit path derives its event
+	 * type from this and isStoreBuyOrSell delegates to it, so the two can never drift (grill F5).
+	 */
+	static String storeTxType(MenuOptionClicked event)
+	{
+		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
+		if (opt.startsWith("Buy"))
+		{
+			return "store_buy";
+		}
+		if (opt.startsWith("Sell"))
+		{
+			return "store_sell";
+		}
+		return null;
+	}
+
+	/** True when a menu click is a general-store buy/sell (delegates to storeTxType — never a second match). */
+	static boolean isStoreBuyOrSell(MenuOptionClicked event)
+	{
+		return storeTxType(event) != null;
+	}
+
 	/** "Buy 10" -> 10, "Sell 1" -> 1, "Buy" -> 1 (default). */
 	static int parseTrailingQty(String option)
 	{
@@ -1335,6 +1833,254 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return 1;
 		}
+	}
+
+	/**
+	 * Off-book value events. A "Drop", ground-item "Take", or High/Low-Alchemy cast arms an inventory-delta
+	 * pending, resolved on the next INVENTORY change from the item-count delta (alch also confirms the gp gained
+	 * from the coin delta). Own gate on the activity log; not shop-scoped. Last-click-wins like the store pending
+	 * (a fresh click supersedes an unresolved one — rapid drop-all logs the last drop; the wealth snapshot nets
+	 * the rest). getItemId() carries the item for Drop/Take (same accessor the store path uses); for alch it is
+	 * [verify in-client] (a spell-on-item click may report -1), so an unresolvable item id is skipped, not guessed.
+	 */
+	void maybeArmInvDeltaPending(MenuOptionClicked event)
+	{
+		if (!activityLogActive())
+		{
+			return;
+		}
+		String action = offBookMenuAction(event);
+		if (action == null)
+		{
+			return;
+		}
+		int item = event.getItemId();
+		if (item <= 0)
+		{
+			return;	// no resolvable item id (e.g. alch spell-on-item may report -1) — skip rather than guess
+		}
+		String base = action.startsWith("alch") ? "alch" : action;
+		String spell = "alch_high".equals(action) ? "high" : ("alch_low".equals(action) ? "low" : null);
+		ItemContainer inv = client == null ? null : client.getItemContainer(InventoryID.INVENTORY);
+		long beforeCount = countItem(inv, item);
+		long beforeCoins = countItem(inv, COINS_ID);
+		int tick = client == null ? 0 : client.getTickCount();
+		Map<String, Object> location = "alch".equals(base) ? null : currentLocation();
+		Boolean wilderness = "drop".equals(base)
+			? (client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
+			: null;
+		invDeltaPending = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick);
+	}
+
+	/**
+	 * Ground-spawn confirmation for drops (the M3 redesign). A "drop" pending resolves ONLY when BOTH signals
+	 * co-occur: the armed item APPEARS ON THE GROUND on/adjacent to the player's tile, AND the player's
+	 * inventory holds fewer of it than at click time. An inventory removal alone (equip / eat / bank deposit /
+	 * destroy — including via widget buttons that carry no item id) spawns no ground item, so it can never
+	 * fabricate a drop; a ground item alone (another player's drop becoming visible) shows no inventory loss,
+	 * so it never resolves either. Package-private + primitives so it is unit-testable without a client.
+	 */
+	/** Backwards-compatible overload — a plain ItemSpawned is always a fresh (grown) ground item. */
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick)
+	{
+		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, true);
+	}
+
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null || !"drop".equals(p.base) || spawnedItemId != p.item || dist > DROP_SPAWN_MAX_DIST || !stackGrew)
+		{
+			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
+		}
+		if (deathPending != null)
+		{
+			// Death belt (backs the onActorDeath disarm): mid-death ground spawns + inventory wipe are the
+			// death's items, never a player-initiated drop — refuse all corroboration while a death settles.
+			invDeltaPending = null;
+			return;
+		}
+		if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
+		{
+			invDeltaPending = null;	// stale — the click this pending belonged to is long over
+			return;
+		}
+		long delta = p.beforeCount - invCountAfter;
+		if (delta <= 0)
+		{
+			// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a server
+			// packet detail we don't control). Record the corroboration; the inventory-change path completes
+			// the emit when the loss lands. Without this, spawn-first ordering would miss EVERY drop.
+			p.spawnCorroboratedTick = currentTick;
+			return;
+		}
+		invDeltaPending = null;	// consume — both signals confirmed
+		emitDropEvent(p, delta);
+	}
+
+	/** Shared drop emit — reached from either signal order. */
+	private void emitDropEvent(InvDeltaPending p, long qty)
+	{
+		if (!activityLogActive())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", p.item);
+		fields.put("qty", qty);
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		fields.put("wilderness", p.wilderness != null && p.wilderness);
+		emitEvent("drop", fields);
+	}
+
+	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
+	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile, boolean stackGrew)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null || !"drop".equals(p.base) || client == null || it == null || tile == null)
+		{
+			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
+		}
+		// Ownership discriminator (Codex consult 2026-07-18): the client tags ground items with ownership,
+		// and a fresh OWN drop is always OWNERSHIP_SELF. Anything else (another player's pile, an NPC drop,
+		// an ownerless world spawn, a GIM partner's item) can never corroborate OUR drop — this closes the
+		// whole coincidental-foreign-source fabrication class in one check. [verify in-client]
+		if (it.getOwnership() != net.runelite.api.TileItem.OWNERSHIP_SELF)
+		{
+			return;
+		}
+		net.runelite.api.Player me = client.getLocalPlayer();
+		net.runelite.api.coords.WorldPoint pw = me == null ? null : me.getWorldLocation();
+		net.runelite.api.coords.WorldPoint tw = tile.getWorldLocation();
+		if (pw == null || tw == null || pw.getPlane() != tw.getPlane())
+		{
+			return;
+		}
+		int dist = Math.abs(pw.getX() - tw.getX()) + Math.abs(pw.getY() - tw.getY());
+		long invCount = countItem(client.getItemContainer(InventoryID.INVENTORY), it.getId());
+		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, client.getTickCount(), stackGrew);
+	}
+
+	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
+	@Subscribe
+	public void onItemSpawned(net.runelite.api.events.ItemSpawned event)
+	{
+		handleGroundItemForDropPending(event.getItem(), event.getTile(), true);
+	}
+
+	/**
+	 * Dropping a stackable onto an existing ground stack merges instead of spawning — same confirmation, but
+	 * ONLY when the stack GREW (a shrinking stack is another player looting it, never our drop landing).
+	 */
+	@Subscribe
+	public void onItemQuantityChanged(net.runelite.api.events.ItemQuantityChanged event)
+	{
+		handleGroundItemForDropPending(event.getItem(), event.getTile(),
+			event.getNewQuantity() > event.getOldQuantity());
+	}
+
+	/**
+	 * Classify a menu click as an off-book value action: "drop" (inventory Drop), "pickup" (ground Take), or
+	 * "alch_high"/"alch_low" (High/Low Level Alchemy cast). Alch menu shape varies — option "Cast High Level
+	 * Alchemy", or option "Cast" with the spell name in the target — so it matches the spell name across the
+	 * combined option+target text. Returns null for anything else. Static + pure (no client) so it is unit-testable.
+	 */
+	static String offBookMenuAction(MenuOptionClicked event)
+	{
+		String opt = event.getMenuOption() == null ? "" : event.getMenuOption();
+		if (opt.equals("Drop"))
+		{
+			return "drop";
+		}
+		if (opt.equals("Take"))
+		{
+			return "pickup";
+		}
+		if (opt.startsWith("Cast"))
+		{
+			String combined = opt + " " + (event.getMenuTarget() == null ? "" : event.getMenuTarget());
+			if (combined.contains("High Level Alchemy"))
+			{
+				return "alch_high";
+			}
+			if (combined.contains("Low Level Alchemy"))
+			{
+				return "alch_low";
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Resolve an armed pickup/alch pending against the post-change inventory. pickup fires when the item count
+	 * ROSE (an inventory removal can't fake a rise); alch fires only when the item fell AND coins rose in the
+	 * same change (an alch always yields coins — an item removal without a coin gain is an equip/bank/destroy,
+	 * never an alch). "drop" pendings NEVER resolve here: an inventory removal alone could be a bank deposit /
+	 * destroy / equip, so drops resolve exclusively via ground-spawn confirmation
+	 * (resolveDropPendingOnGroundSpawn) — this path only expires a stale drop pending. Unrelated inventory
+	 * changes are ignored and the pending kept until it lands or its tick window expires (so a "Take" that
+	 * completes after a short walk still logs). Package-private + primitive args so it is unit-testable.
+	 */
+	void resolveInvDeltaPending(long itemCountAfter, long coinsAfter, int currentTick)
+	{
+		InvDeltaPending p = invDeltaPending;
+		if (p == null)
+		{
+			return;
+		}
+		if ("drop".equals(p.base))
+		{
+			// Order-independence: if a matching ground spawn already corroborated (spawn processed before the
+			// inventory decrement) and the loss now lands within the corroboration window, complete the emit.
+			long dropDelta = p.beforeCount - itemCountAfter;
+			int spawnTick = p.spawnCorroboratedTick;
+			if (dropDelta > 0 && spawnTick >= 0 && currentTick - spawnTick <= DROP_CORROBORATION_MAX_TICKS)
+			{
+				invDeltaPending = null;
+				emitDropEvent(p, dropDelta);
+				return;
+			}
+			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
+			{
+				invDeltaPending = null;	// no ground spawn ever confirmed it — expire silently, emit nothing
+			}
+			return;
+		}
+		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
+		long gp = coinsAfter - p.beforeCoins;
+		boolean landed = delta > 0 && (!"alch".equals(p.base) || gp > 0);
+		if (!landed)
+		{
+			int window = "pickup".equals(p.base) ? INV_DELTA_PENDING_MAX_TICKS : ALCH_PENDING_MAX_TICKS;
+			if (currentTick - p.tick > window)
+			{
+				invDeltaPending = null;
+			}
+			return;
+		}
+		invDeltaPending = null;	// consume — the expected delta landed
+		if (!activityLogActive())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", p.item);
+		fields.put("qty", delta);
+		if ("alch".equals(p.base))
+		{
+			fields.put("spell", p.spell);
+			fields.put("gp", gp);	// always present now — the coin gain is the alch confirmation itself
+			emitEvent("alch", fields);
+			return;
+		}
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		emitEvent("pickup", fields);	// only pickup reaches here — drop is spawn-confirmed, alch returned above
 	}
 
 	/**
@@ -1370,22 +2116,123 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
 		{
-			// WAVE 3: attach {region_id, plane} from the player's world location. Items-lost is deferred (no
-			// clean items-lost API in RuneLite) — left for the in-game loop to reconstruct server-side.
-			emitEvent("death", deathLocationFields());
+			// A death spawns the player's items on the ground at their tile WITH an inventory loss — exactly the
+			// drop pending's dual confirmation signal. Kill any armed drop/pickup/alch pending: the loss belongs
+			// to the death event's items_lost, never to a fabricated player-initiated drop.
+			invDeltaPending = null;
+			// Capture the pre-death inventory + equipment LIVE now: OSRS removes items a few ticks AFTER the death
+			// animation, so the containers are still intact at ActorDeath ([verify in-client] — the standard
+			// RuneLite death-tracking timing assumption). Defer the emit; items_lost is the pre/post diff resolved
+			// once the containers settle (at syncTask, DEATH_SETTLE_TICKS later) or on logout — whichever first.
+			deathPending = new DeathPending(currentLocation(), deathKind(),
+				mergedInvEquipCounts(), client == null ? 0 : client.getTickCount());
 		}
 	}
 
-	/** {location:{region_id, plane}} of the local player, or empty if the world location isn't readable. */
-	private Map<String, Object> deathLocationFields()
+	/**
+	 * death_kind: "wilderness" (inside the Wilderness — items drop to the killer), "pvp" (a PvP / DMM / high-risk
+	 * world), or "safe" (PvM / minigame — a gp-sink item-retrieval reclaim, NOT a transfer). Only wilderness/pvp is
+	 * an inter-account transfer. IN_WILDERNESS is the standard client wilderness signal.
+	 */
+	private String deathKind()
 	{
-		Map<String, Object> fields = new LinkedHashMap<>();
-		Map<String, Object> loc = currentLocation();
-		if (loc != null)
+		if (client == null)
 		{
-			fields.put("location", loc);
+			return "safe";
 		}
-		return fields;
+		if (client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
+		{
+			return "wilderness";
+		}
+		java.util.Set<WorldType> wt = client.getWorldType();
+		if (wt != null && (wt.contains(WorldType.PVP) || wt.contains(WorldType.DEADMAN) || wt.contains(WorldType.HIGH_RISK)))
+		{
+			return "pvp";
+		}
+		return "safe";
+	}
+
+	/** Merged inventory + equipment item -> total qty, read live. Null-safe (empty when a container is absent). */
+	private Map<Integer, Long> mergedInvEquipCounts()
+	{
+		Map<Integer, Long> counts = new LinkedHashMap<>();
+		if (client == null)
+		{
+			return counts;
+		}
+		addContainerCounts(counts, client.getItemContainer(InventoryID.INVENTORY));
+		addContainerCounts(counts, client.getItemContainer(InventoryID.EQUIPMENT));
+		return counts;
+	}
+
+	private void addContainerCounts(Map<Integer, Long> counts, ItemContainer c)
+	{
+		if (c == null)
+		{
+			return;
+		}
+		for (Item item : c.getItems())
+		{
+			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+			{
+				counts.merge(item.getId(), (long) item.getQuantity(), Long::sum);
+			}
+		}
+	}
+
+	/** Resolve a deferred death from the settle-window path: containers are live AND settled, so the loss diff
+	 * is trustworthy (computeLoss=true). The logout/disconnect path calls resolveDeathPending(null, false). */
+	private void resolveDeathPendingViaLiveContainers()
+	{
+		if (deathPending != null)
+		{
+			resolveDeathPending(mergedInvEquipCounts(), true);
+		}
+	}
+
+	/**
+	 * Emit the deferred death event: {location?, death_kind, items_lost[]?}. death + kind + location are always
+	 * recorded. items_lost is emitted ONLY when it can be trusted: (a) computeLoss — the settle-window path where
+	 * the containers are live AND settled (the logout/disconnect path passes false, where the containers are null
+	 * or not-yet-settled and a diff would over- or under-report), AND (b) the death is a real inter-account
+	 * transfer (wilderness/pvp). A safe death is a gp-sink reclaim, not a transfer, and its settle-window diff is
+	 * polluted by post-death eating/drinking — so it never carries items_lost. A wrong items_lost on a monitoring
+	 * feed is worse than an absent one; the server wealth-reconciliation still catches the delta either way.
+	 * Package-private + map arg so it is unit-testable without a client.
+	 */
+	void resolveDeathPending(Map<Integer, Long> postCounts, boolean computeLoss)
+	{
+		DeathPending p = deathPending;
+		if (p == null)
+		{
+			return;
+		}
+		deathPending = null;
+		Map<String, Object> fields = new LinkedHashMap<>();
+		if (p.location != null)
+		{
+			fields.put("location", p.location);
+		}
+		fields.put("death_kind", p.kind);
+		if (computeLoss && ("wilderness".equals(p.kind) || "pvp".equals(p.kind)))
+		{
+			List<Map<String, Object>> lost = new ArrayList<>();
+			for (Map.Entry<Integer, Long> e : p.preCounts.entrySet())
+			{
+				long before = e.getValue();
+				long after = postCounts == null ? 0L : postCounts.getOrDefault(e.getKey(), 0L);
+				long d = before - after;
+				if (d > 0)
+				{
+					Map<String, Object> m = new LinkedHashMap<>();
+					m.put("id", e.getKey());
+					m.put("qty", d);
+					lost.add(m);
+				}
+			}
+			fields.put("items_lost", lost);
+		}
+		emitEvent("death", fields);
 	}
 
 	/** Level-ups: StatChanged fires on every xp drop, so emit only when the real level increases. */
@@ -1614,20 +2461,60 @@ public class AccountConnectPlugin extends Plugin
 		return bi;
 	}
 
-	/** In-memory PNG encode via JDK ImageIO (same encoder core ImageCapture uses). Null on failure. */
-	static byte[] encodePng(BufferedImage image)
+	/** In-memory encode via JDK ImageIO (same encoder core ImageCapture uses). fmt e.g. "png". Null on failure. */
+	static byte[] encodeImage(BufferedImage image, String fmt)
 	{
 		java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
 		try
 		{
-			javax.imageio.ImageIO.write(image, "png", buf);
+			javax.imageio.ImageIO.write(image, fmt, buf);
 		}
 		catch (IOException e)
 		{
-			log.debug("OSRS BiS trade screenshot PNG encode failed", e);
+			log.debug("OSRS BiS image encode ({}) failed", fmt, e);
 			return null;
 		}
 		return buf.toByteArray();
+	}
+
+	/** In-memory PNG encode (trade path). Delegates to the generalized encoder. */
+	static byte[] encodePng(BufferedImage image)
+	{
+		return encodeImage(image, "png");
+	}
+
+	/**
+	 * In-memory JPEG encode at an explicit quality (store delivery-proof frames). The default ImageIO.write
+	 * path can't set quality, so drive the writer directly with ImageWriteParam. Input must be TYPE_INT_RGB
+	 * (the JDK JPEG writer corrupts ARGB rasters). Null on failure.
+	 */
+	static byte[] encodeJpeg(BufferedImage image)
+	{
+		javax.imageio.ImageWriter writer = null;
+		try (java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+			javax.imageio.stream.ImageOutputStream ios = javax.imageio.ImageIO.createImageOutputStream(buf))
+		{
+			writer = javax.imageio.ImageIO.getImageWritersByFormatName("jpg").next();
+			writer.setOutput(ios);
+			javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+			param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+			param.setCompressionQuality(0.7f);
+			writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+			ios.flush();
+			return buf.toByteArray();
+		}
+		catch (Exception e)
+		{
+			log.debug("OSRS BiS store-clip JPEG encode failed", e);
+			return null;
+		}
+		finally
+		{
+			if (writer != null)
+			{
+				writer.dispose();
+			}
+		}
 	}
 
 	/**
@@ -1833,6 +2720,7 @@ public class AccountConnectPlugin extends Plugin
 
 		// ---- grand exchange: active buy/sell offers ----
 		List<Map<String, Object>> geOffers = new ArrayList<>();
+		long geEscrowGp = 0L;	// wealth locked in GE offers (see the per-offer accumulation below)
 		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
 		if (offers != null)
 		{
@@ -1852,6 +2740,28 @@ public class AccountConnectPlugin extends Plugin
 				m.put("price_per_item", o.getPrice());
 				m.put("spent", o.getSpent());
 				geOffers.add(m);
+				// GE escrow (gap audit 2026-07-18): wealth locked in the GE that bank+inv can't see — a placed
+				// buy removes gp, an in-flight sell removes items, and either reads as a FALSE leak without this.
+				// Buy-side: the full committed gp (bought-but-uncollected items stand in for the spent part).
+				// Sell-side: remaining items at GE value + uncollected proceeds. Approximation is deliberate —
+				// partial mid-offer collection can briefly double-count, and the reconcile engine already
+				// downgrades confidence on GE-active windows.
+				GrandExchangeOfferState st = o.getState();
+				boolean buySide = st == GrandExchangeOfferState.BUYING || st == GrandExchangeOfferState.BOUGHT
+					|| st == GrandExchangeOfferState.CANCELLED_BUY;
+				if (buySide)
+				{
+					geEscrowGp += (long) o.getTotalQuantity() * o.getPrice();
+				}
+				else
+				{
+					long remaining = (long) o.getTotalQuantity() - o.getQuantitySold();
+					if (remaining > 0 && itemManager != null)
+					{
+						geEscrowGp += remaining * itemManager.getItemPrice(o.getItemId());
+					}
+					geEscrowGp += o.getSpent();	// proceeds not yet collected
+				}
 			}
 		}
 		snap.put("ge_offers", geOffers);
@@ -1878,7 +2788,17 @@ public class AccountConnectPlugin extends Plugin
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
 		snap.put("bank", bankBlock);
 
-		// (looting bag / seed vault deferred: InventoryID member names need verification vs this client)
+		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
+		// only when non-null = opened at least once this session, so a normal snapshot never carries empty blocks.
+		// group_storage is a GENUINE cross-account container (shared between Group-Ironman members) — disclosed. ----
+		addContainerSnapshot(snap, "looting_bag", client.getItemContainer(LOOTING_BAG_CONTAINER_ID));
+		addContainerSnapshot(snap, "seed_vault", client.getItemContainer(SEED_VAULT_CONTAINER_ID));
+		addContainerSnapshot(snap, "group_storage", client.getItemContainer(InventoryID.GROUP_STORAGE));
+		// Storage-visibility (gap audit 2026-07-18): real wealth a bank+inv+equip snapshot can't see — a bond
+		// is ~30M+ parked invisibly; quiver ammo can be a large stacked value. False-residual sources closed.
+		addContainerSnapshot(snap, "bonds_pouch", client.getItemContainer(BONDS_POUCH_CONTAINER_ID));
+		addContainerSnapshot(snap, "bonds_escrow", client.getItemContainer(BONDS_ESCROW_CONTAINER_ID));
+		addContainerSnapshot(snap, "quiver_ammo", client.getItemContainer(QUIVER_AMMO_CONTAINER_ID));
 
 		// ---- collection log: obtained item ids (partial until the player opens the clog tabs) ----
 		Map<String, Object> collog = new LinkedHashMap<>();
@@ -1899,7 +2819,8 @@ public class AccountConnectPlugin extends Plugin
 		wealth.put("inventory_gp", invValue);         // total GE value of carried inventory (incl. coins)
 		wealth.put("equipment_gp", eqpValue);         // GE value of worn / on-character gear
 		wealth.put("bank_gp", bankSynced ? bankValue : null);
-		wealth.put("net_worth_gp", bankSynced ? (invValue + eqpValue + bankValue) : null); // null until bank opened
+		wealth.put("ge_escrow_gp", geEscrowGp);       // wealth locked in GE offers — invisible to bank+inv+equip
+		wealth.put("net_worth_gp", bankSynced ? (invValue + eqpValue + bankValue + geEscrowGp) : null); // null until bank opened
 		snap.put("wealth", wealth);
 
 		// ---- WAVE 5: live state (all ids javap-verified vs runelite-api 1.12.32; raw values, decoded server-side) ----
@@ -2017,6 +2938,19 @@ public class AccountConnectPlugin extends Plugin
 		return v;
 	}
 
+	/** Add a {items, value_gp} block for a container, but only when it is present (opened this session). */
+	void addContainerSnapshot(Map<String, Object> snap, String key, ItemContainer c)
+	{
+		if (c == null)
+		{
+			return;
+		}
+		Map<String, Object> block = new LinkedHashMap<>();
+		block.put("items", itemList(c));
+		block.put("value_gp", containerValue(c));
+		snap.put(key, block);
+	}
+
 	/**
 	 * Async snapshot POST. The response drives the upload gate's memory: a 2xx accept records the
 	 * uploaded hash (so unchanged ticks stop re-sending) and clears any backoff; a 429 arms the
@@ -2084,6 +3018,7 @@ public class AccountConnectPlugin extends Plugin
 	 * OFF, and soft-pause a token — it can never force screenshots ON or expand what's collected.
 	 *   X-Sync-Interval    seconds, clamped [5, 600] — the minimum gap between sends.
 	 *   X-Screenshots      "off"/"disabled"/"false" force-disables trade-screenshot capture.
+	 *   X-Clips            "off"/"disabled"/"false" force-disables store delivery-clip capture.
 	 *   X-Uploads-Enabled  "false"/"0" soft-pauses the token: cadence drops to the 600s max so the
 	 *                      policy channel stays open (the hard data-stop is enforced server-side by
 	 *                      dropping the token's snapshots — the client never goes dark, so it can be
@@ -2096,6 +3031,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			String v = screenshots.trim().toLowerCase(java.util.Locale.ROOT);
 			serverScreenshotsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
+		}
+
+		String clips = response.header("X-Clips");
+		if (clips != null)
+		{
+			String v = clips.trim().toLowerCase(java.util.Locale.ROOT);
+			serverClipsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
 		}
 
 		boolean paused = false;

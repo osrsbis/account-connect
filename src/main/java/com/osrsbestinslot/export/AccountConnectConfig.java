@@ -3,7 +3,6 @@ package com.osrsbestinslot.export;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.Keybind;
 
 @ConfigGroup("osrsbisexport")
 public interface AccountConnectConfig extends Config
@@ -15,8 +14,11 @@ public interface AccountConnectConfig extends Config
 			"Paste the token from osrsbestinslot.com (Connect account) to link this client. While linked, "
 			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats, quests and bank — plus your "
 			+ "account activity: GE and shop buys/sells, completed trades INCLUDING the other player's name "
-			+ "and the items each side exchanged, items you loot from kills, deaths, level-ups, and "
-			+ "login/logout times — to power your calculators and account dashboard. Clear the token to "
+			+ "and the items each side exchanged, items you loot from kills and from reward chests (raids, "
+			+ "Barrows, clue caskets and similar), items you drop, pick up or alch, deaths, level-ups, and "
+			+ "login/logout times — to power your calculators and account dashboard. If you are in a Group "
+			+ "Ironman group, this also includes your shared group storage contents, which can include items "
+			+ "other group members deposited. Clear the token to "
 			+ "stop syncing.",
 		position = 1
 	)
@@ -38,49 +40,22 @@ public interface AccountConnectConfig extends Config
 
 	@ConfigItem(
 		keyName = "uploadTradeScreenshots",
-		name = "Upload trade screenshots",
+		name = "Upload delivery screenshots",
 		description =
-			"When enabled, this captures a screenshot of your trade confirmation window — which shows "
-			+ "the other player's name and the items traded — when a trade completes, and uploads it with "
-			+ "your osrsbestinslot.com link token to osrsbestinslot.com's servers as delivery proof. "
-			+ "Nothing else is sent, and nothing is captured while this is off.",
+			"When enabled, this captures screenshots as delivery proof and uploads them with your "
+			+ "osrsbestinslot.com link token to osrsbestinslot.com's servers: your trade confirmation "
+			+ "window when a trade completes (which shows the other player's name and the items traded), "
+			+ "and a low-rate (1 per second) series while a shop window is open (discarded if the visit "
+			+ "had no purchase or sale). Nothing is captured while this is off.",
 		position = 3,
 		warning =
-			"This uploads a screenshot of your trade window (which includes the other player's name and "
-			+ "the traded items) to osrsbestinslot.com. Only enable it if you agree to that."
+			"This uploads screenshots — your trade window, and your game screen while a shop is open "
+			+ "(which may include on-screen chat messages and other players' names) — to osrsbestinslot.com, "
+			+ "a 3rd-party server not controlled or verified by the RuneLite developers. Only enable it if you agree to that."
 	)
 	default boolean uploadTradeScreenshots()
 	{
 		return false;	// OFF by default — explicit opt-in required
-	}
-
-	@ConfigItem(
-		keyName = "excludedAccounts",
-		name = "Don't sync these accounts",
-		description =
-			"Comma-separated account display names that should NEVER sync, even while logged in with a "
-			+ "token set (e.g. a personal alt you don't want tracked). Matched on the logged-in "
-			+ "character name, case-insensitive. Leave blank to sync every account you log in.",
-		position = 4
-	)
-	default String excludedAccounts()
-	{
-		return "";
-	}
-
-	@ConfigItem(
-		keyName = "resyncHotkey",
-		name = "Re-sync now hotkey",
-		description =
-			"Press this key in-game to re-sync your account to osrsbestinslot.com immediately — it sends a "
-			+ "fresh snapshot right away instead of waiting for the next automatic sync. Handy right after "
-			+ "the site tells you to \"Re-sync\", or after opening your bank. Unset by default: click the "
-			+ "field and press a key to assign one.",
-		position = 5
-	)
-	default Keybind resyncHotkey()
-	{
-		return Keybind.NOT_SET;	// no key bound until the user assigns one
 	}
 
 	// Sync cadence is no longer a user setting: osrsbestinslot.com dictates it per link token in the

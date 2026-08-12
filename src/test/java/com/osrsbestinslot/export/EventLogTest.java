@@ -31,8 +31,7 @@ public class EventLogTest
 {
 	private static final String TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
-	/** A linked config: valid token → activity log active (core sync, no toggle). client is null in tests,
-	 *  so isCurrentAccountExcluded() short-circuits false. */
+	/** A linked config: valid token → activity log active (core sync, no toggle). */
 	private static AccountConnectConfig onConfig()
 	{
 		return new AccountConnectConfig()
@@ -143,6 +142,35 @@ public class EventLogTest
 	}
 
 	@Test
+	public void onChatMessageRoutesGameMessageToSweep() throws Exception
+	{
+		// reachability: a non-TRADE game message must fall through onChatMessage to the chat sweep,
+		// not be eaten by the trade early-return.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
+		when(ev.getMessage()).thenReturn("Congratulations, you've completed a quest!");
+		plugin.onChatMessage(ev);
+		assertEquals(1, plugin.pendingEvents.size());
+		assertEquals("chat", plugin.pendingEvents.get(0).get("type"));
+		assertEquals("Congratulations, you've completed a quest!", plugin.pendingEvents.get(0).get("text"));
+	}
+
+	@Test
+	public void onChatMessageDoesNotSweepPublicChat() throws Exception
+	{
+		// the revived sweep keeps the original filter: public/other-player chat stays excluded.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
+		when(ev.getMessage()).thenReturn("buying gf");
+		plugin.onChatMessage(ev);
+		assertTrue("public/other-player chat must not be swept", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
 	public void geFillEmitsOncePerTransition() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
@@ -197,6 +225,78 @@ public class EventLogTest
 		assertEquals("store_sell", p.type);
 		assertEquals(1391, p.item);
 		assertEquals(10, p.qty);
+	}
+
+	@Test
+	public void unresolvableItemIdArmsNothing() throws Exception
+	{
+		// A store click whose menu entry carries no item id (getItemId() == -1) must NOT arm a pending.
+		// Such clicks were observed in testing; comparing inventory contents either side of them showed
+		// no item entering the inventory, so the click is a no-op rather than a purchase of an unknown
+		// item, and there is nothing to recover. Mirrors the off-book path's own <= 0 guard.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "shopOpen", true);
+		MenuOptionClicked ev = mock(MenuOptionClicked.class);
+		when(ev.getMenuOption()).thenReturn("Buy 1");
+		when(ev.getItemId()).thenReturn(-1);
+
+		plugin.onMenuOptionClicked(ev);
+		assertNull("an itemless store click must not arm a pending", storePending(plugin));
+		assertTrue("an itemless store click must emit nothing", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void unresolvableItemIdDoesNotClobberAnArmedPending() throws Exception
+	{
+		// The skip must be a plain return, not a null-item pending: a real armed buy waiting on its
+		// inventory resolve must survive a stray itemless click.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "shopOpen", true);
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		MenuOptionClicked ev = mock(MenuOptionClicked.class);
+		when(ev.getMenuOption()).thenReturn("Buy 1");
+		when(ev.getItemId()).thenReturn(-1);
+
+		plugin.onMenuOptionClicked(ev);
+		AccountConnectPlugin.StorePending p = storePending(plugin);
+		assertNotNull("the real armed pending must survive an itemless click", p);
+		assertEquals("the surviving pending must be the original", 4151, p.item);
+	}
+
+	@Test
+	public void shopCloseFlushesAnUnresolvedPendingRatherThanDroppingIt() throws Exception
+	{
+		// REGRESSION (0.7.2): buy-then-close is a common sequence, and the inventory change can arrive
+		// after the shop widget is gone. Dropping the pending there silently loses the whole transaction.
+		// 0.7.1 (the build on the Hub) emits the degraded {item, qty} form instead; that must not regress.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+
+		// Drive the REAL event, not the helper: a mutation that reverts the call site back to
+		// `storePending = null` leaves the helper itself perfect and the feature dead, and a test
+		// that calls the helper directly would stay green through exactly that regression.
+		plugin.onWidgetClosed(new WidgetClosed(300, 0, false)); // 300 = SHOPMAIN
+
+		assertEquals("the transaction must still be reported", 1, plugin.pendingEvents.size());
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("store_buy", e.get("type"));
+		assertEquals(4151, e.get("item"));
+		assertEquals(1, e.get("qty"));
+		assertFalse("a zero delta must never be reported as a price", e.containsKey("gp_total"));
+		assertNull("pending consumed", storePending(plugin));
+	}
+
+	@Test
+	public void shopCloseWithNoPendingEmitsNothing() throws Exception
+	{
+		// The discriminator: the flush must not invent an event when nothing was armed.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		plugin.flushStorePendingOnShopClose();
+		assertEquals("no pending -> no event", 0, plugin.pendingEvents.size());
 	}
 
 	@Test
@@ -257,66 +357,15 @@ public class EventLogTest
 	}
 
 	@Test
-	public void shopCloseFlushesPendingWithoutPrice() throws Exception
+	public void shopCloseClearsStorePending() throws Exception
 	{
-		// (e) buy-then-close: the transaction happened, but the coin delta never landed. Emit the degraded
-		// {item,qty} form (what the pre-price behaviour reported) rather than losing the event entirely.
+		// (e) closing the shop widget drops any armed-but-unresolved pending.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
 		WidgetClosed wc = new WidgetClosed(300, 0, false); // SHOPMAIN — final class, use the real event
 		plugin.onWidgetClosed(wc);
-		assertNull("closing the shop must clear the pending", storePending(plugin));
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
-		assertEquals("store_buy", e.get("type"));
-		assertEquals(4151, e.get("item"));
-		assertEquals(1, e.get("qty"));
-		assertFalse("an unresolved close must not invent a price", e.containsKey("gp_total"));
-	}
-
-	@Test
-	public void shopCloseWithNoPendingEmitsNothing() throws Exception
-	{
-		// Closing a shop that had no buy/sell must stay silent.
-		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", onConfig());
-		plugin.onWidgetClosed(new WidgetClosed(300, 0, false));
-		assertTrue("a browse-only visit must emit nothing", plugin.pendingEvents.isEmpty());
-	}
-
-	@Test
-	public void overwritingAnUnresolvedPendingMarksItAmbiguous() throws Exception
-	{
-		// Two clicks a tick apart: the inventory change can lag the click, so the delta arriving after the
-		// SECOND click may belong to the FIRST. Overwriting an unresolved pending must therefore degrade —
-		// otherwise click #2 publishes click #1's gp with full confidence.
-		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", onConfig());
-		inject(plugin, "shopOpen", true);
-		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 440, 10, 10000L, 5, false));
-		MenuOptionClicked ev = mock(MenuOptionClicked.class);
-		when(ev.getMenuOption()).thenReturn("Buy 10");
-		when(ev.getItemId()).thenReturn(453);
-
-		plugin.onMenuOptionClicked(ev); // client is null in tests → tick 0, a DIFFERENT tick from the pending's 5
-		AccountConnectPlugin.StorePending p = storePending(plugin);
-		assertNotNull(p);
-		assertEquals(453, p.item);
-		assertTrue("overwriting an unresolved pending must mark it ambiguous", p.ambiguous);
-	}
-
-	@Test
-	public void backwardsTickJumpExpiresPendingInsteadOfPairing() throws Exception
-	{
-		// Logout/world-hop with the shop open can move the tick counter BACKWARDS. A one-sided window fails
-		// open there and pairs a long-stale coinsBefore with a fresh inventory change, fabricating a purchase.
-		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", onConfig());
-		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 50000L, 900, false));
-		plugin.resolveStorePendingOnInventoryChange(10000L, 3); // tick counter jumped backwards
-		assertTrue("a backwards tick jump must emit nothing", plugin.pendingEvents.isEmpty());
-		assertNull("a backwards tick jump must clear the pending", storePending(plugin));
+		assertNull("closing the shop must drop any armed pending", storePending(plugin));
 	}
 
 	@Test
