@@ -115,59 +115,100 @@ public class EventLogTest
 		assertEquals("buffer must be capped at MAX_PENDING_EVENTS", 500, plugin.pendingEvents.size());
 	}
 
+	// ---- The broad chat sweep is REMOVED (0.7.3). These four tests replace the four that asserted it. ----
+	// They are written as the INVERSE of the originals, deliberately: the sweep's old inputs are replayed
+	// and each must now produce NOTHING. A removal with no test is indistinguishable from an untested one,
+	// and the failure mode being guarded against is silent reintroduction under a different event name.
+
 	@Test
-	public void chatGameMessageEmitsEvent() throws Exception
+	public void gameMessageEmitsNothing() throws Exception
 	{
+		// Was chatGameMessageEmitsEvent: this exact input used to produce a "chat" event.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ChatMessage ev = mock(ChatMessage.class);
 		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
 		when(ev.getMessage()).thenReturn("Oh dear, you are dead!");
-		plugin.emitChatActivity(ev);
-		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals("chat", plugin.pendingEvents.get(0).get("type"));
-		assertEquals("Oh dear, you are dead!", plugin.pendingEvents.get(0).get("text"));
+		plugin.onChatMessage(ev);
+		assertTrue("game chat must no longer be captured at all", plugin.pendingEvents.isEmpty());
 	}
 
 	@Test
-	public void chatPublicMessageIgnored() throws Exception
+	public void spamMessageEmitsNothing() throws Exception
 	{
+		// SPAM was the other half of the sweep's filter and produced the bulk of the flood volume
+		// (skilling lines: "You catch a harpoonfish!" and similar, thousands per hour per account).
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.SPAM);
+		when(ev.getMessage()).thenReturn("You catch a harpoonfish!");
+		plugin.onChatMessage(ev);
+		assertTrue("spam chat must no longer be captured at all", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void publicChatStillEmitsNothing() throws Exception
+	{
+		// Unchanged guarantee, kept explicit: other-player chat was never captured and still is not.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ChatMessage ev = mock(ChatMessage.class);
 		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
 		when(ev.getMessage()).thenReturn("buying gf");
-		plugin.emitChatActivity(ev);
+		plugin.onChatMessage(ev);
 		assertTrue("public/other-player chat must not be captured", plugin.pendingEvents.isEmpty());
 	}
 
 	@Test
-	public void onChatMessageRoutesGameMessageToSweep() throws Exception
+	public void acceptedTradeStillEmitsTradeEventThroughOnChatMessage() throws Exception
 	{
-		// reachability: a non-TRADE game message must fall through onChatMessage to the chat sweep,
-		// not be eaten by the trade early-return.
+		// The trade path SHARES onChatMessage with the removed sweep, and removing the sweep changed that
+		// method's control flow (fall-through became an early return). This is the regression that change
+		// could plausibly cause, and nothing else in the suite drives onChatMessage with a TRADE message.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		// The accept path calls refreshSnapshotCacheAfterTrade, which reads the client. A mock at the
+		// login screen (LOGGED_IN not stubbed -> null state) makes it return immediately, so this test
+		// exercises the ROUTING without dragging in snapshot construction.
+		inject(plugin, "client", mock(net.runelite.api.Client.class));
+		injectPendingTrade(plugin, "Bob");
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.TRADE);
+		when(ev.getMessage()).thenReturn("Accepted trade.");
+		plugin.onChatMessage(ev);
+		assertEquals("the accepted trade must still emit exactly one event", 1, plugin.pendingEvents.size());
+		assertEquals("trade", plugin.pendingEvents.get(0).get("type"));
+		assertEquals("Bob", plugin.pendingEvents.get(0).get("counterparty"));
+	}
+
+	@Test
+	public void declinedTradeChatEmitsNothing() throws Exception
+	{
+		// A TRADE message that is not the accept line must reach handleTradeChat without emitting an event
+		// — proving the early return narrowed the method to TRADE only, not that it swallowed the path.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		ChatMessage ev = mock(ChatMessage.class);
+		when(ev.getType()).thenReturn(ChatMessageType.TRADE);
+		when(ev.getMessage()).thenReturn("Other player declined trade.");
+		plugin.onChatMessage(ev);
+		assertTrue("a declined trade emits no event", plugin.pendingEvents.isEmpty());
+	}
+
+	@Test
+	public void jagexDropBroadcastEmitsNothing() throws Exception
+	{
+		// The privacy case, named so it cannot be lost: Jagex broadcasts another player's RSN as a
+		// GAMEMESSAGE. 845 such rows reached the server under the sweep, covering 270 distinct
+		// third-party names. This input must now produce nothing.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ChatMessage ev = mock(ChatMessage.class);
 		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
-		when(ev.getMessage()).thenReturn("Congratulations, you've completed a quest!");
+		when(ev.getMessage()).thenReturn("SomeOtherPlayer received a drop: Abyssal lantern");
 		plugin.onChatMessage(ev);
-		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals("chat", plugin.pendingEvents.get(0).get("type"));
-		assertEquals("Congratulations, you've completed a quest!", plugin.pendingEvents.get(0).get("text"));
-	}
-
-	@Test
-	public void onChatMessageDoesNotSweepPublicChat() throws Exception
-	{
-		// the revived sweep keeps the original filter: public/other-player chat stays excluded.
-		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", onConfig());
-		ChatMessage ev = mock(ChatMessage.class);
-		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
-		when(ev.getMessage()).thenReturn("buying gf");
-		plugin.onChatMessage(ev);
-		assertTrue("public/other-player chat must not be swept", plugin.pendingEvents.isEmpty());
+		assertTrue("other players' names must not be captured via broadcasts", plugin.pendingEvents.isEmpty());
 	}
 
 	@Test

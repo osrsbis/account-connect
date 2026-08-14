@@ -99,7 +99,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.2";
+	private static final String PLUGIN_VERSION = "0.7.3";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -1643,26 +1643,36 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * TRADE messages drive the trade-completion path ("Accepted trade." commits the buffered frame;
-	 * a decline discards it — tag-tolerant match). All messages then fall through to the activity
-	 * sweep, which self-filters to own-account game chat (GAMEMESSAGE / SPAM).
+	 * a decline discards it — tag-tolerant match). Nothing else is read from chat.
+	 *
+	 * The broad game-chat sweep that used to run here for every message was REMOVED in 0.7.3. It
+	 * emitted one event per GAMEMESSAGE/SPAM line, which on the live release meant 121,565 events from
+	 * 166 accounts in seven hours — enough to exhaust the server's shared hourly ingest budget and drop
+	 * unrelated events for 11-16 minutes of every hour. Nothing consumed those rows, and every signal
+	 * they carried (level-ups, deaths, drops, loot, GE completions) is already emitted as its own
+	 * structured event by this plugin, so the sweep was pure duplication. It also captured other
+	 * players' names via Jagex drop broadcasts, which this plugin's disclosure does not cover.
+	 *
+	 * Do not reintroduce it, under this or any other event name. If a future feature needs a specific
+	 * chat line, match THAT line and emit a structured event for it.
 	 */
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (event.getType() == ChatMessageType.TRADE)
+		if (event.getType() != ChatMessageType.TRADE)
 		{
-			// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
-			// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
-			// since the trade. Client thread; containers are valid right after "Accepted trade.".
-			if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
-				Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
-			{
-				refreshSnapshotCacheAfterTrade();
-				emitTradeEvent();
-			}
-			handleTradeChat(event.getMessage());
+			return;
 		}
-		emitChatActivity(event);
+		// A completed trade changes wealth: refresh the snapshot cache NOW (independent of the
+		// screenshot opt-in) so the logout flush carries post-trade wealth even if no tick has run
+		// since the trade. Client thread; containers are valid right after "Accepted trade.".
+		if (TRADE_ACCEPTED_MESSAGE.equalsIgnoreCase(
+			Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim()))
+		{
+			refreshSnapshotCacheAfterTrade();
+			emitTradeEvent();
+		}
+		handleTradeChat(event.getMessage());
 	}
 
 	/**
@@ -2081,33 +2091,6 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("location", p.location);
 		}
 		emitEvent("pickup", fields);	// only pickup reaches here — drop is spawn-confirmed, alch returned above
-	}
-
-	/**
-	 * Broad activity sweep — own-account game chat only (GAMEMESSAGE / SPAM). Captures deaths, drops,
-	 * pet/untradeable/clue rewards, level-ups, quest completions, GE collect lines, etc. as timestamped
-	 * events. Deliberately EXCLUDES player/private/clan/friends chat (other-player content = PII / the
-	 * Hub's "crowdsource other players" rejection). Own account, structured, disclosed.
-	 */
-	void emitChatActivity(ChatMessage event)
-	{
-		if (event == null)
-		{
-			return;
-		}
-		ChatMessageType t = event.getType();
-		if (t != ChatMessageType.GAMEMESSAGE && t != ChatMessageType.SPAM)
-		{
-			return;
-		}
-		String text = Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim();
-		if (text.isEmpty())
-		{
-			return;
-		}
-		Map<String, Object> fields = new LinkedHashMap<>();
-		fields.put("text", text);
-		emitEvent("chat", fields);
 	}
 
 	/** Own-account death (item-loss context). ActorDeath fires for any nearby actor, so filter to self. */
