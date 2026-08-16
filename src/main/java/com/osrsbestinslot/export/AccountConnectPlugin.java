@@ -281,6 +281,14 @@ public class AccountConnectPlugin extends Plugin
 	final java.util.List<Map<String, Object>> pendingEvents =
 		java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 	private static final int MAX_PENDING_EVENTS = 500;
+
+	/** Event-delivery retry state. Base equals the flush period, so the first retry is the next tick. */
+	private static final long EVENT_RETRY_BASE_BACKOFF_MS = 5_000L;
+	/** Ceiling on the doubling ladder — 5s, 10s, 20s … capped at 5 minutes. */
+	private static final long EVENT_RETRY_MAX_BACKOFF_MS = 300_000L;
+	volatile boolean eventPostInFlight;
+	volatile long eventRetryBackoffMs;
+	volatile long eventRetryBackoffUntilMs;
 	private volatile boolean sessionActive;
 	private volatile String activeRsn;
 	private volatile String activeHash;
@@ -909,9 +917,24 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * POST buffered activity events to /event-ingest, then clear them. Fire-and-forget like the
-	 * screenshot upload. Runs on every @Schedule tick (including at the login screen) so a logout event
-	 * flushes promptly. Own-account data only; token-gated exactly like the snapshot path.
+	 * POST buffered activity events to /event-ingest, then clear them. Runs on every @Schedule tick
+	 * (including at the login screen) so a logout event flushes promptly. Own-account data only;
+	 * token-gated exactly like the snapshot path.
+	 *
+	 * <p>Delivery is RETRIED, not fire-and-forget. The batch is removed from {@link #pendingEvents}
+	 * before the POST (so a slow request cannot double-send it), and on any network failure or non-2xx
+	 * response it is put BACK at the FRONT of the buffer, preserving order, for the next 5s tick to
+	 * resend. Previously the buffer was cleared before sending and {@code onFailure} only logged at
+	 * debug, so every 429/5xx/timeout silently destroyed that batch — the loss correlating exactly with
+	 * the periods of highest event volume, when the shared ingest ceiling is being hit.
+	 *
+	 * <p>Bounded three ways, because an unbounded retry against a rate-limited server is worse than the
+	 * data loss it replaces: (1) requeue reuses the existing {@link #MAX_PENDING_EVENTS} cap, so a
+	 * server that is down for a long time drops the OLDEST events rather than growing memory without
+	 * limit; (2) {@link #eventRetryBackoffUntilMs} makes the next attempt wait, doubling from 5s to a
+	 * {@link #EVENT_RETRY_MAX_BACKOFF_MS} ceiling, so we back off instead of hammering; (3) a single
+	 * in-flight POST at a time ({@link #eventPostInFlight}), so ticks cannot pile concurrent retries of
+	 * the same batch on top of each other. A 429 carrying Retry-After is honoured up to the ceiling.
 	 */
 	void flushEvents()
 	{
@@ -919,6 +942,14 @@ public class AccountConnectPlugin extends Plugin
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return;
+		}
+		if (eventPostInFlight)
+		{
+			return;	// one batch in flight at a time — a retry must not race its own predecessor
+		}
+		if (nowMs() < eventRetryBackoffUntilMs)
+		{
+			return;	// backing off after a failure; the events stay buffered
 		}
 		List<Map<String, Object>> batch;
 		synchronized (pendingEvents)
@@ -930,6 +961,7 @@ public class AccountConnectPlugin extends Plugin
 			batch = new ArrayList<>(pendingEvents);
 			pendingEvents.clear();
 		}
+		eventPostInFlight = true;
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
 		body.put("events", batch);
@@ -943,15 +975,95 @@ public class AccountConnectPlugin extends Plugin
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				log.debug("OSRS BiS event sync failed", e);
+				log.debug("OSRS BiS event sync failed — requeueing {} events", batch.size(), e);
+				requeueEvents(batch, 0);
 			}
 
 			@Override
 			public void onResponse(Call call, Response response)
 			{
-				response.close();
+				try
+				{
+					if (response.isSuccessful())
+					{
+						eventPostInFlight = false;
+						eventRetryBackoffMs = 0;	// delivered — reset the ladder
+						eventRetryBackoffUntilMs = 0L;
+						return;
+					}
+					// Non-2xx: the server did NOT take these events. A 4xx other than 429 is not
+					// retryable (bad token / malformed body would fail identically forever), so only
+					// 429 and 5xx are requeued; anything else is dropped deliberately and logged.
+					int code = response.code();
+					if (code == 429 || code >= 500)
+					{
+						long retryAfterMs = 0L;
+						String h = response.header("Retry-After");
+						if (h != null)
+						{
+							try
+							{
+								retryAfterMs = Long.parseLong(h.trim()) * 1000L;
+							}
+							catch (NumberFormatException ignored)
+							{
+								// non-numeric (HTTP-date form) — fall back to the backoff ladder
+							}
+						}
+						log.debug("OSRS BiS event sync HTTP {} — requeueing {} events", code, batch.size());
+						requeueEvents(batch, retryAfterMs);
+					}
+					else
+					{
+						log.debug("OSRS BiS event sync HTTP {} — dropping {} events (not retryable)",
+							code, batch.size());
+						eventPostInFlight = false;
+					}
+				}
+				finally
+				{
+					response.close();
+				}
 			}
 		});
+	}
+
+	/**
+	 * Put a failed batch back at the FRONT of the pending buffer (preserving chronological order with
+	 * anything logged while the POST was in flight) and arm the backoff for the next attempt.
+	 *
+	 * <p>Re-applies {@link #MAX_PENDING_EVENTS} by dropping the OLDEST events, matching what
+	 * {@code logEvent} does. So a long outage degrades to "keep the most recent 500" rather than
+	 * unbounded growth — the requeue can never make the plugin a memory problem.
+	 *
+	 * @param retryAfterMs server-requested delay (0 when none); capped by EVENT_RETRY_MAX_BACKOFF_MS
+	 */
+	void requeueEvents(List<Map<String, Object>> batch, long retryAfterMs)
+	{
+		synchronized (pendingEvents)
+		{
+			pendingEvents.addAll(0, batch);
+			while (pendingEvents.size() > MAX_PENDING_EVENTS)
+			{
+				pendingEvents.remove(0);
+			}
+		}
+		long next = eventRetryBackoffMs <= 0
+			? EVENT_RETRY_BASE_BACKOFF_MS
+			: Math.min(eventRetryBackoffMs * 2, EVENT_RETRY_MAX_BACKOFF_MS);
+		if (retryAfterMs > 0)
+		{
+			next = Math.max(next, Math.min(retryAfterMs, EVENT_RETRY_MAX_BACKOFF_MS));
+		}
+		eventRetryBackoffMs = next;
+		eventRetryBackoffUntilMs = nowMs() + next;
+		eventPostInFlight = false;
+	}
+
+	/** Wall clock, isolated so tests can drive the backoff without sleeping. */
+	long nowMs()
+	{
+		return System.currentTimeMillis();
 	}
 
 	/**
