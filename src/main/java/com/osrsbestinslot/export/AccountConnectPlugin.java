@@ -1925,9 +1925,44 @@ public class AccountConnectPlugin extends Plugin
 		// (its delta would merge two txns), so the resolver omits gp_total rather than misattribute it.
 		long coinsBefore = countItem(client == null ? null : client.getItemContainer(InventoryID.INVENTORY), COINS_ID);
 		int tick = client == null ? 0 : client.getTickCount();
+		int qty = parseTrailingQty(opt);
 		StorePending prev = storePending;
-		boolean ambiguous = prev != null && prev.tick == tick;
-		storePending = new StorePending(type, item, parseTrailingQty(opt), coinsBefore, tick, ambiguous);
+		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, tick);
+	}
+
+	/**
+	 * Fold a new store click into any pending one from the SAME tick.
+	 *
+	 * <p>Production evidence (2026-08-15 audit): on the newest clients, {@code gp_total} was missing from
+	 * <b>37.1% of multi-quantity store buys</b> (140 of 377 on 2026-08-15) against 8.0% at qty=1. Cause:
+	 * a player spam-clicking "Buy 10" lands two clicks on one tick, which the previous code flagged
+	 * {@code ambiguous} and then dropped the gold for — deliberately, "rather than misattribute it".
+	 * General-store selling is how gold is delivered, so that was the delivery path going dark.
+	 *
+	 * <p>The flag was over-cautious for the common case. If {@code prev} is still armed then it was never
+	 * resolved, and a pending is only consumed by an inventory change — so no inventory change has
+	 * happened yet, so {@code prev.coinsBefore} still predates BOTH transactions. When the two clicks are
+	 * the same type on the same item, the eventual coin delta therefore covers exactly their combined
+	 * quantity: keep the ORIGINAL {@code coinsBefore} and SUM the quantities, and {@code gp_total} comes
+	 * out exact rather than absent.
+	 *
+	 * <p>Genuine ambiguity is still respected. Same-tick clicks on a DIFFERENT item, or in a different
+	 * direction, cannot be split out of one delta, so those stay {@code ambiguous} and still degrade to
+	 * {item, qty} — the audit's rule that we never emit a guessed number is unchanged.
+	 */
+	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore, int tick)
+	{
+		if (prev != null && prev.tick == tick)
+		{
+			if (prev.item == item && prev.type.equals(type) && !prev.ambiguous)
+			{
+				// Same item, same direction, same tick, prev never resolved → one delta covers both.
+				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, tick, false);
+			}
+			// Different item or direction on one tick — the delta merges two unrelated transactions.
+			return new StorePending(type, item, qty, coinsBefore, tick, true);
+		}
+		return new StorePending(type, item, qty, coinsBefore, tick, false);
 	}
 
 	/**
