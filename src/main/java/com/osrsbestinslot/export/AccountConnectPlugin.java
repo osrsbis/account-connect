@@ -334,8 +334,22 @@ public class AccountConnectPlugin extends Plugin
 		final long coinsBefore;
 		final int tick;				// client tick at arm time, for staleness + same-tick-batch detection
 		final boolean ambiguous;	// a second click landed on the same tick → delta merges two txns, omit price
+		/**
+		 * True when {@code qty} is the SUM of several same-tick clicks rather than one click's quantity.
+		 * The coin delta is still ground truth, so {@code gp_total} stays exact — but a click can FAIL
+		 * (out of stock, full inventory, not enough coins) while still having been counted here, so the
+		 * merged quantity is click INTENT, not confirmed executed quantity. Any figure divided by it
+		 * (i.e. unit_price_gp) would therefore be wrong — half price if one of two clicks failed — so it
+		 * is omitted. Never derive a unit price from an uncertain denominator.
+		 */
+		final boolean qtyMerged;
 
 		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous)
+		{
+			this(type, item, qty, coinsBefore, tick, ambiguous, false);
+		}
+
+		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous, boolean qtyMerged)
 		{
 			this.type = type;
 			this.item = item;
@@ -343,6 +357,7 @@ public class AccountConnectPlugin extends Plugin
 			this.coinsBefore = coinsBefore;
 			this.tick = tick;
 			this.ambiguous = ambiguous;
+			this.qtyMerged = qtyMerged;
 		}
 	}
 
@@ -1803,7 +1818,7 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		// coinsAfter == coinsBefore -> zero delta -> fails the sign check -> {item, qty} only, never a guess.
-		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, p.coinsBefore, p.ambiguous));
+		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, p.coinsBefore, p.ambiguous, p.qtyMerged));
 	}
 
 	void handleTradeWidgetClosed(int groupId)
@@ -1957,7 +1972,9 @@ public class AccountConnectPlugin extends Plugin
 			if (prev.item == item && prev.type.equals(type) && !prev.ambiguous)
 			{
 				// Same item, same direction, same tick, prev never resolved → one delta covers both.
-				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, tick, false);
+				// qtyMerged: the coin delta (gp_total) stays exact, but the summed qty is click INTENT —
+				// a click can fail — so unit_price_gp is suppressed downstream rather than halved.
+				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, tick, false, true);
 			}
 			// Different item or direction on one tick — the delta merges two unrelated transactions.
 			return new StorePending(type, item, qty, coinsBefore, tick, true);
@@ -1989,7 +2006,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous));
+		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous, p.qtyMerged));
 	}
 
 	/**
@@ -2001,6 +2018,19 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter, boolean ambiguous)
 	{
+		return buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, false);
+	}
+
+	/**
+	 * @param qtyMerged qty is the SUM of same-tick clicks (intent), not a confirmed executed quantity —
+	 *                  gp_total stays exact (it is the measured coin delta) but unit_price_gp is OMITTED,
+	 *                  because dividing an exact total by an unconfirmed denominator yields a wrong unit
+	 *                  price (half price when one of two merged clicks failed). An absent field is
+	 *                  recoverable; a plausible wrong number is not.
+	 */
+	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
+		boolean ambiguous, boolean qtyMerged)
+	{
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", item);
 		fields.put("qty", qty);
@@ -2010,7 +2040,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			long gp = Math.abs(delta);
 			fields.put("gp_total", gp);
-			if (qty > 1)
+			if (qty > 1 && !qtyMerged)
 			{
 				fields.put("unit_price_gp", gp / qty);	// average — see note above
 			}

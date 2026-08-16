@@ -48,13 +48,14 @@ public class StoreMultiQtyGpTest
 		assertEquals("coinsBefore must stay the ORIGINAL pre-transaction reading",
 			1_000_000L, merged.coinsBefore);
 
-		// 20 coal cost 2,000 total; coins end at 998,000.
+		// 20 coal cost 2,000 total; coins end at 998,000. Both clicks executed here.
 		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
-			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L, merged.ambiguous);
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L, merged.ambiguous, merged.qtyMerged);
 
 		assertEquals("the exact transacted gold must be present", 2_000L, fields.get("gp_total"));
 		assertEquals(20, fields.get("qty"));
-		assertEquals("average unit price", 100L, fields.get("unit_price_gp"));
+		assertNull("merged qty is click intent, so no unit price may be derived from it",
+			fields.get("unit_price_gp"));
 	}
 
 	@Test
@@ -69,6 +70,55 @@ public class StoreMultiQtyGpTest
 		assertEquals("only item and qty survived", 2, fields.size());
 	}
 
+	// ------------------------------------------------------------------ the half-price regression
+
+	/**
+	 * REGRESSION GUARD for the defect the conservative fix exists to prevent.
+	 *
+	 * <p>A merged qty is the sum of click INTENT. A click can fail — shop out of stock, inventory full,
+	 * not enough coins — while still having been counted into that sum. So when two "Buy 10" clicks merge
+	 * but only the first executes, the truth is: 10 items moved for 1,000 gp (100 gp each).
+	 *
+	 * <p>gp_total is still EXACT, because it is the measured coin delta and the coins only moved for the
+	 * click that actually happened. But qty reads 20, so a derived unit price would be 1000/20 = 50 —
+	 * <b>half the real unit price</b>, and plausible enough that nothing downstream would ever question it.
+	 *
+	 * <p>That is strictly worse than the bug this release fixes: an absent field is recoverable, a
+	 * confidently wrong number is not. unit_price_gp must therefore be ABSENT on any merged pending.
+	 */
+	@Test
+	public void mergedQuantityNeverProducesAHalfPriceUnitCost()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+		AccountConnectPlugin.StorePending merged =
+			AccountConnectPlugin.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
+
+		assertTrue("a merged pending must be marked as such", merged.qtyMerged);
+
+		// Only the FIRST click executed: 10 coal at 100 gp = 1,000 gp. Coins 1,000,000 -> 999,000.
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 999_000L, merged.ambiguous, merged.qtyMerged);
+
+		assertEquals("the coin delta is ground truth and stays exact", 1_000L, fields.get("gp_total"));
+		assertNull("unit_price_gp MUST be omitted — 1000/20 = 50 would be half the real 100 gp price",
+			fields.get("unit_price_gp"));
+	}
+
+	@Test
+	public void unmergedMultiQuantityStillCarriesAUnitPriceBecauseItsDenominatorIsConfirmed()
+	{
+		// A single "Buy 20" click: qty came from ONE menu option, so the denominator is trustworthy.
+		AccountConnectPlugin.StorePending p =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, TICK);
+		assertFalse("a single click is not merged", p.qtyMerged);
+
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged);
+		assertEquals(2_000L, fields.get("gp_total"));
+		assertEquals("a confirmed denominator may still yield a unit price", 100L, fields.get("unit_price_gp"));
+	}
+
 	@Test
 	public void sameTickRepeatSellOnOneItemAlsoResolves()
 	{
@@ -81,8 +131,9 @@ public class StoreMultiQtyGpTest
 		assertEquals(10, merged.qty);
 
 		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
-			merged.type, merged.item, merged.qty, merged.coinsBefore, 500_800L, merged.ambiguous);
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 500_800L, merged.ambiguous, merged.qtyMerged);
 		assertEquals("sell proceeds must be captured", 800L, fields.get("gp_total"));
+		assertNull("merged sell qty is intent too — no unit price", fields.get("unit_price_gp"));
 	}
 
 	// ------------------------------------------------------------------ genuine ambiguity is PRESERVED
