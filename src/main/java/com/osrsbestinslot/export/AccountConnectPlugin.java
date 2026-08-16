@@ -968,25 +968,32 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (eventPostInFlight)
-		{
-			return;	// one batch in flight at a time — a retry must not race its own predecessor
-		}
 		if (nowMs() < eventRetryBackoffUntilMs)
 		{
 			return;	// backing off after a failure; the events stay buffered
 		}
 		List<Map<String, Object>> batch;
+		// The in-flight claim and the buffer drain happen under ONE lock. Tested separately they are
+		// check-then-act: the coalesced-flush executor and the 5s scheduler can both pass the guard
+		// before either sets the flag, which allows two concurrent POSTs (violating the stated
+		// one-in-flight invariant) and, on double failure, an order inversion where the later requeue
+		// lands in front of the older batch. No interleaving was found that sends the same event twice —
+		// the drain itself was already atomic — but claiming the flag here costs one line and makes the
+		// invariant true rather than nearly true.
 		synchronized (pendingEvents)
 		{
+			if (eventPostInFlight)
+			{
+				return;	// one batch in flight at a time — a retry must not race its own predecessor
+			}
 			if (pendingEvents.isEmpty())
 			{
 				return;
 			}
 			batch = new ArrayList<>(pendingEvents);
 			pendingEvents.clear();
+			eventPostInFlight = true;
 		}
-		eventPostInFlight = true;
 		// Everything from here to enqueue() must be guarded. The batch has already left the buffer and
 		// the in-flight flag is set, so ANY throw in this window loses the batch AND wedges delivery
 		// permanently: flushEvents would early-return on eventPostInFlight forever after, with no further
@@ -2096,7 +2103,23 @@ public class AccountConnectPlugin extends Plugin
 		{
 			long gp = Math.abs(delta);
 			fields.put("gp_total", gp);
-			if (qty > 1 && !qtyMerged)
+			if (qtyMerged)
+			{
+				// Label the residual uncertainty rather than let a bare exact-looking number imply a
+				// pairing we cannot guarantee. gp_total is always the coins that really moved in this
+				// resolution window. qty is the SUM of same-tick click intents, and two things can make
+				// it overstate what those coins bought: a click that failed (out of stock, full
+				// inventory, insufficient coins), or the server settling the two clicks on DIFFERENT
+				// ticks, in which case the first ItemContainerChanged carries only the first
+				// transaction's delta while qty already counts both.
+				//
+				// Neither is detectable client-side — the plugin sees one inventory update and cannot
+				// ask what the server did — so this is honest labelling, not a guess. A consumer must
+				// treat qty as an UPPER BOUND on a merged row and must never divide gp_total by it.
+				// unit_price_gp is omitted for exactly that reason.
+				fields.put("qty_merged", true);
+			}
+			else if (qty > 1)
 			{
 				fields.put("unit_price_gp", gp / qty);	// average — see note above
 			}

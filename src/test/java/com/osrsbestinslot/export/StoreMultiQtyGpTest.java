@@ -119,6 +119,41 @@ public class StoreMultiQtyGpTest
 		assertEquals("a confirmed denominator may still yield a unit price", 100L, fields.get("unit_price_gp"));
 	}
 
+	/**
+	 * A merged row must SAY it is merged, so nothing downstream pairs gp_total against an unconfirmed
+	 * qty. Two things can make the merged qty overstate what those coins bought: a failed click, or the
+	 * server settling the two clicks on different ticks (the first inventory update then carries only
+	 * the first transaction's delta). Neither is detectable client-side, so the row is labelled rather
+	 * than guessed at.
+	 */
+	@Test
+	public void aMergedRowIsLabelledSoConsumersTreatQtyAsAnUpperBound()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+		AccountConnectPlugin.StorePending merged =
+			AccountConnectPlugin.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
+
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L, merged.ambiguous, merged.qtyMerged);
+
+		assertEquals("coins that really moved", 2_000L, fields.get("gp_total"));
+		assertEquals("the row must carry the merged marker", Boolean.TRUE, fields.get("qty_merged"));
+		assertNull("and never a derived unit price", fields.get("unit_price_gp"));
+	}
+
+	@Test
+	public void anUnmergedRowCarriesNoMergedMarker()
+	{
+		AccountConnectPlugin.StorePending p =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, TICK);
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged);
+
+		assertNull("a single click needs no caveat", fields.get("qty_merged"));
+		assertEquals("and keeps its unit price", 100L, fields.get("unit_price_gp"));
+	}
+
 	@Test
 	public void sameTickRepeatSellOnOneItemAlsoResolves()
 	{
