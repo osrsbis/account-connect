@@ -59,6 +59,7 @@ import net.runelite.api.WorldType;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
@@ -146,8 +147,12 @@ public class AccountConnectPlugin extends Plugin
 	// Activity-log capture (verified vs runelite-api 1.12.32 gameval enums):
 	private static final int SHOP_GROUP_ID = net.runelite.api.gameval.InterfaceID.SHOPMAIN;					// 300
 	private static final int TRADE_TITLE_COMPONENT = net.runelite.api.gameval.InterfaceID.Trademain.TITLE;	// 21954591 ("Trading with X")
-	// WAVE 1b: the confirm screen's "You will receive" column — the ONLY place the counterparty's side is
-	// shown (there is no counterparty ItemContainer). Packed component id = group 334 << 16 | child 24.
+	// The other player's live offer GRID on the MAIN trade screen (335). This is the only place the received
+	// items are readable as item sprites — the confirm screen (334) shows them only as a value-text summary
+	// that collapses to "Lots!" on big trades. javap-verified vs runelite-api 1.12.33.
+	private static final int TRADE_MAIN_OTHER_OFFER = net.runelite.api.gameval.InterfaceID.Trademain.OTHER_OFFER;	// 21954588
+	// WAVE 1b: the confirm screen's "You will receive" column — a value-TEXT summary (not item sprites), kept
+	// only as a last-resort fallback. Packed component id = group 334 << 16 | child 24.
 	private static final int TRADE_CONFIRM_RECEIVE_COMPONENT = net.runelite.api.gameval.InterfaceID.Tradeconfirm.YOU_WILL_RECEIVE;	// 21889048
 	// Capture-on-open groups: opening either forces an immediate snapshot so the bank / collection log
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
@@ -199,6 +204,10 @@ public class AccountConnectPlugin extends Plugin
 	// IDLE -> (container 90) tradeActive -> (334 load) tradeArmed + frame buffered -> commit/discard.
 	volatile boolean tradeActive;
 	volatile boolean tradeArmed;
+	// MAIN trade screen (335) open: while true, onGameTick polls the other player's offer + name (readable
+	// only here — 334 confirm replaces 335 and shows the other side as a "Lots!" text summary with its
+	// 335-only title widget already gone). Root cause of the prod 0-counterparty / empty-received[] bug.
+	volatile boolean tradeMainOpen;
 	final AtomicReference<BufferedImage> pendingTradeFrame = new AtomicReference<>();
 
 	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (Varbits.DIARY_*).
@@ -1250,6 +1259,18 @@ public class AccountConnectPlugin extends Plugin
 	 * frame, after the window already closed; uploading here would ship trades that get declined).
 	 */
 	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		// Poll the other player's trade offer + name while the MAIN screen (335) is open — the only window
+		// they are readable (see captureOtherOfferWhileMainOpen). Tight-gated: the body runs only during an
+		// active trade with activity logging on; a cheap boolean check otherwise.
+		if (tradeMainOpen && activityLogActive())
+		{
+			captureOtherOfferWhileMainOpen();
+		}
+	}
+
+	@Subscribe
 	public void onWidgetLoaded(WidgetLoaded event)
 	{
 		handleTradeWidgetLoaded(event.getGroupId());
@@ -1397,17 +1418,61 @@ public class AccountConnectPlugin extends Plugin
 			shopOpen = true;
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
 		}
+		else if (groupId == TRADE_MAIN_GROUP_ID)
+		{
+			// Main trade screen open: begin polling the other player's side (readable here, gone by confirm).
+			// onGameTick keeps the buffer current; the last read before the 334 transition = the final offer.
+			tradeMainOpen = true;
+			captureOtherOfferWhileMainOpen();	// initial read (offer may still be empty; the poll catches it)
+		}
 		else if (groupId == TRADE_CONFIRM_GROUP_ID)
 		{
-			pendingTradeGiven = readOwnOffer();
-			pendingCounterparty = counterpartyName();
-			// WAVE 1b: capture what we RECEIVE. Prefer structured item children; if the widget carries only a
-			// text summary (the likely runtime shape), keep that raw text so nothing is lost.
-			pendingTradeReceived = readReceivedOffer();
-			if (pendingTradeReceived.isEmpty())
+			tradeMainOpen = false;	// moved to confirm — stop polling; the last 335 poll holds the final offer
+			pendingTradeGiven = readOwnOffer();	// own offer container (90) persists across the transition
+			// Counterparty + received[] come from the 335 poll above (the only place they are readable). Fall
+			// back to the confirm screen ONLY when the poll captured nothing — counterpartyName() is usually
+			// null here (335 title gone) and readReceivedOffer() reads the value-text column.
+			if (pendingCounterparty == null || pendingCounterparty.isEmpty())
+			{
+				pendingCounterparty = counterpartyName();
+			}
+			if (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
+			{
+				pendingTradeReceived = readReceivedOffer();
+			}
+			// Lossless text fallback only when we still have no structured items (e.g. big "Lots!" trade the
+			// poll missed) — keeps the existing "no received_text when items exist" contract.
+			if ((pendingTradeReceived == null || pendingTradeReceived.isEmpty())
+				&& (pendingReceivedText == null || pendingReceivedText.isEmpty()))
 			{
 				pendingReceivedText = readReceivedText();
 			}
+		}
+	}
+
+	/**
+	 * While the MAIN trade screen (335) is open, snapshot the other player's offer + name — the only place
+	 * they are readable as item sprites (the confirm screen 334 replaces 335 and shows the other side as a
+	 * value-text summary that collapses to "Lots!"; its 335-only title widget is gone by 334-load). Last
+	 * non-empty read wins, so the buffer holds the FINAL offer at the moment we transition to confirm.
+	 * Null-safe; runs on the client thread from onGameTick / WidgetLoaded.
+	 */
+	void captureOtherOfferWhileMainOpen()
+	{
+		if (client == null)
+		{
+			return;
+		}
+		List<Map<String, Object>> other = new ArrayList<>();
+		collectReceivedItems(client.getWidget(TRADE_MAIN_OTHER_OFFER), other);
+		if (!other.isEmpty())
+		{
+			pendingTradeReceived = other;
+		}
+		String cp = counterpartyName();
+		if (cp != null && !cp.isEmpty())
+		{
+			pendingCounterparty = cp;
 		}
 	}
 
@@ -2420,6 +2485,7 @@ public class AccountConnectPlugin extends Plugin
 	{
 		tradeActive = false;
 		tradeArmed = false;
+		tradeMainOpen = false;
 		pendingTradeFrame.set(null);
 		pendingTradeGiven = null;	// activity-log trade capture — drop on decline/abandon/hop so it never leaks
 		pendingCounterparty = null;
