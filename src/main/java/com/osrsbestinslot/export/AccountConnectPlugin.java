@@ -987,15 +987,42 @@ public class AccountConnectPlugin extends Plugin
 			pendingEvents.clear();
 		}
 		eventPostInFlight = true;
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("token", token);
-		body.put("events", batch);
-		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
-		Request request = new Request.Builder()
-			.url(base + "/event-ingest")
-			.post(RequestBody.create(JSON, gson.toJson(body)))
-			.build();
-		okHttpClient.newCall(request).enqueue(new Callback()
+		// Everything from here to enqueue() must be guarded. The batch has already left the buffer and
+		// the in-flight flag is set, so ANY throw in this window loses the batch AND wedges delivery
+		// permanently: flushEvents would early-return on eventPostInFlight forever after, with no further
+		// log lines, and events would pile up to the cap and rot until the plugin restarts.
+		//
+		// This is reachable from ordinary user input, not just from an internal bug: apiBaseUrl is a
+		// user-editable config field and Request.Builder.url() throws IllegalArgumentException on a
+		// malformed value — a pasted non-URL or a leading space is enough. gson.toJson,
+		// RequestBody.create and enqueue (RejectedExecutionException from a shut-down dispatcher) share
+		// the same window. 0.7.3 also delivered nothing with a bad URL, but it recovered the moment the
+		// user fixed the typo; without this guard 0.7.4 would stay silently dead until restart.
+		try
+		{
+			Map<String, Object> body = new LinkedHashMap<>();
+			body.put("token", token);
+			body.put("events", batch);
+			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			Request request = new Request.Builder()
+				.url(base + "/event-ingest")
+				.post(RequestBody.create(JSON, gson.toJson(body)))
+				.build();
+			okHttpClient.newCall(request).enqueue(buildEventCallback(batch));
+		}
+		catch (Throwable t)
+		{
+			// requeueEvents restores the batch, arms the backoff and clears the in-flight flag, so a
+			// corrected config recovers on the next tick exactly as it did before 0.7.4.
+			log.debug("OSRS BiS event sync could not be dispatched — requeueing {} events", batch.size(), t);
+			requeueEvents(batch, 0);
+		}
+	}
+
+	/** The delivery callback, extracted so the dispatch window above can be guarded as one block. */
+	private Callback buildEventCallback(final List<Map<String, Object>> batch)
+	{
+		return new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -1050,7 +1077,7 @@ public class AccountConnectPlugin extends Plugin
 					response.close();
 				}
 			}
-		});
+		};
 	}
 
 	/**
@@ -1557,6 +1584,25 @@ public class AccountConnectPlugin extends Plugin
 		}
 		else if (groupId == TRADE_MAIN_GROUP_ID)
 		{
+			// A 335-load ALWAYS begins a fresh trade, so clear the other-player pendings first.
+			//
+			// Without this, a trade that ends WITHOUT acceptance leaks into the next one. A decline routes
+			// through handleTradeChat, which early-returns when screenshots are off (the DEFAULT), so
+			// resetTradeState() never runs; and handleTradeWidgetClosed only resets when tradeArmed, which
+			// is set at confirm-load with screenshots on — so a trade abandoned at the first screen never
+			// arms either. Combined with 0.7.4's last-non-empty-wins poll and its "only fill if empty"
+			// confirm guards, the stale values then SURVIVE a next trade whose partner offers nothing —
+			// the classic gold-delivery shape. Demonstrated: Bob declines offering a Bandos chestplate,
+			// the player then gives an item to Alice who offers nothing, and the emitted event reads
+			// counterparty=Alice received=[Bandos chestplate].
+			//
+			// That is worse than the bug 0.7.4 fixes: 0.7.3 emitted EMPTY fields, this would write
+			// confidently WRONG trade rows on staff delivery accounts, and attribute a third player's RSN
+			// to a trade he was never in. Clearing at 335-open closes it at the only point that is
+			// guaranteed to run for every trade.
+			pendingCounterparty = null;
+			pendingTradeReceived = null;
+			pendingReceivedText = null;
 			// Main trade screen open: begin polling the other player's side (readable here, gone by confirm).
 			// onGameTick keeps the buffer current; the last read before the 334 transition = the final offer.
 			tradeMainOpen = true;
