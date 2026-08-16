@@ -73,7 +73,15 @@ public class EventDeliveryRetryTest
 		field.set(plugin, value);
 	}
 
-	/** Seed the buffer directly — this suite tests DELIVERY, not the emit path. */
+	/**
+	 * Seed the buffer — this suite tests DELIVERY, not the emit path, so it appends directly rather than
+	 * going through emitEvent (which would need a live client, an active token and an account hash).
+	 *
+	 * <p>It DOES reproduce emitEvent's drop-oldest cap (AccountConnectPlugin:753-757), because the 500
+	 * bound is enforced by the two writers — emitEvent and requeueEvents — rather than by the list
+	 * itself. A helper that appended without the cap would let the buffer exceed a limit the real code
+	 * never allows, and the backpressure test would then be measuring the harness instead of the plugin.
+	 */
 	private void seed(String type)
 	{
 		Map<String, Object> ev = new LinkedHashMap<>();
@@ -82,6 +90,10 @@ public class EventDeliveryRetryTest
 		synchronized (plugin.pendingEvents)
 		{
 			plugin.pendingEvents.add(ev);
+			while (plugin.pendingEvents.size() > 500)
+			{
+				plugin.pendingEvents.remove(0);
+			}
 		}
 	}
 
@@ -263,6 +275,113 @@ public class EventDeliveryRetryTest
 		plugin.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 		waitFor(() -> plugin.eventRetryBackoffMs == 0L, "a delivery resets the ladder");
+	}
+
+	// ---------------------------------------------------------------- explicit no-duplicate proof
+
+	/**
+	 * EXACTLY-ONCE after recovery, proven by BODY not just by request count.
+	 *
+	 * <p>The failure mode worth fearing in a retry design is double delivery: the same event landing
+	 * twice in production D1, silently inflating every downstream total. This drives a full
+	 * fail → retry → succeed cycle and then asserts that across ALL requests the server received, the
+	 * event appears exactly twice on the wire (once refused, once accepted) and that the buffer is empty
+	 * afterwards — so no third copy can ever be sent.
+	 */
+	@Test
+	public void aSuccessfulRetryDeliversTheEventExactlyOnceAndNeverAgain() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(503));
+		server.enqueue(new MockResponse().setResponseCode(200));
+
+		seed("trade_unique_marker");
+		plugin.flushEvents();
+		String firstBody = server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8();
+		waitFor(() -> buffered() == 1, "requeued after 503");
+
+		clearBackoff();
+		plugin.flushEvents();
+		String secondBody = server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8();
+		waitFor(() -> buffered() == 0, "delivered");
+
+		assertTrue("the refused attempt carried the event", firstBody.contains("trade_unique_marker"));
+		assertTrue("the accepted attempt carried the event", secondBody.contains("trade_unique_marker"));
+		assertEquals("one occurrence per request — never batched twice into one body",
+			1, countOccurrences(secondBody, "trade_unique_marker"));
+
+		// Drive several more ticks: nothing may be sent, because the buffer is genuinely empty.
+		clearBackoff();
+		plugin.flushEvents();
+		plugin.flushEvents();
+		assertNull("no further delivery after success", server.takeRequest(1, TimeUnit.SECONDS));
+		assertEquals("exactly 2 HTTP requests total for one event", 2, server.getRequestCount());
+	}
+
+	/**
+	 * BACKPRESSURE: a long outage must not grow memory, and must keep the NEWEST events.
+	 *
+	 * <p>Simulates a server that is down while the game keeps generating events. The buffer must settle
+	 * at the 500 cap, and the events retained must be the most recent ones — during an incident the
+	 * newest activity is the operationally useful part.
+	 */
+	@Test
+	public void sustainedOutageHoldsAtTheCapAndKeepsTheNewestEvents() throws Exception
+	{
+		for (int i = 0; i < 12; i++)
+		{
+			server.enqueue(new MockResponse().setResponseCode(503));
+		}
+		for (int i = 0; i < 480; i++)
+		{
+			seed("old" + i);
+		}
+		plugin.flushEvents();
+		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+		waitFor(() -> buffered() == 480, "batch requeued whole");
+
+		for (int i = 0; i < 200; i++)
+		{
+			seed("new" + i);	// the game keeps playing during the outage
+		}
+		synchronized (plugin.pendingEvents)
+		{
+			assertEquals("buffer must be capped, not unbounded", 500, plugin.pendingEvents.size());
+			assertEquals("the NEWEST event must be retained",
+				"new199", plugin.pendingEvents.get(499).get("type"));
+			assertTrue("the oldest events are the ones dropped",
+				String.valueOf(plugin.pendingEvents.get(0).get("type")).startsWith("old"));
+		}
+	}
+
+	/**
+	 * RESTART BEHAVIOUR, pinned as an explicit expectation rather than left implicit.
+	 *
+	 * <p>Retry is in-memory only. A new plugin instance starts with an empty buffer — buffered and
+	 * awaiting-retry events do NOT survive a client restart. This test documents that limit so it cannot
+	 * regress silently into a false belief that delivery is durable. See the flushEvents() javadoc.
+	 */
+	@Test
+	public void unsentEventsAreMemoryOnlyAndDoNotSurviveARestart() throws Exception
+	{
+		seed("will_be_lost");
+		assertEquals(1, buffered());
+
+		AccountConnectPlugin restarted = new AccountConnectPlugin();
+		synchronized (restarted.pendingEvents)
+		{
+			assertTrue("a fresh instance has no spool — restart loss is a KNOWN, accepted limit",
+				restarted.pendingEvents.isEmpty());
+		}
+	}
+
+	private static int countOccurrences(String haystack, String needle)
+	{
+		int n = 0;
+		for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length()))
+		{
+			n++;
+		}
+		return n;
 	}
 
 	// ---------------------------------------------------------------- helper

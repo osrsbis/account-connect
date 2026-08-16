@@ -950,6 +950,16 @@ public class AccountConnectPlugin extends Plugin
 	 * {@link #EVENT_RETRY_MAX_BACKOFF_MS} ceiling, so we back off instead of hammering; (3) a single
 	 * in-flight POST at a time ({@link #eventPostInFlight}), so ticks cannot pile concurrent retries of
 	 * the same batch on top of each other. A 429 carrying Retry-After is honoured up to the ceiling.
+	 *
+	 * <p><b>SCOPE LIMIT — retry is IN-MEMORY ONLY and does not survive a client restart.</b> There is no
+	 * on-disk spool: {@link #pendingEvents} is a plain in-memory list, nothing writes it to config or to
+	 * a file, and {@code shutDown()} does not flush it. So events buffered or awaiting retry when
+	 * RuneLite closes (or crashes, or the plugin is disabled) are LOST — unchanged from previous
+	 * versions. What this release fixes is the far more common case: a transient 429/5xx/timeout while
+	 * the client keeps running, which previously destroyed the batch instantly and now recovers. A
+	 * durable spool would be the next step if restart-loss ever proves material; it is deliberately NOT
+	 * in 0.7.4, because writing game-activity data to disk is a larger design and privacy question than
+	 * this release should decide.
 	 */
 	void flushEvents()
 	{
