@@ -37,6 +37,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
@@ -322,6 +324,16 @@ public class AccountConnectPlugin extends Plugin
 	private volatile StorePending storePending;
 	/** Ticks after which an unresolved store pending is stale (a failed click fires no inventory change). */
 	static final int STORE_PENDING_MAX_TICKS = 3;
+	/**
+	 * Colour/formatting tags in a menu option, e.g. the "&lt;col=ff9040&gt;" the client appends to SELL
+	 * options. Stripped before the quantity is read — the tag's own hex digits are not a quantity.
+	 */
+	private static final Pattern MENU_TAG = Pattern.compile("<[^>]*>");
+	/**
+	 * The quantity in a store menu option, once tags are stripped: the trailing run of digits.
+	 * Capped at 9 digits so a pathological string cannot overflow the parse.
+	 */
+	private static final Pattern TRAILING_QTY = Pattern.compile("(\\d{1,9})\\s*$");
 	/** gameval INVENTORY container id (93) — matches ItemContainerChanged.getContainerId(), not legacy InventoryID. */
 	private static final int INVENTORY_CONTAINER_ID = net.runelite.api.gameval.InventoryID.INV;
 
@@ -2009,13 +2021,13 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Fold a new store click into any pending one from the SAME tick.
+	 * Fold a new store click into any pending one still inside the resolution window.
 	 *
 	 * <p>Production evidence (2026-08-15 audit): on the newest clients, {@code gp_total} was missing from
 	 * <b>37.1% of multi-quantity store buys</b> (140 of 377 on 2026-08-15) against 8.0% at qty=1. Cause:
-	 * a player spam-clicking "Buy 10" lands two clicks on one tick, which the previous code flagged
-	 * {@code ambiguous} and then dropped the gold for — deliberately, "rather than misattribute it".
-	 * General-store selling is how gold is delivered, so that was the delivery path going dark.
+	 * a player spam-clicking "Buy 10" lands two clicks in quick succession, which the previous code
+	 * flagged {@code ambiguous} and then dropped the gold for — deliberately, "rather than misattribute
+	 * it". General-store selling is how gold is delivered, so that was the delivery path going dark.
 	 *
 	 * <p>The flag was over-cautious for the common case. If {@code prev} is still armed then it was never
 	 * resolved, and a pending is only consumed by an inventory change — so no inventory change has
@@ -2024,22 +2036,32 @@ public class AccountConnectPlugin extends Plugin
 	 * quantity: keep the ORIGINAL {@code coinsBefore} and SUM the quantities, and {@code gp_total} comes
 	 * out exact rather than absent.
 	 *
-	 * <p>Genuine ambiguity is still respected. Same-tick clicks on a DIFFERENT item, or in a different
-	 * direction, cannot be split out of one delta, so those stay {@code ambiguous} and still degrade to
+	 * <p><b>The window is UNRESOLVED-ness, not same-tick.</b> Field-observed 2026-08-17: two "Buy 10"
+	 * clicks a single tick apart produced {@code qty:10, gp_total:11325, unit_price_gp:1132} — one
+	 * click's quantity against both clicks' gold, with no {@code qty_merged} label, so a fabricated unit
+	 * price (true ~755) was indistinguishable downstream from a correct single-click row. That is the
+	 * exact half-price failure the conservative rule exists to prevent, arriving through the door the
+	 * {@code prev.tick == tick} equality left open. What makes {@code prev.coinsBefore} usable is that
+	 * nothing has consumed the pending, so the merge now spans the same {@link #STORE_PENDING_MAX_TICKS}
+	 * window the resolver already uses to decide a pending is still live. Beyond it the resolver would
+	 * discard the pending anyway, so the two agree by construction.
+	 *
+	 * <p>Genuine ambiguity is still respected. Clicks on a DIFFERENT item, or in a different direction,
+	 * cannot be split out of one delta, so those stay {@code ambiguous} and still degrade to
 	 * {item, qty} — the audit's rule that we never emit a guessed number is unchanged.
 	 */
 	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore, int tick)
 	{
-		if (prev != null && prev.tick == tick)
+		if (prev != null && tick - prev.tick >= 0 && tick - prev.tick <= STORE_PENDING_MAX_TICKS)
 		{
 			if (prev.item == item && prev.type.equals(type) && !prev.ambiguous)
 			{
-				// Same item, same direction, same tick, prev never resolved → one delta covers both.
+				// Same item, same direction, prev never resolved → one delta covers both.
 				// qtyMerged: the coin delta (gp_total) stays exact, but the summed qty is click INTENT —
 				// a click can fail — so unit_price_gp is suppressed downstream rather than halved.
 				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, tick, false, true);
 			}
-			// Different item or direction on one tick — the delta merges two unrelated transactions.
+			// Different item or direction inside one window — the delta merges unrelated transactions.
 			return new StorePending(type, item, qty, coinsBefore, tick, true);
 		}
 		return new StorePending(type, item, qty, coinsBefore, tick, false);
@@ -2152,17 +2174,29 @@ public class AccountConnectPlugin extends Plugin
 		return storeTxType(event) != null;
 	}
 
-	/** "Buy 10" -> 10, "Sell 1" -> 1, "Buy" -> 1 (default). */
+	/**
+	 * "Buy 10" -&gt; 10, "Sell 10&lt;col=ff9040&gt;" -&gt; 10, "Buy" -&gt; 1 (default).
+	 *
+	 * <p>Colour tags are stripped first, then the trailing digits are read. Field-observed 2026-08-17: the
+	 * client's SELL options carry a trailing colour tag that BUY options do not ("Sell 10&lt;col=ff9040&gt;"),
+	 * so token-parsing threw and silently defaulted every sell to qty 1 while gp_total stayed correct — a
+	 * 10x-wrong implied unit price on the gold-delivery path. Stripping matters rather than just scanning
+	 * for digits: "ff9040" inside the tag would otherwise read as the quantity.
+	 */
 	static int parseTrailingQty(String option)
 	{
-		String[] parts = option.trim().split("\\s+");
+		Matcher m = TRAILING_QTY.matcher(MENU_TAG.matcher(option).replaceAll(""));
+		if (!m.find())
+		{
+			return 1;
+		}
 		try
 		{
-			return Integer.parseInt(parts[parts.length - 1]);
+			return Integer.parseInt(m.group(1));
 		}
 		catch (NumberFormatException e)
 		{
-			return 1;
+			return 1;	// absurdly long digit run — treat as unparseable rather than overflow
 		}
 	}
 

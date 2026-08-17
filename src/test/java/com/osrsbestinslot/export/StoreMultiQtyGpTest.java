@@ -214,17 +214,53 @@ public class StoreMultiQtyGpTest
 
 	// ------------------------------------------------------------------ unaffected paths
 
+	/**
+	 * SUPERSEDED BY FIELD EVIDENCE (2026-08-17). This test previously asserted that a click one tick
+	 * later "is its own transaction — quantities must NOT sum", and it passed. The live client then
+	 * showed that assertion describes a defect: two "Buy 10" clicks a tick apart emitted one click's
+	 * qty against both clicks' gold plus a fabricated {@code unit_price_gp} of 1,132 (true ~755). The
+	 * premise was wrong — a pending is only consumed by an inventory change, so an unresolved pending a
+	 * tick later still has a {@code coinsBefore} that predates both transactions.
+	 *
+	 * <p>Kept, rewritten to assert the corrected contract at the boundary that actually matters: inside
+	 * the resolution window the pending merges and is LABELLED; outside it the clicks stay independent.
+	 * See {@code adjacentTickRepeatBuyMergesInsteadOfPairingOneQtyWithTwoClicksOfGold} and
+	 * {@code aPendingOlderThanTheMergeWindowDoesNotMerge}.
+	 */
 	@Test
-	public void clicksOnDifferentTicksAreIndependentAndNeverMerge()
+	public void clicksMergeInsideTheResolutionWindowAndAreIndependentOutsideIt()
 	{
 		AccountConnectPlugin.StorePending first =
 			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
-		AccountConnectPlugin.StorePending second =
-			AccountConnectPlugin.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK + 1);
 
-		assertFalse(second.ambiguous);
-		assertEquals("a later tick is its own transaction — quantities must NOT sum", 10, second.qty);
-		assertEquals("and it uses its OWN coinsBefore", 999_000L, second.coinsBefore);
+		AccountConnectPlugin.StorePending inside = AccountConnectPlugin.mergeStorePending(
+			first, "store_buy", COAL, 10, 999_000L, TICK + AccountConnectPlugin.STORE_PENDING_MAX_TICKS);
+		assertTrue("still unresolved, so still one delta", inside.qtyMerged);
+		assertEquals(20, inside.qty);
+		assertEquals("the original pre-transaction reading", 1_000_000L, inside.coinsBefore);
+
+		AccountConnectPlugin.StorePending outside = AccountConnectPlugin.mergeStorePending(
+			first, "store_buy", COAL, 10, 999_000L,
+			TICK + AccountConnectPlugin.STORE_PENDING_MAX_TICKS + 1);
+		assertFalse("past the window the resolver would drop it anyway", outside.qtyMerged);
+		assertFalse(outside.ambiguous);
+		assertEquals("its own transaction — quantities must NOT sum", 10, outside.qty);
+		assertEquals("and it uses its OWN coinsBefore", 999_000L, outside.coinsBefore);
+	}
+
+	/**
+	 * A colour tag's own hex digits must never be read as a quantity. "Sell 10&lt;col=ff9040&gt;" scanned
+	 * naively for a trailing digit run yields 9040 — a plausible-looking number, which is the failure
+	 * shape this whole release is about. Tags are stripped before the quantity is read.
+	 */
+	@Test
+	public void colourTagHexDigitsAreNeverMistakenForAQuantity()
+	{
+		assertEquals(10, AccountConnectPlugin.parseTrailingQty("Sell 10<col=ff9040>"));
+		assertEquals("a tag containing digits, with no quantity at all", 1,
+			AccountConnectPlugin.parseTrailingQty("Sell<col=ff9040>"));
+		assertEquals("leading tag too", 10,
+			AccountConnectPlugin.parseTrailingQty("<col=00ff00>Sell 10<col=ff9040>"));
 	}
 
 	@Test
@@ -247,5 +283,115 @@ public class StoreMultiQtyGpTest
 		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
 			"store_buy", COAL, 20, 1_000_000L, 1_005_000L, false);
 		assertNull(fields.get("gp_total"));
+	}
+
+	// ------------------------------------------------------------------ FIELD-OBSERVED defects (2026-08-17)
+
+	/**
+	 * FIELD DEFECT 1 — every general-store SELL was logging qty 1.
+	 *
+	 * <p>Observed live on 2026-08-17 at the Varrock General Store: one "Sell 10" click moved ten items
+	 * out of the inventory and 1,325 gp in, and the event reached production D1 as
+	 * {@code {"item":22660,"qty":1,"gp_total":1325}} — a consumer dividing those gets 1,325 gp per item
+	 * against a true 132.5, ten times over. Reproduced twice.
+	 *
+	 * <p>Cause: the client's SELL option string carries a colour tag the BUY string does not, so the
+	 * trailing token is "10&lt;col=ff9040&gt;", which {@code Integer.parseInt} rejects and the catch
+	 * silently defaults to 1. The pre-existing test asserted on the clean string "Sell 10", which the
+	 * live client never sends — the assertion was true and the behaviour was still wrong.
+	 *
+	 * <p>The strings below are verbatim from the client's own MenuOptionClicked trace.
+	 */
+	@Test
+	public void sellQuantityIsParsedFromTheColourTaggedOptionTheClientActuallySends()
+	{
+		assertEquals("verbatim from the live client trace", 10,
+			AccountConnectPlugin.parseTrailingQty("Sell 10<col=ff9040>"));
+		assertEquals(50, AccountConnectPlugin.parseTrailingQty("Sell 50<col=ff9040>"));
+		assertEquals(5, AccountConnectPlugin.parseTrailingQty("Sell 5<col=ff9040>"));
+		assertEquals(1, AccountConnectPlugin.parseTrailingQty("Sell 1<col=ff9040>"));
+		// the buy strings are untagged and must keep working exactly as before
+		assertEquals(10, AccountConnectPlugin.parseTrailingQty("Buy 10"));
+		assertEquals(50, AccountConnectPlugin.parseTrailingQty("Buy 50"));
+		assertEquals("no trailing number still means one", 1,
+			AccountConnectPlugin.parseTrailingQty("Buy"));
+		assertEquals("a tag with no number is still one", 1,
+			AccountConnectPlugin.parseTrailingQty("Sell<col=ff9040>"));
+	}
+
+	/**
+	 * FIELD DEFECT 2 — two clicks on ADJACENT ticks emitted one click's qty against both clicks' gold,
+	 * and then derived a unit price from the mismatch.
+	 *
+	 * <p>Observed live on 2026-08-17: two rapid "Buy 10" clicks, fifteen packs received (the shop ran
+	 * short), 11,325 gp spent. D1 got {@code qty:10, gp_total:11325, unit_price_gp:1132} with NO
+	 * {@code qty_merged} flag — an exact-looking unit price against a true ~755, indistinguishable
+	 * downstream from a genuinely correct single-click row. Reproduced twice.
+	 *
+	 * <p>Cause: the merge only fired on {@code prev.tick == tick}. One tick apart, {@code prev} was
+	 * dropped and the new pending kept its own {@code coinsBefore} — but no inventory change had
+	 * resolved yet, so that reading STILL predates both transactions. The same argument that justifies
+	 * the same-tick merge applies to any unresolved pending: what makes {@code coinsBefore} usable is
+	 * that nothing has been consumed, not that the clock agrees.
+	 */
+	@Test
+	public void adjacentTickRepeatBuyMergesInsteadOfPairingOneQtyWithTwoClicksOfGold()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+		AccountConnectPlugin.StorePending merged =
+			AccountConnectPlugin.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK + 1);
+
+		assertTrue("an unresolved pending one tick back must still merge", merged.qtyMerged);
+		assertEquals("quantities sum", 20, merged.qty);
+		assertEquals("the ORIGINAL pre-transaction coin reading survives",
+			1_000_000L, merged.coinsBefore);
+
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L,
+			merged.ambiguous, merged.qtyMerged);
+		assertEquals("both clicks' gold", 2_000L, fields.get("gp_total"));
+		assertNull("a merged qty may never produce a unit price", fields.get("unit_price_gp"));
+	}
+
+	/**
+	 * The field defect's exact numbers, as the fixed code must now report them: two "Buy 10" clicks a
+	 * tick apart that delivered fifteen items for 11,325 gp. The row must be LABELLED and must not
+	 * carry the fabricated 1,132 unit price.
+	 */
+	@Test
+	public void theFieldObservedAdjacentTickBuyNoLongerFabricatesAUnitPrice()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", 22660, 10, 26_233_393L, TICK);
+		AccountConnectPlugin.StorePending merged =
+			AccountConnectPlugin.mergeStorePending(first, "store_buy", 22660, 10, 26_227_000L, TICK + 1);
+
+		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 26_222_068L,
+			merged.ambiguous, merged.qtyMerged);
+
+		assertEquals("the measured coin delta, unchanged", 11_325L, fields.get("gp_total"));
+		assertEquals(Boolean.TRUE, fields.get("qty_merged"));
+		assertNull("1132 gp/item was the fabrication this test exists to prevent",
+			fields.get("unit_price_gp"));
+	}
+
+	/**
+	 * The merge window must stay BOUNDED. Two clicks far apart are two separate transactions and the
+	 * later one owns its own coin reading — merging them would attribute the first purchase's gold to
+	 * the second.
+	 */
+	@Test
+	public void aPendingOlderThanTheMergeWindowDoesNotMerge()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+		AccountConnectPlugin.StorePending second = AccountConnectPlugin.mergeStorePending(
+			first, "store_buy", COAL, 10, 999_000L, TICK + AccountConnectPlugin.STORE_PENDING_MAX_TICKS + 1);
+
+		assertFalse("too far apart to share one delta", second.qtyMerged);
+		assertEquals("qty is this click's alone", 10, second.qty);
+		assertEquals("and it uses its OWN coinsBefore", 999_000L, second.coinsBefore);
 	}
 }
