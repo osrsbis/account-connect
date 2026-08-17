@@ -359,17 +359,66 @@ public class EventLogTest
 	}
 
 	@Test
-	public void resolveEmitsSellWithUnitAverage() throws Exception
+	public void resolveEmitsSellWithUnitAverageWhenTheExecutedQuantityConfirmsTheClick() throws Exception
 	{
-		// (b) sell → coins rose exactly; qty>1 so a labelled unit average is derived.
+		// (b) sell → coins rose exactly, and the item count fell by exactly the clicked 5, so the
+		// denominator is CONFIRMED and a labelled unit average is derived.
+		//
+		// Updated 2026-08-17: this test used to pass no item baseline at all and still expect a unit
+		// price. The field showed a single "Sell 50" that only moved 27 items emitting a 10x-wrong unit
+		// price, so an unmeasured quantity no longer licenses the division — see
+		// AccountConnectPlugin#buildStoreTxFields and singleClickPartialFillIsLabelledNotPriced below.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_sell", 1391, 5, 200L, 5, false));
-		plugin.resolveStorePendingOnInventoryChange(950L, 5); // coins rose 750, same tick as the click
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending(
+			"store_sell", 1391, 5, 200L, 5L, 5, false, false));	// itemBefore 5
+		plugin.resolveStorePendingOnInventoryChange(950L, 0L, 5);	// coins rose 750, all 5 items gone
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("store_sell", e.get("type"));
 		assertEquals(750L, e.get("gp_total"));
-		assertEquals(150L, e.get("unit_price_gp")); // 750/5, a labelled average
+		assertEquals(150L, e.get("unit_price_gp")); // 750/5, a labelled average over a confirmed 5
+	}
+
+	@Test
+	public void resolveOmitsUnitPriceWhenTheExecutedQuantityCannotBeMeasured() throws Exception
+	{
+		// No item baseline → no evidence the click executed in full → no derived unit price. gp_total is
+		// still the exact measured coin movement.
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending("store_sell", 1391, 5, 200L, 5, false));
+		plugin.resolveStorePendingOnInventoryChange(950L, 5);
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals(750L, e.get("gp_total"));
+		assertNull("no evidence is not confirmation", e.get("unit_price_gp"));
+	}
+
+	/**
+	 * FIELD DEFECT 3 (2026-08-17, Varrock General Store). One "Buy 50" click on a shop holding 5 emitted
+	 * {@code qty:50, gp_total:3925, unit_price_gp:78} — the true unit was ~785, so the published rate was
+	 * 10x low and looked exact. Reproduced on the sell side: one "Sell 50" moved 27 items and published
+	 * {@code unit_price_gp:43} against ~80.
+	 *
+	 * <p>A single click's quantity is click INTENT, exactly like a merged one: shop stock, free inventory
+	 * space and the player's coin balance all cap what actually executes. The row must therefore be
+	 * LABELLED with what really moved, and must carry no derived price.
+	 */
+	@Test
+	public void singleClickPartialFillIsLabelledNotPriced() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		// "Buy 50" with 0 in the inventory; only 5 arrive, costing 3,925 gp.
+		inject(plugin, "storePending", new AccountConnectPlugin.StorePending(
+			"store_buy", 22660, 50, 26_207_203L, 0L, 5, false, false));
+		plugin.resolveStorePendingOnInventoryChange(26_203_278L, 5L, 5);
+
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("the measured coin movement, exact as always", 3_925L, e.get("gp_total"));
+		assertEquals("the click's own quantity, for continuity with every historical row", 50, e.get("qty"));
+		assertEquals("what the server actually moved", 5L, e.get("qty_executed"));
+		assertEquals(Boolean.TRUE, e.get("qty_partial"));
+		assertNull("78 gp/item was the fabrication this test exists to prevent", e.get("unit_price_gp"));
 	}
 
 	@Test

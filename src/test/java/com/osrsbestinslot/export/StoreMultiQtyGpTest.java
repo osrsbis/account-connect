@@ -105,18 +105,97 @@ public class StoreMultiQtyGpTest
 			fields.get("unit_price_gp"));
 	}
 
+	/**
+	 * Rewritten 2026-08-17. The old title — "unmerged multi-quantity STILL carries a unit price BECAUSE
+	 * its denominator is confirmed" — encoded the assumption the field disproved: one menu option does not
+	 * confirm anything, because the shop's stock, the inventory's free space and the player's coins all cap
+	 * what executes. Confirmation now means MEASURED: the item-count delta equals the clicked quantity.
+	 */
 	@Test
-	public void unmergedMultiQuantityStillCarriesAUnitPriceBecauseItsDenominatorIsConfirmed()
+	public void unmergedMultiQuantityCarriesAUnitPriceOnlyWhenTheExecutedQuantityMatchesTheClick()
 	{
-		// A single "Buy 20" click: qty came from ONE menu option, so the denominator is trustworthy.
 		AccountConnectPlugin.StorePending p =
-			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, TICK);
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
 		assertFalse("a single click is not merged", p.qtyMerged);
 
+		Map<String, Object> confirmed = AccountConnectPlugin.buildStoreTxFields(
+			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged, 20L);
+		assertEquals(2_000L, confirmed.get("gp_total"));
+		assertEquals("a MEASURED denominator yields a unit price", 100L, confirmed.get("unit_price_gp"));
+
+		// Same click, but the shop only had 5 — the field-observed shape.
+		Map<String, Object> partial = AccountConnectPlugin.buildStoreTxFields(
+			p.type, p.item, p.qty, p.coinsBefore, 999_500L, p.ambiguous, p.qtyMerged, 5L);
+		assertEquals("the coin delta is still exact", 500L, partial.get("gp_total"));
+		assertEquals(Boolean.TRUE, partial.get("qty_partial"));
+		assertEquals(5L, partial.get("qty_executed"));
+		assertNull("25 gp/item would be 4x low against the real 100", partial.get("unit_price_gp"));
+	}
+
+	/**
+	 * The field-observed numbers themselves, both directions, as the fixed code must now report them.
+	 */
+	@Test
+	public void theFieldObservedPartialFillsAreLabelledRatherThanPriced()
+	{
+		// BUY 50 on a shop holding 5: 26,207,203 -> 26,203,278 coins, 0 -> 5 packs.
+		Map<String, Object> buy = AccountConnectPlugin.buildStoreTxFields(
+			"store_buy", 22660, 50, 26_207_203L, 26_203_278L, false, false, 5L);
+		assertEquals(3_925L, buy.get("gp_total"));
+		assertEquals(Boolean.TRUE, buy.get("qty_partial"));
+		assertEquals(5L, buy.get("qty_executed"));
+		assertNull("78 gp/item against a true ~785", buy.get("unit_price_gp"));
+
+		// SELL 50 holding 27: coins +2,175, 27 -> 0 packs.
+		Map<String, Object> sell = AccountConnectPlugin.buildStoreTxFields(
+			"store_sell", 22660, 50, 26_201_103L, 26_203_278L, false, false, 27L);
+		assertEquals(2_175L, sell.get("gp_total"));
+		assertEquals(Boolean.TRUE, sell.get("qty_partial"));
+		assertEquals(27L, sell.get("qty_executed"));
+		assertNull("43 gp/item against a true ~80", sell.get("unit_price_gp"));
+	}
+
+	/**
+	 * A merged row now also publishes what actually moved when it can be measured. The merged qty stays an
+	 * upper bound and still gets no unit price — the label is unchanged — but a consumer gains a real
+	 * denominator instead of only "trust nothing here".
+	 */
+	@Test
+	public void aMergedRowPublishesTheMeasuredQuantityAlongsideItsUpperBound()
+	{
+		AccountConnectPlugin.StorePending first =
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, 0L, TICK);
+		AccountConnectPlugin.StorePending merged =
+			AccountConnectPlugin.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, 0L, TICK + 1);
+
 		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
-			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged);
-		assertEquals(2_000L, fields.get("gp_total"));
-		assertEquals("a confirmed denominator may still yield a unit price", 100L, fields.get("unit_price_gp"));
+			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_500L,
+			merged.ambiguous, merged.qtyMerged, 15L);	// the shop ran short: 15 of 20 arrived
+
+		assertEquals(Boolean.TRUE, fields.get("qty_merged"));
+		assertEquals("the click-intent upper bound", 20, fields.get("qty"));
+		assertEquals("what actually moved", 15L, fields.get("qty_executed"));
+		assertNull("still never a derived price on a merged row", fields.get("unit_price_gp"));
+	}
+
+	/** A delta pointing the wrong way is not this transaction's, so nothing is measured from it. */
+	@Test
+	public void anImpossibleItemDeltaIsTreatedAsUnmeasuredRatherThanAsAQuantity()
+	{
+		AccountConnectPlugin.StorePending buy = new AccountConnectPlugin.StorePending(
+			"store_buy", COAL, 10, 1_000_000L, 40L, TICK, false, false);
+		assertEquals("a buy whose item count FELL measures nothing",
+			AccountConnectPlugin.UNKNOWN_ITEM_COUNT, AccountConnectPlugin.executedQty(buy, 30L));
+
+		AccountConnectPlugin.StorePending sell = new AccountConnectPlugin.StorePending(
+			"store_sell", COAL, 10, 1_000_000L, 30L, TICK, false, false);
+		assertEquals("a sell whose item count ROSE measures nothing",
+			AccountConnectPlugin.UNKNOWN_ITEM_COUNT, AccountConnectPlugin.executedQty(sell, 40L));
+
+		AccountConnectPlugin.StorePending noBase = new AccountConnectPlugin.StorePending(
+			"store_buy", COAL, 10, 1_000_000L, TICK, false);
+		assertEquals("no baseline, no measurement",
+			AccountConnectPlugin.UNKNOWN_ITEM_COUNT, AccountConnectPlugin.executedQty(noBase, 10L));
 	}
 
 	/**
@@ -146,11 +225,13 @@ public class StoreMultiQtyGpTest
 	public void anUnmergedRowCarriesNoMergedMarker()
 	{
 		AccountConnectPlugin.StorePending p =
-			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, TICK);
+			AccountConnectPlugin.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
+		// all 20 arrived, so the denominator is confirmed
 		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
-			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged);
+			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged, 20L);
 
 		assertNull("a single click needs no caveat", fields.get("qty_merged"));
+		assertNull("nor a partial-fill caveat", fields.get("qty_partial"));
 		assertEquals("and keeps its unit price", 100L, fields.get("unit_price_gp"));
 	}
 

@@ -324,6 +324,8 @@ public class AccountConnectPlugin extends Plugin
 	private volatile StorePending storePending;
 	/** Ticks after which an unresolved store pending is stale (a failed click fires no inventory change). */
 	static final int STORE_PENDING_MAX_TICKS = 3;
+	/** No item-count baseline was captured, so the executed quantity cannot be measured. */
+	static final long UNKNOWN_ITEM_COUNT = -1L;
 	/**
 	 * Colour/formatting tags in a menu option, e.g. the "&lt;col=ff9040&gt;" the client appends to SELL
 	 * options. Stripped before the quantity is read — the tag's own hex digits are not a quantity.
@@ -342,8 +344,9 @@ public class AccountConnectPlugin extends Plugin
 	{
 		final String type;			// "store_buy" | "store_sell"
 		final int item;
-		final int qty;
+		final int qty;				// the CLICK's quantity (intent) — see qtyExecuted resolution
 		final long coinsBefore;
+		final long itemBefore;		// item count at arm time, so the EXECUTED quantity can be measured
 		final int tick;				// client tick at arm time, for staleness + same-tick-batch detection
 		final boolean ambiguous;	// a second click landed on the same tick → delta merges two txns, omit price
 		/**
@@ -363,10 +366,17 @@ public class AccountConnectPlugin extends Plugin
 
 		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous, boolean qtyMerged)
 		{
+			this(type, item, qty, coinsBefore, UNKNOWN_ITEM_COUNT, tick, ambiguous, qtyMerged);
+		}
+
+		StorePending(String type, int item, int qty, long coinsBefore, long itemBefore, int tick,
+			boolean ambiguous, boolean qtyMerged)
+		{
 			this.type = type;
 			this.item = item;
 			this.qty = qty;
 			this.coinsBefore = coinsBefore;
+			this.itemBefore = itemBefore;
 			this.tick = tick;
 			this.ambiguous = ambiguous;
 			this.qtyMerged = qtyMerged;
@@ -1413,7 +1423,11 @@ public class AccountConnectPlugin extends Plugin
 			ItemContainer inv = event.getItemContainer();
 			long coinsAfter = countItem(inv, COINS_ID);
 			int tick = client == null ? 0 : client.getTickCount();
-			resolveStorePendingOnInventoryChange(coinsAfter, tick);
+			// The transacted item's post count too: its distance from the pending's baseline is the
+			// quantity the server ACTUALLY moved, which is what licenses a derived unit price.
+			StorePending sp = storePending;
+			long itemAfter = (sp == null || inv == null) ? UNKNOWN_ITEM_COUNT : countItem(inv, sp.item);
+			resolveStorePendingOnInventoryChange(coinsAfter, itemAfter, tick);
 			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
 			InvDeltaPending idp = invDeltaPending;
 			if (idp != null)
@@ -2013,11 +2027,13 @@ public class AccountConnectPlugin extends Plugin
 		// exact transacted gp from the coin-count delta (store-price-feasibility.md option B). Snapshot coins
 		// BEFORE the transaction. Last-click-wins: a second click on the same tick marks the pending ambiguous
 		// (its delta would merge two txns), so the resolver omits gp_total rather than misattribute it.
-		long coinsBefore = countItem(client == null ? null : client.getItemContainer(InventoryID.INVENTORY), COINS_ID);
+		ItemContainer invNow = client == null ? null : client.getItemContainer(InventoryID.INVENTORY);
+		long coinsBefore = countItem(invNow, COINS_ID);
+		long itemBefore = invNow == null ? UNKNOWN_ITEM_COUNT : countItem(invNow, item);
 		int tick = client == null ? 0 : client.getTickCount();
 		int qty = parseTrailingQty(opt);
 		StorePending prev = storePending;
-		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, tick);
+		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick);
 	}
 
 	/**
@@ -2052,19 +2068,26 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore, int tick)
 	{
+		return mergeStorePending(prev, type, item, qty, coinsBefore, UNKNOWN_ITEM_COUNT, tick);
+	}
+
+	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore,
+		long itemBefore, int tick)
+	{
 		if (prev != null && tick - prev.tick >= 0 && tick - prev.tick <= STORE_PENDING_MAX_TICKS)
 		{
 			if (prev.item == item && prev.type.equals(type) && !prev.ambiguous)
 			{
-				// Same item, same direction, prev never resolved → one delta covers both.
-				// qtyMerged: the coin delta (gp_total) stays exact, but the summed qty is click INTENT —
-				// a click can fail — so unit_price_gp is suppressed downstream rather than halved.
-				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, tick, false, true);
+				// Same item, same direction, prev never resolved → one delta covers both. Both baselines
+				// stay the ORIGINAL pre-transaction readings, for the same reason: nothing has consumed
+				// this pending, so no inventory change has been applied to either count yet.
+				return new StorePending(type, item, prev.qty + qty, prev.coinsBefore, prev.itemBefore,
+					tick, false, true);
 			}
 			// Different item or direction inside one window — the delta merges unrelated transactions.
-			return new StorePending(type, item, qty, coinsBefore, tick, true);
+			return new StorePending(type, item, qty, coinsBefore, itemBefore, tick, true, false);
 		}
-		return new StorePending(type, item, qty, coinsBefore, tick, false);
+		return new StorePending(type, item, qty, coinsBefore, itemBefore, tick, false, false);
 	}
 
 	/**
@@ -2075,6 +2098,17 @@ public class AccountConnectPlugin extends Plugin
 	 * testable without a live client.
 	 */
 	void resolveStorePendingOnInventoryChange(long coinsAfter, int currentTick)
+	{
+		resolveStorePendingOnInventoryChange(coinsAfter, UNKNOWN_ITEM_COUNT, currentTick);
+	}
+
+	/**
+	 * @param itemAfter post-transaction count of the transacted item, or {@link #UNKNOWN_ITEM_COUNT} when it
+	 *                  could not be read. Its distance from the pending's baseline is the quantity the
+	 *                  server ACTUALLY moved, which is what makes a unit price safe to derive — see
+	 *                  {@link #buildStoreTxFields}.
+	 */
+	void resolveStorePendingOnInventoryChange(long coinsAfter, long itemAfter, int currentTick)
 	{
 		StorePending p = storePending;
 		if (p == null)
@@ -2091,7 +2125,24 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous, p.qtyMerged));
+		long executed = executedQty(p, itemAfter);
+		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous,
+			p.qtyMerged, executed));
+	}
+
+	/**
+	 * The quantity the server actually moved, from the item-count delta, or {@link #UNKNOWN_ITEM_COUNT} when
+	 * either baseline is missing. Sign is normalised: a buy adds items, a sell removes them, so the
+	 * magnitude is what matters and a delta pointing the wrong way is not this transaction's.
+	 */
+	static long executedQty(StorePending p, long itemAfter)
+	{
+		if (p.itemBefore == UNKNOWN_ITEM_COUNT || itemAfter == UNKNOWN_ITEM_COUNT)
+		{
+			return UNKNOWN_ITEM_COUNT;
+		}
+		long delta = "store_buy".equals(p.type) ? itemAfter - p.itemBefore : p.itemBefore - itemAfter;
+		return delta < 0 ? UNKNOWN_ITEM_COUNT : delta;
 	}
 
 	/**
@@ -2115,6 +2166,32 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
 		boolean ambiguous, boolean qtyMerged)
+	{
+		return buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, qtyMerged,
+			UNKNOWN_ITEM_COUNT);
+	}
+
+	/**
+	 * @param executedQty the quantity the server ACTUALLY moved, measured from the item-count delta, or
+	 *                    {@link #UNKNOWN_ITEM_COUNT} when it could not be measured.
+	 *
+	 *                    <p>Field-observed 2026-08-17: a SINGLE "Buy 50" click on a shop holding 5 emitted
+	 *                    {@code qty:50, gp_total:3925, unit_price_gp:78} against a true unit of ~785, and a
+	 *                    single "Sell 50" of 27 items emitted {@code unit_price_gp:43} against ~80. A
+	 *                    single click's quantity is click INTENT too — the shop's stock, the inventory's
+	 *                    free space and the player's coins all cap what actually executes — so "one click
+	 *                    means a confirmed denominator" was simply false, and both rows were 10x wrong
+	 *                    while looking exact.
+	 *
+	 *                    <p>So a unit price is derived only when the measured executed quantity CONFIRMS
+	 *                    the click: it is then a real per-item rate over a real denominator. When the two
+	 *                    disagree the row carries {@code qty_partial: true} and the executed quantity in
+	 *                    {@code qty_executed}, and no unit price — the same "label it, never guess it"
+	 *                    rule the merged case already follows. When nothing could be measured, there is no
+	 *                    evidence either way, so no unit price either.
+	 */
+	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
+		boolean ambiguous, boolean qtyMerged, long executedQty)
 	{
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", item);
@@ -2140,9 +2217,26 @@ public class AccountConnectPlugin extends Plugin
 				// treat qty as an UPPER BOUND on a merged row and must never divide gp_total by it.
 				// unit_price_gp is omitted for exactly that reason.
 				fields.put("qty_merged", true);
+				if (executedQty != UNKNOWN_ITEM_COUNT)
+				{
+					// The measured quantity is not uncertain even when the click intent was — publish it
+					// so a consumer has a real denominator instead of only an upper bound.
+					fields.put("qty_executed", executedQty);
+				}
 			}
-			else if (qty > 1)
+			else if (executedQty != UNKNOWN_ITEM_COUNT && executedQty != qty)
 			{
+				// The server moved a different quantity than the click asked for — partial fill (stock ran
+				// out, inventory filled, coins ran short) or nothing at all. qty stays the click's own
+				// number for continuity with every historical row; the truth sits beside it, labelled.
+				fields.put("qty_partial", true);
+				fields.put("qty_executed", executedQty);
+			}
+			else if (executedQty == qty && qty > 1)
+			{
+				// The measured executed quantity CONFIRMS the click, so gp_total/qty is a real per-item
+				// rate over a real denominator. An unmeasurable quantity does not reach here: no evidence
+				// is not the same as confirmation, and this release exists to stop plausible wrong numbers.
 				fields.put("unit_price_gp", gp / qty);	// average — see note above
 			}
 		}
