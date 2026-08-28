@@ -11,15 +11,26 @@ public interface AccountConnectConfig extends Config
 		keyName = "linkToken",
 		name = "Link token",
 		description =
-			"Paste the token from osrsbestinslot.com (Connect account) to link this client. While linked, "
-			+ "this syncs YOUR OWN account to osrsbestinslot.com — gear, stats, quests and bank — plus your "
-			+ "account activity: GE and shop buys/sells, completed trades INCLUDING the other player's name "
-			+ "and the items each side exchanged, items you loot from kills and from reward chests (raids, "
-			+ "Barrows, clue caskets and similar), items you drop, pick up or alch, deaths, level-ups, and "
-			+ "login/logout times — to power your calculators and account dashboard. If you are in a Group "
-			+ "Ironman group, this also includes your shared group storage contents, which can include items "
-			+ "other group members deposited. Clear the token to "
-			+ "stop syncing.",
+			"Paste the token from osrsbestinslot.com (Connect account) to link this client. While a token "
+			+ "is set, this uploads YOUR OWN account to osrsbestinslot.com: your display name, account hash, "
+			+ "account type, current world and location, skills, total and combat level, quests, achievement "
+			+ "diaries, combat achievements, slayer task, collection log, equipment, inventory, bank, rune "
+			+ "pouch, seed vault, Grand Exchange offers, wealth, spellbook, attack style, active prayers, "
+			+ "Kourend favour and minigame points. In a Group Ironman group it also uploads your shared group "
+			+ "storage, which can include items other members deposited. It also uploads your account "
+			+ "activity: Grand Exchange and general-store buys and sells, completed trades INCLUDING the "
+			+ "other player's name and the items each side exchanged, items you loot from kills and from "
+			+ "reward chests (raids, Barrows, clue caskets and similar), items you drop, pick up or alch, "
+			+ "deaths, level-ups, and login and logout times. Your IP address reaches the server with every "
+			+ "upload. Clear the token to stop all of it.",
+		warning =
+			"Setting a token uploads your account and your in-game activity to osrsbestinslot.com, a "
+			+ "3rd-party server not controlled or verified by the RuneLite developers. That includes your IP "
+			+ "address, your skills, quests, achievement diaries, collection log, equipment, inventory, bank "
+			+ "and Group Ironman shared group storage, and your trades, Grand Exchange and shop "
+			+ "transactions, loot, drops, deaths, level-ups and login times. Completed trades include the "
+			+ "other player's name and the items each side exchanged. Clearing the token stops it. Only set "
+			+ "it if you agree to that.",
 		position = 1
 	)
 	default String linkToken()
