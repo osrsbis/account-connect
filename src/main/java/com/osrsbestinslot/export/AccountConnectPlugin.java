@@ -48,6 +48,8 @@ import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.InventoryID;
+import net.runelite.api.Player;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPCComposition;
@@ -309,6 +311,14 @@ public class AccountConnectPlugin extends Plugin
 	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
 	/** Shop interface (SHOPMAIN 300) open — so a Buy/Sell menu click is a general-store transaction. */
 	private volatile boolean shopOpen;
+
+	// Store-transfer counterparty inference: while a shop is open, accumulate every nearby player seen
+	// (rsn -> [closestTileDist, firstTick, lastTick, combatLevel]). Attached to the store event as `nearby`
+	// so an UNTRACKED receiver of the general-store method (staff sells cheap, receiver buys it out) can be
+	// inferred from who stood there over the visit — presence + persistence + proximity. Reset on shop open.
+	private final Map<String, int[]> shopVisitNearby = new LinkedHashMap<>();
+	private static final int MAX_NEARBY_TRACKED = 64;	// bound the per-visit map
+	private static final int NEARBY_FIELD_CAP = 24;		// bound the emitted nearby[] list
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
 	private volatile List<Map<String, Object>> pendingTradeGiven;
 	private volatile String pendingCounterparty;
@@ -1382,6 +1392,7 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
+				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				chestLooted = false;
 				lastChestEmitKey = null;
 				break;
@@ -1464,6 +1475,10 @@ public class AccountConnectPlugin extends Plugin
 		if (tradeMainOpen && activityLogActive())
 		{
 			captureOtherOfferWhileMainOpen();
+		}
+		if (shopOpen && activityLogActive())
+		{
+			accumulateShopNearby();		// build the receiver-candidate set across the whole shop visit
 		}
 	}
 
@@ -1613,6 +1628,8 @@ public class AccountConnectPlugin extends Plugin
 		if (groupId == SHOP_GROUP_ID)
 		{
 			shopOpen = true;
+			shopVisitNearby.clear();	// fresh receiver-candidate set for this shop visit
+			accumulateShopNearby();		// seed with whoever is already standing here at open
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
 		}
 		else if (groupId == TRADE_MAIN_GROUP_ID)
@@ -2126,8 +2143,10 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		long executed = executedQty(p, itemAfter);
-		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter, p.ambiguous,
-			p.qtyMerged, executed));
+		Map<String, Object> fields = buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter,
+			p.ambiguous, p.qtyMerged, executed);
+		addStoreContextFields(fields);	// nearby[] + world + loc — the candidate receivers of a store transfer
+		emitEvent(p.type, fields);
 	}
 
 	/**
@@ -2143,6 +2162,146 @@ public class AccountConnectPlugin extends Plugin
 		}
 		long delta = "store_buy".equals(p.type) ? itemAfter - p.itemBefore : p.itemBefore - itemAfter;
 		return delta < 0 ? UNKNOWN_ITEM_COUNT : delta;
+	}
+
+	/**
+	 * Attach store-transfer context to a store event: `nearby` (players seen over the shop visit — the
+	 * candidate receivers of the general-store method: staff sells cheap, an untracked player buys it out),
+	 * `world`, `loc`. Instance method (needs the live client). nearby[] comes from the visit accumulator; a
+	 * live snapshot backfills if the accumulator is empty (event fired before a tick ran).
+	 */
+	void addStoreContextFields(Map<String, Object> fields)
+	{
+		if (client == null)
+		{
+			return;
+		}
+		List<Map<String, Object>> nearby = nearbyFromVisit();
+		if (nearby.isEmpty())
+		{
+			nearby = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+		}
+		if (!nearby.isEmpty())
+		{
+			fields.put("nearby", nearby);
+		}
+		fields.put("world", client.getWorld());
+		Player self = client.getLocalPlayer();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me != null)
+		{
+			fields.put("loc", java.util.Arrays.asList(me.getX(), me.getY(), me.getPlane()));
+		}
+	}
+
+	/** Snapshot up to {@code cap} nearest OTHER players right now: {rsn, dx, dy, dist, cb}, nearest first. */
+	private List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return out;
+		}
+		List<Player> others = new ArrayList<>();
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			others.add(p);
+		}
+		others.sort((a, b) -> Integer.compare(a.getWorldLocation().distanceTo(me), b.getWorldLocation().distanceTo(me)));
+		for (Player p : others)
+		{
+			if (out.size() >= cap)
+			{
+				break;
+			}
+			WorldPoint loc = p.getWorldLocation();
+			Map<String, Object> m = new LinkedHashMap<>();
+			m.put("rsn", Text.removeTags(p.getName()));
+			m.put("dx", loc.getX() - me.getX());
+			m.put("dy", loc.getY() - me.getY());
+			m.put("dist", loc.distanceTo(me));
+			m.put("cb", p.getCombatLevel());
+			out.add(m);
+		}
+		return out;
+	}
+
+	/** Merge the current nearby players into the shop-visit accumulator (called each tick while shop open). */
+	void accumulateShopNearby()
+	{
+		if (client == null)
+		{
+			return;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return;
+		}
+		int tick = client.getTickCount();
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			int dist = p.getWorldLocation().distanceTo(me);
+			String rsn = Text.removeTags(p.getName());
+			int[] rec = shopVisitNearby.get(rsn);
+			if (rec == null)
+			{
+				if (shopVisitNearby.size() >= MAX_NEARBY_TRACKED)
+				{
+					continue;	// map full — don't grow unbounded on a crowded world
+				}
+				shopVisitNearby.put(rsn, new int[]{dist, tick, tick, p.getCombatLevel()});
+			}
+			else
+			{
+				if (dist < rec[0])
+				{
+					rec[0] = dist;	// closest approach this visit
+				}
+				rec[2] = tick;		// last seen
+			}
+		}
+	}
+
+	/** Emit nearby[] from the visit accumulator, nearest-first: {rsn, dist, first_tick, last_tick, cb}. */
+	private List<Map<String, Object>> nearbyFromVisit()
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		List<Map.Entry<String, int[]>> entries = new ArrayList<>(shopVisitNearby.entrySet());
+		entries.sort((a, b) -> Integer.compare(a.getValue()[0], b.getValue()[0]));
+		for (Map.Entry<String, int[]> e : entries)
+		{
+			if (out.size() >= NEARBY_FIELD_CAP)
+			{
+				break;
+			}
+			int[] r = e.getValue();
+			Map<String, Object> m = new LinkedHashMap<>();
+			m.put("rsn", e.getKey());
+			m.put("dist", r[0]);
+			m.put("first_tick", r[1]);
+			m.put("last_tick", r[2]);
+			m.put("cb", r[3]);
+			out.add(m);
+		}
+		return out;
 	}
 
 	/**
