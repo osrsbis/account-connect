@@ -60,15 +60,16 @@ public class TradeScreenshotTest
 		assertTrue(startsWith(bytes, PNG_MAGIC));
 	}
 
-	// ---- toggle OFF: handlers return early, nothing captured ----
+	// ---- NOT LINKED: handlers return early, nothing captured ----
 
 	@Test
-	public void toggleOffPerformsNoCaptureAndHoldsNoState() throws Exception
+	public void unlinkedPerformsNoCaptureAndHoldsNoState() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		// Defaults only: uploadTradeScreenshots() == false. drawManager / executor / okHttpClient
-		// are left null on purpose — if any handler got past the toggle guard and tried to capture
-		// or upload, it would NPE and fail this test.
+		// Defaults only: linkToken() == "" so screenshotsEnabled() is false (the separate opt-in toggle
+		// was removed 2026-09-02 — the token is the gate). drawManager / executor / okHttpClient are
+		// left null on purpose — if any handler got past the gate and tried to capture or upload, it
+		// would NPE and fail this test.
 		inject(plugin, "config", new AccountConnectConfig() {});
 
 		plugin.handleTradeContainerChanged(90);
@@ -221,17 +222,19 @@ public class TradeScreenshotTest
 	@Test
 	public void malformedTokenNeverUploads() throws Exception
 	{
-		// Toggle ON but token invalid: commit path must stop at the token guard, before touching
-		// the (null) executor/okHttpClient — an upload attempt would NPE and fail the test.
+		// A token that is present but MALFORMED must be treated as unlinked: the commit path stops at
+		// the token guard, before touching the (null) executor/okHttpClient — an upload attempt would
+		// NPE and fail the test. This is the arm that matters now that the token is the only gate: a
+		// gate keyed on "is the string non-empty" rather than on the ^[a-f0-9]{32}$ shape would pass
+		// every other test in this file and fail here.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig()
 		{
 			@Override
-			public boolean uploadTradeScreenshots()
+			public String linkToken()
 			{
-				return true;
+				return "not-a-valid-token";	// fails ^[a-f0-9]{32}$
 			}
-			// linkToken() default is "" — fails ^[a-f0-9]{32}$
 		});
 		plugin.tradeActive = true;
 		plugin.pendingTradeFrame.set(syntheticFrame(8, 8));
@@ -243,7 +246,7 @@ public class TradeScreenshotTest
 
 	// ---- helpers ----
 
-	/** Toggle ON, ARMED (frame buffered), but no executor/okHttpClient: any upload attempt would NPE. */
+	/** LINKED, ARMED (frame buffered), but no executor/okHttpClient: any upload attempt would NPE. */
 	private static AccountConnectPlugin armedPluginWithoutNetwork() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
@@ -259,15 +262,9 @@ public class TradeScreenshotTest
 		return new AccountConnectConfig()
 		{
 			@Override
-			public boolean uploadTradeScreenshots()
-			{
-				return true;
-			}
-
-			@Override
 			public String linkToken()
 			{
-				return TEST_TOKEN;
+				return TEST_TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 
 			@Override

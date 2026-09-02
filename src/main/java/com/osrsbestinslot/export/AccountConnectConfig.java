@@ -21,16 +21,22 @@ public interface AccountConnectConfig extends Config
 			+ "activity: Grand Exchange and general-store buys and sells, completed trades INCLUDING the "
 			+ "other player's name and the items each side exchanged, items you loot from kills and from "
 			+ "reward chests (raids, Barrows, clue caskets and similar), items you drop, pick up or alch, "
-			+ "deaths, level-ups, and login and logout times. Your IP address reaches the server with every "
-			+ "upload. Clear the token to stop all of it.",
+			+ "deaths, level-ups, and login and logout times. It also uploads screenshots as delivery proof: "
+			+ "your trade confirmation window when a trade completes, which shows the other player's name "
+			+ "and the items traded, and a short series of your game screen while a shop window is open, "
+			+ "which may include on-screen chat and other players' names (discarded if the visit had no "
+			+ "purchase or sale). Your IP address reaches the server with every upload. Clear the token to "
+			+ "stop all of it.",
 		warning =
 			"Setting a token uploads your account and your in-game activity to osrsbestinslot.com, a "
 			+ "3rd-party server not controlled or verified by the RuneLite developers. That includes your IP "
 			+ "address, your skills, quests, achievement diaries, collection log, equipment, inventory, bank "
 			+ "and Group Ironman shared group storage, and your trades, Grand Exchange and shop "
 			+ "transactions, loot, drops, deaths, level-ups and login times. Completed trades include the "
-			+ "other player's name and the items each side exchanged. Clearing the token stops it. Only set "
-			+ "it if you agree to that.",
+			+ "other player's name and the items each side exchanged. It also uploads screenshots of your trade "
+			+ "window and of your game screen while a shop is open, which may include on-screen chat "
+			+ "messages and other players' names. Clearing the token stops it. Only set it if you agree "
+			+ "to that.",
 		position = 1
 	)
 	default String linkToken()
@@ -49,25 +55,11 @@ public interface AccountConnectConfig extends Config
 		return "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
 	}
 
-	@ConfigItem(
-		keyName = "uploadTradeScreenshots",
-		name = "Upload delivery screenshots",
-		description =
-			"When enabled, this captures screenshots as delivery proof and uploads them with your "
-			+ "osrsbestinslot.com link token to osrsbestinslot.com's servers: your trade confirmation "
-			+ "window when a trade completes (which shows the other player's name and the items traded), "
-			+ "and a low-rate (1 per second) series while a shop window is open (discarded if the visit "
-			+ "had no purchase or sale). Nothing is captured while this is off.",
-		position = 3,
-		warning =
-			"This uploads screenshots — your trade window, and your game screen while a shop is open "
-			+ "(which may include on-screen chat messages and other players' names) — to osrsbestinslot.com, "
-			+ "a 3rd-party server not controlled or verified by the RuneLite developers. Only enable it if you agree to that."
-	)
-	default boolean uploadTradeScreenshots()
-	{
-		return false;	// OFF by default — explicit opt-in required
-	}
+	// Delivery-proof screenshots are no longer a separate tick box (2026-09-02). They are part of core
+	// sync, active whenever a link token is set — the SAME gate as the account upload and the activity
+	// log — so what they capture is disclosed in the linkToken description + warning above rather than on
+	// a toggle of their own. Clearing the token stops it, and osrsbestinslot.com can still force it off
+	// per token with the X-Screenshots / X-Clips response headers.
 
 	// Sync cadence is no longer a user setting: osrsbestinslot.com dictates it per link token in the
 	// ingest response (X-Sync-Interval header), so it can be tuned centrally without a client change.

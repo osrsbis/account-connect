@@ -19,33 +19,58 @@ import static org.junit.Assert.assertTrue;
  */
 public class StoreClipCaptureTest
 {
-	// (a) opt-in: capture is OFF by default — uploadTradeScreenshots() defaults false.
+	private static final String TOKEN = "0123456789abcdef0123456789abcdef";
+
+	/** Config with a linked token — the ONLY local condition for capture since the toggle was removed. */
+	private static AccountConnectConfig linked()
+	{
+		return new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+		};
+	}
+
+	// (a) no link token -> no capture. The separate opt-in toggle was removed 2026-09-02; capture is now
+	// part of core sync, so the token IS the gate. An unlinked client must still capture nothing.
 	@Test
-	public void storeClipsDisabledByDefault() throws Exception
+	public void storeClipsDisabledWithoutLinkToken() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig() {});
-		assertFalse("store-clip capture must be off with default (opt-in) config",
+		assertFalse("store-clip capture must be off with no link token",
 			plugin.storeClipsEnabled());
 	}
 
-	// (b) server force-disable wins even when the local opt-in is ON.
+	// (a2) a malformed token is not a link — same refusal as none at all.
 	@Test
-	public void serverForceDisableOverridesLocalOptIn() throws Exception
+	public void storeClipsDisabledOnMalformedToken() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig()
 		{
 			@Override
-			public boolean uploadTradeScreenshots()
+			public String linkToken()
 			{
-				return true;
+				return "not-a-token";
 			}
 		});
-		// opt-in on, server not disabling -> enabled.
-		assertTrue("local opt-in with no server disable must enable capture",
+		assertFalse("a malformed token must not enable capture", plugin.storeClipsEnabled());
+	}
+
+	// (b) server force-disable wins even when the client IS linked.
+	@Test
+	public void serverForceDisableOverridesLinkedToken() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", linked());
+		// linked, server not disabling -> enabled.
+		assertTrue("a linked token with no server disable must enable capture",
 			plugin.storeClipsEnabled());
-		// server flips it off -> gate closes despite the local opt-in.
+		// server flips it off -> gate closes despite the link.
 		plugin.serverClipsDisabled = true;
 		assertFalse("server X-Clips=off must force capture off",
 			plugin.storeClipsEnabled());
@@ -170,6 +195,46 @@ public class StoreClipCaptureTest
 			BufferedImage.TYPE_INT_RGB, rgb.getType());
 		assertEquals("width must be preserved", 32, rgb.getWidth());
 		assertEquals("height must be preserved", 24, rgb.getHeight());
+	}
+
+	/**
+	 * WEDGE ARM (added 2026-09-02 after mutation testing): clipFramePending is a one-in-flight latch, so
+	 * ANY path out of the frame callback must clear it. A DrawManager that hands back a null image — the
+	 * documented shape when the GPU plugin owns the surface — must not leave the latch set, or capture
+	 * silently stops for the rest of the visit after one bad frame and the clip is short or empty.
+	 *
+	 * Falsified: removing the `clipFramePending = false` from the null branch of onClipFrameTick makes
+	 * this arm fail. Without it that mutation survived the whole suite.
+	 */
+	@Test
+	public void nullFrameDoesNotWedgeCapture() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", linked());
+		// A DrawManager whose listener is invoked immediately with a null image.
+		inject(plugin, "drawManager", new net.runelite.client.ui.DrawManager()
+		{
+			@Override
+			public void requestNextFrameListener(java.util.function.Consumer<java.awt.Image> consumer)
+			{
+				consumer.accept(null);
+			}
+		});
+		inject(plugin, "clipCapturing", true);
+		inject(plugin, "clipRing", new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES));
+
+		plugin.onClipFrameTick();		// first sample: null frame comes back
+		assertFalse("a null frame must release the in-flight latch", pending(plugin));
+
+		plugin.onClipFrameTick();		// a wedged latch would make this a no-op forever
+		assertFalse("capture must still be able to request further frames", pending(plugin));
+	}
+
+	private static boolean pending(AccountConnectPlugin plugin) throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField("clipFramePending");
+		f.setAccessible(true);
+		return f.getBoolean(plugin);
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

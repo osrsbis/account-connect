@@ -178,7 +178,7 @@ public class StoreClipUploadTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin()
 		{
 			@Override
-			void submitStoreClipUpload(List<BufferedImage> frames)
+			void submitStoreClipUpload(List<byte[]> frames)
 			{
 				uploaded[0] = true;
 			}
@@ -186,8 +186,8 @@ public class StoreClipUploadTest
 		inject(plugin, "config", enabledConfig(null));
 		inject(plugin, "drawManager", new DrawManager());
 		ClipRingBuffer ring = new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES);
-		ring.add(rgbFrame(16, 12));
-		ring.add(rgbFrame(16, 12));
+		ring.add(jpeg(16, 12));
+		ring.add(jpeg(16, 12));
 		inject(plugin, "clipRing", ring);
 		inject(plugin, "clipCapturing", true);
 		plugin.storeTxThisVisit = false;			// the visit had NO buy/sell
@@ -202,7 +202,7 @@ public class StoreClipUploadTest
 		AccountConnectPlugin plugin2 = new AccountConnectPlugin()
 		{
 			@Override
-			void submitStoreClipUpload(List<BufferedImage> frames)
+			void submitStoreClipUpload(List<byte[]> frames)
 			{
 				uploaded2[0] = true;
 			}
@@ -210,7 +210,7 @@ public class StoreClipUploadTest
 		inject(plugin2, "config", enabledConfig(null));
 		inject(plugin2, "drawManager", new DrawManager());
 		ClipRingBuffer ring2 = new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES);
-		ring2.add(rgbFrame(16, 12));
+		ring2.add(jpeg(16, 12));
 		inject(plugin2, "clipRing", ring2);
 		inject(plugin2, "clipCapturing", true);
 		plugin2.storeTxThisVisit = true;			// a buy/sell happened
@@ -246,10 +246,10 @@ public class StoreClipUploadTest
 			inject(plugin, "executor", Executors.newSingleThreadScheduledExecutor());
 			inject(plugin, "okHttpClient", new OkHttpClient());
 
-			List<BufferedImage> frames = new ArrayList<>();
-			frames.add(rgbFrame(40, 30));
-			frames.add(rgbFrame(40, 30));
-			frames.add(rgbFrame(40, 30));
+			List<byte[]> frames = new ArrayList<>();
+			frames.add(jpeg(40, 30));
+			frames.add(jpeg(40, 30));
+			frames.add(jpeg(40, 30));
 			plugin.submitStoreClipUpload(frames);
 
 			Capture c = received.poll(15, TimeUnit.SECONDS);
@@ -292,20 +292,20 @@ public class StoreClipUploadTest
 		return img;
 	}
 
+	/** An ENCODED frame — what the ring holds since the heap fix (2026-09-02). */
+	private static byte[] jpeg(int w, int h)
+	{
+		return AccountConnectPlugin.encodeJpeg(rgbFrame(w, h));
+	}
+
 	private static AccountConnectConfig enabledConfig(String baseUrl)
 	{
 		return new AccountConnectConfig()
 		{
 			@Override
-			public boolean uploadTradeScreenshots()
-			{
-				return true;
-			}
-
-			@Override
 			public String linkToken()
 			{
-				return TEST_TOKEN;
+				return TEST_TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 
 			@Override

@@ -172,6 +172,11 @@ public class EventLogTest
 		// login screen (LOGGED_IN not stubbed -> null state) makes it return immediately, so this test
 		// exercises the ROUTING without dragging in snapshot construction.
 		inject(plugin, "client", mock(net.runelite.api.Client.class));
+		// A DrawManager is now REQUIRED here. Screenshot capture used to be behind a default-false
+		// opt-in, so with onConfig() this path returned early and never touched drawManager; since the
+		// toggle was removed (2026-09-02) a linked token alone enables capture, so the accept path
+		// reaches requestNextFrameListener for real. Injecting a mock keeps this test about ROUTING.
+		inject(plugin, "drawManager", mock(net.runelite.client.ui.DrawManager.class));
 		injectPendingTrade(plugin, "Bob");
 		ChatMessage ev = mock(ChatMessage.class);
 		when(ev.getType()).thenReturn(ChatMessageType.TRADE);

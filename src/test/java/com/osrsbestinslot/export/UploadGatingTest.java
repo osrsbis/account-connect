@@ -314,19 +314,13 @@ public class UploadGatingTest
 			@Override
 			public String linkToken()
 			{
-				return TOKEN;
-			}
-
-			@Override
-			public boolean uploadTradeScreenshots()
-			{
-				return true;
+				return TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 		});
-		assertTrue("opt-in on + no server override -> enabled", plugin.screenshotsEnabled());
+		assertTrue("linked + no server override -> enabled", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "off"));
-		assertFalse("server force-disable overrides the local opt-in", plugin.screenshotsEnabled());
+		assertFalse("server force-disable overrides the local link", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
 		assertTrue("server can re-allow (local opt-in still governs)", plugin.screenshotsEnabled());

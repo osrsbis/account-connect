@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.5";
+	private static final String PLUGIN_VERSION = "0.7.6";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -484,11 +484,14 @@ public class AccountConnectPlugin extends Plugin
 	private static final java.util.Set<String> SNAPSHOT_TRIGGER_EVENTS = new java.util.HashSet<>(
 		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death", "drop", "alch"));
 
-	/** Trade-screenshot capture requires the local opt-in AND no server force-disable. */
+	/**
+	 * Trade-screenshot capture is part of core sync (2026-09-02): active whenever the activity log is —
+	 * i.e. a valid link token is set — with no separate opt-in. osrsbestinslot.com can still force it off
+	 * per token via the X-Screenshots response header.
+	 */
 	boolean screenshotsEnabled()
 	{
-		// toggle first: when off, short-circuit before touching client (the feature is off regardless).
-		return config.uploadTradeScreenshots() && !serverScreenshotsDisabled;
+		return activityLogActive() && !serverScreenshotsDisabled;
 	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
@@ -548,10 +551,10 @@ public class AccountConnectPlugin extends Plugin
 	/** Per-frame render callback, registered with DrawManager only while capturing. */
 	private final Runnable clipFrameTick = this::onClipFrameTick;
 
-	/** Store-clip capture requires the local opt-in AND no server force-disable (both read live per call). */
+	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
 	{
-		return config.uploadTradeScreenshots() && !serverClipsDisabled;
+		return activityLogActive() && !serverClipsDisabled;
 	}
 
 	/**
@@ -611,7 +614,13 @@ public class AccountConnectPlugin extends Plugin
 	/**
 	 * Render-loop callback (runs every frame while capturing). Decimates by wall clock, then asks
 	 * DrawManager for the next composited frame; that frame arrives on the consumer, is converted to an
-	 * RGB (no-alpha) buffer, downscaled, and stored. One request outstanding at a time (clipFramePending).
+	 * RGB (no-alpha) buffer, downscaled, JPEG-ENCODED, and the BYTES are stored.
+	 *
+	 * ⚠ Encoding happens HERE, per frame, not at upload time — the ring must never hold decoded images
+	 * (see ClipRingBuffer's header: 360 raw frames is ~400MB and freezes the client). The encode runs on
+	 * the executor so the render thread is not blocked by ImageIO, and clipFramePending is cleared only
+	 * once that encode has finished, so at most ONE frame is ever in flight and the ring stays in
+	 * chronological order even though the executor is a shared pool.
 	 */
 	void onClipFrameTick()
 	{
@@ -626,18 +635,33 @@ public class AccountConnectPlugin extends Plugin
 		clipFramePending = true;
 		drawManager.requestNextFrameListener(img ->
 		{
-			try
-			{
-				ClipRingBuffer ring = clipRing;
-				if (ring != null && img != null)
-				{
-					ring.add(downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH));
-				}
-			}
-			finally
+			if (img == null)
 			{
 				clipFramePending = false;
+				return;
 			}
+			// Copy + downscale on this thread: `img` is DrawManager's buffer and is not ours to keep.
+			final BufferedImage scaled = downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH);
+			if (scaled == null)
+			{
+				clipFramePending = false;
+				return;
+			}
+			executor.submit(() ->
+			{
+				try
+				{
+					ClipRingBuffer ring = clipRing;
+					if (ring != null)
+					{
+						ring.add(encodeJpeg(scaled));	// null/empty is ignored by the ring
+					}
+				}
+				finally
+				{
+					clipFramePending = false;
+				}
+			});
 		});
 	}
 
@@ -668,7 +692,7 @@ public class AccountConnectPlugin extends Plugin
 			ring.clear();		// no purchase, or shutdown/hop drop — discard without uploading
 			return;
 		}
-		List<BufferedImage> frames = ring.snapshot();
+		List<byte[]> frames = ring.snapshot();	// already JPEG-encoded at capture time
 		ring.clear();
 		if (!frames.isEmpty())
 		{
@@ -754,7 +778,7 @@ public class AccountConnectPlugin extends Plugin
 	 * DECLARED fps to a range that predates 30fps capture — so the declared value can be wrong, while a
 	 * rate derived from two timestamps cannot be.
 	 */
-	void submitStoreClipUpload(java.util.List<BufferedImage> frames)
+	void submitStoreClipUpload(java.util.List<byte[]> frames)
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty())
@@ -768,13 +792,11 @@ public class AccountConnectPlugin extends Plugin
 		final long startMillis = endMillis - (long) (frames.size() - 1) * 1000L / CLIP_FPS;
 		executor.submit(() ->
 		{
-			java.util.List<byte[]> encoded = new java.util.ArrayList<>(frames.size());
-			for (BufferedImage frame : frames)
-			{
-				encoded.add(encodeJpeg(frame));	// null / oversized entries are filtered by selectStoreClipFrames
-			}
+			// Frames arrive ALREADY ENCODED (onClipFrameTick encodes each one as it is captured), so
+			// there is no second decoded copy here — that copy is what put ~400MB on the heap and froze
+			// the client. selectStoreClipFrames still filters null / oversized entries.
 			java.util.List<byte[]> kept = selectStoreClipFrames(
-				encoded, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
+				frames, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
 			if (kept.isEmpty())
 			{
 				return;
@@ -3194,7 +3216,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				drawManager.requestNextFrameListener(image ->
 				{
-					if (screenshotsEnabled())	// re-check: toggle may flip before the frame lands
+					if (screenshotsEnabled())	// re-check: the gate may close before the frame lands
 					{
 						submitTradeScreenshotUpload(toBufferedImage(image), "completed");
 					}
@@ -3208,8 +3230,9 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * The whole feature is gated on the opt-in toggle: off means no arming, no frame request, no
-	 * buffer, no upload. Also drops any frame buffered before the toggle was switched off mid-trade.
+	 * The whole feature is gated on screenshotsEnabled(): no link token (or a server force-disable)
+	 * means no arming, no frame request, no buffer, no upload. Also drops any frame buffered before the
+	 * token was cleared or the server disabled it mid-trade.
 	 */
 	private boolean tradeScreenshotsDisabled()
 	{
