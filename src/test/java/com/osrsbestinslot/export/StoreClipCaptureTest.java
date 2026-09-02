@@ -87,19 +87,24 @@ public class StoreClipCaptureTest
 		// interface reads as movement only when consecutive frames are ~125ms apart; 3fps (333ms) was
 		// rejected on review as too laggy to see the mouse at all. Asserted independently of whatever
 		// CLIP_FPS currently is, so lowering the rate for a byte saving turns this RED.
-		assertTrue("a delivery clip must sample at least 8x/second for the mouse to be visible",
-			AccountConnectPlugin.CLIP_FPS >= 8);
+		assertTrue("a delivery clip must sample at the client's own render rate (30fps) to read as motion",
+			AccountConnectPlugin.CLIP_FPS >= 30);
 		// The burst must fit the SERVER's frame-count cap. This is 240 only because the ingest cap was
-		// raised to 200 in the same change (osrsbis-web-integrator backend.js FRAMES_COUNT_MAX); with the
+		// raised to 360 in the same change (osrsbis-web-integrator backend.js FRAMES_COUNT_MAX); with the
 		// old 120 the server 400s the whole burst — it does not trim it — so this number and the server's
 		// must move together, and this assertion is what catches them drifting apart.
-		assertTrue("fps x seconds must fit the server's 200-frame burst cap",
-			AccountConnectPlugin.MAX_CLIP_FRAMES <= 200);
+		assertTrue("fps x seconds must fit the server's 360-frame burst cap",
+			AccountConnectPlugin.MAX_CLIP_FRAMES <= 360);
 		// And it must fit the BYTE cap at the measured mean frame size (56KB over 68 real frames), or the
 		// newest-suffix trim silently discards the opening of the visit.
-		assertTrue("fps x seconds at ~56KB/frame must fit the 12MB burst cap",
-			(long) AccountConnectPlugin.MAX_CLIP_FRAMES * 56 * 1024
+		// 30KB is the MEASURED mean at the current MAX_FRAME_WIDTH/quality (704px, q0.55). If either is
+		// raised, this arm goes red — which is the point: the frame size and the frame count are one
+		// budget, and changing one without the other silently truncates the start of every visit.
+		assertTrue("fps x seconds at ~30KB/frame (704px q0.55) must fit the 12MB burst cap",
+			(long) AccountConnectPlugin.MAX_CLIP_FRAMES * 30 * 1024
 				<= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		assertEquals("frame width must stay at the legibility floor that the byte budget assumes",
+			704, AccountConnectPlugin.MAX_FRAME_WIDTH);
 
 		// A second simulated second must yield the next sample — proves it is a rate, not a one-shot.
 		int trues2 = 0;

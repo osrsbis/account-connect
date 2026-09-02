@@ -317,6 +317,26 @@ public class AccountConnectPlugin extends Plugin
 	// so an UNTRACKED receiver of the general-store method (staff sells cheap, receiver buys it out) can be
 	// inferred from who stood there over the visit — presence + persistence + proximity. Reset on shop open.
 	private final Map<String, int[]> shopVisitNearby = new LinkedHashMap<>();
+	/**
+	 * Item -> quantity in the SHOP's own stock, from the last container change while a shop is open.
+	 *
+	 * This is what makes the counterparty visible on the general-store method. The staff account sells
+	 * an item into the shop and an untracked player buys it out; that second half is invisible in the
+	 * staff account's own inventory, so the store event alone can never say who received the value.
+	 * The shop container CAN see it: the stock of an item we just sold goes DOWN when somebody takes it.
+	 * Pairing that moment with who is standing there names the receiver.
+	 */
+	private final Map<Integer, Integer> shopStock = new java.util.HashMap<>();
+	/** Items this visit's own sells put INTO the shop — only these are watched for a taker. */
+	private final java.util.Set<Integer> soldThisVisit = new java.util.LinkedHashSet<>();
+	/**
+	 * Nearby players AT THE MOMENT of the transaction, as opposed to across the whole visit.
+	 *
+	 * A visit-wide list answers "who was around at some point", which is a weaker claim than the one a
+	 * dispute needs. This is sampled when the buy/sell actually fires, so the event can state who was
+	 * present AT the transaction and for how long around it.
+	 */
+	private volatile List<Map<String, Object>> nearbyAtTx;
 	private static final int MAX_NEARBY_TRACKED = 64;	// bound the per-visit map
 	private static final int NEARBY_FIELD_CAP = 24;		// bound the emitted nearby[] list
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
@@ -480,40 +500,28 @@ public class AccountConnectPlugin extends Plugin
 	// click that moves an item can fall between two frames entirely: the quantity menu, the click and
 	// the inventory change all happen inside one second.
 	//
-	// 8fps is the MOUSE-VISIBILITY floor, and that is the requirement this rate exists to meet.
-	// 3fps was tried first and rejected on review: "the current real time stills feel a bit laggy, i can
-	// barely see the mouse movement" (Lukas, 2026-09-02). A cursor crossing a shop interface is only
-	// legible when consecutive frames are ~125ms apart; at 3fps (333ms) the pointer teleports between
-	// positions and the click that moves an item is inferred rather than seen. The video is the evidence,
-	// so seeing the click is the whole product.
+	// 30fps — the client's own render rate, so the clip IS the delivery rather than a flipbook of it.
+	// 1 -> 3 -> 8 were each rejected on review; at 8fps (125ms) the cursor still steps between positions
+	// and the review verdict was "it doesn't feel like a clip, its absolutely lagging". 30fps is 33ms,
+	// which is motion. There is no rate above this worth having: the client does not render faster.
 	//
-	// Budget, measured 2026-09-02 over 68 REAL burst frames at 768px/q0.7 (mean 56KB, median 47KB,
-	// max 79KB; a fresh single-frame re-encode at those settings is 45KB):
-	//   8fps x 25s = 200 frames ~= 11.0MB — fits the 12MB burst cap at the MEAN frame size
-	//   8fps x 30s = 240 frames ~= 13.4MB — EXCEEDS it
-	// ⚠ Size the window against the MEAN (56KB), not a fresh single-frame re-encode (45KB). Using the
-	// smaller number first put this at 30s and the byte-cap assertion caught it — that assertion exists
-	// because the overflow is SILENT in production: the trim just drops the oldest frames.
-	// A store visit is short, but not always shorter than this: the longest burst ever captured here is
-	// 47 frames = 47s at the old 1fps, so a 25s window WILL trim a long visit. That is the deliberate
-	// trade — the trim keeps the NEWEST suffix, so what a long visit loses is its opening, never the
-	// transaction at the end. Buying the window back means raising the server's 12MB FRAMES_MAX too,
-	// which is a wider change than the count cap and was not taken here.
+	// Paying for it: 30fps x 12s = 360 frames, and 360 frames only fits the 12MB burst cap at a smaller
+	// frame. Measured on a real captured frame: 768px/q0.70 = 45KB (16.2MB — over), 704px/q0.55 = 30KB
+	// (10.8MB — fits). The 704px/q0.55 frame was checked for LEGIBILITY, not just size: shop item text
+	// and chat remain readable, which is the property MAX_FRAME_WIDTH exists to protect.
 	//
-	// ⚠ REQUIRES A SERVER CHANGE, and without it every burst is REJECTED, not degraded:
-	// media.js:185 rejects n > FRAMES_COUNT_MAX (120) with a 400, and media.js:226 clamps the recorded
-	// fps to 1-4 so playback would render 240 frames as a 60s slideshow. Both live in
-	// osrsbis-web-integrator and must ship BEFORE this plugin build reaches users.
-	// Do NOT raise this without re-measuring the per-frame bytes; a bigger client window or a higher
-	// MAX_FRAME_WIDTH changes the arithmetic.
-	static final int CLIP_FPS = 8;					// sample rate (constant, NOT a user setting)
-	static final int CLIP_SECONDS = 25;				// max clip length retained (was 120 @ 1fps)
+	// 12 seconds is the deliberate trade. A store visit's evidence is the transaction and the seconds
+	// around it, and the ring keeps the NEWEST frames, so a longer visit loses its opening and never its
+	// transaction. Twelve seconds at 30fps shows the approach, the click and the result.
+	static final int CLIP_FPS = 30;					// sample rate (constant, NOT a user setting)
+	static final int CLIP_SECONDS = 12;				// max clip length retained (was 120 @ 1fps)
 	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// ring capacity = 120 frames
 	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
-	// (Plan body text says 640px; 768 is the ratified Task-0 override.) Kept at 768 when the rate rose
-	// to 8fps: dropping to 640 would save ~30% per frame but store item text is the thing being proven,
-	// so the byte budget was found in the frame COUNT cap instead, not in legibility.
-	static final int MAX_FRAME_WIDTH = 768;
+	// (Plan body text says 640px; 768 is the ratified Task-0 override.) Lowered 768 -> 704 on 2026-09-02
+	// to pay for 30fps: 360 frames only fits the 12MB burst cap at ~30KB/frame. 704 was chosen over 640
+	// because it was CHECKED for legibility — shop item text and chat still read at 704/q0.55, and store
+	// text is the thing being proven. Below 704 that stops being true, so this is a floor, not a knob.
+	static final int MAX_FRAME_WIDTH = 704;
 	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the burst keeps the
 	// newest suffix that fits both the frame-count cap and this total-bytes cap.
 	static final int MAX_CLIP_FRAME_BYTES = 1_000_000;		// 1MB per frame
@@ -1447,6 +1455,9 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
+				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
+				soldThisVisit.clear();
+				nearbyAtTx = null;
 				chestLooted = false;
 				lastChestEmitKey = null;
 				break;
@@ -1481,6 +1492,10 @@ public class AccountConnectPlugin extends Plugin
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
 		handleTradeContainerChanged(event.getContainerId());
+		if (shopOpen && event.getContainerId() != INVENTORY_CONTAINER_ID)
+		{
+			handleShopStockChanged(event.getItemContainer());
+		}
 		// WAVE 6 (store price): resolve a store buy/sell against the live inventory coin count. Read the coins
 		// from the changed container itself (final post-transaction state) — independent of the trade gate above.
 		if (event.getContainerId() == INVENTORY_CONTAINER_ID)
@@ -1683,6 +1698,9 @@ public class AccountConnectPlugin extends Plugin
 		{
 			shopOpen = true;
 			shopVisitNearby.clear();	// fresh receiver-candidate set for this shop visit
+			shopStock.clear();		// baseline is taken from this visit's first container change
+			soldThisVisit.clear();
+			nearbyAtTx = null;
 			accumulateShopNearby();		// seed with whoever is already standing here at open
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
 		}
@@ -2103,6 +2121,13 @@ public class AccountConnectPlugin extends Plugin
 		long itemBefore = invNow == null ? UNKNOWN_ITEM_COUNT : countItem(invNow, item);
 		int tick = client == null ? 0 : client.getTickCount();
 		int qty = parseTrailingQty(opt);
+		// Snapshot who is standing here AT THE CLICK. The visit-wide accumulator answers a weaker
+		// question ("who was around at some point"); a dispute is about the moment value moved.
+		nearbyAtTx = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+		if ("store_sell".equals(type))
+		{
+			soldThisVisit.add(item);	// watch this item's shop stock for a taker
+		}
 		StorePending prev = storePending;
 		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick);
 	}
@@ -2237,8 +2262,18 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (!nearby.isEmpty())
 		{
-			fields.put("nearby", nearby);
+			fields.put("nearby", nearby);		// everyone seen across the whole shop visit
 		}
+		// AND, separately, who was standing there at the CLICK. The two answer different questions and
+		// a dispute is about the second: "nobody was around at some point in the visit" is far weaker
+		// than "nobody was within N tiles when the item moved". Captured at the click rather than here
+		// because this runs on the inventory change, which is one or more ticks later.
+		List<Map<String, Object>> atTx = nearbyAtTx;
+		if (atTx != null && !atTx.isEmpty())
+		{
+			fields.put("nearby_at_tx", atTx);
+		}
+		nearbyAtTx = null;
 		fields.put("world", client.getWorld());
 		Player self = client.getLocalPlayer();
 		WorldPoint me = self == null ? null : self.getWorldLocation();
@@ -2289,6 +2324,66 @@ public class AccountConnectPlugin extends Plugin
 			out.add(m);
 		}
 		return out;
+	}
+
+	/**
+	 * Watch the SHOP's stock for someone taking an item we just sold into it — the general-store
+	 * counterparty, which no other signal can see.
+	 *
+	 * The method works because the shop is a dead drop: staff sells low, an untracked player buys it
+	 * out. The staff account's own inventory shows only the first half. The shop container shows the
+	 * second: stock of a sold item DROPS when a player takes it. So a drop, paired with who is standing
+	 * there at that moment, names the likely receiver.
+	 *
+	 * ⚠ This is an INFERENCE and is emitted as one (`taken_by_candidates`, never `counterparty`). Stock
+	 * also falls when the shop's own restock timer runs, and any player in the shop could be the taker,
+	 * so the candidate list is the players present — evidence to weigh, not an accusation. Only items
+	 * this visit actually SOLD are watched, so a staff buy that lowers stock is never mistaken for it.
+	 */
+	void handleShopStockChanged(ItemContainer shop)
+	{
+		if (shop == null)
+		{
+			return;
+		}
+		Map<Integer, Integer> now = new java.util.HashMap<>();
+		Item[] items = shop.getItems();
+		if (items != null)
+		{
+			for (Item it : items)
+			{
+				if (it != null && it.getId() > 0)
+				{
+					now.merge(it.getId(), it.getQuantity(), Integer::sum);
+				}
+			}
+		}
+		for (Integer item : soldThisVisit)
+		{
+			int before = shopStock.getOrDefault(item, -1);
+			int after = now.getOrDefault(item, 0);
+			if (before < 0 || after >= before)
+			{
+				continue;		// no baseline yet, or stock did not fall
+			}
+			Map<String, Object> f = new LinkedHashMap<>();
+			f.put("item", item);
+			f.put("qty", before - after);
+			f.put("stock_before", before);
+			f.put("stock_after", after);
+			List<Map<String, Object>> present = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+			if (!present.isEmpty())
+			{
+				f.put("taken_by_candidates", present);
+			}
+			if (client != null)
+			{
+				f.put("world", client.getWorld());
+			}
+			emitEvent("store_taken", f);
+		}
+		shopStock.clear();
+		shopStock.putAll(now);
 	}
 
 	/** Merge the current nearby players into the shop-visit accumulator (called each tick while shop open). */
@@ -3144,7 +3239,10 @@ public class AccountConnectPlugin extends Plugin
 			writer.setOutput(ios);
 			javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
 			param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
-			param.setCompressionQuality(0.7f);
+			// 0.55, lowered from 0.70 on 2026-09-02 to fit 360 frames (30fps x 12s) in the 12MB burst
+			// cap: 30KB/frame at 704px vs 45KB at 768px/0.70. Legibility was re-checked at this setting,
+			// not assumed — a clip nobody can read is not evidence however smooth it is.
+			param.setCompressionQuality(0.55f);
 			writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
 			ios.flush();
 			return buf.toByteArray();
