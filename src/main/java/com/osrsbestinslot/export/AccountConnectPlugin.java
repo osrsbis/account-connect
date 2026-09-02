@@ -522,10 +522,15 @@ public class AccountConnectPlugin extends Plugin
 	// because it was CHECKED for legibility — shop item text and chat still read at 704/q0.55, and store
 	// text is the thing being proven. Below 704 that stops being true, so this is a floor, not a knob.
 	static final int MAX_FRAME_WIDTH = 704;
-	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the burst keeps the
+	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the visit keeps the
 	// newest suffix that fits both the frame-count cap and this total-bytes cap.
+	//
+	// ⚠ MAX_CLIP_BURST_BYTES bounds the WHOLE VISIT here, not one POST. Since the upload is chunked
+	// (CLIP_CHUNK_FRAMES), the server's 12MB per-request limit is never the binding constraint — a
+	// 100-frame chunk at ~30KB is ~3MB. This stays at 12MB as the visit budget: it caps what one shop
+	// visit can ever cost in memory and upload, and is what MAX_CLIP_FRAMES is sized against.
 	static final int MAX_CLIP_FRAME_BYTES = 1_000_000;		// 1MB per frame
-	static final int MAX_CLIP_BURST_BYTES = 12_000_000;		// 12MB per burst
+	static final int MAX_CLIP_BURST_BYTES = 12_000_000;		// 12MB per VISIT (all chunks together)
 
 	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
 	 *  (it can never force it ON — that stays a local opt-in, mirroring serverScreenshotsDisabled). */
@@ -722,6 +727,33 @@ public class AccountConnectPlugin extends Plugin
 	 * okhttp idioms: token guard, apiBaseUrl trim, RequestBody.create(MediaType, bytes), async enqueue.
 	 * Encoding + upload run off the render thread; a bad token or an empty burst is a silent no-op.
 	 */
+	/**
+	 * Max frames in ONE POST. This is NOT the clip length — a visit's frames are split across as many
+	 * chunked bursts as it takes, and the collector reassembles them into one video.
+	 *
+	 * Why chunk at all: the ingest endpoint REJECTS a burst over its frame cap with a 400 rather than
+	 * trimming it, and the deployed cap is 120. A 30fps clip is 360 frames. Chunking means the clip
+	 * length stops being hostage to the server cap: 30fps works against the CURRENTLY DEPLOYED server,
+	 * today, and a longer clip later costs another chunk rather than another deploy.
+	 *
+	 * 100, not 120, on purpose — the plugin cannot see the server's cap, so it sits below the smallest
+	 * one that has ever been deployed rather than exactly at the current one.
+	 */
+	static final int CLIP_CHUNK_FRAMES = 100;
+
+	/**
+	 * Encode the visit's frames to JPEG on the background executor and POST them as one or more chunked
+	 * bursts to /store-frames-ingest. Mirrors the trade-upload okhttp idioms: token guard, apiBaseUrl
+	 * trim, RequestBody.create(MediaType, bytes), async enqueue. Encoding + upload run off the render
+	 * thread; a bad token or an empty burst is a silent no-op.
+	 *
+	 * REASSEMBLY CONTRACT — the collector joins chunks on `captured_at`, so each chunk carries the wall
+	 * time of ITS OWN first frame, not the visit's. That gives the collector two things it cannot get
+	 * any other way: the ORDER of the chunks, and the REAL frame rate (a chunk's frame count divided by
+	 * the gap to the next chunk's captured_at). The real rate matters because the server clamps the
+	 * DECLARED fps to a range that predates 30fps capture — so the declared value can be wrong, while a
+	 * rate derived from two timestamps cannot be.
+	 */
 	void submitStoreClipUpload(java.util.List<BufferedImage> frames)
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
@@ -729,7 +761,11 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;	// same guard as the trade path — no / malformed token, or nothing to send
 		}
-		long capturedAt = System.currentTimeMillis() / 1000L;
+		// The visit ENDED now, so the first frame is (frames-1)/fps seconds ago. Anchoring on the end
+		// and working backwards keeps each chunk's captured_at on the same real timeline even though
+		// all of them are uploaded at once, after the fact.
+		final long endMillis = System.currentTimeMillis();
+		final long startMillis = endMillis - (long) (frames.size() - 1) * 1000L / CLIP_FPS;
 		executor.submit(() ->
 		{
 			java.util.List<byte[]> encoded = new java.util.ArrayList<>(frames.size());
@@ -743,10 +779,26 @@ public class AccountConnectPlugin extends Plugin
 			{
 				return;
 			}
+			// selectStoreClipFrames keeps the NEWEST suffix, so a trimmed burst starts later than the
+			// visit did. Re-anchor on the END, which is the frame that is never dropped.
+			long firstKeptMillis = endMillis - (long) (kept.size() - 1) * 1000L / CLIP_FPS;
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			for (int off = 0; off < kept.size(); off += CLIP_CHUNK_FRAMES)
+			{
+				java.util.List<byte[]> chunk =
+					kept.subList(off, Math.min(off + CLIP_CHUNK_FRAMES, kept.size()));
+				long chunkAtMillis = firstKeptMillis + (long) off * 1000L / CLIP_FPS;
+				postStoreClipChunk(base, token, chunk, chunkAtMillis / 1000L);
+			}
+		});
+	}
+
+	/** POST one chunk of a (possibly multi-chunk) store-clip burst. */
+	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt)
+	{
 			Request request = new Request.Builder()
 				.url(base + "/store-frames-ingest")
-				.post(buildStoreClipBody(kept, token, capturedAt, CLIP_FPS))
+				.post(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS))
 				.build();
 
 			okHttpClient.newCall(request).enqueue(new Callback()
@@ -770,7 +822,6 @@ public class AccountConnectPlugin extends Plugin
 					}
 				}
 			});
-		});
 	}
 
 	/**

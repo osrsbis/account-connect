@@ -93,14 +93,21 @@ public class StoreClipCaptureTest
 		// raised to 360 in the same change (osrsbis-web-integrator backend.js FRAMES_COUNT_MAX); with the
 		// old 120 the server 400s the whole burst — it does not trim it — so this number and the server's
 		// must move together, and this assertion is what catches them drifting apart.
-		assertTrue("fps x seconds must fit the server's 360-frame burst cap",
-			AccountConnectPlugin.MAX_CLIP_FRAMES <= 360);
+		// The visit's frames no longer have to fit ONE request: the upload is chunked. What must hold is
+		// that a CHUNK fits the smallest server frame cap ever deployed (120), with margin. This is the
+		// assertion that lets clip length grow without a server deploy — and that turns red if someone
+		// raises the chunk size back up to the current cap and re-couples the two.
+		assertTrue("a chunk must fit the smallest deployed server frame cap (120) with margin",
+			AccountConnectPlugin.CLIP_CHUNK_FRAMES <= 100);
+		assertTrue("chunking must actually chunk a full visit",
+			AccountConnectPlugin.MAX_CLIP_FRAMES > AccountConnectPlugin.CLIP_CHUNK_FRAMES);
 		// And it must fit the BYTE cap at the measured mean frame size (56KB over 68 real frames), or the
 		// newest-suffix trim silently discards the opening of the visit.
 		// 30KB is the MEASURED mean at the current MAX_FRAME_WIDTH/quality (704px, q0.55). If either is
 		// raised, this arm goes red — which is the point: the frame size and the frame count are one
 		// budget, and changing one without the other silently truncates the start of every visit.
-		assertTrue("fps x seconds at ~30KB/frame (704px q0.55) must fit the 12MB burst cap",
+		// This is the VISIT budget (memory + total upload), not a per-request limit.
+		assertTrue("fps x seconds at ~30KB/frame (704px q0.55) must fit the 12MB visit budget",
 			(long) AccountConnectPlugin.MAX_CLIP_FRAMES * 30 * 1024
 				<= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
 		assertEquals("frame width must stay at the legibility floor that the byte budget assumes",
