@@ -475,11 +475,44 @@ public class AccountConnectPlugin extends Plugin
 	// While a shop is open, sample the render at a low WALL-CLOCK rate into a bounded ring buffer. On
 	// shop-close, if the visit had a buy/sell the frames go to the (B3) uploader; otherwise they are
 	// dropped. Frames are captured raw here — no video encode in the plugin; the server stitches them.
-	static final int CLIP_FPS = 1;					// sample rate (constant, NOT a user setting)
-	static final int CLIP_SECONDS = 120;				// max clip length retained
+	// SAMPLE RATE — raised 1 -> 3 on 2026-09-02, with the retained window cut 120s -> 40s so the ring
+	// stays at 120 frames. A general-store delivery is EVIDENCE a customer may dispute, and at 1fps the
+	// click that moves an item can fall between two frames entirely: the quantity menu, the click and
+	// the inventory change all happen inside one second.
+	//
+	// 8fps is the MOUSE-VISIBILITY floor, and that is the requirement this rate exists to meet.
+	// 3fps was tried first and rejected on review: "the current real time stills feel a bit laggy, i can
+	// barely see the mouse movement" (Lukas, 2026-09-02). A cursor crossing a shop interface is only
+	// legible when consecutive frames are ~125ms apart; at 3fps (333ms) the pointer teleports between
+	// positions and the click that moves an item is inferred rather than seen. The video is the evidence,
+	// so seeing the click is the whole product.
+	//
+	// Budget, measured 2026-09-02 over 68 REAL burst frames at 768px/q0.7 (mean 56KB, median 47KB,
+	// max 79KB; a fresh single-frame re-encode at those settings is 45KB):
+	//   8fps x 25s = 200 frames ~= 11.0MB — fits the 12MB burst cap at the MEAN frame size
+	//   8fps x 30s = 240 frames ~= 13.4MB — EXCEEDS it
+	// ⚠ Size the window against the MEAN (56KB), not a fresh single-frame re-encode (45KB). Using the
+	// smaller number first put this at 30s and the byte-cap assertion caught it — that assertion exists
+	// because the overflow is SILENT in production: the trim just drops the oldest frames.
+	// A store visit is short, but not always shorter than this: the longest burst ever captured here is
+	// 47 frames = 47s at the old 1fps, so a 25s window WILL trim a long visit. That is the deliberate
+	// trade — the trim keeps the NEWEST suffix, so what a long visit loses is its opening, never the
+	// transaction at the end. Buying the window back means raising the server's 12MB FRAMES_MAX too,
+	// which is a wider change than the count cap and was not taken here.
+	//
+	// ⚠ REQUIRES A SERVER CHANGE, and without it every burst is REJECTED, not degraded:
+	// media.js:185 rejects n > FRAMES_COUNT_MAX (120) with a 400, and media.js:226 clamps the recorded
+	// fps to 1-4 so playback would render 240 frames as a 60s slideshow. Both live in
+	// osrsbis-web-integrator and must ship BEFORE this plugin build reaches users.
+	// Do NOT raise this without re-measuring the per-frame bytes; a bigger client window or a higher
+	// MAX_FRAME_WIDTH changes the arithmetic.
+	static final int CLIP_FPS = 8;					// sample rate (constant, NOT a user setting)
+	static final int CLIP_SECONDS = 25;				// max clip length retained (was 120 @ 1fps)
 	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// ring capacity = 120 frames
 	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
-	// (Plan body text says 640px; 768 is the ratified Task-0 override.)
+	// (Plan body text says 640px; 768 is the ratified Task-0 override.) Kept at 768 when the rate rose
+	// to 8fps: dropping to 640 would save ~30% per frame but store item text is the thing being proven,
+	// so the byte budget was found in the frame COUNT cap instead, not in legibility.
 	static final int MAX_FRAME_WIDTH = 768;
 	// Server ingest caps (mirror /store-frames-ingest): a JPEG over this is dropped; the burst keeps the
 	// newest suffix that fits both the frame-count cap and this total-bytes cap.
@@ -537,7 +570,28 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return false;
 		}
-		nextClipSampleAt = nowNanos + 1_000_000_000L / CLIP_FPS;
+		final long period = 1_000_000_000L / CLIP_FPS;
+		// Advance from the SCHEDULED boundary, not from the observed tick.
+		//
+		// `nextClipSampleAt = nowNanos + period` looks equivalent and is not: a render tick lands on its
+		// own grid (~20ms at 50fps), so each sample fires slightly AFTER its boundary and that remainder
+		// is then baked into the next deadline. The error compounds. At 1fps it hid — 20ms against a
+		// 1000ms period — but at 8fps it is 20ms against 125ms and it cost a real frame every two
+		// seconds: measured 15 samples where 16 were due, ~6% of a 25-second clip silently missing.
+		// Advancing the deadline by whole periods keeps the rate exact over any span.
+		//
+		// After a long gap (a hitch, or a client that was not rendering) the deadline can sit far in the
+		// past; walking it forward in whole periods would then fire a burst of catch-up samples on
+		// consecutive frames. Re-base to `nowNanos` in that case: a gap loses frames either way, and
+		// duplicating the same instant several times is not evidence.
+		if (nextClipSampleAt == 0L || nowNanos - nextClipSampleAt >= period)
+		{
+			nextClipSampleAt = nowNanos + period;
+		}
+		else
+		{
+			nextClipSampleAt += period;
+		}
 		return true;
 	}
 

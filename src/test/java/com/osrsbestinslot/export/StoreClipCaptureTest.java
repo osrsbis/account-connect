@@ -51,13 +51,19 @@ public class StoreClipCaptureTest
 			plugin.storeClipsEnabled());
 	}
 
-	// (c) wall-clock decimation: 50 render frames across one simulated second -> exactly 1 sample.
+	// (c) wall-clock decimation: 50 render frames across one simulated second -> exactly CLIP_FPS samples.
+	//
+	// The expectation is DERIVED from CLIP_FPS, not hardcoded. It used to assert a literal 1, so raising
+	// the sample rate to 2 on 2026-09-02 turned this red for the rate change rather than for a defect —
+	// a test that fails when the thing it measures is deliberately changed is testing the constant, not
+	// the decimation. What must hold at ANY rate is: exactly CLIP_FPS samples per second, and the same
+	// again in the following second (a rate, never a one-shot).
 	@Test
 	public void wallClockDecimationYieldsOneSamplePerSecond()
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		// nextClipSampleAt defaults to 0; walk 50 evenly-spaced nanoTime ticks over exactly one second
-		// (~50fps render). Only the first tick should cross the 1s gate.
+		// (~50fps render). Only every (1/CLIP_FPS)s boundary should cross the gate.
 		long oneSecond = 1_000_000_000L;
 		int trues = 0;
 		for (int i = 0; i < 50; i++)
@@ -68,7 +74,32 @@ public class StoreClipCaptureTest
 				trues++;
 			}
 		}
-		assertEquals("expected ~1 sample across one simulated second", 1, trues);
+		// Exact equality is the WRONG assertion above 1fps and asserting it hid a real property. The gate
+		// advances by exactly 1/CLIP_FPS seconds, but render ticks land on a 20ms grid, so each sample
+		// fires at the first tick AT OR AFTER its boundary and the remainder carries into the next
+		// second: at 8fps a 50-tick second yields 8 then 7, alternating, averaging 8. That is correct
+		// decimation, not drift — the gate never loses time, it only rounds each sample forward. So the
+		// per-second count is asserted within +/-1 and the TWO-second total is asserted exactly, which
+		// is what actually proves the rate.
+		assertTrue("expected ~CLIP_FPS samples across one simulated second, got " + trues,
+			Math.abs(trues - AccountConnectPlugin.CLIP_FPS) <= 1);
+		// MOUSE VISIBILITY is the floor, not "enough to catch the transaction". A cursor crossing a shop
+		// interface reads as movement only when consecutive frames are ~125ms apart; 3fps (333ms) was
+		// rejected on review as too laggy to see the mouse at all. Asserted independently of whatever
+		// CLIP_FPS currently is, so lowering the rate for a byte saving turns this RED.
+		assertTrue("a delivery clip must sample at least 8x/second for the mouse to be visible",
+			AccountConnectPlugin.CLIP_FPS >= 8);
+		// The burst must fit the SERVER's frame-count cap. This is 240 only because the ingest cap was
+		// raised to 200 in the same change (osrsbis-web-integrator backend.js FRAMES_COUNT_MAX); with the
+		// old 120 the server 400s the whole burst — it does not trim it — so this number and the server's
+		// must move together, and this assertion is what catches them drifting apart.
+		assertTrue("fps x seconds must fit the server's 200-frame burst cap",
+			AccountConnectPlugin.MAX_CLIP_FRAMES <= 200);
+		// And it must fit the BYTE cap at the measured mean frame size (56KB over 68 real frames), or the
+		// newest-suffix trim silently discards the opening of the visit.
+		assertTrue("fps x seconds at ~56KB/frame must fit the 12MB burst cap",
+			(long) AccountConnectPlugin.MAX_CLIP_FRAMES * 56 * 1024
+				<= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
 
 		// A second simulated second must yield the next sample — proves it is a rate, not a one-shot.
 		int trues2 = 0;
@@ -80,7 +111,35 @@ public class StoreClipCaptureTest
 				trues2++;
 			}
 		}
-		assertEquals("expected ~1 more sample across the next simulated second", 1, trues2);
+		assertTrue("expected ~CLIP_FPS more samples across the next simulated second, got " + trues2,
+			Math.abs(trues2 - AccountConnectPlugin.CLIP_FPS) <= 1);
+		// The two-second total is exact: rounding each sample forward must not COST a sample.
+		assertEquals("two simulated seconds must yield exactly 2x CLIP_FPS samples",
+			2 * AccountConnectPlugin.CLIP_FPS, trues + trues2);
+
+		// Over a LONG span the rate must not drift. This is the arm that caught the real defect: the
+		// gate used to advance from the observed tick, so each sample's rounding error compounded and
+		// 8fps delivered ~7.5. Ten simulated seconds at a 50fps render must yield 10x CLIP_FPS.
+		AccountConnectPlugin p2 = new AccountConnectPlugin();
+		int over10s = 0;
+		for (int i = 0; i < 500; i++)
+		{
+			if (p2.shouldSampleClipFrame(i * (oneSecond / 50)))
+			{
+				over10s++;
+			}
+		}
+		assertEquals("ten simulated seconds must yield exactly 10x CLIP_FPS samples — no cumulative drift",
+			10 * AccountConnectPlugin.CLIP_FPS, over10s);
+
+		// A long stall must NOT produce a catch-up burst on consecutive frames: duplicating one instant
+		// is not evidence. After a 5-second gap the next tick samples once, and the tick right after it
+		// (20ms later, well inside the 125ms period) must not.
+		AccountConnectPlugin p3 = new AccountConnectPlugin();
+		assertTrue("first call always samples", p3.shouldSampleClipFrame(0L));
+		assertTrue("the tick after a long stall samples once", p3.shouldSampleClipFrame(5 * oneSecond));
+		assertFalse("...and does not fire again 20ms later",
+			p3.shouldSampleClipFrame(5 * oneSecond + oneSecond / 50));
 	}
 
 	// (d) RGB conversion: an ARGB frame becomes TYPE_INT_RGB (the JDK JPEG writer corrupts ARGB rasters).
