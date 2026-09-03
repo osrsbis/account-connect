@@ -292,6 +292,83 @@ public class StoreClipUploadTest
 		return img;
 	}
 
+	/**
+	 * THE UPLOAD TIMEOUT (added 2026-09-03) — the defect that destroyed every chunked clip.
+	 *
+	 * RuneLite's injected OkHttpClient keeps OkHttp's default 10s timeouts. A real frame chunk does
+	 * not upload in 10s, so the client abandoned the request mid-body. Because that is a CANCEL and
+	 * not a failure, the server's cleanup never ran either: orphaned frames in storage, no manifest,
+	 * no database row, nothing logged above debug.
+	 *
+	 * Reproduced on production with identical bytes: a 10s cap left 49 objects and no manifest (the
+	 * exact signature seen in six real staff bursts); a 60s cap stored all 101 and returned 200.
+	 *
+	 * This asserts the constant is sized for the payload rather than left at the shared default.
+	 */
+	@Test
+	public void clipUploadTimeoutIsSizedForTheChunkNotThePageFetchDefault()
+	{
+		final int okhttpDefaultSeconds = 10;
+		assertTrue("CLIP_UPLOAD_TIMEOUT_SECONDS=" + AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS
+				+ " is at or under OkHttp's " + okhttpDefaultSeconds
+				+ "s default; a real chunk cannot upload that fast and the burst is destroyed mid-body",
+			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS > okhttpDefaultSeconds);
+
+		// Sized against the measured worst case: ~37KB/frame, and a 100-frame chunk took up to 16.6s
+		// on a fast host. A 40-frame chunk on a slow domestic uplink must still fit.
+		final int worstCaseSecondsForAChunk = 45;
+		assertTrue("timeout must cover a slow uplink's worst case (" + worstCaseSecondsForAChunk + "s)",
+			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS >= worstCaseSecondsForAChunk);
+
+		// But not unbounded: a hung socket must not pin an executor thread for the whole session.
+		assertTrue("an effectively-infinite timeout would hang the upload executor on a dead socket",
+			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS <= 300);
+	}
+
+	/**
+	 * SERVER SUBREQUEST CONTRACT (added 2026-09-03). The server writes one R2 object per frame inside a
+	 * single Worker invocation, which has a hard subrequest ceiling. A chunk larger than the server's
+	 * MEDIA.FRAMES_PER_REQUEST_MAX kills that worker MID-LOOP: orphaned frames in storage, no manifest,
+	 * no database row, no cleanup — and the plugin cannot tell, because it only sees a dead socket.
+	 * Every delivery clip between the chunked-upload release and 2026-09-03 was lost exactly this way.
+	 *
+	 * This arm is the plugin's half of a two-repo contract. If it is ever raised past what the server
+	 * grants, clips go silently missing again, so the number is asserted rather than trusted.
+	 */
+	@Test
+	public void chunkSizeStaysInsideTheServerSubrequestBudget()
+	{
+		final int serverPerRequestMax = 40;	// osrsbis-web MEDIA.FRAMES_PER_REQUEST_MAX
+		assertTrue("CLIP_CHUNK_FRAMES=" + AccountConnectPlugin.CLIP_CHUNK_FRAMES
+				+ " exceeds the server's " + serverPerRequestMax
+				+ "-frame per-request budget; the worker dies mid-write and the clip is lost silently",
+			AccountConnectPlugin.CLIP_CHUNK_FRAMES <= serverPerRequestMax);
+		assertTrue("a zero/negative chunk size would loop forever or upload nothing",
+			AccountConnectPlugin.CLIP_CHUNK_FRAMES >= 1);
+	}
+
+	/** A full-length visit must still be delivered — in more chunks, not fewer frames. */
+	@Test
+	public void aFullBurstIsSplitIntoWholeChunksWithNoFrameLost()
+	{
+		int total = AccountConnectPlugin.MAX_CLIP_FRAMES;
+		int chunk = AccountConnectPlugin.CLIP_CHUNK_FRAMES;
+		// Guard the loop bound FIRST. A zero or negative chunk makes `off += chunk` non-advancing, so
+		// this test would hang forever rather than fail — found by mutation on 2026-09-03, where the
+		// chunk=0 mutant produced a 120s timeout instead of a red assertion. A test that hangs on a
+		// defect is not a test.
+		assertTrue("CLIP_CHUNK_FRAMES must be >= 1; " + chunk + " would never advance the upload loop",
+			chunk >= 1);
+		int sent = 0, chunks = 0;
+		for (int off = 0; off < total; off += chunk)
+		{
+			sent += Math.min(chunk, total - off);
+			chunks++;
+		}
+		assertEquals("chunking must cover every captured frame exactly once", total, sent);
+		assertTrue("a full visit should split into more than one chunk at this size", chunks > 1);
+	}
+
 	/** An ENCODED frame — what the ring holds since the heap fix (2026-09-02). */
 	private static byte[] jpeg(int w, int h)
 	{

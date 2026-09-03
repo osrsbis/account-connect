@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.6";
+	private static final String PLUGIN_VERSION = "0.7.7";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -763,7 +763,22 @@ public class AccountConnectPlugin extends Plugin
 	 * 100, not 120, on purpose — the plugin cannot see the server's cap, so it sits below the smallest
 	 * one that has ever been deployed rather than exactly at the current one.
 	 */
-	static final int CLIP_CHUNK_FRAMES = 100;
+	// SUBREQUEST BUDGET, not a size preference (lowered 100 -> 40 on 2026-09-03). The server writes one
+	// R2 object per frame inside ONE Worker invocation, and a Worker has a hard subrequest ceiling: a
+	// 100-frame chunk killed it mid-loop, leaving orphaned frames, no manifest and no database row, and
+	// the plugin saw a dead socket rather than an error. Measured on production: real chunks died at 49,
+	// 45 and 48 frames written. 40 keeps the server inside its budget. This value is HALF of a contract
+	// with the server's MEDIA.FRAMES_PER_REQUEST_MAX — raising it here alone silently loses every clip.
+	static final int CLIP_CHUNK_FRAMES = 40;
+
+	/**
+	 * Upload timeout for ONE clip chunk. Sized to the payload, not to a page fetch.
+	 * A 40-frame chunk at the measured ~37KB/frame is ~1.5MB; the same shape took ~6s in a production
+	 * probe and a 100-frame chunk took 13.9-16.6s. 90s leaves room for a slow domestic uplink without
+	 * hanging a staff client forever. The shared RuneLite client's 10s default is what silently
+	 * destroyed every clip before 2026-09-03 (see postStoreClipChunk).
+	 */
+	static final int CLIP_UPLOAD_TIMEOUT_SECONDS = 90;
 
 	/**
 	 * Encode the visit's frames to JPEG on the background executor and POST them as one or more chunked
@@ -815,7 +830,24 @@ public class AccountConnectPlugin extends Plugin
 		});
 	}
 
-	/** POST one chunk of a (possibly multi-chunk) store-clip burst. */
+	/**
+	 * POST one chunk of a (possibly multi-chunk) store-clip burst.
+	 *
+	 * ⚠ THE TIMEOUT IS THE WHOLE POINT OF THIS METHOD'S CLIENT OVERRIDE (2026-09-03).
+	 * RuneLite's injected OkHttpClient keeps OkHttp's DEFAULT 10s read/write timeouts, and a real
+	 * frame chunk does not upload in 10s on an ordinary connection. The client abandoned the request
+	 * mid-body, the server had already written part of the burst to storage, and because the request
+	 * was CANCELLED rather than failed, the server's own cleanup never ran either: orphaned frames,
+	 * no manifest, no database row, and nothing logged above debug. Every delivery clip from the
+	 * chunked-upload release until this fix was destroyed exactly this way.
+	 *
+	 * Reproduced on production 2026-09-03, one chunk, two arms, identical bytes:
+	 *   10s cap -> 49 objects stored, NO manifest (the exact production signature)
+	 *   60s cap -> 101 objects stored, manifest written, 200 OK
+	 *
+	 * So the upload gets its own client with a timeout sized to the payload, not to a page fetch.
+	 * Do NOT drop this back to the shared client.
+	 */
 	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt)
 	{
 			Request request = new Request.Builder()
@@ -823,7 +855,13 @@ public class AccountConnectPlugin extends Plugin
 				.post(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS))
 				.build();
 
-			okHttpClient.newCall(request).enqueue(new Callback()
+			OkHttpClient uploadClient = okHttpClient.newBuilder()
+				.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+				.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+				.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+				.build();
+
+			uploadClient.newCall(request).enqueue(new Callback()
 			{
 				@Override
 				public void onFailure(Call call, IOException e)
