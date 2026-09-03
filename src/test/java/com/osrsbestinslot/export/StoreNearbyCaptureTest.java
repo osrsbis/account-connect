@@ -313,6 +313,65 @@ public class StoreNearbyCaptureTest
 		assertEquals("the stock movement is still recorded", 29415, ev.get("item"));
 	}
 
+	/**
+	 * OUR OWN BUY-BACK IS NOT A CUSTOMER (fixed 2026-09-03, found in field testing).
+	 *
+	 * The staff script has an explicit emergency step: if the customer cannot buy the item in time,
+	 * staff buy it back. That purchase lowers the shop stock exactly like a customer's, so the
+	 * inference named a bystander as the taker. Measured on live events 3914798/3914799: a buy-back
+	 * and a store_taken landed in the same second, and the plugin still named a candidate.
+	 *
+	 * A false counterparty is the worst output this feature can produce — it is evidence that could
+	 * reach a dispute.
+	 */
+	@Test
+	public void ourOwnBuybackIsNotReportedAsATaker() throws Exception
+	{
+		Player self = player("Staff", 3164, 3486, 90);
+		Player bystander = player("Bystander", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, bystander), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		// We just bought it back ourselves.
+		inject(plugin, "lastSelfBuyItem", 20997);
+		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis());
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+
+		assertTrue("a self buy-back must emit NO store_taken at all",
+			plugin.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+	}
+
+	/** The suppression is time-boxed: an OLD self-buy must not mask a later genuine customer. */
+	@Test
+	public void anOldSelfBuyDoesNotMaskALaterCustomer() throws Exception
+	{
+		Player self = player("Staff", 3164, 3486, 90);
+		Player taker = player("Taker", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, taker), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		inject(plugin, "lastSelfBuyItem", 20997);
+		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis() - 60_000L);	// a minute ago
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+
+		assertTrue("a stale self-buy must not suppress a real taker",
+			plugin.pendingEvents.stream().anyMatch(e -> "store_taken".equals(e.get("type"))));
+	}
+
 	/** A stock RISE (the shop's own restock timer) is not someone taking our item. */
 	@Test
 	public void storeTakenIgnoresRestock() throws Exception

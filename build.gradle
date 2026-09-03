@@ -30,7 +30,7 @@ dependencies {
 }
 
 group = 'com.osrsbestinslot.export'
-version = '0.7.7'
+version = '0.7.8'
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
@@ -46,4 +46,18 @@ tasks.register('runClient', JavaExec) {
     mainClass = 'com.osrsbestinslot.export.AccountConnectPluginTest'
     // RuneLite's ExternalPluginManager.loadBuiltin REQUIRES assertions enabled, or it throws on launch.
     jvmArgs = ['-ea']
+}
+
+// Sideload build (local field testing only — the Plugin Hub builds from source and ignores this).
+// RuneLite's sideloaded-plugins loader reads runelite-plugin.properties from the JAR ROOT, so the
+// file at the repo root has to be carried into the jar or the plugin is silently not discovered.
+jar {
+    from(rootDir) {
+        include 'runelite-plugin.properties'
+    }
+}
+
+// Prints the test runtime classpath so the field-test rig can launch this tree's client directly.
+tasks.register('printCp') {
+    doLast { println sourceSets.test.runtimeClasspath.asPath }
 }
