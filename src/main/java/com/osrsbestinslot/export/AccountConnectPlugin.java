@@ -2395,7 +2395,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** Snapshot up to {@code cap} nearest OTHER players right now: {rsn, dx, dy, dist, cb}, nearest first. */
-	private List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
+	List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
 		if (client == null)
