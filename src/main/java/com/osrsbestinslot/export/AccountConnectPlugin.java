@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.9";
+	private static final String PLUGIN_VERSION = "0.7.10";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -435,8 +435,61 @@ public class AccountConnectPlugin extends Plugin
 	 * by ITEM ID, so out-of-order ground spawns (packet order is the server's choice) still find their own
 	 * pending rather than consuming someone else's.
 	 */
-	static final int INV_PENDING_MAX = 28;		// one inventory's worth of clicks; drops cannot exceed it
+	static final int INV_PENDING_MAX = 28;
+	/** Own dropped piles still believed to be on the ground. Same bound as the inventory that fed them. */
+	static final int GROUND_TRACK_MAX = 28;
+	/**
+	 * How far before its reported despawn tick a removal counts as EARLY rather than the timer expiring.
+	 * The client's despawnTime is authoritative for the pile, so this is only slack for tick rounding.
+	 */
+	static final int GROUND_EARLY_MARGIN_TICKS = 2;
+	private final java.util.Deque<DroppedGroundItem> groundDrops = new java.util.ArrayDeque<>();
+	/**
+	 * Set while the scene is reloading or the account is leaving. A scene reload despawns EVERY ground
+	 * pile at once for reasons unrelated to anyone taking them, so removals seen in that state are
+	 * reported as UNKNOWN, never as early removal.
+	 */
+	private volatile boolean groundObservationUnreliable;
+	// one inventory's worth of clicks; drops cannot exceed it
 	private final java.util.Deque<InvDeltaPending> invDeltaPendings = new java.util.ArrayDeque<>();
+
+	/**
+	 * A ground item WE dropped, tracked from its own-tile spawn until it leaves the ground.
+	 *
+	 * This exists to answer one question honestly: did the item we dropped stay there, or did it go?
+	 * It deliberately CANNOT answer who took it. A ground item's pickup happens in the other player's
+	 * client and nothing in our packet stream names the taker, so no field here ever carries a
+	 * recipient. What we can separate is EARLY removal from the natural despawn TIMER, and even that
+	 * separation is refused whenever the scene reloaded or the tile left render distance, because both
+	 * fire ItemDespawned for reasons that have nothing to do with anyone taking the item.
+	 */
+	static final class DroppedGroundItem
+	{
+		final int item;
+		final long qty;
+		final int x;
+		final int y;
+		final int plane;
+		final Map<String, Object> location;	// {region_id, plane} — same shape the drop event carries
+		final int dropTick;
+		/** Client's own despawn deadline for this pile, in ticks. -1 when the client did not report one. */
+		final int despawnTick;
+		/** Set when OUR OWN account picked this item back up, so the despawn is explained, not ambiguous. */
+		volatile boolean selfPickedUp;
+
+		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
+			int dropTick, int despawnTick)
+		{
+			this.item = item;
+			this.qty = qty;
+			this.x = x;
+			this.y = y;
+			this.plane = plane;
+			this.location = location;
+			this.dropTick = dropTick;
+			this.despawnTick = despawnTick;
+		}
+	}
 
 	static final class InvDeltaPending
 	{
@@ -1574,6 +1627,11 @@ public class AccountConnectPlugin extends Plugin
 				// 2026-07-18) — a surviving pending could pair a replayed same-id pile with an unrelated
 				// inventory loss. A drop clicked right before a region boundary is lost; miss beats fabricate.
 				clearInvDeltaPendings();
+				// A scene reload despawns EVERY pile in the old scene at once. Those removals say nothing
+				// about anyone taking the item, so stop trusting observation and discard what we tracked
+				// rather than emit a wave of "removed_early" that means nothing.
+				groundObservationUnreliable = true;
+				clearGroundDrops();
 				break;
 			case HOPPING:
 			case LOGGING_IN:
@@ -1581,6 +1639,8 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
+				groundObservationUnreliable = true;
+				clearGroundDrops();		// ground state is per world AND per account
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				soldThisVisit.clear();
@@ -1593,6 +1653,8 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
+				groundObservationUnreliable = true;
+				clearGroundDrops();
 				// a feed-death then instant disconnect: record the death, but the containers here are null or
 				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
 				resolveDeathPending(null, false);
@@ -1603,9 +1665,16 @@ public class AccountConnectPlugin extends Plugin
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
+				groundObservationUnreliable = true;
+				clearGroundDrops();
 				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
+				break;
+			case LOGGED_IN:
+				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
+				// for piles dropped from here on.
+				groundObservationUnreliable = false;
 				break;
 			default:
 				break;
@@ -2909,7 +2978,16 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int dist = Math.abs(pw.getX() - tw.getX()) + Math.abs(pw.getY() - tw.getY());
 		long invCount = countItem(client.getItemContainer(InventoryID.INVENTORY), it.getId());
-		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, client.getTickCount(), stackGrew);
+		int tick = client.getTickCount();
+		// Track the pile BEFORE resolving: resolution may consume the pending, and the pile is ours either
+		// way (OWNERSHIP_SELF, our own tile). Only track when an armed drop of this item is waiting, so a
+		// pile we did not drop this session is never adopted.
+		if (dist <= DROP_SPAWN_MAX_DIST && stackGrew && hasArmedDropFor(it.getId()))
+		{
+			trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
+				currentLocation(), tick, it.getDespawnTime());
+		}
+		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew);
 	}
 
 	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
@@ -2928,6 +3006,177 @@ public class AccountConnectPlugin extends Plugin
 	{
 		handleGroundItemForDropPending(event.getItem(), event.getTile(),
 			event.getNewQuantity() > event.getOldQuantity());
+	}
+
+	/** True when a "drop" pending for this item is armed — i.e. this ground pile is one we just dropped. */
+	boolean hasArmedDropFor(int item)
+	{
+		synchronized (invDeltaPendings)
+		{
+			for (InvDeltaPending p : invDeltaPendings)
+			{
+				if ("drop".equals(p.base) && p.item == item)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// ---- ground-item lifecycle: our own dropped piles, tracked from spawn to removal ----
+
+	/**
+	 * Record a pile WE dropped, so a later ItemDespawned on the same tile can be attributed to it.
+	 * Called only from the own-tile OWNERSHIP_SELF spawn path, so a foreign pile is never tracked.
+	 */
+	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
+		int dropTick, int despawnTick)
+	{
+		synchronized (groundDrops)
+		{
+			while (groundDrops.size() >= GROUND_TRACK_MAX)
+			{
+				groundDrops.pollFirst();
+			}
+			groundDrops.addLast(
+				new DroppedGroundItem(item, qty, x, y, plane, location, dropTick, despawnTick));
+		}
+	}
+
+	/** Find the oldest tracked pile matching this item at this exact tile, or null. */
+	private DroppedGroundItem findGroundDrop(int item, int x, int y, int plane)
+	{
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (g.item == item && g.x == x && g.y == y && g.plane == plane)
+				{
+					return g;
+				}
+			}
+		}
+		return null;
+	}
+
+	void clearGroundDrops()
+	{
+		synchronized (groundDrops)
+		{
+			groundDrops.clear();
+		}
+	}
+
+	int groundDropCount()
+	{
+		synchronized (groundDrops)
+		{
+			return groundDrops.size();
+		}
+	}
+
+	/**
+	 * Mark a tracked pile as recovered by our own account, so its removal is explained rather than
+	 * ambiguous. Called when a self-pickup emits. Returns true when a tracked pile matched.
+	 */
+	boolean markGroundDropSelfPickedUp(int item)
+	{
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (g.item == item && !g.selfPickedUp)
+				{
+					g.selfPickedUp = true;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Our dropped pile left the ground. Emit what we can HONESTLY say, and nothing more.
+	 *
+	 * `cause` is the whole point of this event and has exactly three values:
+	 *   "self_pickup"   — our own account took it back; we saw the inventory rise, so this is certain.
+	 *   "despawn_timer" — removal happened at or after the client's own reported despawn deadline.
+	 *                     Nobody took it; it timed out.
+	 *   "removed_early" — the pile went BEFORE its deadline while we were watching normally.
+	 *
+	 * "removed_early" means SOMETHING removed it early. It does NOT mean a customer collected it,
+	 * and it names nobody. A different player picking it up and an unobserved client-side quirk are
+	 * indistinguishable here, which is why the field says removed, not delivered. Any consumer that
+	 * renders this as a delivery is reading it wrong.
+	 *
+	 * When observation was unreliable (scene reload, hop, logout, render-distance loss) the cause is
+	 * "unknown" — the ambiguity is preserved explicitly rather than resolved by guessing.
+	 */
+	void emitGroundRemoval(DroppedGroundItem g, int currentTick, boolean observationUnreliable)
+	{
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("item", g.item);
+		fields.put("qty", g.qty);
+		if (g.location != null)
+		{
+			fields.put("location", g.location);
+		}
+		fields.put("ticks_on_ground", Math.max(0, currentTick - g.dropTick));
+		String cause;
+		if (g.selfPickedUp)
+		{
+			cause = "self_pickup";
+		}
+		else if (observationUnreliable)
+		{
+			cause = "unknown";
+		}
+		else if (g.despawnTick < 0)
+		{
+			cause = "unknown";	// the client never reported a deadline — we cannot call early vs timer
+		}
+		else if (currentTick >= g.despawnTick - GROUND_EARLY_MARGIN_TICKS)
+		{
+			cause = "despawn_timer";
+		}
+		else
+		{
+			cause = "removed_early";
+		}
+		fields.put("cause", cause);
+		// Stated on every row so no downstream reader has to know this rule: the taker is never observable.
+		fields.put("recipient", "UNKNOWN");
+		emitEvent("ground_removed", fields);
+	}
+
+	/**
+	 * RuneLite fires ItemDespawned for a pile leaving the ground — taken, timed out, or simply
+	 * out of scene. Only piles WE dropped and are still tracking reach an emit.
+	 */
+	@Subscribe
+	public void onItemDespawned(net.runelite.api.events.ItemDespawned event)
+	{
+		if (client == null || event == null || event.getItem() == null || event.getTile() == null)
+		{
+			return;
+		}
+		net.runelite.api.coords.WorldPoint tw = event.getTile().getWorldLocation();
+		if (tw == null)
+		{
+			return;
+		}
+		DroppedGroundItem g = findGroundDrop(
+			event.getItem().getId(), tw.getX(), tw.getY(), tw.getPlane());
+		if (g == null)
+		{
+			return;	// not one of ours — every other pile on the map despawns constantly
+		}
+		synchronized (groundDrops)
+		{
+			groundDrops.remove(g);
+		}
+		emitGroundRemoval(g, client.getTickCount(), groundObservationUnreliable);
 	}
 
 	/**
@@ -3065,6 +3314,9 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("location", p.location);
 		}
+		// If this recovers a pile WE dropped, say so on the pile: its later removal is then explained
+		// as self_pickup rather than counted as an ambiguous early removal.
+		markGroundDropSelfPickedUp(p.item);
 		emitEvent("pickup", fields);	// only pickup reaches here — drop is spawn-confirmed, alch returned above
 	}
 
