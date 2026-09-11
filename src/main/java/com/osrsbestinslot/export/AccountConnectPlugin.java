@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.7";
+	private static final String PLUGIN_VERSION = "0.7.9";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -420,7 +420,23 @@ public class AccountConnectPlugin extends Plugin
 	static final int DROP_PENDING_MAX_TICKS = 16;		// drop: the warning dialog can sit ~10s before the player confirms
 	static final int DROP_SPAWN_MAX_DIST = 2;			// own drops land on/adjacent to the player's tile
 	static final int DROP_CORROBORATION_MAX_TICKS = 2;	// spawn + inventory loss must land within ~1 tick of each other
-	private volatile InvDeltaPending invDeltaPending;
+	/**
+	 * Armed off-book pendings, OLDEST FIRST.
+	 *
+	 * This was a SINGLE slot, and that silently lost drops. A drop trade is N items dropped in quick
+	 * succession, so the second Drop click armed a new pending over the first before its ground spawn had
+	 * confirmed it, and the first drop emitted NOTHING — no error, no trace anywhere downstream. Measured
+	 * with the real callback order: four rapid drops produced ONE event; three were lost. The inventory
+	 * still showed the items gone, so a periodic snapshot looks perfectly consistent while the telemetry is
+	 * simply incomplete. That is why a snapshot can confirm final state but can never certify event capture.
+	 *
+	 * Bounded at INV_PENDING_MAX so a stream of clicks that never land cannot grow without limit; the OLDEST
+	 * is evicted first, which is also the one most likely to be stale. Resolution walks the queue and matches
+	 * by ITEM ID, so out-of-order ground spawns (packet order is the server's choice) still find their own
+	 * pending rather than consuming someone else's.
+	 */
+	static final int INV_PENDING_MAX = 28;		// one inventory's worth of clicks; drops cannot exceed it
+	private final java.util.Deque<InvDeltaPending> invDeltaPendings = new java.util.ArrayDeque<>();
 
 	static final class InvDeltaPending
 	{
@@ -1557,14 +1573,14 @@ public class AccountConnectPlugin extends Plugin
 				// Scene reload replays existing ground piles as fresh ItemSpawned events (Codex consult
 				// 2026-07-18) — a surviving pending could pair a replayed same-id pile with an unrelated
 				// inventory loss. A drop clicked right before a region boundary is lost; miss beats fabricate.
-				invDeltaPending = null;
+				clearInvDeltaPendings();
 				break;
 			case HOPPING:
 			case LOGGING_IN:
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
-				invDeltaPending = null;	// an armed drop/pickup/alch must never resolve across a hop/relog
+				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				soldThisVisit.clear();
@@ -1576,7 +1592,7 @@ public class AccountConnectPlugin extends Plugin
 				clogObtained.clear();
 				clogSeen = false;
 				resetTradeState();
-				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a disconnect
+				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				// a feed-death then instant disconnect: record the death, but the containers here are null or
 				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
 				resolveDeathPending(null, false);
@@ -1586,7 +1602,7 @@ public class AccountConnectPlugin extends Plugin
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
-				invDeltaPending = null;	// an armed drop/pickup/alch must never survive a logout
+				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
@@ -1620,11 +1636,9 @@ public class AccountConnectPlugin extends Plugin
 			long itemAfter = (sp == null || inv == null) ? UNKNOWN_ITEM_COUNT : countItem(inv, sp.item);
 			resolveStorePendingOnInventoryChange(coinsAfter, itemAfter, tick);
 			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
-			InvDeltaPending idp = invDeltaPending;
-			if (idp != null)
-			{
-				resolveInvDeltaPending(countItem(inv, idp.item), coinsAfter, tick);
-			}
+			// EVERY armed pending is offered this change, each against its own item count — see
+			// resolveInvDeltaPendings: a stale drop at the head must never hide a real pickup behind it.
+			resolveInvDeltaPendings(inv, coinsAfter, tick);
 		}
 	}
 
@@ -2747,7 +2761,17 @@ public class AccountConnectPlugin extends Plugin
 		Boolean wilderness = "drop".equals(base)
 			? (client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
 			: null;
-		invDeltaPending = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick);
+		synchronized (invDeltaPendings)
+		{
+			// A second Drop before the first lands is the NORMAL shape of a drop trade, never a mistake.
+			// Append; never overwrite.
+			while (invDeltaPendings.size() >= INV_PENDING_MAX)
+			{
+				invDeltaPendings.pollFirst();	// evict the oldest — also the most likely to be stale
+			}
+			invDeltaPendings.addLast(
+				new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick));
+		}
 	}
 
 	/**
@@ -2766,8 +2790,7 @@ public class AccountConnectPlugin extends Plugin
 
 	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew)
 	{
-		InvDeltaPending p = invDeltaPending;
-		if (p == null || !"drop".equals(p.base) || spawnedItemId != p.item || dist > DROP_SPAWN_MAX_DIST || !stackGrew)
+		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew)
 		{
 			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
 		}
@@ -2775,25 +2798,72 @@ public class AccountConnectPlugin extends Plugin
 		{
 			// Death belt (backs the onActorDeath disarm): mid-death ground spawns + inventory wipe are the
 			// death's items, never a player-initiated drop — refuse all corroboration while a death settles.
-			invDeltaPending = null;
+			clearInvDeltaPendings();
 			return;
 		}
-		if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
+		// Match by ITEM ID against the oldest matching armed drop. Packet order is the server's choice, so a
+		// spawn may arrive for the second click before the first; matching on the item rather than on "the
+		// one pending" is what lets each drop find its own.
+		InvDeltaPending p;
+		synchronized (invDeltaPendings)
 		{
-			invDeltaPending = null;	// stale — the click this pending belonged to is long over
-			return;
+			p = null;
+			for (InvDeltaPending c : invDeltaPendings)
+			{
+				if ("drop".equals(c.base) && c.item == spawnedItemId)
+				{
+					p = c;
+					break;
+				}
+			}
+			if (p == null)
+			{
+				return;
+			}
+			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
+			{
+				invDeltaPendings.remove(p);	// stale — the click this pending belonged to is long over
+				return;
+			}
+			long staleDelta = p.beforeCount - invCountAfter;
+			if (staleDelta <= 0)
+			{
+				// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a
+				// server packet detail we don't control). Record the corroboration; the inventory-change path
+				// completes the emit when the loss lands. Without this, spawn-first ordering misses EVERY drop.
+				p.spawnCorroboratedTick = currentTick;
+				return;
+			}
+			invDeltaPendings.remove(p);	// consume — both signals confirmed
 		}
-		long delta = p.beforeCount - invCountAfter;
-		if (delta <= 0)
+		emitDropEvent(p, p.beforeCount - invCountAfter);
+	}
+
+	/** Drop every armed pending — used by the logout / hop / disconnect / death disarms. */
+	private void clearInvDeltaPendings()
+	{
+		synchronized (invDeltaPendings)
 		{
-			// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a server
-			// packet detail we don't control). Record the corroboration; the inventory-change path completes
-			// the emit when the loss lands. Without this, spawn-first ordering would miss EVERY drop.
-			p.spawnCorroboratedTick = currentTick;
-			return;
+			invDeltaPendings.clear();
 		}
-		invDeltaPending = null;	// consume — both signals confirmed
-		emitDropEvent(p, delta);
+	}
+
+	/** Remove exactly one resolved/expired pending. */
+	private void removeInvDeltaPending(InvDeltaPending p)
+	{
+		synchronized (invDeltaPendings)
+		{
+			invDeltaPendings.remove(p);
+		}
+	}
+
+	/** The oldest armed pending, or null. Kept so the single-pending call sites read unchanged. */
+	private InvDeltaPending peekInvDeltaPending()
+	{
+		synchronized (invDeltaPendings)
+		{
+			return invDeltaPendings.peekFirst();
+		}
 	}
 
 	/** Shared drop emit — reached from either signal order. */
@@ -2817,8 +2887,8 @@ public class AccountConnectPlugin extends Plugin
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
 	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile, boolean stackGrew)
 	{
-		InvDeltaPending p = invDeltaPending;
-		if (p == null || !"drop".equals(p.base) || client == null || it == null || tile == null)
+		InvDeltaPending p = peekInvDeltaPending();
+		if (p == null || client == null || it == null || tile == null)
 		{
 			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
 		}
@@ -2904,11 +2974,48 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void resolveInvDeltaPending(long itemCountAfter, long coinsAfter, int currentTick)
 	{
-		InvDeltaPending p = invDeltaPending;
+		// Head-only entry point, kept for the single-pending call shape. The live client path uses
+		// resolveInvDeltaPendings(ItemContainer, ...) instead, which walks EVERY armed pending: with a queue,
+		// an unconfirmed drop sits at the head and would otherwise hide a later pickup behind it forever.
+		InvDeltaPending p = peekInvDeltaPending();
 		if (p == null)
 		{
 			return;
 		}
+		resolveOnePending(p, itemCountAfter, coinsAfter, currentTick);
+	}
+
+	/**
+	 * Resolve EVERY armed pending against one inventory change, each against ITS OWN item count.
+	 *
+	 * A single pending slot could rely on the head being the only candidate. A queue cannot: a Drop whose
+	 * ground spawn never arrives stays armed for DROP_PENDING_MAX_TICKS, and while it sits at the head a
+	 * real "Take" armed behind it resolves against nothing and is lost. The pre-queue build hid this because
+	 * a fresh click overwrote the stale pending. Walking the queue is what keeps a self-pickup observable.
+	 */
+	void resolveInvDeltaPendings(ItemContainer inv, long coinsAfter, int currentTick)
+	{
+		List<InvDeltaPending> snapshot;
+		synchronized (invDeltaPendings)
+		{
+			if (invDeltaPendings.isEmpty())
+			{
+				return;
+			}
+			snapshot = new ArrayList<>(invDeltaPendings);
+		}
+		for (InvDeltaPending p : snapshot)
+		{
+			resolveOnePending(p, countItem(inv, p.item), coinsAfter, currentTick);
+		}
+	}
+
+	/** Resolve exactly ONE armed pending. Removes it only when its own signals landed or its window expired. */
+	private void resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter, int currentTick)
+	{
+		// Resolution removes ONE pending — the one whose signals landed. The lifecycle disarms (logout, hop,
+		// disconnect, death) are the only places that clear them all; a single item's loss must never discard
+		// another item's armed drop, which is the whole point of the queue.
 		if ("drop".equals(p.base))
 		{
 			// Order-independence: if a matching ground spawn already corroborated (spawn processed before the
@@ -2917,13 +3024,13 @@ public class AccountConnectPlugin extends Plugin
 			int spawnTick = p.spawnCorroboratedTick;
 			if (dropDelta > 0 && spawnTick >= 0 && currentTick - spawnTick <= DROP_CORROBORATION_MAX_TICKS)
 			{
-				invDeltaPending = null;
+				removeInvDeltaPending(p);
 				emitDropEvent(p, dropDelta);
 				return;
 			}
 			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 			{
-				invDeltaPending = null;	// no ground spawn ever confirmed it — expire silently, emit nothing
+				removeInvDeltaPending(p);	// no ground spawn confirmed it — expire silently, emit nothing
 			}
 			return;
 		}
@@ -2935,11 +3042,11 @@ public class AccountConnectPlugin extends Plugin
 			int window = "pickup".equals(p.base) ? INV_DELTA_PENDING_MAX_TICKS : ALCH_PENDING_MAX_TICKS;
 			if (currentTick - p.tick > window)
 			{
-				invDeltaPending = null;
+				removeInvDeltaPending(p);
 			}
 			return;
 		}
-		invDeltaPending = null;	// consume — the expected delta landed
+		removeInvDeltaPending(p);	// consume — the expected delta landed
 		if (!activityLogActive())
 		{
 			return;
@@ -2970,7 +3077,7 @@ public class AccountConnectPlugin extends Plugin
 			// A death spawns the player's items on the ground at their tile WITH an inventory loss — exactly the
 			// drop pending's dual confirmation signal. Kill any armed drop/pickup/alch pending: the loss belongs
 			// to the death event's items_lost, never to a fabricated player-initiated drop.
-			invDeltaPending = null;
+			clearInvDeltaPendings();
 			// Capture the pre-death inventory + equipment LIVE now: OSRS removes items a few ticks AFTER the death
 			// animation, so the containers are still intact at ActorDeath ([verify in-client] — the standard
 			// RuneLite death-tracking timing assumption). Defer the emit; items_lost is the pre/post diff resolved

@@ -109,8 +109,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 526, null, 1L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 526, null, 1L, 0L, null, Boolean.FALSE, 5));
 		plugin.resolveDropPendingOnGroundSpawn(526, 1, 0L, 6);
 		assertEquals(false, plugin.pendingEvents.get(0).get("wilderness"));
 	}
@@ -125,8 +124,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.FALSE, 5));
 		// tbow leaves the inventory (equip / deposit / destroy) — inv-change path sees it, must not emit
 		plugin.resolveInvDeltaPending(0L, 0L, 6);
 		assertTrue("no fabricated drop", plugin.pendingEvents.isEmpty());
@@ -145,8 +143,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 		// same item id spawns at our feet but our inventory still holds all 5 -> not our drop
 		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
 		assertTrue("no emit without a matching inventory loss", plugin.pendingEvents.isEmpty());
@@ -170,8 +167,7 @@ public class OffBookEventsTest
 		when(client.getLocalPlayer()).thenReturn(player);
 		when(player.getWorldLocation()).thenReturn(new WorldPoint(3100, 3900, 0));
 		inject(plugin, "client", client);
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
 
 		plugin.onActorDeath(new net.runelite.api.events.ActorDeath((net.runelite.api.Actor) player));
 		assertNull("death disarms any pending drop/pickup/alch", invDeltaPending(plugin));
@@ -193,7 +189,7 @@ public class OffBookEventsTest
 		inject(plugin, "config", onConfig());
 		AccountConnectPlugin.InvDeltaPending p =
 			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.TRUE, 5);
-		inject(plugin, "invDeltaPending", p);
+		armPending(plugin, p);
 
 		// spawn arrives while the inventory still shows the full count -> no emit yet, corroboration recorded
 		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
@@ -216,8 +212,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6); // corroborated at tick 6, no loss yet
 		plugin.resolveInvDeltaPending(0L, 0L, 14); // loss lands 8 ticks later (bank deposit) -> too stale
 		assertTrue("stale corroboration never pairs", plugin.pendingEvents.isEmpty());
@@ -234,7 +229,7 @@ public class OffBookEventsTest
 		inject(plugin, "config", onConfig());
 		AccountConnectPlugin.InvDeltaPending p =
 			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5);
-		inject(plugin, "invDeltaPending", p);
+		armPending(plugin, p);
 		// direct core call with grew=false must record nothing
 		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 6, false);
 		assertTrue("shrinking stack is never our drop", plugin.pendingEvents.isEmpty());
@@ -247,8 +242,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
 		inject(plugin, "deathPending",
 			new AccountConnectPlugin.DeathPending(null, "wilderness", new LinkedHashMap<>(), 5));
 		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6); // the death's tbow hits the floor
@@ -270,8 +264,7 @@ public class OffBookEventsTest
 		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
 		when(client.getTickCount()).thenReturn(6);
 		inject(plugin, "client", client);
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 
 		net.runelite.api.TileItem it = mock(net.runelite.api.TileItem.class);
 		when(it.getId()).thenReturn(560);
@@ -292,8 +285,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 		plugin.resolveDropPendingOnGroundSpawn(560, 7, 0L, 6);
 		assertTrue("distant spawn ignored", plugin.pendingEvents.isEmpty());
 		assertNotNull(invDeltaPending(plugin));
@@ -309,8 +301,7 @@ public class OffBookEventsTest
 		Map<String, Object> loc = new LinkedHashMap<>();
 		loc.put("region_id", 12850);
 		loc.put("plane", 0);
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("pickup", 526, null, 0L, 0L, loc, null, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("pickup", 526, null, 0L, 0L, loc, null, 5));
 		plugin.resolveInvDeltaPending(1L, 0L, 6); // gained 1
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("pickup", e.get("type"));
@@ -327,8 +318,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("alch", 1305, "high", 1L, 100L, null, null, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("alch", 1305, "high", 1L, 100L, null, null, 5));
 		plugin.resolveInvDeltaPending(0L, 1300L, 6); // item consumed, coins 100 -> 1300
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals("alch", e.get("type"));
@@ -347,8 +337,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("alch", 1305, "low", 1L, 100L, null, null, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("alch", 1305, "low", 1L, 100L, null, null, 5));
 		plugin.resolveInvDeltaPending(0L, 100L, 6); // item left but no coin gain -> not an alch
 		assertTrue("no alch emit without a confirmed coin gain", plugin.pendingEvents.isEmpty());
 		// window passes -> stale pending expires silently
@@ -364,8 +353,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "invDeltaPending",
-			new AccountConnectPlugin.InvDeltaPending("pickup", 560, null, 0L, 0L, null, null, 5));
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("pickup", 560, null, 0L, 0L, null, null, 5));
 		// an unrelated inventory change (item unchanged) within the window must NOT emit and must keep waiting
 		plugin.resolveInvDeltaPending(0L, 0L, 6);
 		assertTrue("no emit before the expected delta lands", plugin.pendingEvents.isEmpty());
@@ -589,11 +577,33 @@ public class OffBookEventsTest
 		return c;
 	}
 
+	/**
+	 * The oldest armed pending. `invDeltaPending` became the bounded FIFO `invDeltaPendings` when a single
+	 * slot was proven to silently lose rapid drops (RapidDropTest): four real drops emitted one event. Every
+	 * assertion in this file is about ONE pending, so peeking the head keeps them all meaningful and unchanged.
+	 */
 	private static AccountConnectPlugin.InvDeltaPending invDeltaPending(AccountConnectPlugin plugin) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPending");
+		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
-		return (AccountConnectPlugin.InvDeltaPending) f.get(plugin);
+		java.util.Deque<?> d = (java.util.Deque<?>) f.get(plugin);
+		return d.isEmpty() ? null : (AccountConnectPlugin.InvDeltaPending) d.peekFirst();
+	}
+
+	/** Arm exactly one pending, replacing anything already armed — the old inject("invDeltaPending", p). */
+	private static void armPending(AccountConnectPlugin plugin, AccountConnectPlugin.InvDeltaPending p)
+		throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		f.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		java.util.Deque<AccountConnectPlugin.InvDeltaPending> d =
+			(java.util.Deque<AccountConnectPlugin.InvDeltaPending>) f.get(plugin);
+		d.clear();
+		if (p != null)
+		{
+			d.addLast(p);
+		}
 	}
 
 	private static AccountConnectPlugin.DeathPending deathPending(AccountConnectPlugin plugin) throws Exception
