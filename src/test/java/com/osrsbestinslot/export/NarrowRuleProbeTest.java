@@ -301,6 +301,80 @@ public class NarrowRuleProbeTest
 		}
 	}
 
+	/**
+	 * A gain that lands while the pile is STILL ON THE GROUND is not proof of recovery.
+	 *
+	 * The Take is aimed at our pile, and one Pot really does arrive two ticks later, but it came from
+	 * somewhere else: a trade, a store sale, or a same-item pile we never tracked. Our pile is still
+	 * lying there sixty ticks after the gain, and a customer collects it two hundred ticks later.
+	 * Naming the staff member as the taker of that pile is the exact failure the narrow rule exists
+	 * to stop, so the provisional mark is withdrawn and the row falls to `unknown`.
+	 */
+	@Test
+	public void aGainThatLandsWhileThePileStaysOnTheGroundIsNeverASelfPickup() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 160);
+		plugin.onGameTick(null);
+		assertEquals("the pile is still on the ground, so nothing was recovered",
+			1, plugin.groundDropCount());
+		tick(plugin, 350);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 360);
+		plugin.onGameTick(null);
+		assertEquals("a pile collected 198 ticks after the gain is unknown, never ours",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/** The same start, but nobody takes the pile at all and it reaches its own deadline. */
+	@Test
+	public void aPileThatOutlivesAProvisionalMarkAndTimesOutIsNeverASelfPickup() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 400);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 410);
+		assertNotEquals("a pile that lived its full timer was not recovered by us",
+			"self_pickup", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/**
+	 * The GREEN control for the two probes above: the ordinary recovery order still attributes.
+	 *
+	 * The inventory change is processed first and the despawn lands in the same tick, which is the
+	 * live callback order when the pile really is the one we picked up. The mark is provisional for
+	 * that instant and the pile leaves the ground inside the margin, so the row keeps `self_pickup`.
+	 * Without this control, a rule that simply refused every mark would look correct.
+	 */
+	@Test
+	public void aRecoveryWhoseDespawnLandsInTheSameTickStillAttributes() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 160);
+		plugin.onGameTick(null);
+		assertEquals("control: the ordinary recovery still attributes",
+			"self_pickup", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
 
 	private static void standAt(AccountConnectPlugin plugin, int x, int y) throws Exception

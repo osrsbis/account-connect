@@ -520,6 +520,17 @@ public class AccountConnectPlugin extends Plugin
 		 * `despawn_timer`. The pile reports `unknown` unless the pickup is proven exactly.
 		 */
 		volatile boolean takeArmed;
+		/**
+		 * Tick a PROVISIONAL self-pickup mark landed, or -1 when no such mark is outstanding.
+		 *
+		 * A mark set while the pile is STILL ON THE GROUND is a guess: the gain that produced it can
+		 * equally have come from a trade, a store sale, or an untracked pile of the same item. A pile
+		 * we really recovered leaves the ground at once, so a pile still lying there more than
+		 * GROUND_EARLY_MARGIN_TICKS later was not the source of that gain. The mark is then withdrawn
+		 * and the row falls to `unknown`, which `takeArmed` already guarantees. Withdrawing can only
+		 * WEAKEN a verdict; nothing on this path ever sets `selfPickedUp`.
+		 */
+		volatile int provisionalMarkTick = -1;
 
 		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 			int dropTick, int despawnTick)
@@ -3370,7 +3381,7 @@ public class AccountConnectPlugin extends Plugin
 	 * @return true when a pile was marked, so the caller can publish it at once.
 	 */
 	private boolean markGroundDropSelfPickedUp(InvDeltaPending take, long rawGain,
-		List<InvDeltaPending> snapshot)
+		List<InvDeltaPending> snapshot, int currentTick)
 	{
 		if (take == null)
 		{
@@ -3389,7 +3400,22 @@ public class AccountConnectPlugin extends Plugin
 			return false;
 		}
 		g.selfPickedUp = true;
+		// A pile still lying on the ground has NOT been recovered yet, whatever the inventory did.
+		// Record the tick, so the removal can check the pile really left. See `provisionalMarkTick`.
+		if (stillOnGround(g))
+		{
+			g.provisionalMarkTick = currentTick;
+		}
 		return true;
+	}
+
+	/** True while the pile is still lying on the ground, so its removal has not been observed yet. */
+	private boolean stillOnGround(DroppedGroundItem g)
+	{
+		synchronized (groundDrops)
+		{
+			return groundDrops.contains(g);
+		}
 	}
 
 	/**
@@ -3494,6 +3520,15 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("location", g.location);
 		}
 		fields.put("ticks_on_ground", Math.max(0, currentTick - g.dropTick));
+		// Reconcile a PROVISIONAL mark against what the pile actually did. A pile we truly recovered
+		// leaves the ground in the same tick, or in the next tick or two. One still lying there long
+		// after the gain was never the source of that gain, so the mark is withdrawn and `takeArmed`
+		// carries the row to `unknown`. This branch only WEAKENS: it never sets `selfPickedUp`.
+		if (g.selfPickedUp && g.provisionalMarkTick >= 0
+			&& currentTick - g.provisionalMarkTick > GROUND_EARLY_MARGIN_TICKS)
+		{
+			g.selfPickedUp = false;
+		}
 		String cause;
 		if (g.selfPickedUp)
 		{
@@ -3747,7 +3782,7 @@ public class AccountConnectPlugin extends Plugin
 		// If this recovers a pile WE dropped, say so on the pile: its later removal is then explained
 		// as self_pickup rather than counted as an ambiguous early removal. The rule is deliberately
 		// strict — see markGroundDropSelfPickedUp. Anything it refuses leaves the pile `unknown`.
-		if (markGroundDropSelfPickedUp(p, delta, snapshot))
+		if (markGroundDropSelfPickedUp(p, delta, snapshot, currentTick))
 		{
 			// The pile may already be waiting on this answer; publish now rather than idle out the
 			// window. settlePendingRemovals removes the entry as it fires, so this cannot double-emit.
