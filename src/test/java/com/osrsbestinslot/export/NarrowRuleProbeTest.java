@@ -375,7 +375,123 @@ public class NarrowRuleProbeTest
 			"self_pickup", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
+	/**
+	 * A pile that outlives a no-tile Take gets its timer evidence back AT ITS OWN DEADLINE.
+	 *
+	 * The Take carries no scene coordinates, so it arms every same-item pile on the map. It is then
+	 * served by an unrelated coin gain and is long gone. Our Pot lies on the ground for its full 300
+	 * ticks and nobody touches it. Nothing about that Take can explain the removal any more, so the
+	 * pile reports `despawn_timer` rather than losing the evidence for its whole lifetime.
+	 */
+	@Test
+	public void aPileThatReachesItsOwnDeadlineRecoversItsTimerEvidence() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(widgetTake("Pot", POT));
+		tick(plugin, 160);
+		setInventory(plugin, COINS, 5);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 400);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 410);
+		plugin.onGameTick(null);
+		assertEquals("300 ticks on the ground with the Take long gone is a timer expiry",
+			"despawn_timer", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/**
+	 * The Take EXPIRING is not the trigger, and this test is the guard that keeps it that way.
+	 *
+	 * The Take is served by nothing, so it expires five ticks after the click. The pile is removed
+	 * well BEFORE its own deadline. Restoring the evidence on Take expiry would publish that removal
+	 * as `removed_early`, which is round 8 all over again: a walk longer than the Take window makes
+	 * our own recovery read as somebody else taking the pile. The row stays `unknown`.
+	 */
+	@Test
+	public void aTakeThatExpiredWithThePileStillOnTheGroundStaysUnknown() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 160);
+		setInventory(plugin, COINS, 5);
+		plugin.onItemContainerChanged(invChanged(plugin));	// the Take is now expired and gone
+		tick(plugin, 250);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 260);
+		plugin.onGameTick(null);
+		assertEquals("a removal before the deadline stays unknown, never removed_early",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/** A pile removed early with no Take of ours in play still reports the honest early removal. */
+	@Test
+	public void controlAnEarlyRemovalWithNoTakeOfOursStillReadsEarly() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 250);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 260);
+		plugin.onGameTick(null);
+		assertEquals("control: the early-removal label still works",
+			"removed_early", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/** A no-tile Take still live at the deadline keeps the pile at `unknown`. */
+	@Test
+	public void aLiveTakeAtTheDeadlineStillCostsTheTimerEvidence() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 398);
+		plugin.onMenuOptionClicked(widgetTake("Pot", POT));
+		tick(plugin, 400);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		for (int t = 401; t <= 410; t++)
+		{
+			tick(plugin, t);
+			plugin.onGameTick(null);
+		}
+		assertEquals("a Take still in flight at the deadline leaves the pile unknown",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/** A pile removed far too fast for a real timer never reads `despawn_timer`. */
+	@Test
+	public void theTimerFloorStillRefusesAnImplausiblyFastExpiry() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 110, TILE_X, TILE_Y);
+		tick(plugin, 101);
+		plugin.onMenuOptionClicked(widgetTake("Pot", POT));
+		tick(plugin, 108);
+		setInventory(plugin, COINS, 5);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 110);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, 120);
+		plugin.onGameTick(null);
+		assertEquals("ten ticks on the ground is not a three hundred tick timer",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
+
+	/** A widget op labelled Take that carries an item id but no ground tile. */
+	private static MenuOptionClicked widgetTake(String name, int itemId)
+	{
+		MenuOptionClicked m = mock(MenuOptionClicked.class);
+		when(m.getMenuOption()).thenReturn("Take");
+		when(m.getMenuTarget()).thenReturn("<col=ff9040>" + name);
+		when(m.getItemId()).thenReturn(itemId);
+		when(m.getId()).thenReturn(3);
+		when(m.getMenuAction()).thenReturn(net.runelite.api.MenuAction.CC_OP);
+		return m;
+	}
 
 	private static void standAt(AccountConnectPlugin plugin, int x, int y) throws Exception
 	{

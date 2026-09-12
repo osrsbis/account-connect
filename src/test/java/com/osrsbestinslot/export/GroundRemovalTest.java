@@ -986,18 +986,22 @@ public class GroundRemovalTest
 	}
 
 	/**
-	 * NARROW CANDIDATE: a no-tile Take permanently costs every same-item pile its timer evidence.
+	 * A pile that outlives a no-tile Take gets its timer evidence back AT ITS OWN DEADLINE.
 	 *
-	 * The delta let a withholding LAPSE once the Take could no longer explain the pile, which
-	 * restored `despawn_timer` here. Rounds 20 through 23 were that lapse rule and its own
-	 * regressions, so the narrow candidate does not have it: `takeArmed` never clears. The cost is
-	 * exactly this case, a no-tile Take on a busy tile weakening piles that really did time out.
+	 * `takeArmed` is set at click time and never clears, so a no-tile Take arms every same-item pile
+	 * on the map and used to cost all of them their timer evidence for the whole pile lifetime. The
+	 * bounded reset buys it back in the one place nothing can go wrong: the pile's own deadline, with
+	 * the full timer served, with no gain ever claimed for it and no Take of that item still live.
 	 *
-	 * A no-tile Take is the RARE shape - the live capture carries scene coordinates - so this trade
-	 * is cheap in practice. It is recorded as a give-up, not as correct behaviour.
+	 * The reset is NOT tied to the Take expiring. That rule is round 8, and
+	 * `aTakeThatExpiredWithThePileStillOnTheGroundStaysUnknown` in NarrowRuleProbeTest holds the line.
+	 *
+	 * The third pile here is removed at tick 401 while its own deadline is 402. It is inside the
+	 * two-tick margin, so it reports the same timer expiry - that margin is base behaviour and this
+	 * change does not widen it.
 	 */
 	@Test
-	public void aPileThatOutlivesANoTileTakeLosesItsTimerEvidence() throws Exception
+	public void aPileThatOutlivesANoTileTakeRecoversItsTimerEvidenceAtItsDeadline() throws Exception
 	{
 		AccountConnectPlugin plugin = newPlugin(POT, 3);
 		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y, POT, 2);
@@ -1014,11 +1018,39 @@ public class GroundRemovalTest
 		plugin.onItemDespawned(despawn(POT, 1, TILE_X + 2, TILE_Y, 0));
 		plugin.onGameTick(null);
 
-		for (Map<String, Object> r : eventsOfType(plugin, "ground_removed"))
+		List<Map<String, Object>> all = eventsOfType(plugin, "ground_removed");
+		assertEquals(2, all.size());
+		for (Map<String, Object> r : all)
 		{
-			assertEquals("a no-tile Take could have named this pile, so we refuse to call it",
-				"unknown", r.get("cause"));
+			assertEquals("the pile reached its own deadline with nothing left to explain it: " + all,
+				"despawn_timer", r.get("cause"));
 		}
+	}
+
+	/**
+	 * The same no-tile Take, but the pile is removed EARLY. The evidence stays lost.
+	 *
+	 * A no-tile Take could have named this pile, so `removed_early` would name a stranger for a pile
+	 * we may well have taken ourselves. Only the deadline branch is bought back.
+	 */
+	@Test
+	public void aPileRemovedEarlyUnderANoTileTakeStaysUnknown() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 2);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y, POT, 1);
+		dropItemAt(plugin, POT, 1, 101, 401, TILE_X + 1, TILE_Y);
+
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(takeWithNoTile("Pot", POT));
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+
+		tick(plugin, 300);					// well before either deadline
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X + 1, TILE_Y, 0));
+		plugin.onGameTick(null);
+
+		assertEquals("an early removal under a no-tile Take is still unknown",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
 	/**

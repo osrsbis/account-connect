@@ -3510,6 +3510,41 @@ public class AccountConnectPlugin extends Plugin
 	 * When observation was unreliable (scene reload, hop, logout, render-distance loss) the cause is
 	 * "unknown" — the ambiguity is preserved explicitly rather than resolved by guessing.
 	 */
+	/**
+	 * May a pile a Take once named still report `despawn_timer`? Only at its OWN deadline.
+	 *
+	 * `takeArmed` is set at click time and never clears, so a Take the client gave no tile for costs
+	 * every same-item pile its timer evidence for the whole pile lifetime. This buys that evidence
+	 * back in the one case where the Take cannot explain anything, and every condition is required:
+	 *
+	 *   * observation was reliable, and the client did report a deadline for this pile;
+	 *   * the pile left AT that deadline, inside the margin on BOTH sides - so this can only ever
+	 *     produce `despawn_timer`, never `removed_early`, which is the label the old
+	 *     withholding-expiry rule got wrong (round 8). The upper bound matters as much as the lower
+	 *     one: a removal a hundred ticks PAST a deadline means the record does not describe the pile
+	 *     that just left, which is the merged-stack double-tracking residual, and a stale record
+	 *     must never be read as a timer expiry;
+	 *   * the pile lay there for the full timer, the same fail-closed floor `emitGroundRemoval` uses;
+	 *   * NO Take of this item is still live, so nothing in flight could still explain the removal;
+	 *   * no gain was ever claimed for this pile, provisionally or otherwise - a claim that was made
+	 *     and then withdrawn leaves the pile ambiguous, and ambiguous stays `unknown`.
+	 *
+	 * The reset is bound to the pile's own deadline and to nothing else. Resetting on TAKE EXPIRY
+	 * instead is round 8 again: a walk longer than the Take window would publish our own recovery as
+	 * `removed_early`. `aTakeThatExpiredWithThePileStillOnTheGroundStaysUnknown` holds that line.
+	 */
+	private boolean timerExpiryIsStillProvable(DroppedGroundItem g, int currentTick,
+		boolean observationUnreliable)
+	{
+		return !observationUnreliable
+			&& g.despawnTick >= 0
+			&& currentTick >= g.despawnTick - GROUND_EARLY_MARGIN_TICKS
+			&& currentTick <= g.despawnTick + GROUND_EARLY_MARGIN_TICKS
+			&& (currentTick - g.dropTick) >= GROUND_TIMER_MIN_TICKS
+			&& g.provisionalMarkTick < 0
+			&& !hasArmedPickupFor(g);
+	}
+
 	void emitGroundRemoval(DroppedGroundItem g, int currentTick, boolean observationUnreliable)
 	{
 		Map<String, Object> fields = new LinkedHashMap<>();
@@ -3534,7 +3569,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			cause = "self_pickup";
 		}
-		else if (g.takeArmed)
+		else if (g.takeArmed && !timerExpiryIsStillProvable(g, currentTick, observationUnreliable))
 		{
 			// A local Take named this pile and the recovery was not proven exactly. `removed_early`
 			// would read as somebody else taking it and `despawn_timer` as nobody taking it, and we
