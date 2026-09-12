@@ -3578,8 +3578,15 @@ public class AccountConnectPlugin extends Plugin
 		// leaves the ground in the same tick, or in the next tick or two. One still lying there long
 		// after the gain was never the source of that gain, so the mark is withdrawn and `takeArmed`
 		// carries the row to `unknown`. This branch only WEAKENS: it never sets `selfPickedUp`.
+		//
+		// A NEGATIVE wait means the tick counter moved BACKWARDS under us, so the removal cannot be
+		// timed against the mark at all. A bare `> margin` test reads every negative difference as
+		// "inside the margin" and keeps the claim, which is the strongest reading of the weakest
+		// evidence. `settlePendingRemovals` already treats `waited < 0` as a reason to stop trusting
+		// the clock; the provisional path does the same and withdraws.
+		int sinceMark = currentTick - g.provisionalMarkTick;
 		if (g.selfPickedUp && g.provisionalMarkTick >= 0
-			&& currentTick - g.provisionalMarkTick > GROUND_EARLY_MARGIN_TICKS)
+			&& (sinceMark < 0 || sinceMark > GROUND_EARLY_MARGIN_TICKS))
 		{
 			g.selfPickedUp = false;
 		}

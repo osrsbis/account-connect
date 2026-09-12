@@ -617,6 +617,35 @@ public class NarrowRuleProbeTest
 			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
+	/**
+	 * A tick counter that moves BACKWARDS after a provisional mark withdraws the mark.
+	 *
+	 * The elapsed test is a subtraction, so a negative difference never exceeds the margin and a
+	 * bare `> margin` test kept the claim. That is the strongest reading of the weakest evidence: we
+	 * cannot time the removal against the mark at all when the clock has moved under us.
+	 * `settlePendingRemovals` already treats a negative wait the same way.
+	 */
+	@Test
+	public void aBackwardsTickCounterWithdrawsAProvisionalMark() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);					// gain lands, pile still on the ground
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 160);
+		plugin.onGameTick(null);
+		assertEquals("the pile really is still on the ground", 1, plugin.groundDropCount());
+		tick(plugin, 120);						// the clock moves BACKWARDS
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));	// CUSTOMER collects
+		tick(plugin, 121);
+		plugin.onGameTick(null);
+		assertEquals("the pile outlived the gain; a backwards clock must not keep the claim",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
 
 	/** A widget op labelled Take that carries an item id but no ground tile. */
