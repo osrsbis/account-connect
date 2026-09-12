@@ -529,6 +529,94 @@ public class NarrowRuleProbeTest
 			Long.valueOf(700), eventsOfType(plugin, "pickup").get(0).get("qty"));
 	}
 
+	/**
+	 * A pile PARKED because a Take was live when it left the ground never reports a timer expiry,
+	 * even once that Take has gone stale.
+	 *
+	 * The walk is longer than the Take window, so the Take is discarded as stale and the recovery is
+	 * never proven. The removal still lands inside the margin around the pile's own deadline. Reading
+	 * the live Take at SETTLEMENT time answered "no Take", and the pile then published
+	 * `despawn_timer` - "nobody took it" - for a pile we had in fact just recovered. The answer is
+	 * recorded at REMOVAL time instead, so the pile stays `unknown`.
+	 */
+	@Test
+	public void aRecoveryAfterASevenTickWalkAtTheDeadlineIsNeverATimerExpiry() throws Exception
+	{
+		assertEquals("we took it after a long walk; 'nobody took it' is false",
+			"unknown", walkThenRecoverAt(391, 398));
+	}
+
+	/** The same shape one tick shorter: still past the Take window, still not a timer expiry. */
+	@Test
+	public void aRecoveryAfterASixTickWalkAtTheDeadlineIsNeverATimerExpiry() throws Exception
+	{
+		assertEquals("unknown", walkThenRecoverAt(392, 398));
+	}
+
+	/** The same shape with the removal exactly ON the deadline rather than inside the lower margin. */
+	@Test
+	public void aRecoveryAfterALongWalkExactlyOnTheDeadlineIsNeverATimerExpiry() throws Exception
+	{
+		assertEquals("unknown", walkThenRecoverAt(393, 400));
+	}
+
+	/**
+	 * The GREEN control. A walk INSIDE the Take window still attributes at the deadline.
+	 *
+	 * Without it, a rule that simply refused every pile parked for a Take would look correct.
+	 */
+	@Test
+	public void aRecoveryAfterAShortWalkAtTheDeadlineStillAttributes() throws Exception
+	{
+		assertEquals("self_pickup", walkThenRecoverAt(393, 398));
+	}
+
+	private static String walkThenRecoverAt(int clickTick, int removeTick) throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, clickTick);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, removeTick);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		for (int t = removeTick + 1; t <= removeTick + 12; t++)
+		{
+			tick(plugin, t);
+			plugin.onGameTick(null);
+		}
+		return String.valueOf(onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/**
+	 * A customer collection at the deadline, with our Take live at the moment the pile left, stays
+	 * `unknown` even when an unrelated inventory change prunes that Take inside the parked window.
+	 *
+	 * The Take was live when the pile left the ground, so it could still explain the removal. Losing
+	 * it a few ticks later is not evidence that nobody took the pile.
+	 */
+	@Test
+	public void aTakePrunedInsideTheParkedWindowStillCostsTheTimerEvidence() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 396);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 398);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));	// CUSTOMER collects
+		tick(plugin, 402);
+		setInventory(plugin, COINS, 5);					// unrelated change prunes the Take
+		plugin.onItemContainerChanged(invChanged(plugin));
+		for (int t = 403; t <= 410; t++)
+		{
+			tick(plugin, t);
+			plugin.onGameTick(null);
+		}
+		assertEquals("a Take clicked two ticks before the collection still explains the removal",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
 
 	/** A widget op labelled Take that carries an item id but no ground tile. */

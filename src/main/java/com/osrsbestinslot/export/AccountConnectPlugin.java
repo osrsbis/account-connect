@@ -531,6 +531,20 @@ public class AccountConnectPlugin extends Plugin
 		 * WEAKEN a verdict; nothing on this path ever sets `selfPickedUp`.
 		 */
 		volatile int provisionalMarkTick = -1;
+		/**
+		 * Set when this pile was PARKED because a local Take of its item was live at the moment the
+		 * pile left the ground.
+		 *
+		 * The live Take is the reason the removal was held, so it is a fact about the REMOVAL and it
+		 * must be read at removal time. A Take can go stale, or be pruned by an unrelated inventory
+		 * change, while the removal is still parked. Asking `hasArmedPickupFor` later then answers
+		 * "no Take" about a pile whose removal a Take really could explain, and the deadline reset
+		 * publishes `despawn_timer` - "nobody took it" - for our own recovery after a long walk, or
+		 * for a customer collection. This flag remembers the removal-time answer, so the reset
+		 * refuses and the row stays `unknown`. Like every other condition on that path it can only
+		 * WEAKEN the verdict.
+		 */
+		volatile boolean parkedForLiveTake;
 
 		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 			int dropTick, int despawnTick)
@@ -3524,7 +3538,9 @@ public class AccountConnectPlugin extends Plugin
 	 *     one: a removal a hundred ticks PAST a deadline means the record does not describe the pile
 	 *     that just left, which is the merged-stack double-tracking residual, and a stale record
 	 *     must never be read as a timer expiry;
-	 *   * NO Take of this item is still live, so nothing in flight could still explain the removal;
+	 *   * NO Take of this item is still live, so nothing in flight could still explain the removal,
+	 *     and no Take was live when the pile actually LEFT the ground either - a Take that expired
+	 *     while the removal sat parked still explains that removal, so the pile stays ambiguous;
 	 *   * no gain was ever claimed for this pile, provisionally or otherwise - a claim that was made
 	 *     and then withdrawn leaves the pile ambiguous, and ambiguous stays `unknown`.
 	 *
@@ -3544,6 +3560,7 @@ public class AccountConnectPlugin extends Plugin
 			&& currentTick >= g.despawnTick - GROUND_EARLY_MARGIN_TICKS
 			&& currentTick <= g.despawnTick + GROUND_EARLY_MARGIN_TICKS
 			&& g.provisionalMarkTick < 0
+			&& !g.parkedForLiveTake
 			&& !hasArmedPickupFor(g);
 	}
 
@@ -3641,6 +3658,9 @@ public class AccountConnectPlugin extends Plugin
 		if (!g.selfPickedUp && hasArmedPickupFor(g))
 		{
 			g.takeArmed = true;
+			// Recorded HERE, at removal time, and never re-derived at settlement: the Take that
+			// justified parking this pile can expire or be pruned before the row is published.
+			g.parkedForLiveTake = true;
 			synchronized (pendingRemovals)
 			{
 				pendingRemovals.put(g, now);
