@@ -646,6 +646,85 @@ public class NarrowRuleProbeTest
 			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
+	/**
+	 * DOCUMENTATION. A collection ONE tick after a provisional mark still reads `self_pickup`.
+	 *
+	 * This is the margin the reconciliation deliberately allows, not a defect. A pile we really
+	 * recovered can leave the ground a tick after the inventory change, and the live callback order
+	 * is despawn FIRST, so an on-ground mark is rare to begin with. The residual is that a customer
+	 * collection landing inside that same window is indistinguishable and reads as ours. Narrowing
+	 * the margin to zero would cost genuine recoveries; the margin is a judgement, not a measurement.
+	 */
+	@Test
+	public void docACollectionOneTickAfterAProvisionalMarkStillReadsSelfPickup() throws Exception
+	{
+		assertEquals("pinned as current behaviour, not endorsed as certain",
+			"self_pickup", markThenRemoveAt(153));
+	}
+
+	/** DOCUMENTATION. The same at the far edge of the margin, two ticks after the mark. */
+	@Test
+	public void docACollectionTwoTicksAfterAProvisionalMarkStillReadsSelfPickup() throws Exception
+	{
+		assertEquals("self_pickup", markThenRemoveAt(154));
+	}
+
+	/** The boundary that must hold: three ticks is outside the margin and the mark is withdrawn. */
+	@Test
+	public void aCollectionThreeTicksAfterAProvisionalMarkIsWithdrawn() throws Exception
+	{
+		assertEquals("unknown", markThenRemoveAt(155));
+	}
+
+	private static String markThenRemoveAt(int removeTick) throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, removeTick);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		tick(plugin, removeTick + 10);
+		plugin.onGameTick(null);
+		return String.valueOf(onlyEvent(plugin, "ground_removed").get("cause"));
+	}
+
+	/**
+	 * DOCUMENTATION. A GENUINE second recovery of a pile whose first mark was withdrawn reads
+	 * `unknown`, not `self_pickup`.
+	 *
+	 * This is a LOST label, in the safe direction. `soleClaimablePile` skips a pile that already
+	 * carries a mark, so the second Take cannot re-claim it. The row never becomes `removed_early`
+	 * or `despawn_timer`, so nobody is named wrongly; we simply decline to name ourselves. Pinned so
+	 * that a later change which turns this into a WRONG label is caught rather than welcomed.
+	 */
+	@Test
+	public void docASecondRecoveryAfterAWithdrawnMarkReadsUnknown() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(POT, 0);
+		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 152);
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 200);
+		plugin.onMenuOptionClicked(groundTakeAt("Pot", POT, TILE_X, TILE_Y));
+		tick(plugin, 201);
+		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
+		setInventory(plugin, POT, 2);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 210);
+		plugin.onGameTick(null);
+		Map<String, Object> row = onlyEvent(plugin, "ground_removed");
+		assertNotEquals("never names somebody else", "removed_early", row.get("cause"));
+		assertNotEquals("never claims nobody took it", "despawn_timer", row.get("cause"));
+		assertEquals("a lost label, pinned as current behaviour", "unknown", row.get("cause"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
 
 	/** A widget op labelled Take that carries an item id but no ground tile. */
