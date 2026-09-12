@@ -28,6 +28,9 @@ public class SelfPickupTest
 	private static final int CHAPS = 2495;
 	private static final int DIAMOND = 1617;
 	private static final int COINS = 995;
+	private static final int POT = 1931;
+	private static final int TILE_X = 3210;
+	private static final int TILE_Y = 3420;
 
 	@Test
 	public void dropThreeThenPickTwoBackUp() throws Exception
@@ -97,17 +100,99 @@ public class SelfPickupTest
 		assertEquals("bare pickup must emit", 1, eventsOfType(plugin, "pickup").size());
 	}
 
-	/** Ground-item Take menu entries that carry no item id (getItemId() == -1). */
+	/**
+	 * THE REAL GROUND-TAKE SHAPE, captured from a live client on 2026-09-12.
+	 *
+	 * Dropping a Pot and taking it back on world 308 produced exactly this MenuOptionClicked:
+	 *   option=Take target=<col=ff9040>Pot id=1931 itemId=-1 param0=49 param1=54
+	 *   type=GROUND_ITEM_THIRD_OPTION
+	 *
+	 * This test previously asserted that NO pickup is emitted here, which encoded the defect as
+	 * correct behaviour and is why a green suite missed a live failure on two real staff accounts.
+	 */
 	@Test
-	public void pickupWhoseMenuEntryCarriesNoItemId() throws Exception
+	public void aRealGroundTakeEmitsItsPickup() throws Exception
 	{
 		AccountConnectPlugin plugin = newPlugin();
 		tick(plugin, 200);
-		plugin.onMenuOptionClicked(menu("Take", "Uncut diamond", -1));
-		setInventory(plugin, DIAMOND, 1);
+		plugin.onMenuOptionClicked(groundTake("Pot", POT));
+		setInventory(plugin, POT, 1);
 		plugin.onItemContainerChanged(containerChanged(plugin));
-		assertEquals("documents behaviour when the menu entry has no item id",
-			0, eventsOfType(plugin, "pickup").size());
+		assertEquals("a ground Take carries its item id in the entry identifier, not getItemId()",
+			1, eventsOfType(plugin, "pickup").size());
+		assertEquals(Integer.valueOf(POT), eventsOfType(plugin, "pickup").get(0));
+	}
+
+	/** An entry with NEITHER source populated must still be skipped, not guessed at. */
+	@Test
+	public void aTakeWithNoUsableIdAnywhereStillEmitsNothing() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin();
+		tick(plugin, 200);
+		plugin.onMenuOptionClicked(groundTake("Pot", -1));
+		setInventory(plugin, POT, 1);
+		plugin.onItemContainerChanged(containerChanged(plugin));
+		assertEquals(0, eventsOfType(plugin, "pickup").size());
+	}
+
+	/** The fallback is pickup-ONLY: an inventory entry's identifier is an option index, not an item. */
+	@Test
+	public void theIdentifierFallbackDoesNotApplyToOtherOpcodes() throws Exception
+	{
+		MenuOptionClicked drop = mock(MenuOptionClicked.class);
+		when(drop.getMenuOption()).thenReturn("Drop");
+		when(drop.getItemId()).thenReturn(-1);
+		when(drop.getId()).thenReturn(7);          // the real Drop entry's identifier: option index
+		assertEquals("a Drop must never adopt the option index as an item id",
+			-1, AccountConnectPlugin.offBookItemId(drop, "drop"));
+	}
+
+	/**
+	 * The identifier is only an item id on a GROUND_ITEM_* opcode.
+	 *
+	 * Matching the option word "Take" alone would adopt the identifier of any other entry that
+	 * happens to be labelled Take — a widget button, a future interface — where the identifier is
+	 * an option index or a widget id, not an item. The opcode is what makes the field meaningful.
+	 */
+	@Test
+	public void aTakeOnANonGroundOpcodeNeverAdoptsItsIdentifier()
+	{
+		MenuOptionClicked m = mock(MenuOptionClicked.class);
+		when(m.getMenuOption()).thenReturn("Take");
+		when(m.getItemId()).thenReturn(-1);
+		when(m.getId()).thenReturn(9764864);	// a widget id, not an item
+		when(m.getMenuAction()).thenReturn(net.runelite.api.MenuAction.CC_OP_LOW_PRIORITY);
+		assertEquals("only a ground-item opcode puts an item id in the identifier",
+			-1, AccountConnectPlugin.offBookItemId(m, "pickup"));
+	}
+
+	/** Every ground-item option index is a valid source, not just the third. */
+	@Test
+	public void everyGroundItemOpcodeCarriesItsItemIdInTheIdentifier()
+	{
+		for (net.runelite.api.MenuAction a : new net.runelite.api.MenuAction[]{
+			net.runelite.api.MenuAction.GROUND_ITEM_FIRST_OPTION,
+			net.runelite.api.MenuAction.GROUND_ITEM_SECOND_OPTION,
+			net.runelite.api.MenuAction.GROUND_ITEM_THIRD_OPTION,
+			net.runelite.api.MenuAction.GROUND_ITEM_FOURTH_OPTION,
+			net.runelite.api.MenuAction.GROUND_ITEM_FIFTH_OPTION})
+		{
+			MenuOptionClicked m = mock(MenuOptionClicked.class);
+			when(m.getItemId()).thenReturn(-1);
+			when(m.getId()).thenReturn(POT);
+			when(m.getMenuAction()).thenReturn(a);
+			assertEquals(a.toString(), POT, AccountConnectPlugin.offBookItemId(m, "pickup"));
+		}
+	}
+
+	/** An inventory action with a good getItemId() keeps using it, identifier ignored. */
+	@Test
+	public void aNormalInventoryActionStillUsesGetItemId()
+	{
+		MenuOptionClicked drop = mock(MenuOptionClicked.class);
+		when(drop.getItemId()).thenReturn(1931);
+		when(drop.getId()).thenReturn(7);
+		assertEquals(1931, AccountConnectPlugin.offBookItemId(drop, "drop"));
 	}
 
 
@@ -164,8 +249,16 @@ public class SelfPickupTest
 		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv0);
 		when(client.getVarbitValue(Varbits.IN_WILDERNESS)).thenReturn(0);
 		when(client.getTickCount()).thenReturn(100);
+		// WorldPoint.fromScene() reads the world view's base coordinates. Base 0 makes the scene
+		// coordinates in a Take menu entry equal to world coordinates, which keeps the tile
+		// assertions readable. Without this the conversion returns null and every tile check
+		// silently degrades to item-id-only matching — i.e. passes for the wrong reason.
+		net.runelite.api.WorldView wv = mock(net.runelite.api.WorldView.class);
+		when(wv.getBaseX()).thenReturn(0);
+		when(wv.getBaseY()).thenReturn(0);
+		when(client.getTopLevelWorldView()).thenReturn(wv);
 		when(client.getLocalPlayer()).thenReturn(player);
-		when(player.getWorldLocation()).thenReturn(new WorldPoint(3210, 3420, 0));
+		when(player.getWorldLocation()).thenReturn(new WorldPoint(TILE_X, TILE_Y, 0));
 		inject(plugin, "client", client);
 		return plugin;
 	}
@@ -207,6 +300,32 @@ public class SelfPickupTest
 			}
 		}
 		return out;
+	}
+
+	/** The REAL ground-item Take entry: itemId is -1, the item id sits in the identifier. */
+	private static MenuOptionClicked groundTake(String name, int itemId)
+	{
+		return groundTakeAt(name, itemId, TILE_X, TILE_Y);
+	}
+
+	/**
+	 * The REAL ground-item Take entry, aimed at one specific tile.
+	 *
+	 * itemId is -1, the item id sits in the identifier, the opcode is GROUND_ITEM_THIRD_OPTION and
+	 * param0/param1 carry the pile's SCENE coordinates. The test client mock reports base 0, so the
+	 * scene coordinates ARE the world coordinates here.
+	 */
+	private static MenuOptionClicked groundTakeAt(String name, int itemId, int x, int y)
+	{
+		MenuOptionClicked m = mock(MenuOptionClicked.class);
+		when(m.getMenuOption()).thenReturn("Take");
+		when(m.getMenuTarget()).thenReturn("<col=ff9040>" + name);
+		when(m.getItemId()).thenReturn(-1);
+		when(m.getId()).thenReturn(itemId);
+		when(m.getMenuAction()).thenReturn(net.runelite.api.MenuAction.GROUND_ITEM_THIRD_OPTION);
+		when(m.getParam0()).thenReturn(x);
+		when(m.getParam1()).thenReturn(y);
+		return m;
 	}
 
 	private static MenuOptionClicked menu(String option, String target, int itemId)

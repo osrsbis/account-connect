@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.10";
+	private static final String PLUGIN_VERSION = "0.7.11";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -443,7 +443,37 @@ public class AccountConnectPlugin extends Plugin
 	 * The client's despawnTime is authoritative for the pile, so this is only slack for tick rounding.
 	 */
 	static final int GROUND_EARLY_MARGIN_TICKS = 2;
+	/**
+	 * Below this many ticks on the ground, a removal may NOT be called `despawn_timer`.
+	 *
+	 * FAIL-CLOSED GUARD, not a model of the game. Its only effect is `despawn_timer` -> `unknown`;
+	 * no path here produces a stronger claim than the one it replaces. Measured evidence: the real
+	 * despawn is about 300 ticks (live read 2026-09-12, tick=244 against despawn_time=530), and 357
+	 * of 358 correct fleet rows read exactly 299. 100 is a loose floor that cannot reject a genuine
+	 * full-length expiry. An item with a shorter natural lifetime would report `unknown`, which is
+	 * the acceptable direction to be wrong in.
+	 */
+	static final int GROUND_TIMER_MIN_TICKS = 100;
+	/**
+	 * How long a removal may wait for its pickup to resolve. INV_DELTA_PENDING_MAX_TICKS is the
+	 * window the pickup pending itself lives for, so waiting the same span plus one tick cannot
+	 * outlive the evidence it is waiting for: if the pickup has not landed by then it never will.
+	 */
+	static final int REMOVAL_RESOLVE_MAX_TICKS = INV_DELTA_PENDING_MAX_TICKS + 1;
 	private final java.util.Deque<DroppedGroundItem> groundDrops = new java.util.ArrayDeque<>();
+	/**
+	 * Removals seen but NOT yet finalized, because a local Take could still explain them.
+	 *
+	 * The client fires ItemDespawned the instant a pile leaves the ground, and the inventory change
+	 * that proves WE took it arrives after. Publishing the cause at despawn time therefore states a
+	 * conclusion before the evidence exists, and a real self-pickup went out as `removed_early`
+	 * (measured live 2026-09-12 07:39:40). A removal with a plausible pending Take waits here for a
+	 * bounded number of ticks, then finalizes on whatever actually resolved. Exactly one
+	 * `ground_removed` is ever emitted per pile lifetime: the entry is removed from this map as it
+	 * fires, and the pile is already out of `groundDrops` by then.
+	 */
+	private final java.util.Map<DroppedGroundItem, Integer> pendingRemovals =
+		new java.util.LinkedHashMap<>();
 	/**
 	 * Set while the scene is reloading or the account is leaving. A scene reload despawns EVERY ground
 	 * pile at once for reasons unrelated to anyone taking them, so removals seen in that state are
@@ -476,6 +506,20 @@ public class AccountConnectPlugin extends Plugin
 		final int despawnTick;
 		/** Set when OUR OWN account picked this item back up, so the despawn is explained, not ambiguous. */
 		volatile boolean selfPickedUp;
+		/**
+		 * How many times settlement has considered this parked removal. A frozen tick counter makes
+		 * the elapsed-tick test unreachable, so the attempt count is the backstop that guarantees
+		 * every parked removal is eventually published.
+		 */
+		volatile int settleAttempts;
+		/**
+		 * Set when a local Take of this item could have been aimed at this pile.
+		 *
+		 * Once set it never clears. A pile a local Take named may have been recovered by us, so
+		 * `removed_early` - which reads as somebody else took it - is unsupported, and so is
+		 * `despawn_timer`. The pile reports `unknown` unless the pickup is proven exactly.
+		 */
+		volatile boolean takeArmed;
 
 		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 			int dropTick, int despawnTick)
@@ -496,7 +540,13 @@ public class AccountConnectPlugin extends Plugin
 		final String base;			// "drop" | "pickup" | "alch"
 		final int item;
 		final String spell;			// "high" | "low" for alch, else null
-		final long beforeCount;		// count of `item` in the inventory at click time
+		/**
+		 * Count of `item` in the inventory at click time. RAISED when another pending consumes an
+		 * arrival of the same item, so this pending cannot claim that same arrival. Two Takes of one
+		 * item armed on the same tick share a baseline, and a SINGLE arriving item then satisfied
+		 * both: two `pickup` rows for one real recovery. Not final for exactly that reason.
+		 */
+		volatile long beforeCount;
 		final long beforeCoins;		// carried coins at click time (alch gp confirmation)
 		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
 		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
@@ -505,10 +555,28 @@ public class AccountConnectPlugin extends Plugin
 		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
 		// first records itself; the second completes the emit. -1 = no corroboration yet.
 		volatile int spawnCorroboratedTick = -1;
+		/**
+		 * pickup only: the WORLD tile of the ground pile this Take was clicked on, or -1 when the
+		 * client did not give us one. Item id alone cannot tell two piles of the same item apart,
+		 * and a drop trade is exactly two piles of the same item.
+		 */
+		final int takeX;
+		final int takeY;
+		final int takePlane;
 
 		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
 			Map<String, Object> location, Boolean wilderness, int tick)
 		{
+			this(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick, -1, -1, -1);
+		}
+
+		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
+			Map<String, Object> location, Boolean wilderness, int tick,
+			int takeX, int takeY, int takePlane)
+		{
+			this.takeX = takeX;
+			this.takeY = takeY;
+			this.takePlane = takePlane;
 			this.base = base;
 			this.item = item;
 			this.spell = spell;
@@ -1632,6 +1700,7 @@ public class AccountConnectPlugin extends Plugin
 				// rather than emit a wave of "removed_early" that means nothing.
 				groundObservationUnreliable = true;
 				clearGroundDrops();
+				clearPendingRemovals();
 				break;
 			case HOPPING:
 			case LOGGING_IN:
@@ -1640,7 +1709,8 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				groundObservationUnreliable = true;
-				clearGroundDrops();		// ground state is per world AND per account
+				clearGroundDrops();
+				clearPendingRemovals();		// ground state is per world AND per account
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				soldThisVisit.clear();
@@ -1655,6 +1725,7 @@ public class AccountConnectPlugin extends Plugin
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				groundObservationUnreliable = true;
 				clearGroundDrops();
+				clearPendingRemovals();
 				// a feed-death then instant disconnect: record the death, but the containers here are null or
 				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
 				resolveDeathPending(null, false);
@@ -1667,6 +1738,7 @@ public class AccountConnectPlugin extends Plugin
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				groundObservationUnreliable = true;
 				clearGroundDrops();
+				clearPendingRemovals();
 				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
@@ -1742,6 +1814,10 @@ public class AccountConnectPlugin extends Plugin
 		if (shopOpen && activityLogActive())
 		{
 			accumulateShopNearby();		// build the receiver-candidate set across the whole shop visit
+		}
+		if (client != null)
+		{
+			settlePendingRemovals(client.getTickCount(), true);
 		}
 	}
 
@@ -2815,7 +2891,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		int item = event.getItemId();
+		int item = offBookItemId(event, action);
 		if (item <= 0)
 		{
 			return;	// no resolvable item id (e.g. alch spell-on-item may report -1) — skip rather than guess
@@ -2830,6 +2906,7 @@ public class AccountConnectPlugin extends Plugin
 		Boolean wilderness = "drop".equals(base)
 			? (client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0)
 			: null;
+		int[] tile = "pickup".equals(base) ? groundTakeTile(event) : null;
 		synchronized (invDeltaPendings)
 		{
 			// A second Drop before the first lands is the NORMAL shape of a drop trade, never a mistake.
@@ -2838,9 +2915,97 @@ public class AccountConnectPlugin extends Plugin
 			{
 				invDeltaPendings.pollFirst();	// evict the oldest — also the most likely to be stale
 			}
-			invDeltaPendings.addLast(
-				new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick));
+			invDeltaPendings.addLast(tile == null
+				? new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick)
+				: new InvDeltaPending(base, item, spell, beforeCount, beforeCoins, location, wilderness,
+					tick, tile[0], tile[1], tile[2]));
 		}
+		if ("pickup".equals(base))
+		{
+			// Flag every pile this Take could have been aimed at, NOW, while they are all still
+			// tracked. From here on none of them may be published as `removed_early` (somebody else
+			// took it) or `despawn_timer` (nobody took it): we clicked Take on one of them, so both
+			// are claims the client cannot support. Only a proven, unambiguous recovery upgrades a
+			// flagged pile back to `self_pickup`.
+			flagTakeArmedPiles(item, tile);
+		}
+	}
+
+	/**
+	 * WORLD tile of the ground pile a Take was clicked on, or null when it cannot be established.
+	 *
+	 * A ground-item menu entry carries the pile's SCENE coordinates in param0/param1 (live capture
+	 * 2026-09-12: `option=Take id=1931 itemId=-1 param0=49 param1=54`). Scene coordinates are
+	 * relative to the loaded region, so they are converted to world coordinates here, which is the
+	 * space `DroppedGroundItem` stores and what makes the two comparable.
+	 *
+	 * Returns null rather than a guess whenever the opcode is not a ground-item option, the client
+	 * is unavailable, or the conversion fails.
+	 */
+	int[] groundTakeTile(MenuOptionClicked event)
+	{
+		if (client == null || event == null || !isGroundItemOpcode(event.getMenuAction()))
+		{
+			return null;
+		}
+		try
+		{
+			net.runelite.api.coords.WorldPoint w = net.runelite.api.coords.WorldPoint.fromScene(
+				client, event.getParam0(), event.getParam1(), client.getPlane());
+			return w == null ? null : new int[]{w.getX(), w.getY(), w.getPlane()};
+		}
+		catch (RuntimeException e)
+		{
+			return null;	// no scene loaded / coordinates out of range — degrade, never guess
+		}
+	}
+
+	/** True for the ground-item menu opcodes, the only ones whose identifier is an item id. */
+	static boolean isGroundItemOpcode(net.runelite.api.MenuAction a)
+	{
+		return a == net.runelite.api.MenuAction.GROUND_ITEM_FIRST_OPTION
+			|| a == net.runelite.api.MenuAction.GROUND_ITEM_SECOND_OPTION
+			|| a == net.runelite.api.MenuAction.GROUND_ITEM_THIRD_OPTION
+			|| a == net.runelite.api.MenuAction.GROUND_ITEM_FOURTH_OPTION
+			|| a == net.runelite.api.MenuAction.GROUND_ITEM_FIFTH_OPTION;
+	}
+
+	/**
+	 * The item id for an off-book action, from whichever field the client actually populates.
+	 *
+	 * `getItemId()` is the right source for an INVENTORY action (Drop, alch): the entry is a widget
+	 * op on a slot that holds the item. A GROUND-item Take is a different opcode entirely, and the
+	 * client leaves `getItemId()` at -1 while putting the item id in the entry IDENTIFIER.
+	 *
+	 * Measured on the live client 2026-09-12, dropping and re-taking a Pot on world 308 - the real
+	 * MenuOptionClicked the plugin received:
+	 *
+	 *     option=Take target=&lt;col=ff9040&gt;Pot id=1931 itemId=-1 param0=49 param1=54
+	 *     type=GROUND_ITEM_THIRD_OPTION
+	 *
+	 * against the inventory Drop of the same item moments earlier:
+	 *
+	 *     option=Drop target=&lt;col=ff9040&gt;Pot id=7 itemId=1931 param0=1 param1=9764864
+	 *     type=CC_OP_LOW_PRIORITY
+	 *
+	 * So a self-pickup could never arm a pending, no `pickup` was ever emitted for this opcode, and
+	 * the item's later removal fell through to the despawn comparison and was labelled as if a
+	 * stranger or the timer had taken it. Both symptoms, one cause.
+	 *
+	 * The fallback is deliberately narrow: pickup only, only when `getItemId()` is unusable, AND
+	 * only on a GROUND_ITEM_* opcode. `identifier` on an inventory entry is the OPTION index (7 for
+	 * Drop above), never an item, so it must not be consulted anywhere else. Matching the option
+	 * word "Take" alone would adopt the identifier of any future non-ground entry labelled Take; the
+	 * opcode is what makes that identifier an item id.
+	 */
+	static int offBookItemId(MenuOptionClicked event, String action)
+	{
+		int item = event.getItemId();
+		if (item > 0 || !"pickup".equals(action) || !isGroundItemOpcode(event.getMenuAction()))
+		{
+			return item;
+		}
+		return event.getId();	// ground Take: the item id lives in the entry identifier
 	}
 
 	/**
@@ -3077,23 +3242,238 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Mark a tracked pile as recovered by our own account, so its removal is explained rather than
-	 * ambiguous. Called when a self-pickup emits. Returns true when a tracked pile matched.
+	 * Could this Take have been aimed at this pile?
+	 *
+	 * Item, and the tile whenever the client gave us one. A Take the client gave NO tile for could
+	 * have been aimed at any pile of its item, so it matches all of them here.
+	 *
+	 * This is the ONLY match rule in the narrow candidate, and it is used in both directions. To
+	 * WEAKEN a verdict, one match is enough: the pile may have been ours. To CLAIM a pile, the
+	 * caller additionally requires that it be the ONLY match, so a no-tile Take against two piles
+	 * claims neither, and a tiled Take against two piles on that tile claims neither. Identity comes
+	 * from the uniqueness, not from the tile alone, and the two directions can never disagree
+	 * because there is only one predicate.
 	 */
-	boolean markGroundDropSelfPickedUp(int item)
+	static boolean takeCouldName(InvDeltaPending take, DroppedGroundItem g)
+	{
+		if (g.item != take.item)
+		{
+			return false;
+		}
+		return take.takeX < 0
+			|| (g.x == take.takeX && g.y == take.takeY && g.plane == take.takePlane);
+	}
+
+	/** Mark every currently tracked pile a Take on this item and tile could have been aimed at. */
+	private void flagTakeArmedPiles(int item, int[] tile)
 	{
 		synchronized (groundDrops)
 		{
 			for (DroppedGroundItem g : groundDrops)
 			{
-				if (g.item == item && !g.selfPickedUp)
+				if (g.item == item
+					&& (tile == null || (g.x == tile[0] && g.y == tile[1] && g.plane == tile[2])))
 				{
-					g.selfPickedUp = true;
+					g.takeArmed = true;
+				}
+			}
+		}
+	}
+
+	/**
+	 * True when a local Take that could plausibly explain THIS pile is still in flight.
+	 *
+	 * Used only to DEFER a removal, never to attribute one. Matching on item id alone made a Take on
+	 * a stranger's pile ten tiles away defer our pile's removal, which delayed a verdict that was
+	 * already knowable.
+	 */
+	boolean hasArmedPickupFor(DroppedGroundItem g)
+	{
+		synchronized (invDeltaPendings)
+		{
+			for (InvDeltaPending p : invDeltaPendings)
+			{
+				if ("pickup".equals(p.base) && takeCouldName(p, g))
+				{
 					return true;
 				}
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * The ONE tracked pile this Take could have been aimed at, or null when there is not exactly one.
+	 *
+	 * Two candidates are indistinguishable to the client, so nothing is claimed and both report
+	 * `unknown`. That covers two piles on one tile and a no-tile Take against two piles of its item
+	 * with the same rule. Looks in both collections because the pile may already have despawned and
+	 * be parked awaiting its verdict, which is the ordinary case for a completed pickup.
+	 */
+	private DroppedGroundItem soleClaimablePile(InvDeltaPending take)
+	{
+		DroppedGroundItem found = null;
+		int n = 0;
+		synchronized (pendingRemovals)
+		{
+			for (DroppedGroundItem g : pendingRemovals.keySet())
+			{
+				if (!g.selfPickedUp && takeCouldName(take, g))
+				{
+					found = g;
+					n++;
+				}
+			}
+		}
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (!g.selfPickedUp && takeCouldName(take, g))
+				{
+					found = g;
+					n++;
+				}
+			}
+		}
+		return n == 1 ? found : null;
+	}
+
+	/** How many armed Takes of this item are in this resolution pass. */
+	private static int armedTakeCount(InvDeltaPending p, List<InvDeltaPending> snapshot)
+	{
+		int n = 0;
+		for (InvDeltaPending other : snapshot)
+		{
+			if ("pickup".equals(other.base) && other.item == p.item)
+			{
+				n++;
+			}
+		}
+		return n;
+	}
+
+	/**
+	 * Attribute a recovered pile to a Take, but ONLY when the evidence is unambiguous.
+	 *
+	 * Every condition below is necessary and none is negotiable, because the failure this guards
+	 * against is naming a staff member as the taker of a pile a CUSTOMER collected:
+	 *
+	 *   * exactly ONE armed Take of the item in this pass - two Takes and the client cannot say
+	 *     which one the server actually ran, and OSRS runs the LAST click of a burst while the
+	 *     queue hands the arrival to the FIRST pending;
+	 *   * exactly ONE tracked pile that Take could have been aimed at - two piles on the tile, or a
+	 *     no-tile Take against two piles of the item, name nothing;
+	 *   * the measured gain equals that pile EXACTLY - a ground pile is recovered whole, so a
+	 *     1,500-coin store sale is not a 1,200-coin pile.
+	 *
+	 * The Take's own freshness is enforced earlier, in `resolveOnePending`: a Take past its window
+	 * is discarded before it can produce a `pickup` row at all, so it cannot reach this method.
+	 *
+	 * Anything else marks nothing. The pile keeps its `takeArmed` flag and reports `unknown`, which
+	 * is the truthful answer: we may well have taken it, so `removed_early` would be as wrong as
+	 * claiming the pickup.
+	 *
+	 * @return true when a pile was marked, so the caller can publish it at once.
+	 */
+	private boolean markGroundDropSelfPickedUp(InvDeltaPending take, long rawGain,
+		List<InvDeltaPending> snapshot)
+	{
+		if (take == null || armedTakeCount(take, snapshot) != 1)
+		{
+			return false;
+		}
+		DroppedGroundItem g = soleClaimablePile(take);
+		if (g == null || rawGain != g.qty)
+		{
+			return false;
+		}
+		g.selfPickedUp = true;
+		return true;
+	}
+
+	/**
+	 * Finalize removals whose resolution window has closed, or whose pickup has landed.
+	 *
+	 * A pile marked `selfPickedUp` finalizes at once - the evidence is in. One that ran out of
+	 * window finalizes on what can actually be proven, which is never `self_pickup`. Called from the
+	 * tick hook and again whenever a pickup resolves, so the common case publishes immediately
+	 * rather than waiting out the window.
+	 */
+	void settlePendingRemovals(int currentTick)
+	{
+		settlePendingRemovals(currentTick, false);
+	}
+
+	/**
+	 * @param tickPass true only for the once-per-tick call. The budget counts TICKS, not calls: a
+	 * pickup resolving re-enters this method, so counting every call let ten pickups landing in one
+	 * tick spend the whole budget of every other parked pile. The re-entrant call exists to PUBLISH
+	 * a pile whose answer just arrived, never to age one.
+	 */
+	void settlePendingRemovals(int currentTick, boolean tickPass)
+	{
+		Map<DroppedGroundItem, Integer> due = new LinkedHashMap<>();
+		synchronized (pendingRemovals)
+		{
+			java.util.Iterator<java.util.Map.Entry<DroppedGroundItem, Integer>> it =
+				pendingRemovals.entrySet().iterator();
+			while (it.hasNext())
+			{
+				java.util.Map.Entry<DroppedGroundItem, Integer> e = it.next();
+				int waited = currentTick - e.getValue();
+				// `waited < 0` means the tick counter moved BACKWARDS under us; `settleAttempts`
+				// counts attempts instead of trusting the clock, because a counter that is FROZEN
+				// never lets the difference reach the window either. Without both, the entry strands
+				// in the map forever and its event is lost. Finalize: a late verdict beats none.
+				if (tickPass)
+				{
+					e.getKey().settleAttempts++;
+				}
+				if (e.getKey().selfPickedUp || waited >= REMOVAL_RESOLVE_MAX_TICKS || waited < 0
+					|| e.getKey().settleAttempts > REMOVAL_RESOLVE_MAX_TICKS)
+				{
+					due.put(e.getKey(), e.getValue());
+					it.remove();		// removed as it fires - never two finals for one lifecycle
+				}
+			}
+		}
+		for (Map.Entry<DroppedGroundItem, Integer> e : due.entrySet())
+		{
+			// The tick the pile ACTUALLY left the ground, not the tick we got around to concluding.
+			// Passing `currentTick` here let up to REMOVAL_RESOLVE_MAX_TICKS of drift cross the
+			// despawn deadline, silently turning a genuine `removed_early` into `despawn_timer` -
+			// a STRONGER claim than the evidence supports, and the opposite of failing closed.
+			emitGroundRemoval(e.getKey(), e.getValue(), groundObservationUnreliable);
+		}
+	}
+
+	/**
+	 * Discard the parked removals - but PUBLISH them first, as `unknown`.
+	 *
+	 * A region boundary, a hop or a logout can land inside the resolution window. Clearing the map
+	 * silently made the pile's removal vanish from the record entirely, which is worse than the
+	 * weaker verdict the same event got before it was ever deferred: a delivery simply disappeared.
+	 * Observation is genuinely unreliable across these transitions, so the honest cause is `unknown`
+	 * and never `despawn_timer` or `removed_early`. Each entry is emitted at the tick it was
+	 * actually removed, and removed from the map as it fires, so this cannot double-emit.
+	 */
+	void clearPendingRemovals()
+	{
+		Map<DroppedGroundItem, Integer> stranded;
+		synchronized (pendingRemovals)
+		{
+			if (pendingRemovals.isEmpty())
+			{
+				return;
+			}
+			stranded = new LinkedHashMap<>(pendingRemovals);
+			pendingRemovals.clear();
+		}
+		for (Map.Entry<DroppedGroundItem, Integer> e : stranded.entrySet())
+		{
+			emitGroundRemoval(e.getKey(), e.getValue(), true);	// unreliable: cause is `unknown`
+		}
 	}
 
 	/**
@@ -3128,6 +3508,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			cause = "self_pickup";
 		}
+		else if (g.takeArmed)
+		{
+			// A local Take named this pile and the recovery was not proven exactly. `removed_early`
+			// would read as somebody else taking it and `despawn_timer` as nobody taking it, and we
+			// can support neither. Refusing to attribute must not become a different wrong answer.
+			cause = "unknown";
+		}
 		else if (observationUnreliable)
 		{
 			cause = "unknown";
@@ -3138,7 +3525,14 @@ public class AccountConnectPlugin extends Plugin
 		}
 		else if (currentTick >= g.despawnTick - GROUND_EARLY_MARGIN_TICKS)
 		{
-			cause = "despawn_timer";
+			// FAIL CLOSED. `despawnTick` is an ABSOLUTE future tick (measured live 2026-09-12:
+			// tick=244 while despawn_time=530 on a freshly dropped pile), so a pile that genuinely
+			// reaches its deadline has been on the ground for the full timer. A removal that
+			// satisfies the comparison after only a handful of ticks means the deadline we stored
+			// does not describe this pile - a stale baseline, a re-tracked tile, a client whose tick
+			// counter moved under us. Saying "nobody took it" there is an assertion we cannot
+			// support. Unknown is the honest answer; a wrong cause is worse than no cause.
+			cause = (currentTick - g.dropTick) < GROUND_TIMER_MIN_TICKS ? "unknown" : "despawn_timer";
 		}
 		else
 		{
@@ -3176,7 +3570,21 @@ public class AccountConnectPlugin extends Plugin
 		{
 			groundDrops.remove(g);
 		}
-		emitGroundRemoval(g, client.getTickCount(), groundObservationUnreliable);
+		int now = client.getTickCount();
+		// Do NOT conclude yet if a local Take for this item is still in flight: the inventory gain
+		// that proves it arrives AFTER this callback. Hold the removal for a bounded window and let
+		// whatever actually resolves decide the cause. Piles with no pending Take finalize
+		// immediately, so ordinary despawns are not delayed at all.
+		if (!g.selfPickedUp && hasArmedPickupFor(g))
+		{
+			g.takeArmed = true;
+			synchronized (pendingRemovals)
+			{
+				pendingRemovals.put(g, now);
+			}
+			return;
+		}
+		emitGroundRemoval(g, now, groundObservationUnreliable);
 	}
 
 	/**
@@ -3253,14 +3661,40 @@ public class AccountConnectPlugin extends Plugin
 			}
 			snapshot = new ArrayList<>(invDeltaPendings);
 		}
+		// ONE unit of evidence resolves ONE pending. Every pending is measured against the same
+		// container, so two Takes of the same item armed on the same tick share a `beforeCount` and a
+		// SINGLE arriving item satisfied both: two `pickup` rows and doubled quantities for one real
+		// recovery. A resolved pickup therefore raises every other still-armed pickup's baseline by
+		// what it consumed.
 		for (InvDeltaPending p : snapshot)
 		{
-			resolveOnePending(p, countItem(inv, p.item), coinsAfter, currentTick);
+			long used = resolveOnePending(p, countItem(inv, p.item), coinsAfter, currentTick, snapshot);
+			if (used > 0 && "pickup".equals(p.base))
+			{
+				for (InvDeltaPending other : snapshot)
+				{
+					if (other != p && "pickup".equals(other.base) && other.item == p.item)
+					{
+						other.beforeCount += used;
+					}
+				}
+			}
 		}
 	}
 
-	/** Resolve exactly ONE armed pending. Removes it only when its own signals landed or its window expired. */
-	private void resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter, int currentTick)
+	/**
+	 * Resolve exactly ONE armed pending. Removes it only when its own signals landed or its window
+	 * expired. Returns the quantity it CONSUMED, so the caller can withhold that evidence from the
+	 * remaining pendings; 0 when nothing landed.
+	 */
+	private long resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter, int currentTick)
+	{
+		return resolveOnePending(p, itemCountAfter, coinsAfter, currentTick,
+			java.util.Collections.singletonList(p));
+	}
+
+	private long resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter,
+		int currentTick, List<InvDeltaPending> snapshot)
 	{
 		// Resolution removes ONE pending — the one whose signals landed. The lifecycle disarms (logout, hop,
 		// disconnect, death) are the only places that clear them all; a single item's loss must never discard
@@ -3275,13 +3709,23 @@ public class AccountConnectPlugin extends Plugin
 			{
 				removeInvDeltaPending(p);
 				emitDropEvent(p, dropDelta);
-				return;
+				return dropDelta;
 			}
 			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 			{
 				removeInvDeltaPending(p);	// no ground spawn confirmed it — expire silently, emit nothing
 			}
-			return;
+			return 0;
+		}
+		if ("pickup".equals(p.base) && currentTick - p.tick > INV_DELTA_PENDING_MAX_TICKS)
+		{
+			// A Take past its OWN window is no longer evidence about anything, whether or not an
+			// item arrived. The window used to be checked only when nothing landed, so a Take
+			// clicked but never served stayed armed forever and the next same-item gain revived it:
+			// a customer's collection published as ours, and a `pickup` row for a recovery that
+			// never happened. Expire it silently and emit nothing.
+			removeInvDeltaPending(p);
+			return 0;
 		}
 		long delta = "pickup".equals(p.base) ? (itemCountAfter - p.beforeCount) : (p.beforeCount - itemCountAfter);
 		long gp = coinsAfter - p.beforeCoins;
@@ -3293,12 +3737,12 @@ public class AccountConnectPlugin extends Plugin
 			{
 				removeInvDeltaPending(p);
 			}
-			return;
+			return 0;
 		}
 		removeInvDeltaPending(p);	// consume — the expected delta landed
 		if (!activityLogActive())
 		{
-			return;
+			return delta;
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", p.item);
@@ -3308,16 +3752,23 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("spell", p.spell);
 			fields.put("gp", gp);	// always present now — the coin gain is the alch confirmation itself
 			emitEvent("alch", fields);
-			return;
+			return delta;
 		}
 		if (p.location != null)
 		{
 			fields.put("location", p.location);
 		}
 		// If this recovers a pile WE dropped, say so on the pile: its later removal is then explained
-		// as self_pickup rather than counted as an ambiguous early removal.
-		markGroundDropSelfPickedUp(p.item);
+		// as self_pickup rather than counted as an ambiguous early removal. The rule is deliberately
+		// strict — see markGroundDropSelfPickedUp. Anything it refuses leaves the pile `unknown`.
+		if (markGroundDropSelfPickedUp(p, delta, snapshot))
+		{
+			// The pile may already be waiting on this answer; publish now rather than idle out the
+			// window. settlePendingRemovals removes the entry as it fires, so this cannot double-emit.
+			settlePendingRemovals(currentTick);
+		}
 		emitEvent("pickup", fields);	// only pickup reaches here — drop is spawn-confirmed, alch returned above
+		return delta;
 	}
 
 	/** Own-account death (item-loss context). ActorDeath fires for any nearby actor, so filter to self. */
