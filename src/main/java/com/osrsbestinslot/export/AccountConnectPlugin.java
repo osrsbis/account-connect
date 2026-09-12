@@ -3524,10 +3524,13 @@ public class AccountConnectPlugin extends Plugin
 	 *     one: a removal a hundred ticks PAST a deadline means the record does not describe the pile
 	 *     that just left, which is the merged-stack double-tracking residual, and a stale record
 	 *     must never be read as a timer expiry;
-	 *   * the pile lay there for the full timer, the same fail-closed floor `emitGroundRemoval` uses;
 	 *   * NO Take of this item is still live, so nothing in flight could still explain the removal;
 	 *   * no gain was ever claimed for this pile, provisionally or otherwise - a claim that was made
 	 *     and then withdrawn leaves the pile ambiguous, and ambiguous stays `unknown`.
+	 *
+	 * This method does NOT repeat the GROUND_TIMER_MIN_TICKS floor. Passing here only clears the way
+	 * to the deadline branch below, which applies that floor itself, so a pile removed too fast for a
+	 * real timer still reads `unknown`. `theTimerFloorStillRefusesAnImplausiblyFastExpiry` proves it.
 	 *
 	 * The reset is bound to the pile's own deadline and to nothing else. Resetting on TAKE EXPIRY
 	 * instead is round 8 again: a walk longer than the Take window would publish our own recovery as
@@ -3540,7 +3543,6 @@ public class AccountConnectPlugin extends Plugin
 			&& g.despawnTick >= 0
 			&& currentTick >= g.despawnTick - GROUND_EARLY_MARGIN_TICKS
 			&& currentTick <= g.despawnTick + GROUND_EARLY_MARGIN_TICKS
-			&& (currentTick - g.dropTick) >= GROUND_TIMER_MIN_TICKS
 			&& g.provisionalMarkTick < 0
 			&& !hasArmedPickupFor(g);
 	}

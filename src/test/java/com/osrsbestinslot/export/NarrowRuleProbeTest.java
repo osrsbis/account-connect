@@ -332,7 +332,14 @@ public class NarrowRuleProbeTest
 			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
-	/** The same start, but nobody takes the pile at all and it reaches its own deadline. */
+	/**
+	 * The same start, but nobody takes the pile at all and it reaches its own deadline.
+	 *
+	 * The row is `unknown`, and `despawn_timer` would be just as wrong as `self_pickup`. A gain of
+	 * exactly this pile's size did land inside the Take window, so the pile may well have been ours
+	 * and "nobody took it" is unsupported. A claim that was made and then withdrawn leaves the pile
+	 * ambiguous, which is why the deadline reset refuses a pile that carries a withdrawn mark.
+	 */
 	@Test
 	public void aPileThatOutlivesAProvisionalMarkAndTimesOutIsNeverASelfPickup() throws Exception
 	{
@@ -346,8 +353,11 @@ public class NarrowRuleProbeTest
 		tick(plugin, 400);
 		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
 		tick(plugin, 410);
+		Map<String, Object> row = onlyEvent(plugin, "ground_removed");
 		assertNotEquals("a pile that lived its full timer was not recovered by us",
-			"self_pickup", onlyEvent(plugin, "ground_removed").get("cause"));
+			"self_pickup", row.get("cause"));
+		assertEquals("nor can we say nobody took it: a matching gain did land in the window",
+			"unknown", row.get("cause"));
 	}
 
 	/**
