@@ -479,6 +479,46 @@ public class NarrowRuleProbeTest
 			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
 	}
 
+	/**
+	 * A gain of the WRONG SIZE inside the Take window: no attribution, but the `pickup` row stands.
+	 *
+	 * We click Take on a 1,200-coin pile, a customer collects it one tick later, and 700 coins then
+	 * arrive from somewhere else. The narrow rule refuses the pile, so the ground row is `unknown`
+	 * and no customer collection is published as ours. That is the whole scope of the narrow rule.
+	 *
+	 * The `pickup` row is a SEPARATE event with a separate meaning, and it is base behaviour that
+	 * this candidate does not change: our inventory of that item rose by 700 within the Take window.
+	 * It names no pile, names no taker and carries the quantity that really arrived. Suppressing it
+	 * whenever no tracked pile matches exactly would delete every legitimate recovery of a pile we
+	 * never dropped, which is the ordinary case - see `SelfPickupTest.barePickupWithNoPrecedingDrop`.
+	 *
+	 * RESIDUAL, recorded rather than fixed: the 700 coins may not have come off the ground at all.
+	 * The client gives no evidence that separates a ground recovery from a trade or a store sale
+	 * inside that window, so the row can overcount pickups. It cannot mislabel a ground pile, which
+	 * is the failure this candidate exists to close.
+	 */
+	@Test
+	public void aWrongSizeGainInsideTheWindowLeavesThePileUnknownButStillLogsThePickup() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(COINS, 1200);
+		dropItemAt(plugin, COINS, 1200, 100, 400, TILE_X, TILE_Y);
+		tick(plugin, 150);
+		plugin.onMenuOptionClicked(groundTakeAt("Coins", COINS, TILE_X, TILE_Y));
+		tick(plugin, 151);
+		plugin.onItemDespawned(despawn(COINS, 1200, TILE_X, TILE_Y, 0));	// CUSTOMER collects
+		tick(plugin, 153);
+		setInventory(plugin, COINS, 700);
+		plugin.onItemContainerChanged(invChanged(plugin));
+		tick(plugin, 165);
+		plugin.onGameTick(null);
+		assertEquals("the customer's pile is never ours",
+			"unknown", onlyEvent(plugin, "ground_removed").get("cause"));
+		assertEquals("the pickup row records the gain that really arrived",
+			1, eventsOfType(plugin, "pickup").size());
+		assertEquals("and carries its true size",
+			Long.valueOf(700), eventsOfType(plugin, "pickup").get(0).get("qty"));
+	}
+
 	// ---- helpers (copied from GroundRemovalTest; they are private there) ----
 
 	/** A widget op labelled Take that carries an item id but no ground tile. */
