@@ -284,6 +284,7 @@ public class AccountConnectPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateUploadSwitch();
+		deliverUploadDisclosure();	// a Hub install happens in-game; a restart is caught on LOGGED_IN
 		removeOrphanedKeys();
 		if (overlayManager != null)
 		{
@@ -314,16 +315,39 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * ONE-TIME MIGRATION for the new enableUpload switch.
+	 * THE MIGRATION MARKER, and the reason it is a key of its own.
 	 *
-	 * enableUpload defaults to false, so an upgrade would silently stop uploading for everyone who
-	 * already pasted a token — the plugin would look broken rather than off. RuneLite returns the
-	 * default for an unset key, so config.enableUpload() cannot tell "never set" from "set to false".
-	 * The raw read can: getConfiguration returns null only when the key was never written.
+	 * The obvious migration reads enableUpload and treats null as "never chose". That is wrong on a
+	 * real client, and the failure is silent. RuneLite calls
+	 * PluginManager.loadDefaultPluginConfiguration BEFORE startUp (the client start sequence is
+	 * loadCorePlugins, loadSideLoadPlugins, loadExternalPlugins, loadDefaultPluginConfiguration,
+	 * then startPlugins), and ConfigManager.setDefaultConfiguration writes every default-valued
+	 * {@code @ConfigItem} whose string form is non-empty. A boolean false converts to "false", which
+	 * is non-empty, so osrsbisexport.enableUpload is ALREADY in the profile when startUp runs.
+	 * getConfiguration then returns "false" for a user who never chose anything, the migration reads
+	 * that as a choice, and every existing linked user stops uploading on upgrade with no message.
 	 *
-	 * So: a valid token plus a never-written switch means an existing user, and the switch is set to
-	 * true ONCE. After that it is the user's, and turning it off stays off through every later
-	 * upgrade. A missing or malformed token migrates nothing.
+	 * This key cannot be written that way. setDefaultConfiguration walks the config interface's
+	 * declared methods and skips every method with no {@code @ConfigItem} annotation, so a key that
+	 * is not a config item has no default for RuneLite to write. Its absence therefore still means
+	 * what enableUpload's absence was wrongly assumed to mean: this profile was never migrated.
+	 */
+	static final String MIGRATION_MARKER_KEY = "uploadMigrated";
+
+	/** The release that migrated this profile. A version, not a flag, so a later one can tell. */
+	static final String MIGRATION_MARKER_VALUE = "0.7.12";
+
+	/**
+	 * ONE-TIME MIGRATION for the new enableUpload switch, keyed on the marker above.
+	 *
+	 * enableUpload defaults to false, so a plain upgrade would silently stop uploading for everyone
+	 * who already pasted a token — the plugin would read as broken rather than off.
+	 *
+	 * Three branches, and the marker is written in all of them so this runs at most once per
+	 * profile. An unmarked profile with a valid token is an existing linked user, so the switch goes
+	 * on once and the disclosure is owed. An unmarked profile with no valid token is a fresh
+	 * install, so only the marker is written and the switch stays off. A marked profile is never
+	 * touched again, whatever the switch says, so an explicit off survives every later upgrade.
 	 */
 	void migrateUploadSwitch()
 	{
@@ -331,17 +355,57 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (configManager.getConfiguration(CONFIG_GROUP, "enableUpload") != null)
+		if (configManager.getConfiguration(CONFIG_GROUP, MIGRATION_MARKER_KEY) != null)
 		{
-			return;		// the user has already made a choice — never overwrite it
+			return;		// already migrated once — the switch belongs to the user from here on
 		}
-		if (!activityLogActive())
+		if (activityLogActive())
+		{
+			configManager.setConfiguration(CONFIG_GROUP, "enableUpload", true);
+			// The config panel raises its warning dialog only for a tick the USER makes, so a
+			// programmatic write shows nothing at all. Owe the same disclosure as a chat message.
+			uploadDisclosureOwed = true;
+			log.debug("OSRS BiS upload switch turned on once for an existing linked account");
+		}
+		else
 		{
 			log.debug("OSRS BiS upload switch left off: no valid link token to migrate");
+		}
+		configManager.setConfiguration(CONFIG_GROUP, MIGRATION_MARKER_KEY, MIGRATION_MARKER_VALUE);
+	}
+
+	/**
+	 * Set when the migration turned the switch on for an existing user, cleared when the notice is
+	 * delivered. The user never saw RuneLite's own warning dialog, because ConfigPanel raises that
+	 * from changeConfiguration and only a real tick reaches it.
+	 */
+	volatile boolean uploadDisclosureOwed;
+
+	/** What an upgraded user is told, once. The switch's own warning, shortened for one chat line. */
+	static final String UPLOAD_MIGRATION_NOTICE =
+		"OSRS BiS: uploading is now a switch in the plugin settings, and it has been left ON for "
+		+ "your linked account. It submits your IP address to a 3rd-party server not controlled or "
+		+ "verified by Runelite developers, and uploads your account, your in-game activity and "
+		+ "trade and shop screenshots to osrsbestinslot.com. Turn off \"Upload to "
+		+ "osrsbestinslot.com\" in the plugin settings to stop all of it.";
+
+	/**
+	 * Deliver the migration notice once, in game chat. Called from startUp, because a Plugin Hub
+	 * install happens while the user is logged in, and again on LOGGED_IN, because a client restart
+	 * is the other upgrade path and there is no chat box on the login screen.
+	 */
+	void deliverUploadDisclosure()
+	{
+		if (!uploadDisclosureOwed || client == null)
+		{
 			return;
 		}
-		configManager.setConfiguration(CONFIG_GROUP, "enableUpload", true);
-		log.debug("OSRS BiS upload switch turned on once for an existing linked account");
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
+		}
+		uploadDisclosureOwed = false;
+		client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", UPLOAD_MIGRATION_NOTICE, null);
 	}
 
 	@Override
@@ -397,10 +461,19 @@ public class AccountConnectPlugin extends Plugin
 		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
 	}
 
-	/** Are the store overlays allowed right now? Linked token AND server opt-in, both required. */
+	/**
+	 * Are the store overlays allowed right now? The server grant (or the local test override) AND
+	 * the same upload gate every network send uses, both required.
+	 *
+	 * The upload half is here on purpose. These overlays are the visible half of a feature whose
+	 * data half is uploaded, and the grant that turns them on arrives on an upload response. A user
+	 * who has turned the upload switch off has turned the feature off, so drawing the countdown and
+	 * the nearby panel at them would show a feature they declined. uploadAllowed() subsumes the
+	 * linked-token requirement this gate carried before, so nothing is dropped by folding it in.
+	 */
 	boolean storeToolsEnabled()
 	{
-		return (serverStoreToolsEnabled || storeToolsDevOverride()) && activityLogActive();
+		return (serverStoreToolsEnabled || storeToolsDevOverride()) && uploadAllowed();
 	}
 
 	/**
@@ -2038,6 +2111,9 @@ public class AccountConnectPlugin extends Plugin
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
 				groundObservationUnreliable = false;
+				// An upgrade that turned the switch on owes the user the disclosure. There is no chat
+				// box on the login screen, so this is the first moment it can be shown after a restart.
+				deliverUploadDisclosure();
 				break;
 			default:
 				break;

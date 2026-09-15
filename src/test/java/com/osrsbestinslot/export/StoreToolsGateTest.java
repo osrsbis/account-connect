@@ -24,6 +24,11 @@ public class StoreToolsGateTest
 
 	private static AccountConnectPlugin withToken(String token) throws Exception
 	{
+		return withTokenAndSwitch(token, true);
+	}
+
+	private static AccountConnectPlugin withTokenAndSwitch(String token, boolean upload) throws Exception
+	{
 		AccountConnectPlugin p = new AccountConnectPlugin();
 		java.lang.reflect.Field f = AccountConnectPlugin.class.getDeclaredField("config");
 		f.setAccessible(true);
@@ -32,7 +37,7 @@ public class StoreToolsGateTest
 			@Override
 			public boolean enableUpload()
 			{
-				return true;
+				return upload;
 			}
 
 			@Override
@@ -119,6 +124,62 @@ public class StoreToolsGateTest
 			assertFalse("config must expose no store-tools switch: " + m.getName(),
 				m.getName().toLowerCase().contains("storetool"));
 		}
+	}
+
+	/**
+	 * THE UPLOAD SWITCH GATES THE OVERLAYS TOO (F3).
+	 *
+	 * These overlays are the visible half of a feature whose data half is uploaded, and the grant
+	 * that turns them on arrives on an upload response. A user who turned the upload switch off has
+	 * declined the feature, so drawing the countdown and the nearby panel at them shows a feature
+	 * they said no to. The gate now calls uploadAllowed(), which is the same gate every network send
+	 * uses and which subsumes the linked-token requirement this gate carried before.
+	 */
+	@Test
+	public void theUploadSwitchOffMeansNoOverlaysEvenWithTheGrant() throws Exception
+	{
+		AccountConnectPlugin p =
+			withTokenAndSwitch("0123456789abcdef0123456789abcdef", false);
+		p.setStoreToolsForTest(true);
+		p.setShopOpenForTest(true);
+
+		assertFalse("the upload switch off must close the store-tools gate", p.storeToolsEnabled());
+		assertNull("reset overlay must stay hidden", new StoreResetOverlay(p).render(g()));
+		assertNull("nearby overlay must stay hidden", new StoreNearbyOverlay(p).render(g()));
+	}
+
+	/** The same, through the dev override — the override grants the feature, never the consent. */
+	@Test
+	public void theDevOverrideDoesNotBypassTheUploadSwitch() throws Exception
+	{
+		AccountConnectPlugin p =
+			withTokenAndSwitch("0123456789abcdef0123456789abcdef", false);
+		p.setShopOpenForTest(true);
+		try
+		{
+			System.setProperty("osrsbis.storetools", "on");
+			assertFalse("the override must not bypass the upload switch", p.storeToolsEnabled());
+			assertNull(new StoreResetOverlay(p).render(g()));
+			assertNull(new StoreNearbyOverlay(p).render(g()));
+		}
+		finally
+		{
+			System.clearProperty("osrsbis.storetools");
+		}
+	}
+
+	/** And with the switch back on, the same granted account draws — the gate is not "always off". */
+	@Test
+	public void theUploadSwitchOnRestoresTheOverlays() throws Exception
+	{
+		AccountConnectPlugin p =
+			withTokenAndSwitch("0123456789abcdef0123456789abcdef", true);
+		p.setStoreToolsForTest(true);
+		p.setShopOpenForTest(true);
+
+		assertTrue(p.storeToolsEnabled());
+		org.junit.Assert.assertNotNull(new StoreResetOverlay(p).render(g()));
+		org.junit.Assert.assertNotNull(new StoreNearbyOverlay(p).render(g()));
 	}
 
 	/** A server revoke mid-session closes the gate immediately. */
