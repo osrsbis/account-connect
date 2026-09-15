@@ -211,8 +211,15 @@ public class UploadSwitchTest
 
 			plugin.migrateUploadSwitch();
 
-			verify(cm, never()).setConfiguration(org.mockito.Mockito.anyString(),
-				org.mockito.Mockito.anyString(), org.mockito.Mockito.any());
+			// The value overload MATTERS. ConfigManager has both setConfiguration(String,String,String)
+			// and a generic setConfiguration(String,String,T); the plugin calls the generic one with a
+			// boolean. A verify written with anyString()/any() resolves to the String overload, which
+			// the plugin never calls, so it can never fail. Name the exact call instead — that is what
+			// the migration mutants exercise.
+			verify(cm, never()).setConfiguration(
+				AccountConnectPlugin.CONFIG_GROUP, "enableUpload", (Object) Boolean.TRUE);
+			verify(cm, never()).setConfiguration(
+				AccountConnectPlugin.CONFIG_GROUP, "enableUpload", (Object) Boolean.FALSE);
 		}
 	}
 
@@ -229,8 +236,15 @@ public class UploadSwitchTest
 
 			plugin.migrateUploadSwitch();
 
-			verify(cm, never()).setConfiguration(org.mockito.Mockito.anyString(),
-				org.mockito.Mockito.anyString(), org.mockito.Mockito.any());
+			// The value overload MATTERS. ConfigManager has both setConfiguration(String,String,String)
+			// and a generic setConfiguration(String,String,T); the plugin calls the generic one with a
+			// boolean. A verify written with anyString()/any() resolves to the String overload, which
+			// the plugin never calls, so it can never fail. Name the exact call instead — that is what
+			// the migration mutants exercise.
+			verify(cm, never()).setConfiguration(
+				AccountConnectPlugin.CONFIG_GROUP, "enableUpload", (Object) Boolean.TRUE);
+			verify(cm, never()).setConfiguration(
+				AccountConnectPlugin.CONFIG_GROUP, "enableUpload", (Object) Boolean.FALSE);
 		}
 	}
 
