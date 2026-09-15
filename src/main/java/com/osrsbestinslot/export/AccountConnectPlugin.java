@@ -266,6 +266,26 @@ public class AccountConnectPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateUploadSwitch();
+		removeOrphanedKeys();
+	}
+
+	/**
+	 * A key from a removed feature, still sitting in every upgraded profile.
+	 *
+	 * The trade-screenshot opt-in became part of core sync in 0.7.6 and its config item was deleted,
+	 * but RuneLite never removes a stored value whose item is gone. Nothing reads it, so it is
+	 * harmless — but anyone reading a profile file sees a toggle that no longer exists and concludes
+	 * the feature is still opt-in. Unset it once so the profile matches the code.
+	 */
+	static final String ORPHAN_SCREENSHOT_KEY = "uploadTradeScreenshots";
+
+	void removeOrphanedKeys()
+	{
+		if (configManager == null)
+		{
+			return;
+		}
+		configManager.unsetConfiguration(CONFIG_GROUP, ORPHAN_SCREENSHOT_KEY);
 	}
 
 	/**
