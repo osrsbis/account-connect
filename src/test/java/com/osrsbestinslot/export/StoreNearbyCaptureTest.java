@@ -11,6 +11,7 @@ import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -18,7 +19,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Store-transfer counterparty capture — nearby[] (players seen over a shop visit), world, loc attached to
- * store events. Unmasks the untracked receiver of the general-store method: staff sells an item cheap into
+ * store events. Unmasks the untracked receiver of the general-store method: a seller lists an item cheap into
  * the shared store, an untracked player standing there buys it out (no trade event). The receiver is in the
  * nearby set — presence + persistence + proximity finger them. Logic proven against mocked players; real
  * WorldView timing is field-verified on a live shop visit.
@@ -67,7 +68,7 @@ public class StoreNearbyCaptureTest
 	@Test
 	public void accumulateTracksClosestApproachAndPersistence() throws Exception
 	{
-		Player self = player("Staff", 3164, 3486, 90);
+		Player self = player("Seller", 3164, 3486, 90);
 		Player b = mock(Player.class);
 		when(b.getName()).thenReturn("Receiver");
 		when(b.getCombatLevel()).thenReturn(126);
@@ -103,7 +104,7 @@ public class StoreNearbyCaptureTest
 	@Test
 	public void storeContextAttachesNearbyWorldLocNearestFirst() throws Exception
 	{
-		Player self = player("Staff", 3164, 3486, 90);
+		Player self = player("Seller", 3164, 3486, 90);
 		Player near = player("Adjacent", 3165, 3486, 100);	// dist 1
 		Player far = player("Bystander", 3170, 3486, 50);	// dist 6
 		List<Player> players = new ArrayList<>();
@@ -130,7 +131,7 @@ public class StoreNearbyCaptureTest
 	@Test
 	public void selfAndNamelessExcluded() throws Exception
 	{
-		Player self = player("Staff", 3164, 3486, 90);
+		Player self = player("Seller", 3164, 3486, 90);
 		Player nameless = mock(Player.class);
 		when(nameless.getName()).thenReturn(null);
 		when(nameless.getWorldLocation()).thenReturn(new WorldPoint(3165, 3486, 0));
@@ -149,7 +150,7 @@ public class StoreNearbyCaptureTest
 	public void liveSnapshotBackfillsWhenAccumulatorEmpty() throws Exception
 	{
 		// store event fires before any tick accumulated -> nearby[] falls back to a live snapshot.
-		Player self = player("Staff", 3164, 3486, 90);
+		Player self = player("Seller", 3164, 3486, 90);
 		Player near = player("Walker", 3166, 3486, 70);	// dist 2
 		List<Player> players = new ArrayList<>();
 		players.add(self);
@@ -170,7 +171,7 @@ public class StoreNearbyCaptureTest
 	@Test
 	public void noPlayersNoNearbyStillCarriesWorldLoc() throws Exception
 	{
-		Player self = player("Staff", 3164, 3486, 90);
+		Player self = player("Seller", 3164, 3486, 90);
 		List<Player> players = new ArrayList<>();
 		players.add(self);
 		AccountConnectPlugin plugin = plugin(self, players, 302, 5);
@@ -181,6 +182,227 @@ public class StoreNearbyCaptureTest
 		assertNull("no nearby field when nobody around", fields.get("nearby"));
 		assertEquals(302, fields.get("world"));
 		assertFalse("world/loc still present", fields.isEmpty());
+	}
+
+	// ---- nearby_at_tx: the TRANSACTION-MOMENT snapshot (was completely untested until 2026-09-03) ----
+
+	/**
+	 * nearby_at_tx is the whole point of the field: nearby[] is everyone seen across the WHOLE visit,
+	 * which over a long visit accumulates passers-by. nearby_at_tx is who was standing there at the
+	 * instant the item moved. On production the two differ on roughly 1 event in 10, and the narrower
+	 * list is the one that names a receiver — so a bug that made them identical would destroy the
+	 * feature's value while every existing assertion still passed.
+	 */
+	@Test
+	public void nearbyAtTxIsTheTransactionMomentNotTheWholeVisit() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player receiver = player("Receiver", 3164, 3486, 126);
+		Player passerby = player("PasserBy", 3170, 3490, 60);
+
+		// Visit accumulator saw BOTH — receiver and a passer-by who has since walked off.
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, receiver), 311, 100);
+		java.util.Map<String, int[]> visit = new java.util.LinkedHashMap<>();
+		visit.put("Receiver", new int[]{0, 90, 100, 126});
+		visit.put("PasserBy", new int[]{6, 90, 92, 60});
+		inject(plugin, "shopVisitNearby", visit);
+
+		// At the transaction moment only the receiver is present.
+		inject(plugin, "nearbyAtTx", plugin.nearbyPlayersSnapshot(24));
+
+		java.util.Map<String, Object> fields = new java.util.LinkedHashMap<>();
+		plugin.addStoreContextFields(fields);
+
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> visitWide = (List<Map<String, Object>>) fields.get("nearby");
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> atTx = (List<Map<String, Object>>) fields.get("nearby_at_tx");
+
+		assertNotNull("nearby_at_tx must be attached when a snapshot was taken", atTx);
+		assertEquals("the visit-wide list keeps everyone seen", 2, visitWide.size());
+		assertEquals("the transaction-moment list holds only who was there then", 1, atTx.size());
+		assertEquals("Receiver", atTx.get(0).get("rsn"));
+	}
+
+	/**
+	 * The field must be CONSUMED, not left set. It is a per-transaction snapshot, so a stale value
+	 * leaking into the next store event would attach the previous transaction's bystanders to it —
+	 * the exact shape of a false accusation.
+	 */
+	@Test
+	public void nearbyAtTxIsClearedAfterItIsAttached() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player other = player("Other", 3164, 3486, 100);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, other), 311, 100);
+		inject(plugin, "nearbyAtTx", plugin.nearbyPlayersSnapshot(24));
+
+		java.util.Map<String, Object> first = new java.util.LinkedHashMap<>();
+		plugin.addStoreContextFields(first);
+		assertNotNull("first event carries the snapshot", first.get("nearby_at_tx"));
+
+		java.util.Map<String, Object> second = new java.util.LinkedHashMap<>();
+		plugin.addStoreContextFields(second);
+		assertNull("a second event must NOT inherit the previous transaction's snapshot",
+			second.get("nearby_at_tx"));
+	}
+
+	// ---- store_taken: the shop-stock counterparty inference (was completely untested) ----
+
+	/**
+	 * store_taken fires when the stock of an item THIS VISIT SOLD falls — someone bought it out of the
+	 * dead drop. Only sold items are watched, because our own BUY also lowers stock and must never be
+	 * reported as a taker.
+	 */
+	@Test
+	public void storeTakenFiresOnlyForItemsThisVisitSold() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player taker = player("Taker", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, taker), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);						// we sold this
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);					// our item, stock 1
+		baseline.put(29415, 43);				// an unrelated shop item
+		inject(plugin, "shopStock", baseline);
+
+		// Both fall: ours to 0 (a taker), the unrelated one to 42 (nothing to do with us).
+		plugin.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
+
+		List<Map<String, Object>> events = plugin.pendingEvents;
+		long taken = events.stream().filter(e -> "store_taken".equals(e.get("type"))).count();
+		assertEquals("exactly one store_taken, for the SOLD item only", 1, taken);
+		Map<String, Object> ev = events.stream()
+			.filter(e -> "store_taken".equals(e.get("type"))).findFirst().orElseThrow(AssertionError::new);
+		assertEquals(20997, ev.get("item"));
+		assertEquals("stock fell by one", 1, ev.get("qty"));
+	}
+
+	/**
+	 * The candidate list is EVIDENCE, not an accusation, and the code is careful to call it
+	 * taken_by_candidates. An empty shop must therefore emit the event with NO candidate list at all
+	 * rather than an empty one — "we do not know who" must not read as "nobody".
+	 */
+	@Test
+	public void storeTakenOmitsCandidatesWhenNobodyIsPresent() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self), 602, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(29415);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(29415, 43);
+		inject(plugin, "shopStock", baseline);
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
+
+		Map<String, Object> ev = plugin.pendingEvents.stream()
+			.filter(e -> "store_taken".equals(e.get("type"))).findFirst().orElseThrow(AssertionError::new);
+		assertNull("an empty shop must omit the candidate list, never emit an empty one",
+			ev.get("taken_by_candidates"));
+		assertEquals("the stock movement is still recorded", 29415, ev.get("item"));
+	}
+
+	/**
+	 * OUR OWN BUY-BACK IS NOT A CUSTOMER (fixed 2026-09-03, found in field testing).
+	 *
+	 * The seller's own procedure has an explicit emergency step: if the customer cannot buy the item in time,
+	 * the seller buys it back. That purchase lowers the shop stock exactly like a customer's, so the
+	 * inference named a bystander as the taker. Measured on live events 3914798/3914799: a buy-back
+	 * and a store_taken landed in the same second, and the plugin still named a candidate.
+	 *
+	 * A false counterparty is the worst output this feature can produce — it is evidence that could
+	 * reach a dispute.
+	 */
+	@Test
+	public void ourOwnBuybackIsNotReportedAsATaker() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player bystander = player("Bystander", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, bystander), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		// We just bought it back ourselves.
+		inject(plugin, "lastSelfBuyItem", 20997);
+		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis());
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+
+		assertTrue("a self buy-back must emit NO store_taken at all",
+			plugin.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+	}
+
+	/** The suppression is time-boxed: an OLD self-buy must not mask a later genuine customer. */
+	@Test
+	public void anOldSelfBuyDoesNotMaskALaterCustomer() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player taker = player("Taker", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, taker), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		inject(plugin, "lastSelfBuyItem", 20997);
+		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis() - 60_000L);	// a minute ago
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+
+		assertTrue("a stale self-buy must not suppress a real taker",
+			plugin.pendingEvents.stream().anyMatch(e -> "store_taken".equals(e.get("type"))));
+	}
+
+	/** A stock RISE (the shop's own restock timer) is not someone taking our item. */
+	@Test
+	public void storeTakenIgnoresRestock() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self), 412, 200);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{{20997, 5}}));	// stock ROSE
+
+		assertTrue("a stock rise must emit nothing",
+			plugin.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+	}
+
+	/**
+	 * Build a shop container holding the given {itemId, qty} pairs.
+	 *
+	 * net.runelite.api.Item is FINAL, so Mockito cannot mock it — construct real ones. (The mock
+	 * version of this helper failed with "Cannot mock/spy because - final class", 2026-09-03.)
+	 */
+	private static net.runelite.api.ItemContainer shopWith(int[][] pairs)
+	{
+		net.runelite.api.ItemContainer c = mock(net.runelite.api.ItemContainer.class);
+		net.runelite.api.Item[] items = new net.runelite.api.Item[pairs.length];
+		for (int i = 0; i < pairs.length; i++)
+		{
+			items[i] = new net.runelite.api.Item(pairs[i][0], pairs[i][1]);
+		}
+		when(c.getItems()).thenReturn(items);
+		return c;
 	}
 
 	private static Object field(AccountConnectPlugin plugin, String name) throws Exception

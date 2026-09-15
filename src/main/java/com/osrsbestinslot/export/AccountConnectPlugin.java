@@ -77,6 +77,8 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.events.PlayerLootReceived;
 import net.runelite.client.events.ServerNpcLoot;
+import net.runelite.client.ui.overlay.infobox.InfoBoxManager;
+import net.runelite.client.ui.overlay.infobox.Timer;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
@@ -252,6 +254,12 @@ public class AccountConnectPlugin extends Plugin
 	private ScheduledExecutorService executor;
 
 	@Inject
+	private InfoBoxManager infoBoxManager;
+
+	@Inject
+	private net.runelite.client.ui.overlay.OverlayManager overlayManager;
+
+	@Inject
 	private ConfigManager configManager;
 
 	static final String CONFIG_GROUP = "osrsbisexport";
@@ -262,11 +270,28 @@ public class AccountConnectPlugin extends Plugin
 		return configManager.getConfig(AccountConnectConfig.class);
 	}
 
+	/**
+	 * Two SEPARATE overlays, deliberately.
+	 *
+	 * The countdown is one fixed-size row so it never moves; the nearby list changes height as
+	 * players walk past. Combined, the list dragged the countdown around the screen on every tick —
+	 * the jitter reported from the live test on 2026-09-03.
+	 */
+	private StoreNearbyOverlay nearbyOverlay;
+	private StoreResetOverlay resetOverlay;
+
 	@Override
 	protected void startUp()
 	{
 		migrateUploadSwitch();
 		removeOrphanedKeys();
+		if (overlayManager != null)
+		{
+			resetOverlay = new StoreResetOverlay(this);
+			overlayManager.add(resetOverlay);
+			nearbyOverlay = new StoreNearbyOverlay(this);
+			overlayManager.add(nearbyOverlay);
+		}
 	}
 
 	/**
@@ -322,7 +347,21 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		if (overlayManager != null && nearbyOverlay != null)
+		{
+			overlayManager.remove(nearbyOverlay);	// an overlay outliving the plugin is a leak on screen
+		}
+		if (overlayManager != null && resetOverlay != null)
+		{
+			overlayManager.remove(resetOverlay);
+		}
+		nearbyOverlay = null;
+		resetOverlay = null;
 		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
+		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
+		// not clear a plugin's infoboxes for it.
+		storeResetAnchorMs = 0;
+		removeResetTimer();
 	}
 
 	/**
@@ -332,6 +371,37 @@ public class AccountConnectPlugin extends Plugin
 	 * remotely (it can never force it ON — that stays a local opt-in for Plugin Hub compliance).
 	 */
 	volatile boolean serverScreenshotsDisabled;
+
+	/**
+	 * Server-dictated STORE TOOLS grant — one half of the gate on the reset countdown and the nearby
+	 * panel.
+	 *
+	 * Defaults OFF and can only ever be turned ON by the backend, for a token whose linked RSN is on
+	 * the allowlist. A regular player therefore never sees these overlays, and there is no local
+	 * setting that grants them. Read from the X-Store-Tools response header on every accepted upload.
+	 */
+	volatile boolean serverStoreToolsEnabled;
+
+	/**
+	 * LOCAL TEST OVERRIDE for the store-tools gate.
+	 *
+	 * The grant normally arrives from the backend, so the feature cannot be exercised at all until
+	 * that deploy lands. This lets a field test run against production today. It is a JVM system
+	 * property, so it can only be set by whoever launches the client with an explicit flag — the
+	 * Plugin Hub build launched through RuneLite.exe never has it, and it grants nothing on the
+	 * server: no extra data is read, captured or uploaded, only local rendering.
+	 */
+	static boolean storeToolsDevOverride()
+	{
+		String v = System.getProperty("osrsbis.storetools");
+		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
+	}
+
+	/** Are the store overlays allowed right now? Linked token AND server opt-in, both required. */
+	boolean storeToolsEnabled()
+	{
+		return (serverStoreToolsEnabled || storeToolsDevOverride()) && activityLogActive();
+	}
 
 	/**
 	 * Own-account activity log (syncActivityLog opt-in): buffered structured events — logins/logouts,
@@ -369,6 +439,75 @@ public class AccountConnectPlugin extends Plugin
 	/** Shop interface (SHOPMAIN 300) open — so a Buy/Sell menu click is a general-store transaction. */
 	private volatile boolean shopOpen;
 
+	/** Is a shop interface open right now? Read by the overlays to decide whether to draw. */
+	boolean isShopOpen()
+	{
+		return shopOpen;
+	}
+
+	/**
+	 * Where the shop's item grid ENDS on screen, so an overlay can sit directly beneath it.
+	 *
+	 * RuneLite draws overlays over the interface, never inside it, so "below the items" has to be
+	 * computed from the live widget each frame — the shop window moves with the client size and the
+	 * fixed/resizable layout. Child 16 is the item grid (the same child the stock reader uses).
+	 *
+	 * Returns null when the shop is closed or the widget is not laid out yet; the caller then falls
+	 * back to its own anchor rather than drawing at a stale position.
+	 */
+	java.awt.Point shopItemsBottomLeft()
+	{
+		if (client == null || !shopOpen)
+		{
+			return null;
+		}
+		net.runelite.api.widgets.Widget grid = client.getWidget(SHOP_GROUP_ID, 16);
+		if (grid == null || grid.isHidden())
+		{
+			return null;
+		}
+		net.runelite.api.Point loc = grid.getCanvasLocation();
+		if (loc == null || grid.getHeight() <= 0)
+		{
+			return null;
+		}
+		// ANCHOR TO THE GRID BOX, NOT THE ITEMS. Measured twice on a live client 2026-09-03:
+		//   - grid bottom alone put the panels ON the "Value check" / "Quantity" controls, because
+		//     the widget box extends past them;
+		//   - lowest-occupied-item put them INSIDE the grid as soon as the shop gained a third row.
+		// The grid box is stable whatever the stock count, so use it and clear the control row by a
+		// fixed margin measured from that same box.
+		int gridBottom = loc.getY() + grid.getHeight();
+		// RIGHT EDGE, not a fraction of the width. The caller subtracts its own panel width, so both
+		// panels end flush with the shop's right side however wide each one is.
+		//
+		// Prefer the SHOP WINDOW's right edge over the item grid's: measured on a live client the
+		// grid box ends ~58px inside the window, so aligning to it left the panels short of the
+		// right side that was asked for. Fall back to the grid when the root widget is unreadable.
+		int right = loc.getX() + grid.getWidth();
+		net.runelite.api.widgets.Widget root = client.getWidget(SHOP_GROUP_ID, 0);
+		if (root != null && !root.isHidden() && root.getCanvasLocation() != null && root.getWidth() > 0)
+		{
+			right = root.getCanvasLocation().getX() + root.getWidth();
+		}
+		int gridRight = right - 10;
+		// +58 clears the control row entirely. Measured: the grid box bottom sits ~14px above the
+		// "Value check" / "Quantity" row, which is ~26px tall, so +30 landed ON it (seen live).
+		return new java.awt.Point(gridRight, gridBottom + 58);
+	}
+
+	/** Test seam: drive the shop-open gate without a game client. */
+	void setShopOpenForTest(boolean open)
+	{
+		shopOpen = open;
+	}
+
+	/** Test seam: grant the server-side store-tools half of the gate. */
+	void setStoreToolsForTest(boolean on)
+	{
+		serverStoreToolsEnabled = on;
+	}
+
 	// Store-transfer counterparty inference: while a shop is open, accumulate every nearby player seen
 	// (rsn -> [closestTileDist, firstTick, lastTick, combatLevel]). Attached to the store event as `nearby`
 	// so an UNTRACKED receiver of the general-store method (staff sells cheap, receiver buys it out) can be
@@ -394,6 +533,40 @@ public class AccountConnectPlugin extends Plugin
 	 * present AT the transaction and for how long around it.
 	 */
 	private volatile List<Map<String, Object>> nearbyAtTx;
+	// ---- STORE RESET CLOCK ----
+	//
+	// A general store's stock cycles on a fixed 60s clock. An item put into the shop disappears at the
+	// next tick of that clock, NOT 60s after it was sold — so an item sold 1s after a reset is gone in
+	// 59s, and one sold at 58s is gone in 2. That difference is the whole risk of the delivery method:
+	// a seller currently puts a junk item in and watches it vanish to feel out where the clock is,
+	// which is a guess repeated by eye every visit. Measured over 56 real sessions, the gap between the
+	// junk probe and the first real item ran 5s to 146s — that spread IS the guesswork.
+	//
+	// The clock's PHASE is what matters, and one observation fixes it: the moment any tracked item
+	// vanishes from the shop, we know a reset just happened, and every reset after that is anchored to
+	// it. So a single junk probe pins the phase for the rest of the visit.
+	//
+	// The anchor is only valid while the shop stays open. On close, hop or logout it is dropped rather
+	// than carried, because a stale phase shown as a live countdown is worse than no countdown at all —
+	// the user would push a high-value item into a window that has already closed.
+	private static final long STORE_RESET_PERIOD_MS = 60_000L;
+	private static final int COINS_ITEM_ID = 995;		// infobox icon
+	/**
+	 * The junk PROBE item — the first thing sold into the shop this visit.
+	 *
+	 * Its disappearance is the reset (see handleShopStockChanged). Everything sold after it is real
+	 * merchandise whose disappearance means a customer, so only this one may move the clock.
+	 */
+	private int storeProbeItem;
+	/** Item id of our most recent own store buy, and when — see the buy-back note in onMenuOptionClicked. */
+	private int lastSelfBuyItem;
+	private long lastSelfBuyAtMs;
+	/** How long a self-buy suppresses the counterparty inference for that item. */
+	private static final long SELF_BUY_SUPPRESS_MS = 3_000L;
+	/** Wall-clock ms of an OBSERVED reset; 0 = phase unknown, show nothing. */
+	private long storeResetAnchorMs;
+	/** When the shop container last changed at all. The anchor needs two observations, not one. */
+	private long lastStockChangeMs;
 	private static final int MAX_NEARBY_TRACKED = 64;	// bound the per-visit map
 	private static final int NEARBY_FIELD_CAP = 24;		// bound the emitted nearby[] list
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
@@ -1793,6 +1966,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			stopStoreClipCapture(true);
 		}
+		// A hop or a disconnect ends the shop session, so the observed phase no longer describes the
+		// shop in front of us. Drop it: an anchor that survives a hop is a confidently wrong countdown.
+		if (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST)
+		{
+			storeResetAnchorMs = 0;
+			removeResetTimer();
+		}
 		switch (event.getGameState())
 		{
 			case LOADING:
@@ -1821,6 +2001,9 @@ public class AccountConnectPlugin extends Plugin
 				clearPendingRemovals();		// ground state is per world AND per account
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
+				storeResetAnchorMs = 0;	// phase is per-visit: never carry it across accounts
+				lastStockChangeMs = 0;
+				storeProbeItem = 0;
 				soldThisVisit.clear();
 				nearbyAtTx = null;
 				chestLooted = false;
@@ -1922,6 +2105,15 @@ public class AccountConnectPlugin extends Plugin
 		if (shopOpen && activityLogActive())
 		{
 			accumulateShopNearby();		// build the receiver-candidate set across the whole shop visit
+		}
+		// RuneLite's Timer infobox removes ITSELF when it reaches zero, so a countdown armed at one
+		// observed reset covers exactly one 60s cycle and then vanishes. The phase is still known,
+		// so re-arm for the next cycle. This extrapolates from a REAL observed anchor, never a
+		// guess, and the next observed reset re-anchors it.
+		if (shopOpen && resetTimer == null && resetPhaseKnown(storeResetAnchorMs))
+		{
+			reArmAttempts++;
+			showResetTimer();
 		}
 		if (client != null)
 		{
@@ -2075,8 +2267,21 @@ public class AccountConnectPlugin extends Plugin
 		if (groupId == SHOP_GROUP_ID)
 		{
 			shopOpen = true;
+			// Re-place the overlays under THIS shop's item grid. A user drag still wins: the
+			// overlays only apply a default when RuneLite has no stored location for them.
+			if (resetOverlay != null)
+			{
+				resetOverlay.resetAnchorForVisit();
+			}
+			if (nearbyOverlay != null)
+			{
+				nearbyOverlay.resetAnchorForVisit();
+			}
 			shopVisitNearby.clear();	// fresh receiver-candidate set for this shop visit
 			shopStock.clear();		// baseline is taken from this visit's first container change
+			storeResetAnchorMs = 0;		// a new visit starts with the phase UNKNOWN
+			lastStockChangeMs = 0;
+			storeProbeItem = 0;		// and with no probe until the first item is sold
 			soldThisVisit.clear();
 			nearbyAtTx = null;
 			accumulateShopNearby();		// seed with whoever is already standing here at open
@@ -2353,6 +2558,10 @@ public class AccountConnectPlugin extends Plugin
 			shopOpen = false;
 			flushStorePendingOnShopClose();
 			stopStoreClipCapture(true);	// end the visit; upload only if it had a buy/sell, else drop
+			// The reset phase is only valid while the shop is open — drop it rather than show a stale
+			// countdown on the next visit. Re-probing costs one junk item; a wrong number costs the item.
+			storeResetAnchorMs = 0;
+			removeResetTimer();
 		}
 	}
 
@@ -2484,6 +2693,18 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		if ("store_buy".equals(type))
+		{
+			// OUR OWN BUY-BACK. The seller's own procedure has an explicit emergency step — if the
+			// buyer cannot take the item in time, buy it back — so our own buy of an item we just
+			// sold is a NORMAL part of the method, not a customer taking it. Without this the fall
+			// that our own purchase causes is reported as a counterparty: measured on live events
+			// 3914798/3914799, where a buy-back and a store_taken landed in the SAME SECOND and the
+			// plugin still named a candidate. Record the item so handleShopStockChanged can suppress
+			// the inference.
+			lastSelfBuyItem = event.getItemId();
+			lastSelfBuyAtMs = System.currentTimeMillis();
+		}
 		int item = event.getItemId();
 		if (item <= 0)
 		{
@@ -2505,6 +2726,12 @@ public class AccountConnectPlugin extends Plugin
 		if ("store_sell".equals(type))
 		{
 			soldThisVisit.add(item);	// watch this item's shop stock for a taker
+			if (storeProbeItem == 0)
+			{
+				// FIRST sell of the visit = the junk probe. Only its disappearance moves the reset
+				// clock; everything after it is merchandise whose disappearance means a customer.
+				storeProbeItem = item;
+			}
 		}
 		StorePending prev = storePending;
 		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick);
@@ -2662,7 +2889,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** Snapshot up to {@code cap} nearest OTHER players right now: {rsn, dx, dy, dist, cb}, nearest first. */
-	private List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
+	List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
 		if (client == null)
@@ -2705,6 +2932,187 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Milliseconds until the next store reset, given an observed anchor and the current time.
+	 *
+	 * Returns 0 when the phase is unknown (no reset observed yet this visit) — the caller shows nothing
+	 * rather than a guess. Pure and static so the phase arithmetic is testable without a game client.
+	 */
+	static long msUntilNextReset(long anchorMs, long nowMs)
+	{
+		if (anchorMs <= 0 || nowMs < anchorMs)
+		{
+			return 0;			// no anchor, or a clock that went backwards — refuse to guess
+		}
+		long since = nowMs - anchorMs;
+		long remainder = since % STORE_RESET_PERIOD_MS;
+		// Land exactly ON a tick => a full period remains, never 0 (0 is reserved for "unknown").
+		return STORE_RESET_PERIOD_MS - remainder;
+	}
+
+	/** True when the phase is known and a countdown may be shown. */
+	static boolean resetPhaseKnown(long anchorMs)
+	{
+		return anchorMs > 0;
+	}
+
+	/** The live countdown infobox, or null when none is shown. Client thread only. */
+	private Timer resetTimer;
+
+	/**
+	 * Show (or re-point) the countdown for the next reset.
+	 *
+	 * Called once per observed reset, so the box is replaced rather than accumulated — a leaked infobox
+	 * is the obvious failure of this feature and the tests assert against it explicitly.
+	 */
+	private void showResetTimer()
+	{
+		if (infoBoxManager == null || !storeToolsEnabled() || !resetPhaseKnown(storeResetAnchorMs))
+		{
+			return;
+		}
+		removeResetTimer();
+		long remainMs = msUntilNextReset(storeResetAnchorMs, System.currentTimeMillis());
+		if (remainMs <= 0)
+		{
+			return;
+		}
+		java.awt.image.BufferedImage icon = itemManager != null ? itemManager.getImage(COINS_ITEM_ID) : null;
+		Timer t = new Timer(remainMs, java.time.temporal.ChronoUnit.MILLIS, icon, this);
+		t.setTooltip("General store resets");
+		resetTimer = t;
+		infoBoxManager.addInfoBox(t);
+	}
+
+	/** Counts tick-driven re-arms. Test seam: the re-arm decision is otherwise invisible. */
+	private int reArmAttempts;
+
+	int reArmAttemptsForTest()
+	{
+		return reArmAttempts;
+	}
+
+	boolean resetPhaseKnownForTest()
+	{
+		return resetPhaseKnown(storeResetAnchorMs);
+	}
+
+	/** Milliseconds until the next reset, or 0 when the phase has not been observed yet. */
+	long msUntilNextResetForDisplay()
+	{
+		return msUntilNextReset(storeResetAnchorMs, System.currentTimeMillis());
+	}
+
+	/**
+	 * DIAGNOSTIC ONLY — writes what the shop container actually does, to a LOCAL file.
+	 *
+	 * The reset model is not yet confirmed against a real client: a full store session produced no
+	 * anchor on 2026-09-03 while the operator saw several resets happen. Rather than guess at a
+	 * second model, record the ground truth. Nothing here is uploaded and nothing about another
+	 * player is written — only item ids and quantities from the shop's own container.
+	 *
+	 * Enabled only by the system property, so an ordinary build writes nothing at all.
+	 */
+	private void traceLine(String text)
+	{
+		String path = System.getProperty("osrsbis.shoptrace");
+		if (path == null || path.isEmpty())
+		{
+			return;
+		}
+		try
+		{
+			java.nio.file.Files.write(java.nio.file.Paths.get(path),
+				(System.currentTimeMillis() + " " + text + "\n")
+					.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+				java.nio.file.StandardOpenOption.CREATE,
+				java.nio.file.StandardOpenOption.APPEND);
+		}
+		catch (Exception ignored)
+		{
+			// a diagnostic must never affect the plugin
+		}
+	}
+
+	private void traceShopStock(Map<Integer, Integer> now)
+	{
+		String path = System.getProperty("osrsbis.shoptrace");
+		if (path == null || path.isEmpty())
+		{
+			return;
+		}
+		try
+		{
+			StringBuilder sb = new StringBuilder();
+			sb.append(System.currentTimeMillis()).append(' ');
+			sb.append("gate=").append(storeToolsEnabled()).append(' ');
+			sb.append("probe=").append(storeProbeItem).append(' ');
+			sb.append("anchor=").append(storeResetAnchorMs).append(' ');
+			sb.append("delta=");
+			boolean any = false;
+			java.util.Set<Integer> keys = new java.util.TreeSet<>();
+			keys.addAll(shopStock.keySet());
+			keys.addAll(now.keySet());
+			for (Integer k : keys)
+			{
+				int a = shopStock.getOrDefault(k, 0);
+				int b = now.getOrDefault(k, 0);
+				if (a != b)
+				{
+					sb.append(k).append(':').append(a).append("->").append(b).append(' ');
+					any = true;
+				}
+			}
+			if (!any)
+			{
+				sb.append("(none)");
+			}
+			sb.append('\n');
+			java.nio.file.Files.write(java.nio.file.Paths.get(path),
+				sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+				java.nio.file.StandardOpenOption.CREATE,
+				java.nio.file.StandardOpenOption.APPEND);
+		}
+		catch (Exception ignored)
+		{
+			// a diagnostic must never affect the plugin
+		}
+	}
+
+	/** How far a gap may sit from one full period and still count as the cycle. */
+	static final long PERIOD_TOLERANCE_MS = 3_000L;
+
+	/**
+	 * Do two consecutive container changes sit exactly one store period apart?
+	 *
+	 * This is the whole anchor rule. It is deliberately conservative: a shop where nothing else
+	 * happens produces a clean 60s chain, while a busy shop full of customers produces changes at
+	 * arbitrary times that mostly will NOT be 60s apart, so the clock simply stays unknown rather
+	 * than locking onto a coincidence. Showing nothing beats showing a wrong countdown.
+	 *
+	 * Pure and static so the rule is testable without a client.
+	 */
+	static boolean isPeriodAgreement(long previousChangeMs, long nowMs)
+	{
+		if (previousChangeMs <= 0 || nowMs <= previousChangeMs)
+		{
+			return false;		// nothing to compare against, or a clock that went backwards
+		}
+		long gap = nowMs - previousChangeMs;
+		return Math.abs(gap - STORE_RESET_PERIOD_MS) <= PERIOD_TOLERANCE_MS;
+	}
+
+	/** Remove the countdown. Idempotent — every teardown path calls it. */
+	private void removeResetTimer()
+	{
+		Timer t = resetTimer;
+		resetTimer = null;
+		if (t != null && infoBoxManager != null)
+		{
+			infoBoxManager.removeInfoBox(t);
+		}
+	}
+
+	/**
 	 * Watch the SHOP's stock for someone taking an item we just sold into it — the general-store
 	 * counterparty, which no other signal can see.
 	 *
@@ -2736,6 +3144,58 @@ public class AccountConnectPlugin extends Plugin
 				}
 			}
 		}
+		traceShopStock(now);
+		long nowMs = System.currentTimeMillis();
+
+		// ANCHOR 1 — THE ITEM WE SOLD VANISHING. This is the event the user actually watches, and it
+		// is the strongest signal available: a junk item the shop does NOT natively stock is sold in,
+		// and it is removed on the next tick.
+		//
+		// The discriminator is ZERO, measured live 2026-09-03. Player-added stock decays 1 per tick
+		// until it reaches 0 and leaves the shop entirely (item 1191: 5->4->3->…->0, each step exactly
+		// 60.0s apart; item 1159: 1->0). Shop DEFAULT stock behaves completely differently — selling a
+		// Pot into Varrock GS raised it 5->6 and the shop normalised it back to 5 in 1.2-5.4 SECONDS,
+		// never touching the cycle. So a sold item falling to a NON-ZERO number is the shop
+		// normalising its own goods and means nothing; falling to ZERO is the tick.
+		if (!soldThisVisit.isEmpty())
+		{
+			for (Integer sold : soldThisVisit)
+			{
+				if (sold == null)
+				{
+					continue;
+				}
+				int had = shopStock.getOrDefault(sold, 0);
+				int has = now.getOrDefault(sold, 0);
+				if (had > 0 && has == 0)
+				{
+					storeResetAnchorMs = nowMs;
+					traceLine("ANCHOR sold-item-vanished item=" + sold + " " + had + "->0");
+					showResetTimer();
+					break;
+				}
+			}
+		}
+
+		// ANCHOR 2 — PERIODICITY, for a visit where nothing of ours has vanished yet. Two consecutive
+		// container changes exactly one period apart can only be the cycle. Confirmed live: two
+		// restock ticks 60.015s apart anchored, while two buys 15.0s apart were correctly refused.
+		//
+		// Two earlier models were refuted by measurement, both by watching a real shop. "the junk item
+		// we sold vanishing IS the reset" gave 72s cycles drifting 36s/24s/12s, because a shop's
+		// DEFAULT stock normalises on its own schedule. "a tick is a rise and a fall together" refused
+		// all five ticks of a five-minute observation, because a full shop has nothing to restock. What
+		// survived every observation is the PERIOD: ticks landed at 60.0s with no deviation, twice.
+		if (!now.equals(shopStock) && !shopStock.isEmpty())
+		{
+			if (storeResetAnchorMs == 0 && isPeriodAgreement(lastStockChangeMs, nowMs))
+			{
+				storeResetAnchorMs = nowMs;
+				traceLine("ANCHOR period gap=" + (nowMs - lastStockChangeMs));
+				showResetTimer();
+			}
+			lastStockChangeMs = nowMs;
+		}
 		for (Integer item : soldThisVisit)
 		{
 			int before = shopStock.getOrDefault(item, -1);
@@ -2743,6 +3203,11 @@ public class AccountConnectPlugin extends Plugin
 			if (before < 0 || after >= before)
 			{
 				continue;		// no baseline yet, or stock did not fall
+			}
+			if (item != null && item == lastSelfBuyItem
+				&& System.currentTimeMillis() - lastSelfBuyAtMs <= SELF_BUY_SUPPRESS_MS)
+			{
+				continue;	// WE bought it back — not a customer. See onMenuOptionClicked.
 			}
 			Map<String, Object> f = new LinkedHashMap<>();
 			f.put("item", item);
@@ -4864,6 +5329,8 @@ public class AccountConnectPlugin extends Plugin
 	 *   X-Sync-Interval    seconds, clamped [5, 600] — the minimum gap between sends.
 	 *   X-Screenshots      "off"/"disabled"/"false" force-disables trade-screenshot capture.
 	 *   X-Clips            "off"/"disabled"/"false" force-disables store delivery-clip capture.
+	 *   X-Store-Tools      "on"/"enabled"/"true"/"1" grants the shop overlays for this token. The
+	 *                      overlays draw only and send nothing, so the grant expands no collection.
 	 *   X-Uploads-Enabled  "false"/"0" soft-pauses the token: cadence drops to the 600s max so the
 	 *                      policy channel stays open (the hard data-stop is enforced server-side by
 	 *                      dropping the token's snapshots — the client never goes dark, so it can be
@@ -4876,6 +5343,18 @@ public class AccountConnectPlugin extends Plugin
 		{
 			String v = screenshots.trim().toLowerCase(java.util.Locale.ROOT);
 			serverScreenshotsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
+		}
+
+		String storeTools = response.header("X-Store-Tools");
+		if (storeTools != null)
+		{
+			String v = storeTools.trim().toLowerCase(java.util.Locale.ROOT);
+			boolean on = "on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v);
+			serverStoreToolsEnabled = on;
+			if (!on)
+			{
+				removeResetTimer();	// a revoked grant must clear what is already on screen
+			}
 		}
 
 		String clips = response.header("X-Clips");
