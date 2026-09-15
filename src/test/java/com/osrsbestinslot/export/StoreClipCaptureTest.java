@@ -26,6 +26,8 @@ public class StoreClipCaptureTest
 	{
 		return new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{
@@ -40,7 +42,9 @@ public class StoreClipCaptureTest
 	public void storeClipsDisabledWithoutLinkToken() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", new AccountConnectConfig() {});
+		inject(plugin, "config", new AccountConnectConfig() {
+			@Override public boolean enableUpload() { return true; }
+});
 		assertFalse("store-clip capture must be off with no link token",
 			plugin.storeClipsEnabled());
 	}
@@ -52,6 +56,8 @@ public class StoreClipCaptureTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

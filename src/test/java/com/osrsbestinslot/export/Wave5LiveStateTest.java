@@ -88,6 +88,8 @@ public class Wave5LiveStateTest
 		String baseUrl = server.url("/").toString();
 		AccountConnectConfig config = new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

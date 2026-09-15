@@ -85,6 +85,8 @@ public class UploadGatingTest
 		String baseUrl = server.url("/").toString();
 		AccountConnectConfig config = new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{
@@ -311,6 +313,8 @@ public class UploadGatingTest
 		// local opt-in ON
 		inject("config", new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

@@ -70,6 +70,8 @@ public class RealtimeFlushTest
 		final String base = server.url("/").toString();
 		return new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

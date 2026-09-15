@@ -54,6 +54,7 @@ public class TradeLeakAndFlushWedgeTest
 	private void configWith(String apiBaseUrl) throws Exception
 	{
 		AccountConnectConfig config = mock(AccountConnectConfig.class);
+		when(config.enableUpload()).thenReturn(true);
 		when(config.linkToken()).thenReturn(TOKEN);
 		when(config.apiBaseUrl()).thenReturn(apiBaseUrl);
 		inject("config", config);

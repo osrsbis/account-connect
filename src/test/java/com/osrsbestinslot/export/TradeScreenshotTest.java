@@ -70,7 +70,9 @@ public class TradeScreenshotTest
 		// was removed 2026-09-02 — the token is the gate). drawManager / executor / okHttpClient are
 		// left null on purpose — if any handler got past the gate and tried to capture or upload, it
 		// would NPE and fail this test.
-		inject(plugin, "config", new AccountConnectConfig() {});
+		inject(plugin, "config", new AccountConnectConfig() {
+			@Override public boolean enableUpload() { return true; }
+});
 
 		plugin.handleTradeContainerChanged(90);
 		assertFalse("toggle off must not arm tradeActive", plugin.tradeActive);
@@ -87,7 +89,9 @@ public class TradeScreenshotTest
 	public void togglingOffMidTradeDropsTheBufferedFrame() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "config", new AccountConnectConfig() {});
+		inject(plugin, "config", new AccountConnectConfig() {
+			@Override public boolean enableUpload() { return true; }
+});
 		// Simulate a frame buffered while the toggle was on, then the toggle switched off:
 		plugin.tradeActive = true;
 		plugin.pendingTradeFrame.set(syntheticFrame(8, 8));
@@ -230,6 +234,8 @@ public class TradeScreenshotTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{
@@ -261,6 +267,8 @@ public class TradeScreenshotTest
 	{
 		return new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

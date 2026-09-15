@@ -55,6 +55,7 @@ public class EventDeliveryRetryTest
 			.build());
 
 		AccountConnectConfig config = mock(AccountConnectConfig.class);
+		when(config.enableUpload()).thenReturn(true);
 		when(config.linkToken()).thenReturn(TOKEN);
 		when(config.apiBaseUrl()).thenReturn(server.url("/api").toString().replaceAll("/+$", ""));
 		inject("config", config);

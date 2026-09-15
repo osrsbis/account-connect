@@ -33,6 +33,8 @@ public class Wave3EnrichmentTest
 	{
 		return new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

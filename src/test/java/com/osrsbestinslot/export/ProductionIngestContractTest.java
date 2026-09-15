@@ -96,6 +96,7 @@ public class ProductionIngestContractTest
 	private void pointAt(String baseUrl)
 	{
 		AccountConnectConfig config = mock(AccountConnectConfig.class);
+		when(config.enableUpload()).thenReturn(true);
 		when(config.linkToken()).thenReturn(UNOWNED_TOKEN);
 		when(config.apiBaseUrl()).thenReturn(baseUrl);
 		try

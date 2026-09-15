@@ -31,6 +31,8 @@ public class StoreNearbyCaptureTest
 	{
 		return new AccountConnectConfig()
 		{
+			@Override public boolean enableUpload() { return true; }
+
 			@Override
 			public String linkToken()
 			{

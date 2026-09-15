@@ -104,7 +104,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.11";
+	private static final String PLUGIN_VERSION = "0.7.12";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -251,6 +251,11 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ScheduledExecutorService executor;
 
+	@Inject
+	private ConfigManager configManager;
+
+	static final String CONFIG_GROUP = "osrsbisexport";
+
 	@Provides
 	AccountConnectConfig provideConfig(ConfigManager configManager)
 	{
@@ -260,6 +265,38 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		migrateUploadSwitch();
+	}
+
+	/**
+	 * ONE-TIME MIGRATION for the new enableUpload switch.
+	 *
+	 * enableUpload defaults to false, so an upgrade would silently stop uploading for everyone who
+	 * already pasted a token — the plugin would look broken rather than off. RuneLite returns the
+	 * default for an unset key, so config.enableUpload() cannot tell "never set" from "set to false".
+	 * The raw read can: getConfiguration returns null only when the key was never written.
+	 *
+	 * So: a valid token plus a never-written switch means an existing user, and the switch is set to
+	 * true ONCE. After that it is the user's, and turning it off stays off through every later
+	 * upgrade. A missing or malformed token migrates nothing.
+	 */
+	void migrateUploadSwitch()
+	{
+		if (configManager == null)
+		{
+			return;
+		}
+		if (configManager.getConfiguration(CONFIG_GROUP, "enableUpload") != null)
+		{
+			return;		// the user has already made a choice — never overwrite it
+		}
+		if (!activityLogActive())
+		{
+			log.debug("OSRS BiS upload switch left off: no valid link token to migrate");
+			return;
+		}
+		configManager.setConfiguration(CONFIG_GROUP, "enableUpload", true);
+		log.debug("OSRS BiS upload switch turned on once for an existing linked account");
 	}
 
 	@Override
@@ -958,6 +995,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void submitStoreClipUpload(java.util.List<byte[]> frames)
 	{
+		if (!uploadAllowed())
+		{
+			return;		// upload switch off — send nothing
+		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty())
 		{
@@ -1013,6 +1054,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt)
 	{
+			if (!uploadAllowed())
+			{
+				return;		// upload switch off — send nothing
+			}
 			Request request = new Request.Builder()
 				.url(base + "/store-frames-ingest")
 				.post(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS))
@@ -1105,6 +1150,19 @@ public class AccountConnectPlugin extends Plugin
 	{
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		return token.matches("^[a-f0-9]{32}$");
+	}
+
+	/**
+	 * THE ONE UPLOAD GATE. Every OkHttp call site in this plugin calls it and returns early when it
+	 * is false: the account snapshot, the activity events, the trade screenshot and the shop clip.
+	 *
+	 * Two conditions, both required. enableUpload is the user's own default-false switch, and it is
+	 * what the config warning is attached to. A linked token is still needed because the server has
+	 * nowhere to file an upload without one.
+	 */
+	boolean uploadAllowed()
+	{
+		return config.enableUpload() && activityLogActive();
 	}
 
 	/**
@@ -1331,6 +1389,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void flushEvents()
 	{
+		if (!uploadAllowed())
+		{
+			return;		// upload switch off — send nothing
+		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -4274,6 +4336,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void submitTradeScreenshotUpload(BufferedImage frame, String phase)
 	{
+		if (!uploadAllowed())
+		{
+			return;		// upload switch off — send nothing
+		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -4298,6 +4364,10 @@ public class AccountConnectPlugin extends Plugin
 
 	private void uploadTradeScreenshot(String token, byte[] pngBytes, String phase)
 	{
+		if (!uploadAllowed())
+		{
+			return;		// upload switch off — send nothing
+		}
 		long capturedAt = System.currentTimeMillis() / 1000L;
 		RequestBody body = new MultipartBody.Builder()
 			.setType(MultipartBody.FORM)
@@ -4710,6 +4780,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void postSnapshot(String token, Map<String, Object> snapshot, String hash)
 	{
+		if (!uploadAllowed())
+		{
+			return;		// upload switch off — send nothing
+		}
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
 		body.put("snapshot", snapshot);
