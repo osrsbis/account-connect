@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -15,15 +14,46 @@ import static org.junit.Assert.assertTrue;
  */
 public class ShopTraceTest
 {
+	/**
+	 * A NORMAL BUILD WRITES NOTHING.
+	 *
+	 * The arm is written as an A/B on ONE file rather than as "some temp path stays absent", which
+	 * proves nothing: the plugin was never pointed at that path, so the assertion held whatever the
+	 * code did. Here the property is set, a change is traced, the file's size is recorded, then the
+	 * property is cleared and the same changes are replayed. The file must not grow by one byte.
+	 *
+	 * KNOWN LIMIT, stated because it is real: this kills a stale-or-removed guard, which is the
+	 * regression that can actually happen. It cannot kill a trace rewritten to a hard-coded constant
+	 * path, because a black-box test cannot enumerate every path the process might write.
+	 */
 	@Test
 	public void writesNothingUnlessExplicitlyEnabled() throws Exception
 	{
-		System.clearProperty("osrsbis.shoptrace");
-		Path out = Files.createTempFile("shoptrace-off", ".log");
+		Path out = Files.createTempFile("shoptrace-ab", ".log");
 		Files.delete(out);
-		AccountConnectPlugin p = configured();
-		p.handleShopStockChanged(container(new int[][]{{561, 1}}));
-		assertFalse("a normal build must write no trace at all", Files.exists(out));
+		try
+		{
+			System.setProperty("osrsbis.shoptrace", out.toString());
+			AccountConnectPlugin on = configured();
+			on.handleShopStockChanged(container(new int[][]{{561, 1}}));
+			on.handleShopStockChanged(container(new int[][]{{561, 0}}));
+			assertTrue("the control arm must prove the trace CAN write", Files.exists(out));
+			long enabledSize = Files.size(out);
+			assertTrue("the enabled trace must have content", enabledSize > 0);
+
+			System.clearProperty("osrsbis.shoptrace");
+			AccountConnectPlugin off = configured();
+			off.handleShopStockChanged(container(new int[][]{{561, 1}}));
+			off.handleShopStockChanged(container(new int[][]{{561, 0}}));
+
+			assertEquals("a normal build must write no trace at all",
+				enabledSize, Files.size(out));
+		}
+		finally
+		{
+			System.clearProperty("osrsbis.shoptrace");
+			Files.deleteIfExists(out);
+		}
 	}
 
 	@Test
