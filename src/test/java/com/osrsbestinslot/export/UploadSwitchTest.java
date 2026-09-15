@@ -342,6 +342,9 @@ public class UploadSwitchTest
 		AccountConnectPlugin plugin = plugin(false, TOKEN);
 		net.runelite.api.Client client = mock(net.runelite.api.Client.class);
 		when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+		// No ClientThread is injected here, so this arm models a caller that is ALREADY on the
+		// client thread. Off it the plugin must queue instead, which the hot-install arms cover.
+		when(client.isClientThread()).thenReturn(true);
 		inject(plugin, "client", client);
 		plugin.uploadDisclosureOwed = true;
 
@@ -374,6 +377,9 @@ public class UploadSwitchTest
 		AccountConnectPlugin plugin = plugin(false, TOKEN);
 		net.runelite.api.Client client = mock(net.runelite.api.Client.class);
 		when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGIN_SCREEN);
+		// ON the client thread on purpose. Otherwise the send is refused for the wrong reason and
+		// this arm stays green even with the LOGGED_IN check deleted.
+		when(client.isClientThread()).thenReturn(true);
 		inject(plugin, "client", client);
 		plugin.uploadDisclosureOwed = true;
 
@@ -402,6 +408,7 @@ public class UploadSwitchTest
 		inject(plugin, "configManager", cm);
 		net.runelite.api.Client client = mock(net.runelite.api.Client.class);
 		when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+		when(client.isClientThread()).thenReturn(true);
 		inject(plugin, "client", client);
 
 		Method startUp = AccountConnectPlugin.class.getDeclaredMethod("startUp");
@@ -430,7 +437,313 @@ public class UploadSwitchTest
 			AccountConnectPlugin.UPLOAD_MIGRATION_NOTICE, null);
 	}
 
+	// ---- F-A: the Hub hot-install path, which is NOT the client thread ----
+
+	/**
+	 * THE ARM THE OLD MOCK COULD NOT SEE, and the reason the send is marshalled.
+	 *
+	 * A Plugin Hub install, and the 180-minute Hub auto-update, both call startUp from
+	 * PluginManager.startPlugin on the Swing event dispatch thread while the user is logged in and
+	 * playing. The real injected Client checks isClientThread first and throws off it. Any throw out
+	 * of startUp makes startPlugin call stopPlugin and rethrow, so the plugin is dead for the rest
+	 * of that session: no uploads, no overlays, and the notice is lost for good because the marker
+	 * is already on disk. This Client throws exactly like the real one, so the mock can no longer
+	 * hide it.
+	 */
+	@Test
+	public void aHubInstallWhileLoggedInDoesNotKillThePluginAndStillDeliversTheNotice() throws Exception
+	{
+		java.util.Map<String, String> store = new java.util.HashMap<>();
+		store.put(AccountConnectPlugin.CONFIG_GROUP + ".enableUpload", DEFAULT_WRITTEN);
+		AccountConnectPlugin plugin = storeBackedPlugin(store);
+		ConfigManager cm = fakeConfig(store);
+		inject(plugin, "configManager", cm);
+
+		java.util.concurrent.atomic.AtomicBoolean onClientThread =
+			new java.util.concurrent.atomic.AtomicBoolean(false);
+		java.util.List<String> shown = new java.util.ArrayList<>();
+		net.runelite.api.Client client = strictThreadClient(onClientThread, shown);
+		inject(plugin, "client", client);
+
+		java.util.List<Runnable> queue = new java.util.ArrayList<>();
+		inject(plugin, "clientThread", capturingClientThread(queue));
+
+		net.runelite.client.ui.overlay.OverlayManager overlays =
+			mock(net.runelite.client.ui.overlay.OverlayManager.class);
+		inject(plugin, "overlayManager", overlays);
+
+		// startUp on the EDT. It must not throw.
+		Method startUp = AccountConnectPlugin.class.getDeclaredMethod("startUp");
+		startUp.setAccessible(true);
+		startUp.invoke(plugin);
+
+		// The plugin is still running: startUp reached the code AFTER the disclosure.
+		verify(cm, times(1)).unsetConfiguration(AccountConnectPlugin.CONFIG_GROUP,
+			AccountConnectPlugin.ORPHAN_SCREENSHOT_KEY);
+		verify(overlays, times(2)).add(org.mockito.ArgumentMatchers.any());
+		assertTrue("the migrated user must be allowed to upload", plugin.uploadAllowed());
+
+		// Nothing was said on the EDT, and the debt is still owed and still on disk.
+		assertTrue("no chat message may be sent off the client thread", shown.isEmpty());
+		assertTrue("the notice is still owed until it is actually shown", plugin.uploadDisclosureOwed);
+		assertEquals("true", store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+			+ AccountConnectPlugin.DISCLOSURE_OWED_KEY));
+
+		// The client thread runs what was queued. NOW the user is told.
+		assertEquals("the send must be queued on the client thread", 1, queue.size());
+		onClientThread.set(true);
+		queue.get(0).run();
+		onClientThread.set(false);
+
+		assertEquals(1, shown.size());
+		assertEquals(AccountConnectPlugin.UPLOAD_MIGRATION_NOTICE, shown.get(0));
+		assertFalse("a delivered notice is no longer owed", plugin.uploadDisclosureOwed);
+		assertNull("and the persisted debt is cleared too",
+			store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+				+ AccountConnectPlugin.DISCLOSURE_OWED_KEY));
+	}
+
+	/**
+	 * A SEND THAT FAILS LEAVES THE DEBT IN PLACE. Clearing the flag before the send loses the notice
+	 * for good, because the marker on disk stops the migration ever running again.
+	 */
+	@Test
+	public void aSendThatThrowsLeavesTheNoticeOwed() throws Exception
+	{
+		java.util.Map<String, String> store = new java.util.HashMap<>();
+		AccountConnectPlugin plugin = plugin(false, TOKEN);
+		inject(plugin, "configManager", fakeConfig(store));
+		store.put(AccountConnectPlugin.CONFIG_GROUP + ".enableUpload", DEFAULT_WRITTEN);
+
+		java.util.concurrent.atomic.AtomicBoolean onClientThread =
+			new java.util.concurrent.atomic.AtomicBoolean(false);
+		java.util.List<String> shown = new java.util.ArrayList<>();
+		inject(plugin, "client", strictThreadClient(onClientThread, shown));
+
+		java.util.List<Runnable> queue = new java.util.ArrayList<>();
+		inject(plugin, "clientThread", capturingClientThread(queue));
+
+		Method startUp = AccountConnectPlugin.class.getDeclaredMethod("startUp");
+		startUp.setAccessible(true);
+		startUp.invoke(plugin);
+
+		// Run the queued send while STILL off the client thread: it throws inside the runnable.
+		assertEquals(1, queue.size());
+		queue.get(0).run();
+
+		assertTrue("a send that threw has told nobody, so the notice stays owed",
+			plugin.uploadDisclosureOwed);
+		assertEquals("and the persisted debt must survive it too", "true",
+			store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+				+ AccountConnectPlugin.DISCLOSURE_OWED_KEY));
+		assertTrue(shown.isEmpty());
+
+		// A later LOGGED_IN queues it again rather than dropping it.
+		plugin.deliverUploadDisclosure();
+		assertEquals("the failed send must be retried", 2, queue.size());
+		onClientThread.set(true);
+		queue.get(1).run();
+		assertEquals(1, shown.size());
+		assertFalse(plugin.uploadDisclosureOwed);
+	}
+
+	// ---- F-C: the debt survives a client restart ----
+
+	/**
+	 * A CLIENT CLOSED BEFORE THE CHAT BOX STILL OWES THE NOTICE.
+	 *
+	 * The migration writes the marker whatever happens, and the marker stops the migration running
+	 * again. So an in-memory-only flag is lost if the user quits on the login screen, and the switch
+	 * stays on forever with nobody ever told. The debt is written next to the marker instead.
+	 */
+	@Test
+	public void theOwedNoticeSurvivesARestartAndIsDeliveredOnce() throws Exception
+	{
+		java.util.Map<String, String> store = new java.util.HashMap<>();
+		store.put(AccountConnectPlugin.CONFIG_GROUP + ".enableUpload", DEFAULT_WRITTEN);
+
+		// Session one: migrate on the login screen, then the user closes the client.
+		AccountConnectPlugin first = plugin(false, TOKEN);
+		inject(first, "configManager", fakeConfig(store));
+		net.runelite.api.Client loginScreen = mock(net.runelite.api.Client.class);
+		when(loginScreen.getGameState()).thenReturn(net.runelite.api.GameState.LOGIN_SCREEN);
+		inject(first, "client", loginScreen);
+		Method startUp = AccountConnectPlugin.class.getDeclaredMethod("startUp");
+		startUp.setAccessible(true);
+		startUp.invoke(first);
+
+		verify(loginScreen, never()).addChatMessage(
+			org.mockito.ArgumentMatchers.any(net.runelite.api.ChatMessageType.class),
+			org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+			org.mockito.ArgumentMatchers.any());
+		assertEquals("the debt must be on disk before the client can close", "true",
+			store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+				+ AccountConnectPlugin.DISCLOSURE_OWED_KEY));
+		assertEquals("the profile is marked migrated, so this never runs again",
+			AccountConnectPlugin.MIGRATION_MARKER_VALUE,
+			store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+				+ AccountConnectPlugin.MIGRATION_MARKER_KEY));
+
+		// Session two: a brand new plugin object, the same profile on disk, and the user logs in.
+		AccountConnectPlugin second = plugin(true, TOKEN);
+		inject(second, "configManager", fakeConfig(store));
+		java.util.concurrent.atomic.AtomicBoolean onClientThread =
+			new java.util.concurrent.atomic.AtomicBoolean(false);
+		java.util.List<String> shown = new java.util.ArrayList<>();
+		inject(second, "client", strictThreadClient(onClientThread, shown));
+		java.util.List<Runnable> queue = new java.util.ArrayList<>();
+		inject(second, "clientThread", capturingClientThread(queue));
+
+		startUp.invoke(second);
+		assertTrue("the restored debt must be owed again", second.uploadDisclosureOwed);
+		assertEquals(1, queue.size());
+		onClientThread.set(true);
+		queue.get(0).run();
+		onClientThread.set(false);
+		assertEquals(1, shown.size());
+		assertEquals(AccountConnectPlugin.UPLOAD_MIGRATION_NOTICE, shown.get(0));
+
+		// Session three: nothing is owed any more, so nobody is told twice.
+		AccountConnectPlugin third = plugin(true, TOKEN);
+		inject(third, "configManager", fakeConfig(store));
+		java.util.List<String> shownAgain = new java.util.ArrayList<>();
+		inject(third, "client", strictThreadClient(onClientThread, shownAgain));
+		java.util.List<Runnable> laterQueue = new java.util.ArrayList<>();
+		inject(third, "clientThread", capturingClientThread(laterQueue));
+		startUp.invoke(third);
+		assertFalse("the notice is owed once, not every launch", third.uploadDisclosureOwed);
+		assertTrue("and nothing is queued for it", laterQueue.isEmpty());
+		assertTrue(shownAgain.isEmpty());
+	}
+
+	/**
+	 * A USER WHO TICKED THE SWITCH THEMSELVES IS NEVER TOLD. Their profile is already marked, so no
+	 * migration runs, no debt is written, and no notice is queued on any launch.
+	 */
+	@Test
+	public void aUserWhoTickedTheSwitchThemselvesNeverGetsTheNotice() throws Exception
+	{
+		java.util.Map<String, String> store = new java.util.HashMap<>();
+		store.put(AccountConnectPlugin.CONFIG_GROUP + ".enableUpload", "true");
+		store.put(AccountConnectPlugin.CONFIG_GROUP + "." + AccountConnectPlugin.MIGRATION_MARKER_KEY,
+			AccountConnectPlugin.MIGRATION_MARKER_VALUE);
+
+		AccountConnectPlugin plugin = plugin(true, TOKEN);
+		inject(plugin, "configManager", fakeConfig(store));
+		java.util.concurrent.atomic.AtomicBoolean onClientThread =
+			new java.util.concurrent.atomic.AtomicBoolean(true);
+		java.util.List<String> shown = new java.util.ArrayList<>();
+		inject(plugin, "client", strictThreadClient(onClientThread, shown));
+		java.util.List<Runnable> queue = new java.util.ArrayList<>();
+		inject(plugin, "clientThread", capturingClientThread(queue));
+
+		Method startUp = AccountConnectPlugin.class.getDeclaredMethod("startUp");
+		startUp.setAccessible(true);
+		startUp.invoke(plugin);
+
+		assertFalse("a self-ticker owes nothing", plugin.uploadDisclosureOwed);
+		assertTrue("nothing may be queued", queue.isEmpty());
+		assertTrue("and nothing may be said", shown.isEmpty());
+		assertNull("no debt key may be written",
+			store.get(AccountConnectPlugin.CONFIG_GROUP + "."
+				+ AccountConnectPlugin.DISCLOSURE_OWED_KEY));
+	}
+
 	// ---- helpers ----
+
+	/**
+	 * A Client that behaves like the injected one: addChatMessage throws unless the caller really is
+	 * on the client thread. A plain Mockito mock accepts the call from any thread, which is exactly
+	 * why the unit suite could not see F-A.
+	 */
+	private static net.runelite.api.Client strictThreadClient(
+		final java.util.concurrent.atomic.AtomicBoolean onClientThread,
+		final java.util.List<String> shown)
+	{
+		net.runelite.api.Client client = mock(net.runelite.api.Client.class);
+		when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+		when(client.isClientThread()).thenAnswer(inv -> onClientThread.get());
+		when(client.addChatMessage(
+			org.mockito.ArgumentMatchers.any(net.runelite.api.ChatMessageType.class),
+			org.mockito.ArgumentMatchers.anyString(),
+			org.mockito.ArgumentMatchers.anyString(),
+			org.mockito.ArgumentMatchers.nullable(String.class)))
+			.thenAnswer(inv ->
+			{
+				if (!onClientThread.get())
+				{
+					throw new IllegalStateException("must be called on client thread");
+				}
+				shown.add((String) inv.getArguments()[2]);
+				return null;
+			});
+		return client;
+	}
+
+	/** A ClientThread that records what was handed to it instead of running it. */
+	private static net.runelite.client.callback.ClientThread capturingClientThread(
+		final java.util.List<Runnable> queue)
+	{
+		net.runelite.client.callback.ClientThread ct =
+			mock(net.runelite.client.callback.ClientThread.class);
+		org.mockito.Mockito.doAnswer(inv ->
+		{
+			queue.add((Runnable) inv.getArguments()[0]);
+			return null;
+		}).when(ct).invokeLater(org.mockito.ArgumentMatchers.any(Runnable.class));
+		return ct;
+	}
+
+	/**
+	 * A plugin whose enableUpload() reads the same store the migration writes to, like the real
+	 * config proxy. A fixed-false config could never show that the migration re-enabled uploading.
+	 */
+	private static AccountConnectPlugin storeBackedPlugin(final java.util.Map<String, String> store)
+		throws Exception
+	{
+		AccountConnectPlugin p = new AccountConnectPlugin();
+		inject(p, "config", new AccountConnectConfig()
+		{
+			@Override
+			public boolean enableUpload()
+			{
+				return "true".equals(store.get(AccountConnectPlugin.CONFIG_GROUP + ".enableUpload"));
+			}
+
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+		});
+		return p;
+	}
+
+	/** A ConfigManager backed by a real map, so a restart can be simulated by reusing the map. */
+	private static ConfigManager fakeConfig(final java.util.Map<String, String> store)
+	{
+		return mock(ConfigManager.class, inv ->
+		{
+			String name = inv.getMethod().getName();
+			Object[] a = inv.getArguments();
+			if ("getConfiguration".equals(name) && a.length == 2)
+			{
+				return store.get(a[0] + "." + a[1]);
+			}
+			if ("setConfiguration".equals(name) && a.length == 3)
+			{
+				store.put(a[0] + "." + a[1], String.valueOf(a[2]));
+				return null;
+			}
+			if ("unsetConfiguration".equals(name) && a.length == 2)
+			{
+				store.remove(a[0] + "." + a[1]);
+				return null;
+			}
+			return org.mockito.Answers.RETURNS_DEFAULTS.answer(inv);
+		});
+	}
+
 
 	/** A plugin pointed at the mock server, with the http client and gson injected. */
 	private AccountConnectPlugin wired(boolean upload) throws Exception

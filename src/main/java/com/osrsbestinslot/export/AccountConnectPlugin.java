@@ -72,6 +72,7 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.config.RuneScapeProfileType;
@@ -262,6 +263,18 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
+	/**
+	 * The client thread. A chat message may only be added from it.
+	 *
+	 * startUp does NOT run on the client thread. RuneLite starts a plugin from
+	 * PluginManager.startPlugin, which asserts it is on the Swing event dispatch thread, so a Plugin
+	 * Hub install or the 180-minute Hub auto-update calls startUp on the EDT while the user plays.
+	 * The injected client's addChatMessage checks isClientThread first and throws off it, and
+	 * startPlugin turns any throw from startUp into a stopped plugin for the rest of the session.
+	 */
+	@Inject
+	private ClientThread clientThread;
+
 	static final String CONFIG_GROUP = "osrsbisexport";
 
 	@Provides
@@ -284,6 +297,7 @@ public class AccountConnectPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateUploadSwitch();
+		restoreUploadDisclosureOwed();	// a client closed before LOGGED_IN still owes the notice
 		deliverUploadDisclosure();	// a Hub install happens in-game; a restart is caught on LOGGED_IN
 		removeOrphanedKeys();
 		if (overlayManager != null)
@@ -365,6 +379,9 @@ public class AccountConnectPlugin extends Plugin
 			// The config panel raises its warning dialog only for a tick the USER makes, so a
 			// programmatic write shows nothing at all. Owe the same disclosure as a chat message.
 			uploadDisclosureOwed = true;
+			// The marker is written below whatever happens, so an in-memory-only flag is lost for
+			// good if the client closes before the chat box exists. Persist the debt next to it.
+			configManager.setConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY, "true");
 			log.debug("OSRS BiS upload switch turned on once for an existing linked account");
 		}
 		else
@@ -381,6 +398,35 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	volatile boolean uploadDisclosureOwed;
 
+	/**
+	 * THE SAME DEBT, ON DISK.
+	 *
+	 * The migration writes the marker before the notice can be shown, and the marker stops the
+	 * migration ever running again. So a client closed between the migration and the first
+	 * LOGGED_IN used to lose the notice for good: the switch was on, the marker said migrated, and
+	 * the in-memory flag was gone. This key carries the debt across that restart. It is deliberately
+	 * NOT a {@code @ConfigItem}, for the same reason the marker is not: RuneLite default-writes
+	 * every config item before startUp, and a default-written "false" here would clear a real debt.
+	 */
+	static final String DISCLOSURE_OWED_KEY = "uploadNoticeOwed";
+
+	/**
+	 * Set while a send is queued on the client thread, so a second call does not queue a second
+	 * notice. Cleared again if the send fails, so a failed send is retried rather than dropped.
+	 */
+	private volatile boolean uploadDisclosureQueued;
+
+	/** Pick the debt back up after a restart. A debt already held in memory is left alone. */
+	void restoreUploadDisclosureOwed()
+	{
+		if (configManager == null || uploadDisclosureOwed)
+		{
+			return;
+		}
+		uploadDisclosureOwed = "true".equals(
+			configManager.getConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY));
+	}
+
 	/** What an upgraded user is told, once. The switch's own warning, shortened for one chat line. */
 	static final String UPLOAD_MIGRATION_NOTICE =
 		"OSRS BiS: uploading is now a switch in the plugin settings, and it has been left ON for "
@@ -396,7 +442,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void deliverUploadDisclosure()
 	{
-		if (!uploadDisclosureOwed || client == null)
+		if (!uploadDisclosureOwed || client == null || uploadDisclosureQueued)
 		{
 			return;
 		}
@@ -404,8 +450,46 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
 		}
+		if (clientThread == null)
+		{
+			// No injector, so this is a unit test. Send only if we are already on the client thread;
+			// off it the real client throws and startUp dies, so stay owed instead.
+			if (client.isClientThread())
+			{
+				sendUploadDisclosure();
+			}
+			return;
+		}
+		uploadDisclosureQueued = true;
+		clientThread.invokeLater(this::sendUploadDisclosure);
+	}
+
+	/**
+	 * THE SEND, AND WHY THE DEBT IS CLEARED AFTER IT AND NOT BEFORE.
+	 *
+	 * Runs on the client thread. If addChatMessage still fails the user has not been told, so the
+	 * debt must survive: clearing first and then throwing loses the notice silently. Nothing is
+	 * rethrown either, because this also runs from startUp on the fallback path and a throw there
+	 * stops the whole plugin for the session.
+	 */
+	void sendUploadDisclosure()
+	{
+		try
+		{
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", UPLOAD_MIGRATION_NOTICE, null);
+		}
+		catch (RuntimeException | Error e)
+		{
+			uploadDisclosureQueued = false;		// still owed — try again on the next LOGGED_IN
+			log.debug("OSRS BiS upload notice could not be shown yet", e);
+			return;
+		}
 		uploadDisclosureOwed = false;
-		client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", UPLOAD_MIGRATION_NOTICE, null);
+		uploadDisclosureQueued = false;
+		if (configManager != null)
+		{
+			configManager.unsetConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY);
+		}
 	}
 
 	@Override
