@@ -4335,6 +4335,20 @@ public class AccountConnectPlugin extends Plugin
 		fields.put("cause", cause);
 		// Stated on every row so no downstream reader has to know this rule: the taker is never observable.
 		fields.put("recipient", "UNKNOWN");
+		// Who was standing here when an early removal happened. The pickup itself runs in another
+		// player's client, so this is EVIDENCE, never an answer: it goes out under the same
+		// `taken_by_candidates` inference field the store handoff uses, for the server-side resolver
+		// (one candidate at dist 0 -> counterparty, anything else stays UNKNOWN). Only `removed_early`
+		// carries it: presence at a timer expiry or a self-pickup says nothing about a taker.
+		// The key is absent when nobody is around, matching the store path, so readers keep one rule.
+		if ("removed_early".equals(cause))
+		{
+			List<Map<String, Object>> present = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+			if (!present.isEmpty())
+			{
+				fields.put("taken_by_candidates", present);
+			}
+		}
 		emitEvent("ground_removed", fields);
 	}
 

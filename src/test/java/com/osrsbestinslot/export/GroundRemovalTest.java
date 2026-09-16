@@ -61,6 +61,76 @@ public class GroundRemovalTest
 	}
 
 	/** Left to time out: removal at/after the client's own deadline is the timer, not a taker. */
+	/**
+	 * Who was standing on the pile when it left the ground. The taker is still never NAMED here:
+	 * `recipient` stays UNKNOWN and the players go out as `taken_by_candidates`, the same inference
+	 * field the store handoff emits, for the server-side resolver to judge (one candidate at dist 0).
+	 */
+	@Test
+	public void earlyRemovalRecordsWhoStoodOnThePile() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(COINS, 25_000_000);
+		dropItem(plugin, COINS, 25_000_000, 100, 300);
+		Player onPile = mockPlayer("Buyer", TILE_X, TILE_Y, 92);
+		Player bystander = mockPlayer("Passer", TILE_X + 2, TILE_Y, 3);
+		List<Player> players = new ArrayList<>();
+		players.add(onPile);
+		players.add(bystander);
+		when(client(plugin).getPlayers()).thenReturn(players);
+
+		tick(plugin, 103);
+		plugin.onItemDespawned(despawn(COINS, 25_000_000, TILE_X, TILE_Y, 0));
+
+		Map<String, Object> ev = onlyEvent(plugin, "ground_removed");
+		assertEquals("removed_early", ev.get("cause"));
+		assertEquals("the plugin still never names the taker", "UNKNOWN", ev.get("recipient"));
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> cands = (List<Map<String, Object>>) ev.get("taken_by_candidates");
+		assertEquals(2, cands.size());
+		assertEquals("nearest first", "Buyer", cands.get(0).get("rsn"));
+		assertEquals(0, cands.get(0).get("dist"));
+		assertEquals(92, cands.get(0).get("cb"));
+		assertEquals(2, cands.get(1).get("dist"));
+	}
+
+	/** Nobody around: the key is ABSENT, exactly as the store path does it, so readers keep one rule. */
+	@Test
+	public void earlyRemovalWithNobodyAroundCarriesNoCandidates() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(CHAPS, 1);
+		dropItem(plugin, CHAPS, 1, 100, 300);
+		tick(plugin, 140);
+		plugin.onItemDespawned(despawn(CHAPS, 1, TILE_X, TILE_Y, 0));
+		Map<String, Object> ev = onlyEvent(plugin, "ground_removed");
+		assertEquals("removed_early", ev.get("cause"));
+		assertNull(ev.get("taken_by_candidates"));
+	}
+
+	/** A pile that ran its own timer names nobody: presence at a despawn is not a pickup. */
+	@Test
+	public void timerRemovalNeverCarriesCandidates() throws Exception
+	{
+		AccountConnectPlugin plugin = newPlugin(CHAPS, 1);
+		dropItem(plugin, CHAPS, 1, 100, 300);
+		List<Player> players = new ArrayList<>();
+		players.add(mockPlayer("Idler", TILE_X, TILE_Y, 50));
+		when(client(plugin).getPlayers()).thenReturn(players);
+		tick(plugin, 300);
+		plugin.onItemDespawned(despawn(CHAPS, 1, TILE_X, TILE_Y, 0));
+		Map<String, Object> ev = onlyEvent(plugin, "ground_removed");
+		assertEquals("despawn_timer", ev.get("cause"));
+		assertNull(ev.get("taken_by_candidates"));
+	}
+
+	private static Player mockPlayer(String name, int x, int y, int cb)
+	{
+		Player p = mock(Player.class);
+		when(p.getName()).thenReturn(name);
+		when(p.getWorldLocation()).thenReturn(new WorldPoint(x, y, 0));
+		when(p.getCombatLevel()).thenReturn(cb);
+		return p;
+	}
+
 	@Test
 	public void removalAtTheDespawnDeadlineIsTheTimer() throws Exception
 	{
