@@ -107,7 +107,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.12";
+	private static final String PLUGIN_VERSION = "0.7.13";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -348,7 +348,15 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static final String MIGRATION_MARKER_KEY = "uploadMigrated";
 
-	/** The release that migrated this profile. A version, not a flag, so a later one can tell. */
+	/**
+	 * The release that migrated this profile. A version, not a flag, so a later one can tell.
+	 *
+	 * IT STAYS "0.7.12" AS THE PLUGIN VERSION MOVES ON. This is not the current release — it is the
+	 * release whose upgrade needed the one-time enableUpload migration. Bumping it with the version
+	 * would make every already-migrated profile look unmigrated and re-run the migration on the
+	 * whole installed fleet. VersionDriftTest pins PLUGIN_VERSION to build.gradle and deliberately
+	 * does not pin this.
+	 */
 	static final String MIGRATION_MARKER_VALUE = "0.7.12";
 
 	/**
