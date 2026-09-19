@@ -221,6 +221,17 @@ public class AccountConnectPlugin extends Plugin
 	// (no trade / GE / store), so this diff is the ONLY event-plane record of what left or entered the
 	// bank — the snapshot plane carries only periodic full state, never the individual move. Own account.
 	private Map<Integer, Long> bankAtOpen;
+
+	// XP-gain capture (coalesced): accumulate per-skill xp deltas from StatChanged, which fires on every
+	// drop, and flush them as ONE xp_gain event every XP_FLUSH_TICKS and on logout, so per-action xp does
+	// not flood the event plane. lastSkillXp = last-seen total per skill (the baseline). Reset per account
+	// on hop, relog and logout.
+	private final Map<String, Integer> lastSkillXp = new LinkedHashMap<>();
+	private final Map<String, Long> xpAccum = new LinkedHashMap<>();
+	private int xpFlushTicks;
+	private static final int XP_FLUSH_TICKS = 25;	// ~15s coalescing window
+	// Region capture: emit region {from,to} only when the map region changes, which coalesces naturally.
+	private Integer lastRegion;
 	final AtomicReference<BufferedImage> pendingTradeFrame = new AtomicReference<>();
 
 	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (Varbits.DIARY_*).
@@ -3657,6 +3668,9 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				bankAtOpen = null;	// a bank left open across a hop/relog must not diff against another account
+				lastSkillXp.clear();	// xp deltas re-baseline per account
+				xpAccum.clear();
+				lastRegion = null;
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();		// ground state is per world AND per account
@@ -3677,6 +3691,9 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				bankAtOpen = null;	// a bank open at disconnect must not diff against the next session
+				lastSkillXp.clear();
+				xpAccum.clear();
+				lastRegion = null;
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3692,6 +3709,10 @@ public class AccountConnectPlugin extends Plugin
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				bankAtOpen = null;	// a bank open at logout must not diff against the next session
+				flushXpGain();		// flush accumulated xp before the session ends
+				lastSkillXp.clear();
+				xpAccum.clear();
+				lastRegion = null;
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3771,6 +3792,15 @@ public class AccountConnectPlugin extends Plugin
 		if (shopOpen && activityLogActive())
 		{
 			accumulateShopNearby();		// build the receiver-candidate set across the whole shop visit
+		}
+		if (activityLogActive())
+		{
+			if (++xpFlushTicks >= XP_FLUSH_TICKS)
+			{
+				xpFlushTicks = 0;
+				flushXpGain();		// coalesced xp_gain every ~15s
+			}
+			checkRegionChange();	// region {from,to} on map-region change
 		}
 		// RuneLite's Timer infobox removes ITSELF when it reaches zero, so a countdown armed at one
 		// observed reset covers exactly one 60s cycle and then vanishes. The phase is still known,
@@ -6742,6 +6772,65 @@ public class AccountConnectPlugin extends Plugin
 				fields.put("xp", client.getSkillExperience(event.getSkill()));	// WAVE 3: total xp at level-up
 			}
 			emitEvent("level_up", fields);
+		}
+		// XP gain (coalesced): accumulate the per-skill delta from the event's total xp. The tick timer
+		// flushes it as one xp_gain event. First observation per skill only baselines (prevXp null).
+		int nowXp = event.getXp();
+		Integer prevXp = lastSkillXp.put(skill, nowXp);
+		if (prevXp != null && nowXp > prevXp)
+		{
+			xpAccum.merge(skill, (long) (nowXp - prevXp), Long::sum);
+		}
+	}
+
+	/** Emit one coalesced xp_gain event for all per-skill xp accumulated since the last flush. */
+	void flushXpGain()
+	{
+		if (xpAccum.isEmpty() || !activityLogActive())
+		{
+			return;
+		}
+		List<Map<String, Object>> gains = new ArrayList<>();
+		long total = 0;
+		for (Map.Entry<String, Long> e : xpAccum.entrySet())
+		{
+			Map<String, Object> g = new LinkedHashMap<>();
+			g.put("skill", e.getKey());
+			g.put("xp", e.getValue());
+			gains.add(g);
+			total += e.getValue();
+		}
+		xpAccum.clear();
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("gains", gains);
+		fields.put("total", total);
+		emitEvent("xp_gain", fields);
+	}
+
+	/** Emit region {from,to,x,y} when the map region changes. The first observation only baselines. */
+	void checkRegionChange()
+	{
+		if (client == null)
+		{
+			return;
+		}
+		Player self = client.getLocalPlayer();
+		WorldPoint wp = self == null ? null : self.getWorldLocation();
+		if (wp == null)
+		{
+			return;
+		}
+		int region = wp.getRegionID();
+		Integer prev = lastRegion;
+		lastRegion = region;
+		if (prev != null && prev != region)
+		{
+			Map<String, Object> fields = new LinkedHashMap<>();
+			fields.put("from", prev);
+			fields.put("to", region);
+			fields.put("x", wp.getX());
+			fields.put("y", wp.getY());
+			emitEvent("region", fields);
 		}
 	}
 
