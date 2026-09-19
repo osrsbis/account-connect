@@ -215,6 +215,12 @@ public class AccountConnectPlugin extends Plugin
 	// only here — 334 confirm replaces 335 and shows the other side as a "Lots!" text summary with its
 	// 335-only title widget already gone). Root cause of the prod 0-counterparty / empty-received[] bug.
 	volatile boolean tradeMainOpen;
+
+	// Bank move capture: item-id -> qty snapshot of the bank taken when it OPENS; on close the bank is
+	// re-read and diffed to emit discrete bank_withdraw / bank_deposit events. Bank moves are internal
+	// (no trade / GE / store), so this diff is the ONLY event-plane record of what left or entered the
+	// bank — the snapshot plane carries only periodic full state, never the individual move. Own account.
+	private Map<Integer, Long> bankAtOpen;
 	final AtomicReference<BufferedImage> pendingTradeFrame = new AtomicReference<>();
 
 	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (Varbits.DIARY_*).
@@ -3650,6 +3656,7 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
+				bankAtOpen = null;	// a bank left open across a hop/relog must not diff against another account
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();		// ground state is per world AND per account
@@ -3669,6 +3676,7 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
+				bankAtOpen = null;	// a bank open at disconnect must not diff against the next session
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3683,6 +3691,7 @@ public class AccountConnectPlugin extends Plugin
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
+				bankAtOpen = null;	// a bank open at logout must not diff against the next session
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3908,6 +3917,72 @@ public class AccountConnectPlugin extends Plugin
 		if (groupId == BANK_GROUP_ID || groupId == COLLECTION_LOG_GROUP_ID)
 		{
 			forceSendSnapshot();
+		}
+		if (groupId == BANK_GROUP_ID && activityLogActive())
+		{
+			// Snapshot the bank the moment it opens; handleBankWidgetClosed diffs against this on close.
+			// The bank is readable here — the same read forceSendSnapshot just used to set bank_synced.
+			Map<Integer, Long> b = new LinkedHashMap<>();
+			addContainerCounts(b, client.getItemContainer(InventoryID.BANK));
+			bankAtOpen = b;
+		}
+	}
+
+	/**
+	 * Bank close: re-read the bank and diff it against the open-state snapshot, emitting discrete
+	 * bank_withdraw / bank_deposit events for the NET item movement of this bank session. Bank transfers
+	 * fire no trade / GE / store event, so this diff is the only event-plane record of what left or
+	 * entered the bank. Own account; same data class as the bank snapshot, which the hub already approved.
+	 */
+	void handleBankWidgetClosed(int groupId)
+	{
+		if (groupId != BANK_GROUP_ID)
+		{
+			return;
+		}
+		Map<Integer, Long> before = bankAtOpen;
+		bankAtOpen = null;
+		if (before == null || !activityLogActive())
+		{
+			return;
+		}
+		Map<Integer, Long> after = new LinkedHashMap<>();
+		addContainerCounts(after, client.getItemContainer(InventoryID.BANK));
+
+		List<Map<String, Object>> withdrawn = new ArrayList<>();
+		List<Map<String, Object>> deposited = new ArrayList<>();
+		// items present at open: emit the signed delta (out = withdraw, in = deposit)
+		for (Map.Entry<Integer, Long> e : before.entrySet())
+		{
+			long delta = after.getOrDefault(e.getKey(), 0L) - e.getValue();
+			if (delta < 0)
+			{
+				withdrawn.add(itemMapLong(e.getKey(), -delta));
+			}
+			else if (delta > 0)
+			{
+				deposited.add(itemMapLong(e.getKey(), delta));
+			}
+		}
+		// items that only appeared after open = pure deposits
+		for (Map.Entry<Integer, Long> e : after.entrySet())
+		{
+			if (!before.containsKey(e.getKey()))
+			{
+				deposited.add(itemMapLong(e.getKey(), e.getValue()));
+			}
+		}
+		if (!withdrawn.isEmpty())
+		{
+			Map<String, Object> f = new LinkedHashMap<>();
+			f.put("items", withdrawn);
+			emitEvent("bank_withdraw", f);
+		}
+		if (!deposited.isEmpty())
+		{
+			Map<String, Object> f = new LinkedHashMap<>();
+			f.put("items", deposited);
+			emitEvent("bank_deposit", f);
 		}
 	}
 
@@ -4211,6 +4286,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		handleTradeWidgetClosed(event.getGroupId());
+		handleBankWidgetClosed(event.getGroupId());
 		if (event.getGroupId() == SHOP_GROUP_ID)
 		{
 			shopOpen = false;
@@ -7303,6 +7379,15 @@ public class AccountConnectPlugin extends Plugin
 	// ---- container helpers ----
 
 	private Map<String, Object> itemMap(int id, int qty)
+	{
+		Map<String, Object> m = new LinkedHashMap<>();
+		m.put("id", id);
+		m.put("qty", qty);
+		return m;
+	}
+
+	/** itemMap variant for quantities that can exceed int range (bank diffs, large coin/token stacks). */
+	private Map<String, Object> itemMapLong(int id, long qty)
 	{
 		Map<String, Object> m = new LinkedHashMap<>();
 		m.put("id", id);
