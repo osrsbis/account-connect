@@ -41,6 +41,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Actor;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.EquipmentInventorySlot;
@@ -61,14 +62,20 @@ import net.runelite.api.VarPlayer;
 import net.runelite.api.Varbits;
 import net.runelite.api.WorldType;
 import net.runelite.api.events.ActorDeath;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.InteractingChanged;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPreFired;
+import net.runelite.api.events.PlayerDespawned;
+import net.runelite.api.events.PlayerSpawned;
 import net.runelite.api.events.StatChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WorldChanged;
 import net.runelite.api.events.WidgetLoaded;
@@ -242,6 +249,13 @@ public class AccountConnectPlugin extends Plugin
 	private static final int XP_FLUSH_TICKS = 25;	// ~15s coalescing window
 	// Region capture: emit region {from,to} only when the map region changes, which coalesces naturally.
 	private Integer lastRegion;
+
+	// Firehose buffer (server-granted): high-frequency rows batched into ONE fh_batch event so per-tick
+	// data never floods the ingest. Cleared on account switch, flushed before logout.
+	private final List<Map<String, Object>> firehoseBuffer = new ArrayList<>();
+	private int firehoseFlushTicks;
+	private static final int FIREHOSE_FLUSH_TICKS = 10;	// ~6s batch window
+	private static final int FIREHOSE_MAX = 500;		// hard cap between flushes: drop overflow, never OOM
 	final AtomicReference<BufferedImage> pendingTradeFrame = new AtomicReference<>();
 
 	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (Varbits.DIARY_*).
@@ -378,6 +392,17 @@ public class AccountConnectPlugin extends Plugin
 	 * setting that grants them. Read from the X-Store-Tools response header on every accepted upload.
 	 */
 	volatile boolean serverStoreToolsEnabled;
+
+	/**
+	 * Server-dictated FIREHOSE grant. Same shape as the store-tools grant, and for the same reason.
+	 *
+	 * Defaults OFF and can only ever be turned ON by the backend, for a token on the staff allowlist.
+	 * There is NO local setting that grants it, deliberately: this plugin carries no user-facing capture
+	 * toggle (operator default 2026-09-19), and the firehose captures other players' names and public chat,
+	 * which the hub manifest warning does not describe. A regular player therefore never runs it.
+	 * Read from the X-Max-Capture response header on every accepted upload.
+	 */
+	volatile boolean serverMaxCaptureEnabled;
 
 	/**
 	 * LOCAL TEST OVERRIDE for the store-tools gate.
@@ -3684,6 +3709,7 @@ public class AccountConnectPlugin extends Plugin
 				lastSkillXp.clear();	// xp deltas re-baseline per account
 				xpAccum.clear();
 				lastRegion = null;
+				clearFirehose();	// buffered firehose rows must not carry across accounts
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();		// ground state is per world AND per account
@@ -3708,6 +3734,7 @@ public class AccountConnectPlugin extends Plugin
 				lastSkillXp.clear();
 				xpAccum.clear();
 				lastRegion = null;
+				clearFirehose();
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3725,9 +3752,11 @@ public class AccountConnectPlugin extends Plugin
 				bankAtOpen = null;	// a bank open at logout must not diff against the next session
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
+				flushFirehose();	// flush batched firehose rows before the session ends
 				lastSkillXp.clear();
 				xpAccum.clear();
 				lastRegion = null;
+				clearFirehose();
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
@@ -3896,6 +3925,15 @@ public class AccountConnectPlugin extends Plugin
 				flushXpGain();		// coalesced xp_gain every ~15s
 			}
 			checkRegionChange();	// region {from,to} on map-region change
+			if (maxCapture())
+			{
+				capturePosition();	// per-tick position trail (firehose)
+				if (++firehoseFlushTicks >= FIREHOSE_FLUSH_TICKS)
+				{
+					firehoseFlushTicks = 0;
+					flushFirehose();
+				}
+			}
 		}
 		// RuneLite's Timer infobox removes ITSELF when it reaches zero, so a countdown armed at one
 		// observed reset covers exactly one 60s cycle and then vanishes. The phase is still known,
@@ -4483,6 +4521,25 @@ public class AccountConnectPlugin extends Plugin
 			emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
 			return;
 		}
+		// Nearby public chat, firehose grant only. This is the ONE place another player's words are read,
+		// it is off for every ordinary player, and it is batched into fh_batch like every other firehose row.
+		if (maxCapture()
+			&& (event.getType() == ChatMessageType.PUBLICCHAT || event.getType() == ChatMessageType.MODCHAT))
+		{
+			String text = Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim();
+			if (!text.isEmpty())
+			{
+				Map<String, Object> d = new LinkedHashMap<>();
+				d.put("text", text);
+				String name = Text.removeTags(event.getName() == null ? "" : event.getName()).trim();
+				if (!name.isEmpty())
+				{
+					d.put("rsn", name);
+				}
+				firehose("public_chat", d);
+			}
+			return;
+		}
 		if (event.getType() != ChatMessageType.TRADE)
 		{
 			return;
@@ -4497,6 +4554,184 @@ public class AccountConnectPlugin extends Plugin
 			emitTradeEvent();
 		}
 		handleTradeChat(event.getMessage());
+	}
+
+	// ---- Firehose (server-granted): batched high-frequency capture ----
+
+	/**
+	 * True when the backend has granted the firehose for this token AND uploading is allowed.
+	 *
+	 * NO CONFIG ITEM, deliberately. The operator default is that this plugin carries no user-facing
+	 * settings, and the firehose captures other players' names and public chat, which the hub manifest
+	 * warning does not describe. Making it server-granted keeps it off every ordinary player's client
+	 * with no way for them to turn it on.
+	 */
+	boolean maxCapture()
+	{
+		return serverMaxCaptureEnabled && uploadAllowed();
+	}
+
+	/** Buffer one firehose row. No-op unless the grant is live. Batched, never emitted per event. */
+	void firehose(String kind, Map<String, Object> data)
+	{
+		if (!maxCapture())
+		{
+			return;
+		}
+		Map<String, Object> row = new LinkedHashMap<>();
+		row.put("k", kind);
+		row.put("tick", client == null ? 0 : client.getTickCount());
+		if (data != null)
+		{
+			row.putAll(data);
+		}
+		synchronized (firehoseBuffer)
+		{
+			if (firehoseBuffer.size() >= FIREHOSE_MAX)
+			{
+				return;		// hard cap between flushes: drop the overflow rather than grow without bound
+			}
+			firehoseBuffer.add(row);
+		}
+	}
+
+	/** Emit the buffered firehose rows as ONE fh_batch event. */
+	void flushFirehose()
+	{
+		List<Map<String, Object>> batch;
+		synchronized (firehoseBuffer)
+		{
+			if (firehoseBuffer.isEmpty())
+			{
+				return;
+			}
+			batch = new ArrayList<>(firehoseBuffer);
+			firehoseBuffer.clear();
+		}
+		if (!activityLogActive())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("events", batch);
+		emitEvent("fh_batch", fields);
+	}
+
+	/** Drop buffered firehose rows on an account switch, so stale rows never mis-stamp the next account. */
+	private void clearFirehose()
+	{
+		synchronized (firehoseBuffer)
+		{
+			firehoseBuffer.clear();
+		}
+		firehoseFlushTicks = 0;
+	}
+
+	/** Per-tick position trail (firehose). */
+	private void capturePosition()
+	{
+		if (client == null)
+		{
+			return;
+		}
+		Player self = client.getLocalPlayer();
+		WorldPoint wp = self == null ? null : self.getWorldLocation();
+		if (wp == null)
+		{
+			return;
+		}
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("x", wp.getX());
+		d.put("y", wp.getY());
+		d.put("p", wp.getPlane());
+		firehose("pos", d);
+	}
+
+	@Subscribe
+	public void onHitsplatApplied(HitsplatApplied event)
+	{
+		if (!maxCapture() || client == null)
+		{
+			return;
+		}
+		Actor self = client.getLocalPlayer();
+		Actor actor = event.getActor();
+		Actor target = self == null ? null : self.getInteracting();
+		if (actor != self && actor != target)
+		{
+			return;		// only hits on us and on our current target
+		}
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("on", actor == self ? "self" : "target");
+		d.put("amount", event.getHitsplat() == null ? 0 : event.getHitsplat().getAmount());
+		firehose("hitsplat", d);
+	}
+
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged event)
+	{
+		if (!maxCapture() || client == null || event.getActor() != client.getLocalPlayer())
+		{
+			return;
+		}
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("id", event.getActor().getAnimation());
+		firehose("anim", d);
+	}
+
+	@Subscribe
+	public void onInteractingChanged(InteractingChanged event)
+	{
+		if (!maxCapture() || client == null || event.getSource() != client.getLocalPlayer())
+		{
+			return;
+		}
+		Actor t = event.getTarget();
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("target", t == null || t.getName() == null ? null : Text.removeTags(t.getName()));
+		firehose("interact", d);
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (!maxCapture())
+		{
+			return;
+		}
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("varbit", event.getVarbitId());
+		d.put("varp", event.getIndex());
+		d.put("val", event.getValue());
+		firehose("varbit", d);
+	}
+
+	@Subscribe
+	public void onPlayerSpawned(PlayerSpawned event)
+	{
+		nearbyPlayerEvent(event.getPlayer(), "spawn");
+	}
+
+	@Subscribe
+	public void onPlayerDespawned(PlayerDespawned event)
+	{
+		nearbyPlayerEvent(event.getPlayer(), "despawn");
+	}
+
+	private void nearbyPlayerEvent(Player p, String kind)
+	{
+		if (!maxCapture() || p == null || (client != null && p == client.getLocalPlayer()))
+		{
+			return;
+		}
+		if (p.getName() == null || p.getName().isEmpty())
+		{
+			return;
+		}
+		Map<String, Object> d = new LinkedHashMap<>();
+		d.put("rsn", Text.removeTags(p.getName()));
+		d.put("event", kind);
+		firehose("nearby", d);
 	}
 
 	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
@@ -4580,6 +4815,13 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
+		if (maxCapture() && event != null)
+		{
+			Map<String, Object> d = new LinkedHashMap<>();
+			d.put("opt", event.getMenuOption());
+			d.put("target", Text.removeTags(event.getMenuTarget() == null ? "" : event.getMenuTarget()));
+			firehose("menu", d);
+		}
 		// Delivery-proof tx flag — hoisted ABOVE the activity-log gate (grill F5): a clip's buy/sell must
 		// not be dropped just because activity logging is off. Only relevant while a clip is capturing.
 		if (clipCapturing && shopOpen && isStoreBuyOrSell(event))
@@ -7794,6 +8036,18 @@ public class AccountConnectPlugin extends Plugin
 			if (!on)
 			{
 				removeResetTimer();	// a revoked grant must clear what is already on screen
+			}
+		}
+
+		String maxCap = response.header("X-Max-Capture");
+		if (maxCap != null)
+		{
+			String v = maxCap.trim().toLowerCase(java.util.Locale.ROOT);
+			boolean on = "on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v);
+			serverMaxCaptureEnabled = on;
+			if (!on)
+			{
+				clearFirehose();	// a revoked grant drops whatever is still buffered
 			}
 		}
 
