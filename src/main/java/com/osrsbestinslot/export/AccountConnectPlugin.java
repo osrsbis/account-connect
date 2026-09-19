@@ -70,6 +70,7 @@ import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
+import net.runelite.api.events.WorldChanged;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
@@ -221,6 +222,15 @@ public class AccountConnectPlugin extends Plugin
 	// (no trade / GE / store), so this diff is the ONLY event-plane record of what left or entered the
 	// bank — the snapshot plane carries only periodic full state, never the individual move. Own account.
 	private Map<Integer, Long> bankAtOpen;
+
+	// Equipment change capture: last-seen worn-item counts, diffed on each WORN-container change to emit
+	// equip_change {equipped[], unequipped[]}. The first change after a login only baselines, so a normal
+	// gear load does not emit a spurious full-kit equip. Reset on hop and relog.
+	private Map<Integer, Long> equipLast;
+
+	// World-hop capture: the last world we were on, 0 when unknown. WorldChanged after a hop emits
+	// world_hop {from,to}. The initial login WorldChanged is suppressed by lastWorld 0. Reset on logout.
+	private int lastWorld;
 
 	// XP-gain capture (coalesced): accumulate per-skill xp deltas from StatChanged, which fires on every
 	// drop, and flush them as ONE xp_gain event every XP_FLUSH_TICKS and on logout, so per-action xp does
@@ -594,6 +604,8 @@ public class AccountConnectPlugin extends Plugin
 	private static final Pattern TRAILING_QTY = Pattern.compile("(\\d{1,9})\\s*$");
 	/** gameval INVENTORY container id (93) — matches ItemContainerChanged.getContainerId(), not legacy InventoryID. */
 	private static final int INVENTORY_CONTAINER_ID = net.runelite.api.gameval.InventoryID.INV;
+	/** gameval WORN container id — the equipment container, diffed to emit equip_change. */
+	private static final int EQUIP_CONTAINER_ID = net.runelite.api.gameval.InventoryID.WORN;
 
 	/** An armed store buy/sell awaiting its inventory-change resolution. coinsBefore is a long: bank-stack totals overflow int. */
 	static final class StorePending
@@ -3668,6 +3680,7 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				bankAtOpen = null;	// a bank left open across a hop/relog must not diff against another account
+				equipLast = null;	// re-baseline equipment on the next change so a relog emits no full-kit diff
 				lastSkillXp.clear();	// xp deltas re-baseline per account
 				xpAccum.clear();
 				lastRegion = null;
@@ -3691,6 +3704,7 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				bankAtOpen = null;	// a bank open at disconnect must not diff against the next session
+				equipLast = null;	// re-baseline equipment on reconnect
 				lastSkillXp.clear();
 				xpAccum.clear();
 				lastRegion = null;
@@ -3709,6 +3723,7 @@ public class AccountConnectPlugin extends Plugin
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				bankAtOpen = null;	// a bank open at logout must not diff against the next session
+				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
 				lastSkillXp.clear();
 				xpAccum.clear();
@@ -3758,6 +3773,86 @@ public class AccountConnectPlugin extends Plugin
 			// EVERY armed pending is offered this change, each against its own item count — see
 			// resolveInvDeltaPendings: a stale drop at the head must never hide a real pickup behind it.
 			resolveInvDeltaPendings(inv, coinsAfter, tick);
+		}
+		if (event.getContainerId() == EQUIP_CONTAINER_ID)
+		{
+			handleEquipmentChanged(event.getItemContainer());
+		}
+	}
+
+	/**
+	 * Emit equip_change from the diff of the worn-equipment container against its last-seen state. The
+	 * first change after a login only baselines, so a normal gear load does not emit a spurious full-kit
+	 * equip. Own account, and the same data class as the equipment snapshot.
+	 */
+	void handleEquipmentChanged(ItemContainer worn)
+	{
+		if (worn == null)
+		{
+			return;
+		}
+		Map<Integer, Long> now = new LinkedHashMap<>();
+		addContainerCounts(now, worn);
+		Map<Integer, Long> before = equipLast;
+		equipLast = now;
+		if (before == null || !activityLogActive())
+		{
+			return;		// first observation this session is a baseline, no event
+		}
+		List<Map<String, Object>> equipped = new ArrayList<>();
+		List<Map<String, Object>> unequipped = new ArrayList<>();
+		for (Map.Entry<Integer, Long> e : now.entrySet())
+		{
+			long d = e.getValue() - before.getOrDefault(e.getKey(), 0L);
+			if (d > 0)
+			{
+				equipped.add(itemMapLong(e.getKey(), d));
+			}
+			else if (d < 0)
+			{
+				unequipped.add(itemMapLong(e.getKey(), -d));
+			}
+		}
+		for (Map.Entry<Integer, Long> e : before.entrySet())
+		{
+			if (!now.containsKey(e.getKey()))
+			{
+				unequipped.add(itemMapLong(e.getKey(), e.getValue()));
+			}
+		}
+		if (equipped.isEmpty() && unequipped.isEmpty())
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		if (!equipped.isEmpty())
+		{
+			fields.put("equipped", equipped);
+		}
+		if (!unequipped.isEmpty())
+		{
+			fields.put("unequipped", unequipped);
+		}
+		emitEvent("equip_change", fields);
+	}
+
+	/** World hop: emit world_hop {from,to} when the world changes. The login's first change is suppressed. */
+	@Subscribe
+	public void onWorldChanged(WorldChanged event)
+	{
+		if (client == null)
+		{
+			return;
+		}
+		int w = client.getWorld();
+		int prev = lastWorld;
+		lastWorld = w;
+		if (prev != 0 && w != prev && activityLogActive())
+		{
+			Map<String, Object> fields = new LinkedHashMap<>();
+			fields.put("from", prev);
+			fields.put("to", w);
+			emitEvent("world_hop", fields);
 		}
 	}
 
@@ -4380,6 +4475,14 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
+		// Two SPECIFIC system lines are matched and emitted as their own structured events: a kill count
+		// and a pet drop. This is the narrow form the comment above allows. It is NOT the broad sweep:
+		// no raw chat line is emitted, no other player's name is read, and no other channel is examined.
+		if (event.getType() == ChatMessageType.GAMEMESSAGE || event.getType() == ChatMessageType.SPAM)
+		{
+			emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
+			return;
+		}
 		if (event.getType() != ChatMessageType.TRADE)
 		{
 			return;
@@ -4394,6 +4497,45 @@ public class AccountConnectPlugin extends Plugin
 			emitTradeEvent();
 		}
 		handleTradeChat(event.getMessage());
+	}
+
+	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
+		"(?:kill|completion|chest|success|harvest) count is:? ?([\\d,]+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * Emit the two structured milestones parsed from a system chat line: kill_count and pet.
+	 *
+	 * Own-account only. A system line names no other player, so nothing here captures a bystander.
+	 * The raw line rides along as `text` because the count alone does not say WHAT was killed.
+	 */
+	void emitParsedMilestones(String text)
+	{
+		if (text == null || text.isEmpty() || !activityLogActive())
+		{
+			return;
+		}
+		java.util.regex.Matcher m = KILL_COUNT_RE.matcher(text);
+		if (m.find())
+		{
+			Map<String, Object> f = new LinkedHashMap<>();
+			f.put("text", text);
+			try
+			{
+				f.put("count", Long.parseLong(m.group(1).replace(",", "")));
+			}
+			catch (NumberFormatException ignored)
+			{
+				// leave count off when it does not parse; the text still carries the milestone
+			}
+			emitEvent("kill_count", f);
+		}
+		String low = text.toLowerCase(java.util.Locale.ROOT);
+		if (low.contains("funny feeling like you") && low.contains("followed"))
+		{
+			Map<String, Object> f = new LinkedHashMap<>();
+			f.put("text", text);
+			emitEvent("pet", f);
+		}
 	}
 
 	/**
