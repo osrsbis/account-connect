@@ -71,9 +71,9 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 1));
+		r.pileActive(key(995, 1), 1);
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 2));
+		r.pileActive(key(995, 2), 2);
 
 		r.pileRemoved(key(995, 1), T0 + 1_000);
 		assertFalse("one pile still on the ground — no stop yet", r.stopPending());
@@ -91,7 +91,7 @@ public class DropSessionRecorderTest
 		assertEquals(5_000L, DropSessionRecorder.TAIL_MILLIS);
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		r.pileRemoved(key(1, 1), T0);
 		assertEquals(5_000L, r.tailRemainingMillis(T0));
 		assertEquals(1L, r.tailRemainingMillis(T0 + 4_999));
@@ -109,7 +109,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 1));
+		r.pileActive(key(995, 1), 1);
 		r.pileRemoved(key(995, 1), T0 + 1_000);
 		assertTrue(r.stopPending());
 
@@ -128,10 +128,10 @@ public class DropSessionRecorderTest
 		// between the action and the spawn. pileActive must clear it.
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		r.pileRemoved(key(1, 1), T0 + 100);
 		assertTrue(r.stopPending());
-		r.pileActive(key(1, 2));
+		r.pileActive(key(1, 2), 2);
 		assertFalse(r.stopPending());
 	}
 
@@ -147,9 +147,9 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		int a = r.onDropAction("s", T0);
-		r.pileActive(key(995, a));
+		r.pileActive(key(995, a), a);
 		int b = r.onDropAction("s", T0);
-		r.pileActive(key(995, b));
+		r.pileActive(key(995, b), b);
 		assertEquals("two live piles", 2, r.activePileCount());
 
 		r.pileRemoved(key(995, a), T0 + 500);
@@ -164,7 +164,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 1));
+		r.pileActive(key(995, 1), 1);
 		r.pileRemoved(key(4151, 9), T0 + 100);	// never ours
 		assertFalse("an unknown pile must not arm the tail", r.stopPending());
 		assertEquals(1, r.activePileCount());
@@ -175,8 +175,8 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 1));
-		r.pileActive(key(995, 2));
+		r.pileActive(key(995, 1), 1);
+		r.pileActive(key(995, 2), 2);
 		r.pileRemoved(key(995, 1), T0 + 100);
 		r.pileRemoved(key(995, 1), T0 + 200);	// duplicate
 		assertFalse("a duplicate removal must not empty the set", r.stopPending());
@@ -190,7 +190,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		r.pileRemoved(key(1, 1), T0 + 100);
 		assertTrue(r.shouldStop(T0 + 5_100));
 		assertEquals(DropSessionRecorder.Outcome.COMPLETE, r.finish());
@@ -203,7 +203,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		r.interrupt();
 		assertTrue("an interrupt is due immediately", r.shouldStop(T0));
 		assertEquals(DropSessionRecorder.Outcome.INTERRUPTED, r.finish());
@@ -219,7 +219,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		assertEquals(DropSessionRecorder.Outcome.INTERRUPTED, r.finish());
 	}
 
@@ -241,7 +241,7 @@ public class DropSessionRecorderTest
 	public void callsOnAnIdleRecorderAreSafeNoOps()
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
-		r.pileActive(key(1, 1));
+		r.pileActive(key(1, 1), 1);
 		r.pileRemoved(key(1, 1), T0);
 		r.interrupt();
 		assertFalse("none of those may start a session", r.active());
@@ -260,7 +260,7 @@ public class DropSessionRecorderTest
 	{
 		DropSessionRecorder r = new DropSessionRecorder();
 		r.onDropAction("s", T0);
-		r.pileActive(key(995, 1));
+		r.pileActive(key(995, 1), 1);
 		for (long t = T0; t <= T0 + 240_000; t += 5_000)
 		{
 			assertFalse("must not stop while the pile is on the ground at t=" + (t - T0), r.shouldStop(t));

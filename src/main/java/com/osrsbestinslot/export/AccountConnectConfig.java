@@ -35,12 +35,17 @@ public interface AccountConnectConfig extends Config
 			+ "and shop transactions, loot, drops, deaths, level-ups and login times. Completed trades "
 			+ "include the other player's name and the items each side exchanged. It also uploads "
 			+ "screenshots of your trade window and of your game screen while a shop is open, which may "
-			+ "include on-screen chat messages and other players' names. For staff accounts where "
-			+ "osrsbestinslot.com enables drop-trade proof, it may also capture and upload a recording "
+			+ "include on-screen chat messages and other players' names. Where osrsbestinslot.com turns "
+			+ "on drop-trade proof for your linked account, it may also capture and upload a recording "
 			+ "of your rendered game screen throughout a drop trade, starting when you choose Drop and "
-			+ "continuing until five seconds after the final dropped pile disappears. The recording may "
-			+ "include visible chat messages and other players' names. Turning this off stops all of "
-			+ "it. Only turn it on if you agree to that.",
+			+ "continuing until five seconds after the final dropped pile disappears, or, if a drop "
+			+ "never lands on the ground, five seconds after the client stops waiting for it. The "
+			+ "recording always ends. That recording can run for several minutes and may include "
+			+ "visible chat messages and other players' names. You cannot turn drop-trade proof on "
+			+ "yourself: only osrsbestinslot.com can, for "
+			+ "one linked account at a time. Turning this switch off stops all of it, including a "
+			+ "recording already in progress, and the frames captured before you turned it off are "
+			+ "discarded rather than uploaded later. Only turn it on if you agree to that.",
 		position = 1
 	)
 	default boolean enableUpload()
@@ -74,13 +79,17 @@ public interface AccountConnectConfig extends Config
 			+ "confirmation window when a trade completes, which shows the other player's name and the "
 			+ "items traded, and a short series of your game screen while a shop window is open, which "
 			+ "may include on-screen chat and other players' names (discarded if the visit had no "
-			+ "purchase or sale). For staff accounts where osrsbestinslot.com enables drop-trade proof, "
-			+ "it may also capture and upload a recording of your rendered game screen throughout a drop "
-			+ "trade, starting when you choose Drop and continuing until five seconds after the final "
-			+ "dropped pile disappears. That recording can run for several minutes and may include "
-			+ "visible chat messages and other players' names. Only osrsbestinslot.com can enable it, "
-			+ "per account. Your IP address reaches the server with every upload. Turn the upload "
-			+ "switch off, or clear the token, to stop all of it.",
+			+ "purchase or sale). Where osrsbestinslot.com turns on drop-trade proof for your linked "
+			+ "account, it may also capture and upload a recording of your rendered game screen "
+			+ "throughout a drop trade, starting when you choose Drop and continuing until five "
+			+ "seconds after the final dropped pile disappears, or, if a drop never lands on the "
+			+ "ground, five seconds after the client stops waiting for it. The recording always ends. "
+			+ "That recording can run for several "
+			+ "minutes and may include visible chat messages and other players' names. You cannot turn "
+			+ "drop-trade proof on yourself: only osrsbestinslot.com can, for one linked account at a "
+			+ "time. Your IP address reaches the server with every upload. Turn the upload switch off, "
+			+ "or clear the token, to stop all of it, including a recording already in progress, and "
+			+ "the frames captured before you turned it off are discarded rather than uploaded later.",
 		position = 2
 	)
 	default String linkToken()

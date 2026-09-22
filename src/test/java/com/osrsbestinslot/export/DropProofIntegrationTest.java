@@ -45,7 +45,8 @@ public class DropProofIntegrationTest
 				return true;
 			}
 		});
-		p.setStoreToolsForTest(true);	// the server grant; drop proof rides the same one
+		p.setStoreToolsForTest(true);		// the shop-overlay grant
+		p.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag (finding F4)
 		return p;
 	}
 
@@ -358,6 +359,7 @@ public class DropProofIntegrationTest
 			}
 		});
 		p.setStoreToolsForTest(true);
+		p.setDropProofRolloutForTest(true);
 		dropAction(p);
 		assertFalse("upload off beats a server grant", p.dropSession.active());
 	}
@@ -402,6 +404,7 @@ public class DropProofIntegrationTest
 				return true;
 			}
 		});
+		p.setDropProofRolloutForTest(true);
 		try
 		{
 			System.setProperty("osrsbis.dropproof", "on");

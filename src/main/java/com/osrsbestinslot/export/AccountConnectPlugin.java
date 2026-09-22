@@ -500,6 +500,147 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	// ---- the drop-proof one-shot notice (finding F3) ----
+
+	/**
+	 * WHY A CHAT NOTICE AND NOT A CONFIG WARNING.
+	 *
+	 * RuneLite raises a {@code @ConfigItem(warning=)} dialog from ConfigPanel.changeConfiguration,
+	 * which for a checkbox runs ONLY when the user toggles it, and RuneLite has no way to re-prompt
+	 * when the warning TEXT changes. Drop proof requires the upload switch to be ON already. So the
+	 * entire recordable population has, by definition, already passed the only moment the dialog
+	 * can fire, and the dialog reaches only users who cannot yet be recorded. That is backwards,
+	 * and it is finding F3.
+	 *
+	 * This is NOT a new config item. The standing rule is no new plugin settings, and a setting
+	 * would be wrong here anyway: the user has no drop-proof control to offer, only the upload
+	 * switch they already have.
+	 */
+	static final String DROP_PROOF_NOTICE =
+		"OSRS BiS: drop-trade screen recording is now active for this linked account. While you "
+		+ "drop items for a trade, your rendered game screen is recorded and uploaded to "
+		+ "osrsbestinslot.com, and the recording can include visible chat messages and other "
+		+ "players' names. Turn off \"Upload to osrsbestinslot.com\" in the plugin settings to "
+		+ "stop it.";
+
+	/**
+	 * THE VERSION OF THE WORDING THE USER HAS SEEN, persisted per profile.
+	 *
+	 * A plain "already shown" boolean cannot be re-armed, so a materially changed disclosure could
+	 * never be re-delivered. Storing the VERSION means bumping this constant shows the notice once
+	 * more, to everyone, and only once. Bump it when the wording changes MATERIALLY — new data
+	 * captured, a new trigger, a changed stop condition. Do not bump it for a typo.
+	 */
+	static final int DROP_PROOF_NOTICE_VERSION = 1;
+
+	/**
+	 * Where that version is stored. Deliberately NOT a {@code @ConfigItem}: RuneLite default-writes
+	 * every config item before startUp, so a default-written value here would silently satisfy a
+	 * debt the user was never shown. The same reason DISCLOSURE_OWED_KEY is a bare key.
+	 */
+	static final String DROP_PROOF_NOTICE_KEY = "dropProofNoticeVersion";
+
+	/** Set when the notice is owed and not yet shown. Mirrors the persisted version below it. */
+	volatile boolean dropProofDisclosureOwed;
+
+	/** Set while a send is queued on the client thread, so a second call does not queue a second notice. */
+	private volatile boolean dropProofDisclosureQueued;
+
+	/** The notice version this profile has already seen, or 0 for none. */
+	int dropProofNoticeSeenVersion()
+	{
+		if (configManager == null)
+		{
+			return 0;
+		}
+		String v = configManager.getConfiguration(CONFIG_GROUP, DROP_PROOF_NOTICE_KEY);
+		if (v == null)
+		{
+			return 0;
+		}
+		try
+		{
+			return Integer.parseInt(v.trim());
+		}
+		catch (NumberFormatException e)
+		{
+			return 0;	// unreadable means unproven, so the notice is owed again
+		}
+	}
+
+	/**
+	 * Owe the notice when this profile has not seen the CURRENT wording.
+	 *
+	 * Called whenever the capability becomes active. Idempotent: once the stored version matches,
+	 * nothing is owed however often a policy response repeats the grant.
+	 */
+	void noteDropProofDisclosureOwed()
+	{
+		if (dropProofDisclosureOwed)
+		{
+			return;
+		}
+		if (dropProofNoticeSeenVersion() >= DROP_PROOF_NOTICE_VERSION)
+		{
+			return;
+		}
+		dropProofDisclosureOwed = true;
+	}
+
+	/**
+	 * Deliver the notice once, in game chat.
+	 *
+	 * Same shape as deliverUploadDisclosure, including the no-chat-box-yet case: an owed notice
+	 * survives until a LOGGED_IN where it can actually be shown.
+	 */
+	void deliverDropProofDisclosure()
+	{
+		if (!dropProofDisclosureOwed || client == null || dropProofDisclosureQueued)
+		{
+			return;
+		}
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
+		}
+		if (clientThread == null)
+		{
+			// No injector, so this is a unit test. Send only if we are already on the client thread.
+			if (client.isClientThread())
+			{
+				sendDropProofDisclosure();
+			}
+			return;
+		}
+		dropProofDisclosureQueued = true;
+		clientThread.invokeLater(this::sendDropProofDisclosure);
+	}
+
+	/**
+	 * The send. The version is stored AFTER the chat line lands, never before: storing first and
+	 * then throwing would mark a notice delivered that the user never saw.
+	 */
+	void sendDropProofDisclosure()
+	{
+		try
+		{
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", DROP_PROOF_NOTICE, null);
+		}
+		catch (RuntimeException | Error e)
+		{
+			dropProofDisclosureQueued = false;		// still owed — try again on the next LOGGED_IN
+			log.debug("OSRS BiS drop-proof notice could not be shown yet", e);
+			return;
+		}
+		dropProofDisclosureOwed = false;
+		dropProofDisclosureQueued = false;
+		if (configManager != null)
+		{
+			configManager.setConfiguration(CONFIG_GROUP, DROP_PROOF_NOTICE_KEY,
+				Integer.toString(DROP_PROOF_NOTICE_VERSION));
+		}
+	}
+
 	@Override
 	protected void shutDown()
 	{
@@ -1162,7 +1303,27 @@ public class AccountConnectPlugin extends Plugin
 	static final int DROP_CLIP_FPS = CLIP_FPS;
 
 	/**
-	 * Drop-trade capture requires the same server grant the store overlays use.
+	 * ROLLOUT, NOT AUTHORIZATION. Its own per-token policy flag, default OFF.
+	 *
+	 * Set from the X-Drop-Proof response header, whose ONE source of truth is the `drop_proof` key
+	 * in the server's KV policy map. Absent header, absent key, unparseable value and a failed
+	 * response all leave this false, so an unknown state fails capture OFF.
+	 *
+	 * IT AUTHORIZES NOTHING. Whether a `drop_frames` upload is accepted is decided server-side by
+	 * the staff check on the token at /store-frames-ingest, which this flag never touches. Rollout
+	 * says WHICH granted clients record; authorization says whose recording the server keeps.
+	 */
+	volatile boolean serverDropProofEnabled;
+
+	/**
+	 * Drop-trade capture: the store-tools grant, the drop-proof rollout flag, and clips not forced
+	 * off. All three required.
+	 *
+	 * WHY THE ROLLOUT FLAG IS SEPARATE FROM X-Store-Tools. Before this, X-Store-Tools ALONE turned
+	 * on continuous screen recording, while its own documented contract said the grant expanded no
+	 * collection. The backend allowlist had no way to grant the shop overlays without also granting
+	 * a screen recorder, and the only denial was X-Clips: off, which also killed the store delivery
+	 * clips. Now the operator turns drop proof on for one token at a time and nothing else moves.
 	 *
 	 * Deliberately NOT a config item: this plugin carries no user-facing settings (operator default
 	 * 2026-09-19), and a drop clip records other players standing on a tile, which the hub manifest
@@ -1170,7 +1331,15 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean dropProofEnabled()
 	{
-		return storeToolsEnabled() && (!serverClipsDisabled || dropProofDevOverride());
+		return storeToolsEnabled()
+			&& serverDropProofEnabled
+			&& (!serverClipsDisabled || dropProofDevOverride());
+	}
+
+	/** Test hook for the rollout flag. The real one is only ever written by applyServerPolicy. */
+	void setDropProofRolloutForTest(boolean on)
+	{
+		serverDropProofEnabled = on;
 	}
 
 	/**
@@ -1324,6 +1493,14 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void acceptDropFrame(byte[] encoded, long nowMillis)
 	{
+		// RE-CHECK THE GATE ON THE FRAME PATH (finding F2). The frame path used to test only that a
+		// segmenter existed, so a user who unticked the upload switch mid-session kept being
+		// recorded until something else ended the session. A frame taken after consent is withdrawn
+		// is never accepted, so it can never be uploaded later.
+		if (!dropCapturing || !dropProofEnabled())
+		{
+			return;
+		}
 		DropFrameSegmenter seg = dropSegmenter;
 		if (seg == null)
 		{
@@ -1373,7 +1550,7 @@ public class AccountConnectPlugin extends Plugin
 	 * removals lives in the same event stream everything else does.
 	 */
 	void stopDropCapture(DropSessionRecorder.Outcome outcome, String sessionId, int dropCount,
-		long startedAtMillis)
+		long startedAtMillis, String reason)
 	{
 		if (!dropCapturing)
 		{
@@ -1411,7 +1588,7 @@ public class AccountConnectPlugin extends Plugin
 			dropSegmentsFailed.incrementAndGet();
 			log.debug("OSRS BiS drop tail segment failed to submit", e);
 		}
-		emitDropSessionManifest(seg, outcome, sessionId, dropCount, startedAtMillis);
+		emitDropSessionManifest(seg, outcome, sessionId, dropCount, startedAtMillis, reason);
 		// Cleared AFTER the manifest: emitDropSessionManifest reads the rate controller's counts.
 		dropSegmenter = null;
 		DropCaptureRate done = dropRate;
@@ -1429,7 +1606,7 @@ public class AccountConnectPlugin extends Plugin
 	 * surface says so rather than playing a gap as if it were the footage.
 	 */
 	private void emitDropSessionManifest(DropFrameSegmenter seg, DropSessionRecorder.Outcome outcome,
-		String sessionId, int dropCount, long startedAtMillis)
+		String sessionId, int dropCount, long startedAtMillis, String reason)
 	{
 		if (sessionId == null)
 		{
@@ -1437,7 +1614,18 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("drop_session_id", sessionId);
-		fields.put("outcome", outcome == DropSessionRecorder.Outcome.COMPLETE ? "COMPLETE" : "INTERRUPTED");
+		// COMPLETE IS A CLAIM ABOUT EVIDENCE, so it is only written when the recorder proved it. The
+		// recorder refuses COMPLETE for a live pile, an outstanding pending drop, an expired
+		// pending, an abandoned pile and any external interrupt — see DropSessionRecorder.finish.
+		boolean complete = outcome == DropSessionRecorder.Outcome.COMPLETE;
+		fields.put("outcome", complete ? "COMPLETE" : "INTERRUPTED");
+		if (!complete)
+		{
+			// WHY it is not complete, so a reader never has to guess whether a partial clip means a
+			// logout or a drop that was never observed landing.
+			fields.put("outcome_reason",
+				reason == null || reason.isEmpty() ? DropSessionRecorder.REASON_EXTERNAL : reason);
+		}
 		fields.put("drops", dropCount);
 		fields.put("started_at", startedAtMillis);
 		fields.put("ended_at", System.currentTimeMillis());
@@ -1699,8 +1887,88 @@ public class AccountConnectPlugin extends Plugin
 		}
 		dropPileSeq.put(g, new int[]{seq});
 		dropPileSession.put(g, sid);
-		dropSession.pileActive(DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq));
+		dropSession.pileActive(DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), seq);
 		markDropMoment(DropCaptureRate.Event.PILE_SPAWN, System.currentTimeMillis());
+	}
+
+	/**
+	 * A drop MERGED into a pile this session already has on the ground.
+	 *
+	 * FINDING F1 PATH A, and the reason the recorder used to run forever. Dropping a stackable onto
+	 * an existing stack of the same item on the same tile does not spawn a second ground item: the
+	 * game merges them and fires exactly ONE ItemDespawned when the merged stack goes. Tracking a
+	 * second pile here produced a second session key that no despawn could ever release, so the
+	 * tail never armed and only a logout stopped the recording.
+	 *
+	 * So no second pile is tracked. The drop's pending is resolved against the stack already live,
+	 * which keeps the session correct without inventing a pile the game does not have.
+	 */
+	void mergeDropIntoLiveSessionPile(DroppedGroundItem existing)
+	{
+		if (existing == null || !dropSession.active())
+		{
+			return;
+		}
+		int seq = pendingDropSeq;
+		if (seq <= 0)
+		{
+			return;
+		}
+		dropSession.pendingDropResolved(seq);
+		markDropMoment(DropCaptureRate.Event.PILE_SPAWN, System.currentTimeMillis());
+	}
+
+	/**
+	 * The live session pile at this exact item and tile, or null.
+	 *
+	 * Membership of the CURRENT session is required: a pile left over from a previous session must
+	 * not absorb this drop's pending, or the pending would be resolved by something no despawn in
+	 * this session will report.
+	 */
+	DroppedGroundItem liveSessionPileAt(int item, int x, int y, int plane)
+	{
+		String sid = dropSession.sessionId();
+		if (sid == null)
+		{
+			return null;
+		}
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (g.item == item && g.x == x && g.y == y && g.plane == plane
+					&& sid.equals(dropPileSession.get(g)))
+				{
+					return g;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The client stopped tracking a pile without seeing it leave the ground.
+	 *
+	 * FINDING F1 PATH C. trackGroundDrop evicts the oldest pile past GROUND_TRACK_MAX, and nothing
+	 * used to tell the session, so a 30-item drop trade stranded keys the recorder waited on
+	 * forever. The key is released here so the tail can still arm, and the session is marked
+	 * unprovable so the released key is never mistaken for the pile actually going: that session
+	 * reports INTERRUPTED, never COMPLETE.
+	 */
+	void abandonPileFromDropSession(DroppedGroundItem g)
+	{
+		if (g == null)
+		{
+			return;
+		}
+		int seq = dropSeqForPile(g);
+		dropPileSeq.remove(g);
+		dropPileSession.remove(g);
+		if (seq > 0)
+		{
+			dropSession.pileAbandoned(
+				DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), System.currentTimeMillis());
+		}
 	}
 
 	/** The drop sequence a tracked pile belongs to, or -1 when it is not part of a session. */
@@ -1752,19 +2020,41 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		if (!dropSession.shouldStop(System.currentTimeMillis()))
+		long now = System.currentTimeMillis();
+		// CHECK THE GATE EVERY TICK, not only when capture starts. The user can untick the upload
+		// switch, clear the token, or have the grant withdrawn while a session runs. Before this,
+		// dropCapturing was only ever cleared by a stop, so capture continued through a withdrawal
+		// and the frames taken during it uploaded as soon as the switch went back on (finding F2).
+		if (!dropProofEnabled())
+		{
+			discardDropSessionOnWithdrawnConsent();
+			return;
+		}
+		// EXPIRE PENDING DROPS FIRST. A Drop click that never produces a pile leaves nothing for a
+		// removal to release, so without this the tail can never arm and the session runs until a
+		// logout (finding F1 path B).
+		for (Integer expiredSeq : dropSession.settle(now))
+		{
+			if (expiredSeq != null && expiredSeq == pendingDropSeq)
+			{
+				pendingDropSeq = 0;
+				pendingDropSessionId = null;
+			}
+		}
+		if (!dropSession.shouldStop(now))
 		{
 			return;
 		}
 		String sid = dropSession.sessionId();
 		int drops = dropSession.dropCount();
 		long started = dropSession.startedAtMillis();
+		String reason = dropSession.reason();		// read BEFORE finish(), which clears it
 		DropSessionRecorder.Outcome outcome = dropSession.finish();
 		dropPileSeq.clear();
 		dropPileSession.clear();
 		pendingDropSessionId = null;
 		pendingDropSeq = 0;
-		stopDropCapture(outcome, sid, drops, started);
+		stopDropCapture(outcome, sid, drops, started, reason);
 	}
 
 	/**
@@ -1783,12 +2073,80 @@ public class AccountConnectPlugin extends Plugin
 		int drops = dropSession.dropCount();
 		long started = dropSession.startedAtMillis();
 		dropSession.interrupt();
+		String reason = dropSession.reason();		// read BEFORE finish(), which clears it
 		DropSessionRecorder.Outcome outcome = dropSession.finish();
 		dropPileSeq.clear();
 		dropPileSession.clear();
 		pendingDropSessionId = null;
 		pendingDropSeq = 0;
-		stopDropCapture(outcome, sid, drops, started);
+		stopDropCapture(outcome, sid, drops, started, reason);
+	}
+
+	/**
+	 * CONSENT WAS WITHDRAWN MID-SESSION. End the session and DESTROY what was captured.
+	 *
+	 * This is the one path where footage is deliberately thrown away, and it is the opposite of
+	 * interruptDropSession on purpose. A hop or a logout is an accident of the session and the
+	 * user still consents, so that footage is evidence and it uploads. Unticking the upload switch,
+	 * clearing the token or losing the grant is the user or the operator saying stop, so the frames
+	 * already in the buffer must not survive to be uploaded when the switch goes back on. Finding
+	 * F2 measured exactly that leak: OFF-window frames reached the uploader after a re-enable.
+	 *
+	 * No manifest is emitted either. A manifest is an upload about a recording the user withdrew
+	 * consent for, so publishing one would be the same disclosure defect in a smaller shape.
+	 */
+	void discardDropSessionOnWithdrawnConsent()
+	{
+		if (dropSession.active())
+		{
+			dropSession.interrupt();
+			dropSession.finish();
+		}
+		dropPileSeq.clear();
+		dropPileSession.clear();
+		pendingDropSessionId = null;
+		pendingDropSeq = 0;
+		dropCapturing = false;
+		dropFramePending = false;
+		if (drawManager != null)
+		{
+			drawManager.unregisterEveryFrameListener(dropFrameTick);
+		}
+		DropFrameSegmenter seg = dropSegmenter;
+		dropSegmenter = null;
+		if (seg != null)
+		{
+			seg.clear();		// buffered frames die here; nothing is handed to the uploader
+		}
+		DropCaptureRate rate = dropRate;
+		dropRate = null;
+		if (rate != null)
+		{
+			rate.clear();		// the held pre-roll dies too
+		}
+	}
+
+	/**
+	 * The drop-proof capability may have just changed. Called after every policy application.
+	 *
+	 * Two jobs, and they are not symmetrical. A capability that has gone away must stop a running
+	 * recorder now rather than at the next tick. A capability that has just become reachable owes
+	 * the user the one-shot notice, because RuneLite only raises a config item's warning dialog
+	 * when the user toggles it, and a user whose upload switch is ALREADY on never toggles it
+	 * (finding F3).
+	 */
+	void onDropProofCapabilityChanged()
+	{
+		if (!dropProofEnabled())
+		{
+			if (dropSession.active() || dropCapturing)
+			{
+				discardDropSessionOnWithdrawnConsent();
+			}
+			return;
+		}
+		noteDropProofDisclosureOwed();
+		deliverDropProofDisclosure();
 	}
 
 	/**
@@ -2926,6 +3284,9 @@ public class AccountConnectPlugin extends Plugin
 				// An upgrade that turned the switch on owes the user the disclosure. There is no chat
 				// box on the login screen, so this is the first moment it can be shown after a restart.
 				deliverUploadDisclosure();
+				// Same for the drop-proof notice: the grant can arrive while the user is on the
+				// login screen, where there is no chat box to show it in.
+				deliverDropProofDisclosure();
 				break;
 			default:
 				break;
@@ -4596,7 +4957,8 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
-	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile, boolean stackGrew)
+	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile,
+		boolean stackGrew, boolean quantityMerge)
 	{
 		InvDeltaPending p = peekInvDeltaPending();
 		if (p == null || client == null || it == null || tile == null)
@@ -4627,7 +4989,7 @@ public class AccountConnectPlugin extends Plugin
 		if (dist <= DROP_SPAWN_MAX_DIST && stackGrew && hasArmedDropFor(it.getId()))
 		{
 			trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
-				currentLocation(), tick, it.getDespawnTime());
+				currentLocation(), tick, it.getDespawnTime(), quantityMerge);
 		}
 		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew);
 	}
@@ -4636,7 +4998,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemSpawned(net.runelite.api.events.ItemSpawned event)
 	{
-		handleGroundItemForDropPending(event.getItem(), event.getTile(), true);
+		// A genuine NEW ground item, never a merge into an existing stack.
+		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false);
 	}
 
 	/**
@@ -4646,8 +5009,9 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemQuantityChanged(net.runelite.api.events.ItemQuantityChanged event)
 	{
+		// A GROWN stack is a merge: the game holds ONE pile and will fire ONE ItemDespawned for it.
 		handleGroundItemForDropPending(event.getItem(), event.getTile(),
-			event.getNewQuantity() > event.getOldQuantity());
+			event.getNewQuantity() > event.getOldQuantity(), true);
 	}
 
 	/** True when a "drop" pending for this item is armed — i.e. this ground pile is one we just dropped. */
@@ -4675,11 +5039,33 @@ public class AccountConnectPlugin extends Plugin
 	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 		int dropTick, int despawnTick)
 	{
+		trackGroundDrop(item, qty, x, y, plane, location, dropTick, despawnTick, false);
+	}
+
+	/**
+	 * @param quantityMerge true when this arrived as an ItemQuantityChanged growth, meaning the game
+	 *                      merged the drop into an existing stack instead of spawning a new pile.
+	 */
+	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
+		int dropTick, int despawnTick, boolean quantityMerge)
+	{
 		synchronized (groundDrops)
 		{
+			// A MERGED STACK IS ONE PILE. Dropping a stackable onto our own live pile of the same
+			// item on the same tile merges it in the game, and the client will fire exactly one
+			// ItemDespawned for the result. Tracking a second DroppedGroundItem here made a second
+			// session key that no despawn could release (finding F1 path A).
+			DroppedGroundItem merged = quantityMerge ? liveSessionPileAt(item, x, y, plane) : null;
+			if (merged != null)
+			{
+				mergeDropIntoLiveSessionPile(merged);
+				return;
+			}
 			while (groundDrops.size() >= GROUND_TRACK_MAX)
 			{
-				groundDrops.pollFirst();
+				// An evicted pile is one we will never see leave the ground. Tell the session, or
+				// its key is stranded and the recorder waits on it forever (finding F1 path C).
+				abandonPileFromDropSession(groundDrops.pollFirst());
 			}
 			DroppedGroundItem g =
 				new DroppedGroundItem(item, qty, x, y, plane, location, dropTick, despawnTick);
@@ -6293,6 +6679,13 @@ public class AccountConnectPlugin extends Plugin
 	 *   X-Clips            "off"/"disabled"/"false" force-disables store delivery-clip capture.
 	 *   X-Store-Tools      "on"/"enabled"/"true"/"1" grants the shop overlays for this token. The
 	 *                      overlays draw only and send nothing, so the grant expands no collection.
+	 *                      It does NOT grant drop-trade recording; that is X-Drop-Proof below, and
+	 *                      keeping them apart is the whole reason that header exists.
+	 *   X-Drop-Proof       "on"/"enabled"/"true"/"1" ROLLS OUT drop-trade screen recording to this
+	 *                      token. Absent, false or unparseable = OFF, and a response that never
+	 *                      arrives leaves it OFF, so an unknown state never records. It is a
+	 *                      rollout control, not an authorization: the server still decides on its
+	 *                      own staff check whether to keep a drop_frames upload.
 	 *   X-Uploads-Enabled  "false"/"0" soft-pauses the token: cadence drops to the 600s max so the
 	 *                      policy channel stays open (the hard data-stop is enforced server-side by
 	 *                      dropping the token's snapshots — the client never goes dark, so it can be
@@ -6325,6 +6718,20 @@ public class AccountConnectPlugin extends Plugin
 			String v = clips.trim().toLowerCase(java.util.Locale.ROOT);
 			serverClipsDisabled = "off".equals(v) || "disabled".equals(v) || "false".equals(v);
 		}
+
+		// THE ROLLOUT FLAG. Absent header leaves it unchanged, exactly like every other directive,
+		// because a single malformed response must not silently revoke a live rollout. It starts
+		// false and only an explicit on-value ever sets it, so the fail-closed default holds.
+		String dropProof = response.header("X-Drop-Proof");
+		if (dropProof != null)
+		{
+			String v = dropProof.trim().toLowerCase(java.util.Locale.ROOT);
+			serverDropProofEnabled = "on".equals(v) || "enabled".equals(v)
+				|| "true".equals(v) || "1".equals(v);
+		}
+		// A capability that has just become reachable owes the user the notice, and a capability
+		// that has just gone away must not leave a recorder running.
+		onDropProofCapabilityChanged();
 
 		boolean paused = false;
 		String uploadsEnabled = response.header("X-Uploads-Enabled");
