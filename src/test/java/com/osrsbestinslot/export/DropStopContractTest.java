@@ -491,16 +491,21 @@ public class DropStopContractTest
 		changed.plugin.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 3}, 1_000L);
 		changed.config.token = OTHER_TOKEN;
 		changed.plugin.pollDropSession();
-		// A DIFFERENT valid token is still a valid token, so the gate stays open and the session
-		// continues. What must NOT happen is the session silently re-filing under the new account:
-		// the manifest's drop_session_id was minted under the old one. This arm pins the honest
-		// behaviour rather than asserting a stop the code does not perform.
-		assertTrue("a swap to another valid token does not itself revoke consent",
+		// ROUND 3 CORRECTION. Round 2 pinned the opposite here, because the code did not stop on a
+		// swap to another VALID token and the arm recorded that honestly. It is an identity
+		// boundary, not accounting: frames captured under token A would upload under token B and
+		// attribute one account's evidence to another. Cases 14 to 20 below own the full contract.
+		assertFalse("a swap to a DIFFERENT valid token stops it too",
 			changed.plugin.dropSession.active());
-		changed.config.token = "not-a-token";
-		changed.plugin.pollDropSession();
-		assertFalse("an INVALID token does stop it", changed.plugin.dropSession.active());
 		assertNull(field(changed.plugin, "dropSegmenter"));
+
+		Rig malformed = rig();
+		dropAction(malformed.plugin);
+		attach(malformed.plugin, pile(995, 5L, 3200, 3400));
+		malformed.config.token = "not-a-token";
+		malformed.plugin.pollDropSession();
+		assertFalse("an INVALID token does stop it", malformed.plugin.dropSession.active());
+		assertNull(field(malformed.plugin, "dropSegmenter"));
 	}
 
 	// ===== CASE 12 — OFF then ON must not upload the OFF-window frames =====
@@ -632,6 +637,372 @@ public class DropStopContractTest
 			assertTrue("something is outstanding, so recording legitimately continues",
 				p.dropSession.activePileCount() > 0 || p.dropSession.pendingDropCount() > 0);
 		}
+	}
+
+	// ================================================================
+	// CASES 14-20 — THE TOKEN IDENTITY BOUNDARY
+	//
+	// THE DEFECT ROUND 2 PINNED AND DID NOT FIX. uploadAllowed() asked whether the configured token
+	// was WELL-FORMED, never whether it was the SAME token. So a mid-session swap from token A to a
+	// different valid token B left every gate open, and frames captured under A were uploaded with B
+	// in the multipart body. That files one account's evidence against another account.
+	//
+	// THE CONTRACT THESE SEVEN ARMS ENFORCE:
+	//   any change of the configured token during a session INTERRUPTS it immediately
+	//     -> pre-roll, buffered frames, outstanding retry media and pending session state all die
+	//     -> nothing captured under A may upload under B
+	//     -> NO drop_trade_clip manifest is published for a session whose identity was withdrawn
+	//     -> a new or returning token may only start a NEW FUTURE session.
+	//
+	// Case 20 is the control arm. A fix that simply broke all recording would pass 14 to 19.
+	// ================================================================
+
+	/**
+	 * Fill a session with frames and force one FULL segment out, so bytes sit in the RETRY BUFFER
+	 * and not only in the segment being filled.
+	 *
+	 * This is what makes case 18 a real leak test rather than a flag test. A segment handed to the
+	 * uploader is accounted in the segmenter's outstanding map, and clear() does not touch that map.
+	 */
+	private static DropFrameSegmenter fillOneWholeSegment(AccountConnectPlugin p) throws Exception
+	{
+		for (int i = 0; i <= DropFrameSegmenter.SEGMENT_FRAMES; i++)
+		{
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i, 7, 7, 7}, 1_000L + i);
+		}
+		DropFrameSegmenter seg = (DropFrameSegmenter) field(p, "dropSegmenter");
+		assertNotNull(seg);
+		assertTrue("a whole segment must have been handed to the uploader", seg.segmentCount() >= 1);
+		return seg;
+	}
+
+	// ===== CASE 14 — A -> B, a swap to a DIFFERENT VALID token =====
+
+	@Test
+	public void case14_swapToADifferentValidTokenInterruptsTheSession() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		attach(p, pile(995, 5L, 3200, 3400));
+		// Baseline-cadence frames are HELD as pre-roll rather than kept, which is the thing that
+		// has to die: a pre-roll survivor would be flushed into the next burst's clip.
+		for (int i = 0; i < 12; i++)
+		{
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i * 5L);
+		}
+		DropCaptureRate rateUnderA = (DropCaptureRate) field(p, "dropRate");
+		assertNotNull(rateUnderA);
+		assertNotNull("a session is recording under token A", field(p, "dropSegmenter"));
+		assertTrue(p.dropSession.active());
+
+		r.config.token = OTHER_TOKEN;		// still 32 hex characters, still perfectly valid
+		p.pollDropSession();
+
+		assertFalse("the session ends the moment the identity changes", p.dropSession.active());
+		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
+		assertNull("the frame buffer is destroyed", field(p, "dropSegmenter"));
+		assertNull("the pre-roll controller is destroyed", field(p, "dropRate"));
+		assertEquals("and the frames it was holding are gone, not merely unreferenced",
+			0, rateUnderA.preRollSize());
+		assertNull("and no pending session state survives", field(p, "pendingDropSessionId"));
+	}
+
+	// ===== CASE 15 — A -> empty =====
+
+	@Test
+	public void case15_clearingTheTokenInterruptsTheSessionAndClearsTheBuffers() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		attach(p, pile(995, 5L, 3200, 3400));
+		DropFrameSegmenter seg = fillOneWholeSegment(p);
+
+		r.config.token = "";
+		p.pollDropSession();
+
+		assertFalse(p.dropSession.active());
+		assertNull(field(p, "dropSegmenter"));
+		assertNull(field(p, "dropRate"));
+		assertEquals("the filling segment is emptied", 0, seg.bufferedFrames());
+		assertTrue("and the retry buffer is discarded, not merely emptied", seg.discarded());
+		assertEquals("nothing is held at all", 0L, seg.heldBytes());
+		assertEquals("no segment is still outstanding", 0, seg.unsettledSegments());
+	}
+
+	// ===== CASE 16 — A -> malformed =====
+
+	@Test
+	public void case16_aMalformedTokenInterruptsTheSession() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		attach(p, pile(995, 5L, 3200, 3400));
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+
+		r.config.token = "zzzz-not-a-token";
+		p.pollDropSession();
+
+		assertFalse(p.dropSession.active());
+		assertNull(field(p, "dropSegmenter"));
+		assertNull(field(p, "dropRate"));
+	}
+
+	// ===== CASE 17 — A -> B -> A, the returning token =====
+
+	/**
+	 * THE RESURRECTION ARM. Token A comes back. It must NOT revive the session it left, its id, its
+	 * frames or its manifest. A returning token is simply a token that may start something new.
+	 */
+	@Test
+	public void case17_aReturningTokenDoesNotResurrectTheOldSessionOrItsBuffers() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		String firstSessionId = p.dropSession.sessionId();
+		assertNotNull(firstSessionId);
+		attach(p, pile(995, 5L, 3200, 3400));
+		DropFrameSegmenter seg = fillOneWholeSegment(p);
+		int framesUnderA = seg.acceptedFrames();
+		assertTrue(framesUnderA > 0);
+
+		r.config.token = OTHER_TOKEN;
+		p.pollDropSession();
+		assertFalse(p.dropSession.active());
+
+		// A comes back.
+		r.config.token = TOKEN;
+		poll(p, 5);
+
+		assertFalse("the old session must not restart", p.dropSession.active());
+		assertNull("no buffer is resurrected", field(p, "dropSegmenter"));
+		assertNull("no pre-roll is resurrected", field(p, "dropRate"));
+		assertNull("and no manifest appears for the abandoned session", manifest(p));
+		assertTrue("the old segmenter stays discarded forever", seg.discarded());
+		assertNull("it yields nothing even when asked directly", seg.flushRemainder());
+		seg.add(new byte[]{(byte) 0xff, (byte) 0xd8, 9}, 9_000L);
+		assertEquals("and it accepts nothing more, so its frame count cannot grow",
+			framesUnderA, seg.acceptedFrames());
+
+		// A genuinely new drop is allowed, and it is a DIFFERENT session.
+		dropAction(p);
+		assertTrue("token A may start a NEW session", p.dropSession.active());
+		assertFalse("with a new id, never the old one",
+			firstSessionId.equals(p.dropSession.sessionId()));
+	}
+
+	// ===== CASE 18 — frames buffered before the swap reach NEITHER upload =====
+
+	/**
+	 * THE LEAK ARM, and a flag is not enough here.
+	 *
+	 * Bytes captured under token A live in two places: the segment being filled, and the RETRY
+	 * BUFFER of segments already handed to the uploader. Round 2's discard path called clear(),
+	 * which empties only the first. A segment in the second would still have been retried, and a
+	 * retry reads the CURRENT token, so those bytes would have uploaded under token B.
+	 *
+	 * This arm proves the bytes are unreachable by three independent routes, not that a flag flipped:
+	 *   1. the segmenter yields nothing when asked for a segment directly;
+	 *   2. it accepts nothing more, so no new segment can form from it;
+	 *   3. the plugin's own upload entry point, driven with the old segment and the NEW token,
+	 *      sends nothing and strands the bytes.
+	 */
+	@Test
+	public void case18_framesBufferedBeforeTheSwapReachNeitherUpload() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		attach(p, pile(995, 5L, 3200, 3400));
+		DropFrameSegmenter seg = fillOneWholeSegment(p);
+
+		// PUT BYTES IN THE RETRY BUFFER. A segment is handed out and left UNSETTLED, which is
+		// exactly the state of a segment whose POST is in flight when the token changes. Those
+		// bytes are the ones clear() would have left accounted and retriable.
+		for (int i = 0; i < DropFrameSegmenter.SEGMENT_FRAMES; i++)
+		{
+			seg.add(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i, 3, 3, 3}, 5_000L + i);
+		}
+		assertEquals("one segment is in flight and unacknowledged", 1, seg.unsettledSegments());
+		long heldUnderA = seg.heldBytes();
+		assertTrue("so real bytes are held for a retry", heldUnderA > 0L);
+		int framesUnderA = seg.acceptedFrames();
+		java.util.concurrent.atomic.AtomicInteger sent =
+			(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsSent");
+		assertEquals("nothing reached the server under token A either", 0, sent.get());
+
+		r.config.token = OTHER_TOKEN;
+		p.pollDropSession();
+
+		// Route 1: nothing can be taken out of it, and the retry buffer is gone.
+		assertTrue(seg.discarded());
+		assertNull("no tail segment can be produced", seg.flushRemainder());
+		assertEquals("nothing is held", 0L, seg.heldBytes());
+		assertEquals("the in-flight segment's bytes are discarded", 0, seg.unsettledSegments());
+		assertEquals("no frames remain buffered", 0, seg.bufferedFrames());
+
+		// Route 2: nothing more can go in, so no segment can re-form.
+		for (int i = 0; i < DropFrameSegmenter.SEGMENT_FRAMES * 2; i++)
+		{
+			seg.add(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i, 7, 7, 7}, 20_000L + i);
+		}
+		assertEquals("the discarded segmenter accepts nothing", framesUnderA, seg.acceptedFrames());
+		assertEquals("so it can never hand out another segment", 2, seg.segmentCount());
+		assertNull(seg.flushRemainder());
+
+		// Route 3: THE RETRY ITSELF. A segment captured under token A, retried after the swap, must
+		// not reach the network. Driven straight at postDropSegment, because that is the only code
+		// an in-flight retry runs. The rig has no OkHttp client, so REACHING the network step throws
+		// a NullPointerException — which is what makes this a discriminating probe rather than a
+		// flag check. A mismatched token must return quietly; a matching one must reach the call.
+		DropFrameSegmenter.Segment old = takeOneSegment();
+		assertFalse("the guard must stop the old-token retry before any network work",
+			postDropSegmentReachedTheNetwork(p, TOKEN, old));
+		assertTrue("and the same call with the CURRENT token does reach it, so the probe is live",
+			postDropSegmentReachedTheNetwork(p, OTHER_TOKEN, old));
+
+		assertEquals("nothing was ever reported as sent", 0, sent.get());
+
+		// And frames offered to the PLUGIN after the swap are refused before any buffer exists.
+		for (int i = 0; i < 10; i++)
+		{
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) (200 + i)}, 30_000L + i);
+		}
+		assertNull("no buffer is created by a post-swap frame", field(p, "dropSegmenter"));
+	}
+
+	/** One real Segment, made by a standalone segmenter so no plugin state is disturbed. */
+	private static DropFrameSegmenter.Segment takeOneSegment()
+	{
+		DropFrameSegmenter solo = new DropFrameSegmenter(1, DropFrameSegmenter.MAX_FRAME_BYTES,
+			DropFrameSegmenter.UNACKED_BYTE_BUDGET);
+		DropFrameSegmenter.Segment out = solo.add(new byte[]{(byte) 0xff, (byte) 0xd8, 4, 4}, 1_000L);
+		assertNotNull(out);
+		return out;
+	}
+
+	/**
+	 * Run one upload attempt and report whether it got as far as the network.
+	 *
+	 * The rig injects no OkHttp client, so an attempt that reaches the call throws a
+	 * NullPointerException. That is the signal: true means the attempt was NOT stopped.
+	 */
+	private static boolean postDropSegmentReachedTheNetwork(AccountConnectPlugin p, String token,
+		DropFrameSegmenter.Segment segment) throws Exception
+	{
+		Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+			String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
+		m.setAccessible(true);
+		try
+		{
+			m.invoke(p, "https://example.invalid", token, segment, "sid", 0);
+			return false;
+		}
+		catch (java.lang.reflect.InvocationTargetException e)
+		{
+			if (e.getCause() instanceof NullPointerException)
+			{
+				return true;
+			}
+			throw e;
+		}
+	}
+
+	// ===== CASE 19 — no OLD manifest is emitted after the swap =====
+
+	/**
+	 * A manifest is itself an upload ABOUT the recording. Publishing one for a session whose
+	 * identity was withdrawn would file the old account's session id, drop count and start time
+	 * under whoever is linked now. Cases 10 to 12 set this precedent for a withdrawn grant; a swap
+	 * is the same event with a different cause.
+	 */
+	@Test
+	public void case19_noManifestIsPublishedForASessionWhoseTokenWasSwapped() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		String swappedAwayId = p.dropSession.sessionId();
+		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		attach(p, g);
+		fillOneWholeSegment(p);
+
+		r.config.token = OTHER_TOKEN;
+		p.pollDropSession();
+		assertNull("no manifest at the moment of the swap", manifest(p));
+
+		// NOTHING AFTERWARDS MAY PUBLISH IT EITHER, and the session is driven all the way to the
+		// state that WOULD publish one: the last pile gone, every pending expired, and the tail due.
+		// A session that was merely paused rather than ended emits its old manifest right here.
+		release(p, g);
+		forcePendingsExpired(p);
+		forceTailDue(p);
+		poll(p, 5);
+		assertNull("and none appears even when the tail is driven to due", manifest(p));
+
+		// Not even after the account the frames belonged to comes back.
+		r.config.token = TOKEN;
+		poll(p, 5);
+		assertNull("nor when the original token returns", manifest(p));
+
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			assertFalse("no event may carry the swapped-away session id",
+				swappedAwayId.equals(e.get("drop_session_id")));
+		}
+	}
+
+	// ===== CASE 20 — THE CONTROL ARM: a fresh post-swap session works =====
+
+	/**
+	 * A fix that simply stopped all recording would pass cases 14 to 19. This arm fails it.
+	 *
+	 * After a swap to token B, a brand-new drop under B must record normally: a new session id,
+	 * a live buffer, frames accepted, a stop when the pile goes, and a COMPLETE manifest naming the
+	 * NEW session.
+	 */
+	@Test
+	public void case20_aFreshSessionAfterTheSwapRecordsNormally() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		String oldId = p.dropSession.sessionId();
+		attach(p, pile(995, 5L, 3200, 3400));
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+
+		r.config.token = OTHER_TOKEN;
+		p.pollDropSession();
+		assertFalse(p.dropSession.active());
+
+		// A NEW drop, under the NEW token.
+		dropAction(p);
+		assertTrue("recording still works after the swap", p.dropSession.active());
+		String newId = p.dropSession.sessionId();
+		assertNotNull(newId);
+		assertFalse("and it is a different session", newId.equals(oldId));
+
+		AccountConnectPlugin.DroppedGroundItem g2 = pile(995, 7L, 3201, 3400);
+		attach(p, g2);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		DropFrameSegmenter fresh = (DropFrameSegmenter) field(p, "dropSegmenter");
+		assertNotNull("a fresh buffer exists", fresh);
+		assertFalse("and it is not a discarded one", fresh.discarded());
+		assertEquals("carrying only the frames taken under the new token", 1, fresh.acceptedFrames());
+
+		release(p, g2);
+		assertTrue(p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("the fresh session ends normally", p.dropSession.active());
+
+		Map<String, Object> m = manifest(p);
+		assertNotNull("and it DOES publish its own manifest", m);
+		assertEquals("named for the new session, never the old one", newId, m.get("drop_session_id"));
+		assertEquals("COMPLETE", m.get("outcome"));
 	}
 
 	// ============ the rollout flag is not an authorization ============

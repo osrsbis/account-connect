@@ -75,6 +75,7 @@ import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.events.PlayerLootReceived;
 import net.runelite.client.events.ServerNpcLoot;
@@ -1298,6 +1299,20 @@ public class AccountConnectPlugin extends Plugin
 	private volatile int pendingDropSeq;
 	/** Session id at the moment of the last drop action, so a late spawn attaches to the right one. */
 	private volatile String pendingDropSessionId;
+	/**
+	 * THE ACCOUNT IDENTITY THIS RECORDING BELONGS TO: the link token as it read when the session
+	 * started. Null when no session is bound to an identity.
+	 *
+	 * WHY IT EXISTS. uploadAllowed() only asks whether SOME valid token is configured. A mid-session
+	 * swap from token A to a different valid token B therefore left every gate open, and the frames
+	 * captured under A were uploaded with B in the form body. That attributes one account's evidence
+	 * to another account, which is an identity-boundary failure, not an accounting untidiness.
+	 *
+	 * Every drop-proof path now compares the live token against THIS value rather than against the
+	 * shape of a token. A mismatch of any kind — a swap, a clear, a malformed value — ends the
+	 * session and destroys what it captured.
+	 */
+	private volatile String dropSessionToken;
 
 	/** Frame rate for drop capture. Same sampler as the store path, so the same constant. */
 	static final int DROP_CLIP_FPS = CLIP_FPS;
@@ -1361,6 +1376,63 @@ public class AccountConnectPlugin extends Plugin
 		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
 	}
 
+	/** The configured link token exactly as the upload paths read it: trimmed, never null. */
+	String currentLinkToken()
+	{
+		if (config == null || config.linkToken() == null)
+		{
+			return "";
+		}
+		return config.linkToken().trim();
+	}
+
+	/**
+	 * Does the live token still name the account this recording was started for?
+	 *
+	 * True when no session is bound to an identity, so a caller can ask this unconditionally.
+	 */
+	boolean dropSessionIdentityIntact()
+	{
+		String bound = dropSessionToken;
+		return bound == null || bound.equals(currentLinkToken());
+	}
+
+	/**
+	 * THE IDENTITY BOUNDARY. A changed link token ends the running session at once and destroys
+	 * everything captured under the old one.
+	 *
+	 * It covers all three shapes of change with one rule, because they are the same event: a swap to
+	 * another VALID token, a clear to empty, and a change to a malformed value. Only the first was
+	 * ever missed, and only because the old gate asked whether a token was well-formed rather than
+	 * whether it was the SAME token.
+	 *
+	 * A newly configured token starts nothing here. It can only be the identity of a FUTURE session,
+	 * which is what stops a token that comes back from resurrecting the recording it left.
+	 */
+	void enforceDropSessionTokenIdentity()
+	{
+		if (dropSessionToken == null || dropSessionIdentityIntact())
+		{
+			return;
+		}
+		discardDropSessionOnWithdrawnConsent();
+	}
+
+	/**
+	 * Any plugin config write. The link token is a config item, so this is the FIRST moment the
+	 * client can know it changed.
+	 *
+	 * Deliberately not filtered by config group or key. The check is idempotent and costs a string
+	 * compare, and a filter that names the wrong group would silently restore the defect. Catching
+	 * the change here rather than at the next tick is what makes an A -> B -> A swap inside one tick
+	 * still end the session.
+	 */
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		enforceDropSessionTokenIdentity();
+	}
+
 	/**
 	 * A Drop action was clicked. Starts or joins the session and arms capture.
 	 *
@@ -1382,6 +1454,8 @@ public class AccountConnectPlugin extends Plugin
 		pendingDropSessionId = dropSession.sessionId();
 		if (!wasActive)
 		{
+			// Bind the identity BEFORE capture arms, so no frame can exist that is not attributable.
+			dropSessionToken = currentLinkToken();
 			startDropCapture();
 		}
 		// A drop inside the tail is its own moment: it cancels the stop, so the clip must show it at
@@ -1498,6 +1572,14 @@ public class AccountConnectPlugin extends Plugin
 		// recorded until something else ended the session. A frame taken after consent is withdrawn
 		// is never accepted, so it can never be uploaded later.
 		if (!dropCapturing || !dropProofEnabled())
+		{
+			return;
+		}
+		// AND RE-CHECK THE IDENTITY. This runs on the encode executor, which can deliver a frame
+		// after the token already changed. Refusing here does not end the session — the config
+		// listener and the tick poll do that, both on the client thread — it only guarantees that
+		// no frame captured under the old account is ever buffered.
+		if (!dropSessionIdentityIntact())
 		{
 			return;
 		}
@@ -1772,6 +1854,16 @@ public class AccountConnectPlugin extends Plugin
 			abandonDropSegment(segment.index);
 			return;
 		}
+		// THE OUTSTANDING RETRY ARM. This segment's bytes were captured while `token` was configured,
+		// and `token` is what its form body carries. A retry that fires after the user swapped to a
+		// different token would file one account's footage under whoever is linked now, so the
+		// attempt is stranded instead. Retries are the only way a segment survives the swap at all:
+		// the segmenter refuses to produce a new one.
+		if (!token.equals(currentLinkToken()))
+		{
+			abandonDropSegment(segment.index);
+			return;
+		}
 		Request request = new Request.Builder()
 			.url(base + "/store-frames-ingest")
 			.post(buildDropSegmentBody(segment, token, sessionId))
@@ -2030,6 +2122,14 @@ public class AccountConnectPlugin extends Plugin
 			discardDropSessionOnWithdrawnConsent();
 			return;
 		}
+		// AND CHECK THE IDENTITY EVERY TICK. The config listener is the immediate path, but it is an
+		// event from the client and this poll must not depend on one arriving. Both call the same
+		// method, so the two paths cannot disagree about what a changed token means.
+		if (!dropSessionIdentityIntact())
+		{
+			enforceDropSessionTokenIdentity();
+			return;
+		}
 		// EXPIRE PENDING DROPS FIRST. A Drop click that never produces a pile leaves nothing for a
 		// removal to release, so without this the tail can never arm and the session runs until a
 		// logout (finding F1 path B).
@@ -2054,6 +2154,7 @@ public class AccountConnectPlugin extends Plugin
 		dropPileSession.clear();
 		pendingDropSessionId = null;
 		pendingDropSeq = 0;
+		dropSessionToken = null;
 		stopDropCapture(outcome, sid, drops, started, reason);
 	}
 
@@ -2079,6 +2180,7 @@ public class AccountConnectPlugin extends Plugin
 		dropPileSession.clear();
 		pendingDropSessionId = null;
 		pendingDropSeq = 0;
+		dropSessionToken = null;
 		stopDropCapture(outcome, sid, drops, started, reason);
 	}
 
@@ -2106,6 +2208,7 @@ public class AccountConnectPlugin extends Plugin
 		dropPileSession.clear();
 		pendingDropSessionId = null;
 		pendingDropSeq = 0;
+		dropSessionToken = null;	// the next session binds its own identity; this one cannot return
 		dropCapturing = false;
 		dropFramePending = false;
 		if (drawManager != null)
@@ -2116,7 +2219,12 @@ public class AccountConnectPlugin extends Plugin
 		dropSegmenter = null;
 		if (seg != null)
 		{
-			seg.clear();		// buffered frames die here; nothing is handed to the uploader
+			// discardAll, NOT clear. clear() empties only the segment being filled and leaves the
+			// RETRY BUFFER accounted, so a segment already handed to the uploader would still be
+			// retried under whatever token is configured by then. discardAll drops that accounting
+			// and latches the segmenter closed, so this object can never yield another segment even
+			// to a caller still holding a reference to it.
+			seg.discardAll();
 		}
 		DropCaptureRate rate = dropRate;
 		dropRate = null;

@@ -77,6 +77,11 @@ public class DropFrameSegmenter
 	private long peakHeldBytes;
 	/** Wall time of the first frame in the segment being filled. 0 when the segment is empty. */
 	private long currentFirstFrameMillis;
+	/**
+	 * Set by {@link #discardAll()} and never cleared. A discarded segmenter accepts nothing and
+	 * yields nothing, so a reference held by an in-flight callback cannot produce a late upload.
+	 */
+	private boolean discarded;
 
 	public DropFrameSegmenter()
 	{
@@ -125,6 +130,13 @@ public class DropFrameSegmenter
 	 */
 	public synchronized Segment add(byte[] frame, long nowMillis)
 	{
+		if (discarded)
+		{
+			// The identity this footage belonged to is gone. Refusing here, rather than only at the
+			// caller, is what makes a stale reference to this object harmless.
+			rejectedFrames++;
+			return null;
+		}
 		if (frame == null || frame.length == 0 || frame.length > maxFrameBytes)
 		{
 			rejectedFrames++;
@@ -165,7 +177,7 @@ public class DropFrameSegmenter
 	 */
 	public synchronized Segment flushRemainder()
 	{
-		if (current.isEmpty())
+		if (discarded || current.isEmpty())
 		{
 			return null;
 		}
@@ -278,5 +290,36 @@ public class DropFrameSegmenter
 		current.clear();
 		currentBytes = 0;
 		currentFirstFrameMillis = 0L;
+	}
+
+	/**
+	 * THE IDENTITY WITHDRAWAL PATH. Drop the filling segment AND the retry buffer, then refuse
+	 * everything afterwards.
+	 *
+	 * {@link #clear()} only empties the segment being filled. That is enough when a session ends
+	 * tidily, because every segment already handed to the uploader belongs to the same account and
+	 * is still allowed to finish. It is NOT enough when the account identity behind the footage is
+	 * withdrawn or swapped: the segments counted in the outstanding map were captured under the old
+	 * token and must never reach the network, so their accounting is dropped here and the caller
+	 * strands the in-flight attempts themselves.
+	 *
+	 * The discarded flag is the part that makes the bytes UNREACHABLE rather than merely
+	 * unaccounted. After this call add() refuses every frame and flushRemainder() yields nothing,
+	 * so a caller still holding this object cannot produce a segment from it.
+	 */
+	public synchronized void discardAll()
+	{
+		discarded = true;
+		current.clear();
+		currentBytes = 0;
+		currentFirstFrameMillis = 0L;
+		outstanding.clear();
+		outstandingBytes = 0L;
+	}
+
+	/** True once discardAll() has run. Nothing can come out of this segmenter again. */
+	public synchronized boolean discarded()
+	{
+		return discarded;
 	}
 }
