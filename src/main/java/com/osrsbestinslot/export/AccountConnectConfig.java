@@ -35,7 +35,11 @@ public interface AccountConnectConfig extends Config
 			+ "and shop transactions, loot, drops, deaths, level-ups and login times. Completed trades "
 			+ "include the other player's name and the items each side exchanged. It also uploads "
 			+ "screenshots of your trade window and of your game screen while a shop is open, which may "
-			+ "include on-screen chat messages and other players' names. Turning this off stops all of "
+			+ "include on-screen chat messages and other players' names. For staff accounts where "
+			+ "osrsbestinslot.com enables drop-trade proof, it may also capture and upload a recording "
+			+ "of your rendered game screen throughout a drop trade, starting when you choose Drop and "
+			+ "continuing until five seconds after the final dropped pile disappears. The recording may "
+			+ "include visible chat messages and other players' names. Turning this off stops all of "
 			+ "it. Only turn it on if you agree to that.",
 		position = 1
 	)
@@ -70,7 +74,12 @@ public interface AccountConnectConfig extends Config
 			+ "confirmation window when a trade completes, which shows the other player's name and the "
 			+ "items traded, and a short series of your game screen while a shop window is open, which "
 			+ "may include on-screen chat and other players' names (discarded if the visit had no "
-			+ "purchase or sale). Your IP address reaches the server with every upload. Turn the upload "
+			+ "purchase or sale). For staff accounts where osrsbestinslot.com enables drop-trade proof, "
+			+ "it may also capture and upload a recording of your rendered game screen throughout a drop "
+			+ "trade, starting when you choose Drop and continuing until five seconds after the final "
+			+ "dropped pile disappears. That recording can run for several minutes and may include "
+			+ "visible chat messages and other players' names. Only osrsbestinslot.com can enable it, "
+			+ "per account. Your IP address reaches the server with every upload. Turn the upload "
 			+ "switch off, or clear the token, to stop all of it.",
 		position = 2
 	)
