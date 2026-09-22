@@ -156,6 +156,12 @@ public class EventDeliveryRetryTest
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 
 		waitFor(() -> buffered() == 1, "batch requeued after 429");
+		// WAIT ON THE BACKOFF, NOT THE BUFFER. requeueEvents refills pendingEvents FIRST and arms the
+		// backoff fields afterwards, so buffered()==1 can be true while eventRetryBackoffUntilMs is
+		// still 0. Reading it in that window measured -1789916708150ms and failed this arm, once, on
+		// 2026-09-20. Production is unaffected: requeueEvents clears eventPostInFlight last of all, and
+		// flushEvents refuses to send while that flag is set, so no early POST can escape.
+		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
 		// 42s from the server beats the 5s base rung of the ladder, and is under the 300s ceiling.
 		long waitMs = plugin.eventRetryBackoffUntilMs - plugin.nowMs();
 		assertTrue("Retry-After should push the next attempt out to ~42s, got " + waitMs + "ms",

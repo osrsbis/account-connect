@@ -181,7 +181,10 @@ public class StoreResetTimerTest
 	{
 		AccountConnectPlugin plugin = plugin();
 		plugin.setStoreToolsForTest(true);
-		seedVisit(plugin, new int[][]{{1191, 1}});		// our junk, one left
+		// The probe is seeded because the REAL sell path sets it: 1191 is the first item sold this
+		// visit, so it IS the probe. The old fixture left storeProbeItem at 0, which no live visit
+		// ever does. The assertion below is unchanged.
+		seedVisitWithProbe(plugin, 1191, new int[][]{{1191, 1}});	// our junk, one left
 		long before = System.currentTimeMillis();
 
 		plugin.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 1191 gone entirely
@@ -205,6 +208,69 @@ public class StoreResetTimerTest
 		plugin.handleShopStockChanged(shop(new int[][]{{1931, 5}}));	// normalised, NOT gone
 
 		assertEquals("6->5 is the shop normalising, not a tick", 0L, anchor(plugin));
+	}
+
+	/**
+	 * A MULTI-ITEM DELIVERY MUST NOT RE-ANCHOR ON THE MERCHANDISE.
+	 *
+	 * Reported from the field by Snaauz, 2026-09-19: "if we're delivering more than 1 item, the timer
+	 * messes up, it resets as soon as the first item is bought from the store."
+	 *
+	 * The visit sells a junk probe first, then the merchandise. A customer buying the merchandise out
+	 * takes its stock to zero, which is NOT a store tick — it is a purchase, and it happens at an
+	 * arbitrary moment in the cycle. Anchoring there throws the phase away and restarts the countdown
+	 * from the wrong place, so every later number is wrong for the rest of the visit.
+	 *
+	 * Only the PROBE reaching zero is the tick. storeProbeItem already records which item that is.
+	 */
+	@Test
+	public void aCustomerBuyingOutTheMerchandiseDoesNotAnchor() throws Exception
+	{
+		AccountConnectPlugin plugin = plugin();
+		plugin.setStoreToolsForTest(true);
+		seedVisitWithProbe(plugin, 111, new int[][]{{111, 1}, {999, 3}});	// probe + merchandise
+
+		plugin.handleShopStockChanged(shop(new int[][]{{111, 1}}));	// 999 bought out, probe still there
+
+		assertEquals("a customer clearing the merchandise is not a store tick", 0L, anchor(plugin));
+	}
+
+	/** The probe reaching zero still anchors while merchandise sits in the shop beside it. */
+	@Test
+	public void theProbeReachingZeroStillAnchorsInAMultiItemVisit() throws Exception
+	{
+		AccountConnectPlugin plugin = plugin();
+		plugin.setStoreToolsForTest(true);
+		seedVisitWithProbe(plugin, 111, new int[][]{{111, 1}, {999, 3}});
+		long before = System.currentTimeMillis();
+
+		plugin.handleShopStockChanged(shop(new int[][]{{999, 3}}));	// probe gone, merchandise untouched
+
+		assertTrue("the probe vanishing is still the tick", anchor(plugin) >= before);
+	}
+
+	/**
+	 * A visit with NO probe recorded must not anchor off any sold item at all.
+	 *
+	 * The degenerate arm: storeProbeItem is 0 until the first sell lands.
+	 *
+	 * ⚠ THIS ARM IS WEAK AND SAYS SO. Mutation-checked 2026-09-20: replacing the
+	 * `storeProbeItem != 0` guard with `true` leaves it GREEN, because handleShopStockChanged only
+	 * ever records ids above zero, so a lookup of id 0 returns 0 and the `had > 0` test fails anyway.
+	 * The guard is therefore belt-and-braces rather than load-bearing. It is kept because it states
+	 * the intent at the branch, and this arm is kept because it pins the degenerate state, but
+	 * neither should be read as proof that the guard is what stops the anchor.
+	 */
+	@Test
+	public void noProbeRecordedMeansNoAnchorFromAVanishingItem() throws Exception
+	{
+		AccountConnectPlugin plugin = plugin();
+		plugin.setStoreToolsForTest(true);
+		seedVisitWithProbe(plugin, 0, new int[][]{{999, 3}});		// stock present, probe never set
+
+		plugin.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 999 gone
+
+		assertEquals("no probe means no tick can be read from a vanishing item", 0L, anchor(plugin));
 	}
 
 	@Test
@@ -548,6 +614,13 @@ public class StoreResetTimerTest
 			}
 		});
 		return p;
+	}
+
+	/** Seed a visit AND pin which item was the junk probe (the first thing sold). */
+	private static void seedVisitWithProbe(AccountConnectPlugin p, int probe, int[][] stock) throws Exception
+	{
+		seedVisit(p, stock);
+		inject(p, "storeProbeItem", probe);
 	}
 
 	/** Put the plugin in a shop visit that has sold the given {item, qty} pairs into the shop. */

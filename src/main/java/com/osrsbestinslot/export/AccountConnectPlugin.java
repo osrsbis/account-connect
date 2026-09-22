@@ -514,6 +514,7 @@ public class AccountConnectPlugin extends Plugin
 		nearbyOverlay = null;
 		resetOverlay = null;
 		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
+		interruptDropSession();		// a shutdown mid-session still publishes what was captured
 		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
 		// not clear a plugin's infoboxes for it.
 		storeResetAnchorMs = 0;
@@ -1108,6 +1109,721 @@ public class AccountConnectPlugin extends Plugin
 	private volatile boolean clipFramePending;
 	/** Per-frame render callback, registered with DrawManager only while capturing. */
 	private final Runnable clipFrameTick = this::onClipFrameTick;
+
+	// ---- DROP-TRADE PROOF: session lifecycle, segmented capture, pile-centred candidates ----
+	//
+	// This is a SECOND consumer of the same frame-capture machinery the store path uses, not a rival
+	// pipeline. It shares the sampler, the encoder, the downscaler and the multipart upload idiom.
+	// What differs is WHAT is retained and WHEN: the store path keeps the newest 12 seconds in a
+	// ring, and a drop trade must keep the START (the drop itself) however long the customer takes.
+
+	/** Session state machine. Owns start, the 5-second tail, and which piles are still live. */
+	final DropSessionRecorder dropSession = new DropSessionRecorder();
+	/** Segmented frame buffer. Bounded to one segment in memory, never the whole session. */
+	private volatile DropFrameSegmenter dropSegmenter;
+	/** Armed while drop capture is running. Separate from clipCapturing so the two never interfere. */
+	private volatile boolean dropCapturing;
+	/** Set on a sampled tick to request one frame; cleared when that frame arrives. */
+	private volatile boolean dropFramePending;
+	/** Wall-clock (nanoTime) of the next drop frame to sample. */
+	private volatile long nextDropSampleAt;
+	/** Per-frame render callback, registered with DrawManager only while drop capture runs. */
+	private final Runnable dropFrameTick = this::onDropFrameTick;
+	/**
+	 * Adaptive rate controller: 8fps baseline, 30fps around the Drop, the spawn, the removal and a
+	 * new drop inside the tail. The sampler still runs at 30fps, because the two seconds BEFORE a
+	 * removal cannot be chosen after it happens; this decides which sampled frames survive.
+	 */
+	private volatile DropCaptureRate dropRate;
+	/** Segments uploaded for the CURRENT session, counted so the final manifest can be checked. */
+	private final java.util.concurrent.atomic.AtomicInteger dropSegmentsSent =
+		new java.util.concurrent.atomic.AtomicInteger();
+	/** Segments whose upload FAILED after every retry. A clip missing a segment must say so. */
+	private final java.util.concurrent.atomic.AtomicInteger dropSegmentsFailed =
+		new java.util.concurrent.atomic.AtomicInteger();
+	/**
+	 * Live piles of the CURRENT session, keyed exactly as DropSessionRecorder keys them.
+	 *
+	 * Maps a tracked pile to its session id and drop sequence, which is what lets a removal name the
+	 * drop that produced it. Without this a removal can only say "a pile of item X went", and the
+	 * manifest could not join one removal to one drop when a session drops the same item twice.
+	 */
+	private final java.util.Map<DroppedGroundItem, int[]> dropPileSeq =
+		java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>());
+	/** Session id each tracked pile belongs to. Parallel to dropPileSeq; separate to keep types simple. */
+	private final java.util.Map<DroppedGroundItem, String> dropPileSession =
+		java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>());
+	/** Sequence number assigned to the next drop ACTION, read when its pile finally spawns. */
+	private volatile int pendingDropSeq;
+	/** Session id at the moment of the last drop action, so a late spawn attaches to the right one. */
+	private volatile String pendingDropSessionId;
+
+	/** Frame rate for drop capture. Same sampler as the store path, so the same constant. */
+	static final int DROP_CLIP_FPS = CLIP_FPS;
+
+	/**
+	 * Drop-trade capture requires the same server grant the store overlays use.
+	 *
+	 * Deliberately NOT a config item: this plugin carries no user-facing settings (operator default
+	 * 2026-09-19), and a drop clip records other players standing on a tile, which the hub manifest
+	 * warning does not describe. Server-granting it keeps it off every ordinary player entirely.
+	 */
+	boolean dropProofEnabled()
+	{
+		return storeToolsEnabled() && (!serverClipsDisabled || dropProofDevOverride());
+	}
+
+	/**
+	 * LOCAL TEST OVERRIDE for the clips half of the drop-proof gate.
+	 *
+	 * Exactly the shape of storeToolsDevOverride above, and for the same reason: the grant arrives
+	 * from the backend, so the feature cannot be exercised at all on a non-staff token. Without this
+	 * the field rig cannot reach the capture path, because the server sends X-Clips: off to every
+	 * non-staff token and the rig's account is deliberately not staff.
+	 *
+	 * It is a JVM system property, so only whoever launches the client with an explicit flag can set
+	 * it. The Plugin Hub build launched through RuneLite.exe never has it. It grants NOTHING on the
+	 * server: /store-frames-ingest refuses a non-staff token with a benign 200-drop, so a local
+	 * override captures and uploads into a refusal. Only the local capture path is reachable.
+	 */
+	static boolean dropProofDevOverride()
+	{
+		String v = System.getProperty("osrsbis.dropproof");
+		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
+	}
+
+	/**
+	 * A Drop action was clicked. Starts or joins the session and arms capture.
+	 *
+	 * Called from the menu-click path, NOT from the drop EVENT, and that ordering is the requirement:
+	 * the event only exists once the inventory loss and the ground spawn agree, which is ticks after
+	 * the click. Starting there would cut the drop itself off the front of the clip.
+	 */
+	void onDropActionForProof()
+	{
+		if (!dropProofEnabled())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		boolean wasActive = dropSession.active();
+		boolean inTail = dropSession.stopPending();
+		String newId = wasActive ? null : newDropSessionId();
+		pendingDropSeq = dropSession.onDropAction(newId, now);
+		pendingDropSessionId = dropSession.sessionId();
+		if (!wasActive)
+		{
+			startDropCapture();
+		}
+		// A drop inside the tail is its own moment: it cancels the stop, so the clip must show it at
+		// full rate rather than at the baseline the tail had settled into.
+		markDropMoment(inTail ? DropCaptureRate.Event.TAIL_DROP : DropCaptureRate.Event.DROP_ACTION, now);
+	}
+
+	/**
+	 * Longest a session id may be on the wire. The server truncates at 24 and the staff-ops stitcher
+	 * puts the id inside a D1 `LIKE` pattern, which D1 refuses past 50 characters. Keeping the id
+	 * short at the source means no downstream limit has to be widened for it.
+	 */
+	static final int DROP_SESSION_ID_MAX = 24;
+
+	/**
+	 * Session id: time-ordered and unique per client, so two staff clients cannot collide.
+	 *
+	 * Hyphen-free and lower-case hex, because the id becomes part of an R2 key and the server's
+	 * sanitizer drops anything outside [a-z0-9_-]. An id that loses characters to sanitizing would
+	 * stop matching the manifest the stitcher joins on.
+	 */
+	private String newDropSessionId()
+	{
+		String id = Long.toHexString(System.currentTimeMillis())
+			+ Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(1 << 24));
+		return id.length() > DROP_SESSION_ID_MAX ? id.substring(0, DROP_SESSION_ID_MAX) : id;
+	}
+
+	/** Arm frame capture for a session. Idempotent. */
+	void startDropCapture()
+	{
+		if (dropCapturing || !dropProofEnabled())
+		{
+			return;
+		}
+		dropSegmenter = new DropFrameSegmenter();
+		dropRate = new DropCaptureRate();
+		dropSegmentsSent.set(0);
+		dropSegmentsFailed.set(0);
+		nextDropSampleAt = 0L;		// first render tick samples immediately
+		dropFramePending = false;
+		dropCapturing = true;
+		if (drawManager != null)
+		{
+			drawManager.registerEveryFrameListener(dropFrameTick);
+		}
+	}
+
+	/**
+	 * Wall-clock decimation for drop frames. Its own gate, so drop capture and store capture running
+	 * at the same time cannot steal each other's sample slots.
+	 */
+	boolean shouldSampleDropFrame(long nowNanos)
+	{
+		if (nowNanos < nextDropSampleAt)
+		{
+			return false;
+		}
+		final long period = 1_000_000_000L / DROP_CLIP_FPS;
+		long next = nextDropSampleAt + period;
+		nextDropSampleAt = (next <= nowNanos) ? nowNanos + period : next;
+		return true;
+	}
+
+	/** Render-thread frame hook. Encodes off-thread; at most one frame is ever in flight. */
+	void onDropFrameTick()
+	{
+		if (!dropCapturing || dropFramePending)
+		{
+			return;
+		}
+		if (!shouldSampleDropFrame(System.nanoTime()))
+		{
+			return;
+		}
+		dropFramePending = true;
+		drawManager.requestNextFrameListener(img ->
+		{
+			if (img == null)
+			{
+				dropFramePending = false;
+				return;
+			}
+			final BufferedImage scaled = downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH);
+			if (scaled == null)
+			{
+				dropFramePending = false;
+				return;
+			}
+			executor.submit(() ->
+			{
+				try
+				{
+					acceptDropFrame(encodeJpeg(scaled), System.currentTimeMillis());
+				}
+				finally
+				{
+					dropFramePending = false;
+				}
+			});
+		});
+	}
+
+	/**
+	 * Hand one encoded frame to the segmenter and upload the segment it completes.
+	 *
+	 * Package-private so the memory bound and the segment ordering can be driven under test with
+	 * synthetic bytes, with no client and no render loop.
+	 */
+	void acceptDropFrame(byte[] encoded, long nowMillis)
+	{
+		DropFrameSegmenter seg = dropSegmenter;
+		if (seg == null)
+		{
+			return;
+		}
+		DropCaptureRate rate = dropRate;
+		if (rate != null && rate.offer(encoded, nowMillis) != DropCaptureRate.Decision.KEEP)
+		{
+			return;		// held as pre-roll, or discarded by the baseline cadence
+		}
+		DropFrameSegmenter.Segment full = seg.add(encoded, nowMillis);
+		if (full != null)
+		{
+			uploadDropSegment(full, dropSession.sessionId());
+		}
+	}
+
+	/**
+	 * A moment worth full detail: start a 30fps burst and flush the held pre-roll into the clip.
+	 *
+	 * The pre-roll is committed FIRST and in order, so the two seconds leading up to the moment sit
+	 * before it in the clip rather than after.
+	 */
+	void markDropMoment(DropCaptureRate.Event event, long nowMillis)
+	{
+		DropCaptureRate rate = dropRate;
+		DropFrameSegmenter seg = dropSegmenter;
+		if (rate == null || seg == null)
+		{
+			return;
+		}
+		rate.onEvent(event, nowMillis);
+		for (byte[] held : rate.claimPreRoll(nowMillis))
+		{
+			DropFrameSegmenter.Segment full = seg.add(held, nowMillis);
+			if (full != null)
+			{
+				uploadDropSegment(full, dropSession.sessionId());
+			}
+		}
+	}
+
+	/**
+	 * Stop capture, flush the tail segment, and emit the session manifest event.
+	 *
+	 * The manifest is an EVENT, not a media row, so the join from clip to session to drops to
+	 * removals lives in the same event stream everything else does.
+	 */
+	void stopDropCapture(DropSessionRecorder.Outcome outcome, String sessionId, int dropCount,
+		long startedAtMillis)
+	{
+		if (!dropCapturing)
+		{
+			return;
+		}
+		dropCapturing = false;
+		if (drawManager != null)
+		{
+			drawManager.unregisterEveryFrameListener(dropFrameTick);
+		}
+		DropFrameSegmenter seg = dropSegmenter;
+		dropFramePending = false;
+		if (seg == null)
+		{
+			dropSegmenter = null;
+			dropRate = null;
+			return;
+		}
+		// THE MANIFEST IS EMITTED WHATEVER THE TAIL UPLOAD DOES.
+		//
+		// The manifest is the only record of how many segments a clip should have, so losing it to
+		// an upload fault turns a recoverable partial clip into an unreadable one: the stitcher
+		// cannot tell a complete clip from one missing its last segment. The upload is therefore
+		// wrapped, its failure is counted in segments_failed, and the manifest still goes out.
+		try
+		{
+			DropFrameSegmenter.Segment tail = seg.flushRemainder();
+			if (tail != null)
+			{
+				uploadDropSegment(tail, sessionId);
+			}
+		}
+		catch (RuntimeException e)
+		{
+			dropSegmentsFailed.incrementAndGet();
+			log.debug("OSRS BiS drop tail segment failed to submit", e);
+		}
+		emitDropSessionManifest(seg, outcome, sessionId, dropCount, startedAtMillis);
+		// Cleared AFTER the manifest: emitDropSessionManifest reads the rate controller's counts.
+		dropSegmenter = null;
+		DropCaptureRate done = dropRate;
+		dropRate = null;
+		if (done != null)
+		{
+			done.clear();
+		}
+	}
+
+	/**
+	 * The manifest row: everything needed to join a stitched clip back to what it shows.
+	 *
+	 * segments is the count the stitcher must find. A clip assembled from fewer is INCOMPLETE and the
+	 * surface says so rather than playing a gap as if it were the footage.
+	 */
+	private void emitDropSessionManifest(DropFrameSegmenter seg, DropSessionRecorder.Outcome outcome,
+		String sessionId, int dropCount, long startedAtMillis)
+	{
+		if (sessionId == null)
+		{
+			return;
+		}
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("drop_session_id", sessionId);
+		fields.put("outcome", outcome == DropSessionRecorder.Outcome.COMPLETE ? "COMPLETE" : "INTERRUPTED");
+		fields.put("drops", dropCount);
+		fields.put("started_at", startedAtMillis);
+		fields.put("ended_at", System.currentTimeMillis());
+		fields.put("segments", seg.segmentCount());
+		// ⚠ THESE TWO COUNTS ARE A SNAPSHOT, NOT A RECONCILIATION, and the manifest says so.
+		//
+		// Uploads are async: stopDropCapture submits the last segments and emits this row in the
+		// same breath, so the in-flight ones have neither succeeded nor failed yet. Measured live
+		// 2026-09-20 on a real session: segments 5, uploaded 3, failed 0 — which does not add up
+		// and read like two lost segments when both were simply still on the wire.
+		//
+		// Waiting here is the wrong fix. It would block the client thread on a network round trip,
+		// and a client that logs out immediately after a trade would publish nothing at all. So the
+		// row states what it knows AT EMIT TIME and names the gap explicitly. `segments` is the
+		// declared total and is authoritative; the stitcher counts what actually arrived in R2 and
+		// compares against THAT, which is the only count that can be complete.
+		fields.put("segments_uploaded_at_emit", dropSegmentsSent.get());
+		fields.put("segments_failed_at_emit", dropSegmentsFailed.get());
+		int inFlight = seg.segmentCount() - dropSegmentsSent.get() - dropSegmentsFailed.get();
+		if (inFlight > 0)
+		{
+			fields.put("segments_in_flight_at_emit", inFlight);
+		}
+		fields.put("frames", seg.acceptedFrames());
+		fields.put("frames_dropped", seg.rejectedFrames());
+		fields.put("bytes", seg.sessionBytes());
+		// The memory claim, measured rather than asserted: the most this client ever held at once,
+		// and how many segments were still unacknowledged when the manifest was written.
+		fields.put("peak_held_bytes", seg.peakHeldBytes());
+		fields.put("unsettled_at_emit", seg.unsettledSegments());
+		// ADAPTIVE RATE, reported so a viewer knows what they are watching. `fps` is the SAMPLE
+		// rate the bursts play at; `baseline_fps` is the continuous rate between them. A stitcher
+		// that assumed one flat rate would play the baseline stretches too fast.
+		fields.put("fps", DROP_CLIP_FPS);
+		fields.put("baseline_fps", DropCaptureRate.BASELINE_FPS);
+		DropCaptureRate rate = dropRate;
+		if (rate != null)
+		{
+			fields.put("frames_baseline", rate.keptBaseline());
+			fields.put("frames_burst", rate.keptBurst());
+			fields.put("bursts", rate.bursts());
+		}
+		fields.put("media_kind", DROP_MEDIA_KIND);
+		if (seg.truncated())
+		{
+			// FAIL VISIBLY (operator decision 2026-09-20). Truncation is no longer an accepted
+			// outcome: the adaptive rate exists so a long session fits. Reaching the budget anyway
+			// means the sizing assumption is wrong for this session, so the row says the coverage
+			// is INCOMPLETE in as many words, and the stitcher refuses to call the clip complete.
+			fields.put("truncated", true);
+			fields.put("coverage", "INCOMPLETE_BUDGET_EXCEEDED");
+		}
+		else
+		{
+			fields.put("coverage", "FULL");
+		}
+		emitEvent("drop_trade_clip", fields);
+	}
+
+	/**
+	 * Media kind for drop footage. DISTINCT from the store path's `store_frames`, deliberately: a
+	 * drop clip is not a shop visit, and the collector, the stitcher and the staff surfaces all key
+	 * off this string to tell them apart.
+	 */
+	static final String DROP_MEDIA_KIND = "drop_frames";
+
+	/** Upload retries for one segment. A dropped segment is a hole in the evidence, so it is retried. */
+	static final int DROP_SEGMENT_RETRIES = 3;
+
+	/**
+	 * POST one segment to the frames ingest, with retries.
+	 *
+	 * The segment index and the session id travel as form fields, so reassembly is deterministic and
+	 * does not infer order from timestamps the way the store path must.
+	 */
+	/**
+	 * The server stored a segment. Release its bytes from the retry buffer.
+	 *
+	 * Called from the OkHttp callback thread, and the segmenter is synchronized, so this is safe.
+	 * It reads the field fresh: a session that has already ended has nulled it, and a late
+	 * acknowledgement for a finished session must not resurrect anything.
+	 */
+	private void acknowledgeDropSegment(int index)
+	{
+		DropFrameSegmenter seg = dropSegmenter;
+		if (seg != null)
+		{
+			seg.segmentAcknowledged(index);
+		}
+	}
+
+	/** A segment will never be stored. Release its bytes too, and count it as failed elsewhere. */
+	private void abandonDropSegment(int index)
+	{
+		DropFrameSegmenter seg = dropSegmenter;
+		if (seg != null)
+		{
+			seg.segmentAbandoned(index);
+		}
+	}
+
+	private void uploadDropSegment(DropFrameSegmenter.Segment segment, String sessionId)
+	{
+		if (segment == null)
+		{
+			return;
+		}
+		// Every early return below strands the segment's bytes in the retry buffer unless they are
+		// released. That is the whole failure this budget change could introduce: a session that
+		// cannot upload at all would fill the buffer with segments nobody is waiting on and stop
+		// capturing, which is exactly the truncation the change exists to remove.
+		if (!uploadAllowed() || segment.frames.isEmpty() || sessionId == null)
+		{
+			abandonDropSegment(segment.index);
+			return;
+		}
+		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		if (!token.matches("^[a-f0-9]{32}$"))
+		{
+			abandonDropSegment(segment.index);
+			return;
+		}
+		final String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+		if (executor == null)
+		{
+			// No executor means the segment cannot be sent at all. COUNT it rather than throwing:
+			// a throw here would propagate out of stopDropCapture and kill the manifest, so an
+			// upload fault would also erase the record of what was captured.
+			dropSegmentsFailed.incrementAndGet();
+			abandonDropSegment(segment.index);
+			return;
+		}
+		executor.submit(() -> postDropSegment(base, token, segment, sessionId, 0));
+	}
+
+	/** One attempt, re-enqueueing itself on failure up to DROP_SEGMENT_RETRIES. */
+	private void postDropSegment(String base, String token, DropFrameSegmenter.Segment segment,
+		String sessionId, int attempt)
+	{
+		if (!uploadAllowed())
+		{
+			// The user turned uploads off mid-session. Nothing more will be sent, so release the
+			// bytes rather than leaving them held for the rest of the session.
+			abandonDropSegment(segment.index);
+			return;
+		}
+		Request request = new Request.Builder()
+			.url(base + "/store-frames-ingest")
+			.post(buildDropSegmentBody(segment, token, sessionId))
+			.build();
+		OkHttpClient uploadClient = okHttpClient.newBuilder()
+			.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.build();
+		uploadClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				retryOrGiveUp(e == null ? "io" : String.valueOf(e.getMessage()));
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try
+				{
+					if (response.isSuccessful())
+					{
+						dropSegmentsSent.incrementAndGet();
+						acknowledgeDropSegment(segment.index);
+						return;
+					}
+					// A 4xx other than 429 will fail identically forever, so it is not retried.
+					int code = response.code();
+					if (code == 429 || code >= 500)
+					{
+						retryOrGiveUp("http " + code);
+					}
+					else
+					{
+						dropSegmentsFailed.incrementAndGet();
+						abandonDropSegment(segment.index);
+						log.debug("OSRS BiS drop segment {} rejected: {}", segment.index, code);
+					}
+				}
+				finally
+				{
+					response.close();
+				}
+			}
+
+			private void retryOrGiveUp(String why)
+			{
+				if (attempt + 1 >= DROP_SEGMENT_RETRIES)
+				{
+					dropSegmentsFailed.incrementAndGet();
+					abandonDropSegment(segment.index);
+					log.debug("OSRS BiS drop segment {} lost after {} attempts: {}",
+						segment.index, DROP_SEGMENT_RETRIES, why);
+					return;
+				}
+				executor.submit(() -> postDropSegment(base, token, segment, sessionId, attempt + 1));
+			}
+		});
+	}
+
+	/**
+	 * Multipart body for a drop segment.
+	 *
+	 * Same field names the store path uses for the frames themselves, so the server's existing parser
+	 * handles them unchanged. The three EXTRA fields are what make a drop clip reassemble
+	 * deterministically: the session id, the segment index and the media kind.
+	 */
+	static okhttp3.MultipartBody buildDropSegmentBody(DropFrameSegmenter.Segment segment, String token,
+		String sessionId)
+	{
+		MultipartBody.Builder builder = new MultipartBody.Builder()
+			.setType(MultipartBody.FORM)
+			.addFormDataPart("token", token)
+			.addFormDataPart("captured_at", Long.toString(segment.firstFrameMillis / 1000L))
+			.addFormDataPart("fps", Integer.toString(DROP_CLIP_FPS))
+			.addFormDataPart("kind", DROP_MEDIA_KIND)
+			.addFormDataPart("drop_session_id", sessionId)
+			.addFormDataPart("segment_index", Integer.toString(segment.index));
+		for (int i = 0; i < segment.frames.size(); i++)
+		{
+			builder.addFormDataPart("frames[]", String.format("frame-%03d.jpg", i),
+				RequestBody.create(JPEG, segment.frames.get(i)));
+		}
+		builder.addFormDataPart("frame_count", Integer.toString(segment.frames.size()));
+		// THE SEGMENT'S OWN SIZE, distinct from this attempt's size. Every attempt at this index
+		// carries the same Segment object, so this value never changes between a first attempt and
+		// a retry. The server refuses an attempt whose frame count disagrees with it, which is what
+		// stops a short retry from silently replacing a complete attempt.
+		builder.addFormDataPart("segment_frame_total", Integer.toString(segment.frameCount()));
+		return builder.build();
+	}
+
+	/**
+	 * Register a freshly spawned pile with the running session.
+	 *
+	 * Called from the ground-spawn path, where the pile first exists. The sequence number comes from
+	 * the drop ACTION that armed it, so a removal can name the exact drop even when a session drops
+	 * the same item onto the same tile twice.
+	 */
+	void attachPileToDropSession(DroppedGroundItem g)
+	{
+		if (g == null || !dropSession.active())
+		{
+			return;
+		}
+		String sid = pendingDropSessionId;
+		int seq = pendingDropSeq;
+		if (sid == null || seq <= 0)
+		{
+			return;
+		}
+		dropPileSeq.put(g, new int[]{seq});
+		dropPileSession.put(g, sid);
+		dropSession.pileActive(DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq));
+		markDropMoment(DropCaptureRate.Event.PILE_SPAWN, System.currentTimeMillis());
+	}
+
+	/** The drop sequence a tracked pile belongs to, or -1 when it is not part of a session. */
+	int dropSeqForPile(DroppedGroundItem g)
+	{
+		int[] v = dropPileSeq.get(g);
+		return v == null ? -1 : v[0];
+	}
+
+	/** The session id a tracked pile belongs to, or null. */
+	String dropSessionForPile(DroppedGroundItem g)
+	{
+		return dropPileSession.get(g);
+	}
+
+	/**
+	 * A tracked pile left the ground. Tells the session, which arms the 5-second tail when it was
+	 * the last one.
+	 */
+	void releasePileFromDropSession(DroppedGroundItem g)
+	{
+		if (g == null)
+		{
+			return;
+		}
+		int seq = dropSeqForPile(g);
+		dropPileSeq.remove(g);
+		dropPileSession.remove(g);
+		if (seq > 0)
+		{
+			// Mark the moment FIRST. The pre-roll it flushes is the two seconds leading up to the
+			// pile vanishing, which is the single most important stretch in the whole clip: it is
+			// where a player walks onto the tile.
+			markDropMoment(DropCaptureRate.Event.PILE_REMOVED, System.currentTimeMillis());
+			dropSession.pileRemoved(
+				DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), System.currentTimeMillis());
+		}
+	}
+
+	/**
+	 * Per-tick session poll: stop when the tail has elapsed.
+	 *
+	 * Reads the session's identity BEFORE finishing it, because finish() clears the state the
+	 * manifest needs.
+	 */
+	void pollDropSession()
+	{
+		if (!dropSession.active())
+		{
+			return;
+		}
+		if (!dropSession.shouldStop(System.currentTimeMillis()))
+		{
+			return;
+		}
+		String sid = dropSession.sessionId();
+		int drops = dropSession.dropCount();
+		long started = dropSession.startedAtMillis();
+		DropSessionRecorder.Outcome outcome = dropSession.finish();
+		dropPileSeq.clear();
+		dropPileSession.clear();
+		pendingDropSessionId = null;
+		pendingDropSeq = 0;
+		stopDropCapture(outcome, sid, drops, started);
+	}
+
+	/**
+	 * A hop, logout, disconnect or scene reload happened mid-session.
+	 *
+	 * The footage is uploaded and the manifest says INTERRUPTED. Discarding it would delete the
+	 * evidence for exactly the sessions somebody will need to look at.
+	 */
+	void interruptDropSession()
+	{
+		if (!dropSession.active())
+		{
+			return;
+		}
+		String sid = dropSession.sessionId();
+		int drops = dropSession.dropCount();
+		long started = dropSession.startedAtMillis();
+		dropSession.interrupt();
+		DropSessionRecorder.Outcome outcome = dropSession.finish();
+		dropPileSeq.clear();
+		dropPileSession.clear();
+		pendingDropSessionId = null;
+		pendingDropSeq = 0;
+		stopDropCapture(outcome, sid, drops, started);
+	}
+
+	/**
+	 * Players observed right now, as plain values, for pile-centred candidate resolution.
+	 *
+	 * Separate from nearbyPlayersSnapshot, which measures from OUR character. In a drop trade the
+	 * staff member routinely walks away before the customer arrives, so a distance measured from us
+	 * says nothing about who was on the pile.
+	 */
+	java.util.List<DropCandidates.Observed> observedPlayers()
+	{
+		java.util.List<DropCandidates.Observed> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		java.util.List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return out;
+		}
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty()
+				|| p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			WorldPoint loc = p.getWorldLocation();
+			out.add(new DropCandidates.Observed(Text.removeTags(p.getName()),
+				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel()));
+		}
+		return out;
+	}
 
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
@@ -2154,6 +2870,7 @@ public class AccountConnectPlugin extends Plugin
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
+				interruptDropSession();	// a scene reload ends the session as INTERRUPTED; footage still uploads
 				break;
 			case HOPPING:
 			case LOGGING_IN:
@@ -2164,6 +2881,7 @@ public class AccountConnectPlugin extends Plugin
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();		// ground state is per world AND per account
+				interruptDropSession();	// a hop ends the session as INTERRUPTED; footage still uploads
 				shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				storeResetAnchorMs = 0;	// phase is per-visit: never carry it across accounts
@@ -2182,6 +2900,7 @@ public class AccountConnectPlugin extends Plugin
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
+				interruptDropSession();	// a disconnect ends the session as INTERRUPTED; footage still uploads
 				// a feed-death then instant disconnect: record the death, but the containers here are null or
 				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
 				resolveDeathPending(null, false);
@@ -2195,6 +2914,7 @@ public class AccountConnectPlugin extends Plugin
 				groundObservationUnreliable = true;
 				clearGroundDrops();
 				clearPendingRemovals();
+				interruptDropSession();	// a logout ends the session as INTERRUPTED; footage still uploads
 				resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				flushPendingSnapshot();
@@ -2286,6 +3006,7 @@ public class AccountConnectPlugin extends Plugin
 		if (client != null)
 		{
 			settlePendingRemovals(client.getTickCount(), true, false);
+			pollDropSession();	// the 5-second tail after the last pile, checked once per tick
 		}
 	}
 
@@ -3325,23 +4046,22 @@ public class AccountConnectPlugin extends Plugin
 		// Pot into Varrock GS raised it 5->6 and the shop normalised it back to 5 in 1.2-5.4 SECONDS,
 		// never touching the cycle. So a sold item falling to a NON-ZERO number is the shop
 		// normalising its own goods and means nothing; falling to ZERO is the tick.
-		if (!soldThisVisit.isEmpty())
+		// ONLY THE PROBE, never the merchandise. Reported from the field by Snaauz on 2026-09-19:
+		// delivering more than one item made the timer reset as soon as the first item was bought.
+		// A delivery visit sells the junk probe and then the goods, so soldThisVisit holds both. A
+		// customer buying the GOODS out takes their stock to zero at an arbitrary moment in the cycle,
+		// which is a purchase and not a tick. Anchoring there threw the phase away and every number
+		// after it was wrong. storeProbeItem already records the first item sold, which is the junk
+		// whose decay IS the cycle, so read that one item and no other.
+		if (storeProbeItem != 0)
 		{
-			for (Integer sold : soldThisVisit)
+			int had = shopStock.getOrDefault(storeProbeItem, 0);
+			int has = now.getOrDefault(storeProbeItem, 0);
+			if (had > 0 && has == 0)
 			{
-				if (sold == null)
-				{
-					continue;
-				}
-				int had = shopStock.getOrDefault(sold, 0);
-				int has = now.getOrDefault(sold, 0);
-				if (had > 0 && has == 0)
-				{
-					storeResetAnchorMs = nowMs;
-					traceLine("ANCHOR sold-item-vanished item=" + sold + " " + had + "->0");
-					showResetTimer();
-					break;
-				}
+				storeResetAnchorMs = nowMs;
+				traceLine("ANCHOR probe-vanished item=" + storeProbeItem + " " + had + "->0");
+				showResetTimer();
 			}
 		}
 
@@ -3638,6 +4358,13 @@ public class AccountConnectPlugin extends Plugin
 			return;	// no resolvable item id (e.g. alch spell-on-item may report -1) — skip rather than guess
 		}
 		String base = action.startsWith("alch") ? "alch" : action;
+		if ("drop".equals(base))
+		{
+			// START THE CLIP AT THE CLICK, not at the drop EVENT. The event only exists once the
+			// inventory loss and the ground spawn agree, which is ticks later, so starting there
+			// would cut the drop itself off the front of the evidence.
+			onDropActionForProof();
+		}
 		String spell = "alch_high".equals(action) ? "high" : ("alch_low".equals(action) ? "low" : null);
 		ItemContainer inv = client == null ? null : client.getItemContainer(InventoryID.INVENTORY);
 		long beforeCount = countItem(inv, item);
@@ -3857,6 +4584,14 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("location", p.location);
 		}
 		fields.put("wilderness", p.wilderness != null && p.wilderness);
+		// SESSION LINKAGE on the drop row itself. drop_seq is what lets the manifest join one drop
+		// to one removal when a session drops the same item, same quantity, onto the same tile twice
+		// — which is the ordinary shape of a drop trade, not an edge case.
+		if (dropSession.active() && pendingDropSessionId != null)
+		{
+			fields.put("drop_session_id", pendingDropSessionId);
+			fields.put("drop_seq", pendingDropSeq);
+		}
 		emitEvent("drop", fields);
 	}
 
@@ -3946,8 +4681,10 @@ public class AccountConnectPlugin extends Plugin
 			{
 				groundDrops.pollFirst();
 			}
-			groundDrops.addLast(
-				new DroppedGroundItem(item, qty, x, y, plane, location, dropTick, despawnTick));
+			DroppedGroundItem g =
+				new DroppedGroundItem(item, qty, x, y, plane, location, dropTick, despawnTick);
+			groundDrops.addLast(g);
+			attachPileToDropSession(g);
 		}
 	}
 
@@ -4343,6 +5080,23 @@ public class AccountConnectPlugin extends Plugin
 		fields.put("cause", cause);
 		// Stated on every row so no downstream reader has to know this rule: the taker is never observable.
 		fields.put("recipient", "UNKNOWN");
+		// DROP-SESSION LINKAGE. Written on every removal of a session pile, whatever the cause, so a
+		// self-pickup and a despawn join the manifest exactly like an early removal does. A removal
+		// that carries no session id simply predates the feature or happened outside a session.
+		String dropSid = dropSessionForPile(g);
+		int dropSeq = dropSeqForPile(g);
+		if (dropSid != null)
+		{
+			fields.put("drop_session_id", dropSid);
+			fields.put("drop_seq", dropSeq);
+		}
+		// The pile's own tile, on every row. A reader must be able to locate the pile without
+		// knowing where our character stood, and the candidate offsets below are relative to THIS.
+		Map<String, Object> tile = new LinkedHashMap<>();
+		tile.put("x", g.x);
+		tile.put("y", g.y);
+		tile.put("plane", g.plane);
+		fields.put("tile", tile);
 		// Who was standing here when an early removal happened. The pickup itself runs in another
 		// player's client, so this is EVIDENCE, never an answer: it goes out under the same
 		// `taken_by_candidates` inference field the store handoff uses, for the server-side resolver
@@ -4351,13 +5105,39 @@ public class AccountConnectPlugin extends Plugin
 		// The key is absent when nobody is around, matching the store path, so readers keep one rule.
 		if ("removed_early".equals(cause))
 		{
-			List<Map<String, Object>> present = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+			// PILE-CENTRED, not player-centred. The old snapshot measured from OUR character, which
+			// answers the wrong question: in a drop trade the staff member walks off before the
+			// customer arrives, so a player at distance 0 from us is not on the pile and a player on
+			// the pile can be many tiles away. Measured from the pile's own tile instead.
+			List<Map<String, Object>> present =
+				DropCandidates.candidatesAt(observedPlayers(), g.x, g.y, g.plane);
 			if (!present.isEmpty())
 			{
 				fields.put("taken_by_candidates", present);
 			}
+			// Resolve ONLY on exactly one player standing on the pile's tile. Two on it is
+			// AMBIGUOUS, an empty tile is UNKNOWN, and neither ever names anybody. The Take itself
+			// happens in the other client and nothing in our stream proves it.
+			String resolved = DropCandidates.resolveCounterparty(present);
+			String status = DropCandidates.statusFor(present, resolved);
+			fields.put("counterparty_status", status);
+			if (resolved != null)
+			{
+				// `counterparty_inferred`, never `counterparty`. The trade path's `counterparty` is
+				// read from the trade window and IS the other party; this one is an inference from
+				// where somebody stood, and the field name has to keep those apart.
+				fields.put("counterparty_inferred", resolved);
+			}
+		}
+		else
+		{
+			// Self-pickup, despawn timer and unknown all carry the status too, so a reader never has
+			// to infer "no status means nobody asked" from an absent key.
+			fields.put("counterparty_status", DropCandidates.STATUS_UNKNOWN);
 		}
 		emitEvent("ground_removed", fields);
+		// Tell the session this pile is gone. When it is the last one, the 5-second tail arms.
+		releasePileFromDropSession(g);
 	}
 
 	/**
