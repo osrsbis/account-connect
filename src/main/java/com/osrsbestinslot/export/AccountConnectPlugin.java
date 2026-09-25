@@ -229,10 +229,17 @@ public class AccountConnectPlugin extends Plugin
 	// (no trade / GE / store), so this diff is the ONLY event-plane record of what left or entered the
 	// bank — the snapshot plane carries only periodic full state, never the individual move. Own account.
 	private Map<Integer, Long> bankAtOpen;
+	// True while the bank is open but its container was empty or unloaded at open (the first open after a
+	// login can precede the bank contents). Diffing a real bank against that empty state would report the
+	// whole bank as bank_deposit, so no baseline is taken then. The first BANK container change while
+	// this is set becomes the baseline, and the close diffs against it.
+	private boolean bankBaselinePending;
 
 	// Equipment change capture: last-seen worn-item counts, diffed on each WORN-container change to emit
-	// equip_change {equipped[], unequipped[]}. The first change after a login only baselines, so a normal
-	// gear load does not emit a spurious full-kit equip. Reset on hop and relog.
+	// equip_change {equipped[], unequipped[]}. Only a change in the SET of worn item ids emits: a quantity
+	// change of an item still worn (ammo spent on every attack) is not an equipment change and emits
+	// nothing, else one ranger floods the event ingest. The first change after a login only baselines, so
+	// a normal gear load does not emit a spurious full-kit equip. Reset on hop and relog.
 	private Map<Integer, Long> equipLast;
 
 	// World-hop capture: the last world we were on, 0 when unknown. WorldChanged after a hop emits
@@ -240,13 +247,14 @@ public class AccountConnectPlugin extends Plugin
 	private int lastWorld;
 
 	// XP-gain capture (coalesced): accumulate per-skill xp deltas from StatChanged, which fires on every
-	// drop, and flush them as ONE xp_gain event every XP_FLUSH_TICKS and on logout, so per-action xp does
-	// not flood the event plane. lastSkillXp = last-seen total per skill (the baseline). Reset per account
+	// drop, and flush them as ONE xp_gain event every XP_FLUSH_TICKS (5 minutes) and at logout, world hop
+	// and disconnect, so per-action xp does not flood the event plane: at most 12 timed flushes per hour of
+	// training plus one at session end, and no accumulated xp is dropped at a session boundary. lastSkillXp = last-seen total per skill (the baseline). Reset per account
 	// on hop, relog and logout.
 	private final Map<String, Integer> lastSkillXp = new LinkedHashMap<>();
 	private final Map<String, Long> xpAccum = new LinkedHashMap<>();
 	private int xpFlushTicks;
-	private static final int XP_FLUSH_TICKS = 25;	// ~15s coalescing window
+	static final int XP_FLUSH_TICKS = 500;	// 5 minutes at 0.6s per tick
 	// Region capture: emit region {from,to} only when the map region changes, which coalesces naturally.
 	private Integer lastRegion;
 
@@ -631,6 +639,8 @@ public class AccountConnectPlugin extends Plugin
 	private static final int INVENTORY_CONTAINER_ID = net.runelite.api.gameval.InventoryID.INV;
 	/** gameval WORN container id — the equipment container, diffed to emit equip_change. */
 	private static final int EQUIP_CONTAINER_ID = net.runelite.api.gameval.InventoryID.WORN;
+	/** gameval BANK container id: its first contents after an empty open become the bank-move baseline. */
+	private static final int BANK_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BANK;
 
 	/** An armed store buy/sell awaiting its inventory-change resolution. coinsBefore is a long: bank-stack totals overflow int. */
 	static final class StorePending
@@ -3705,7 +3715,10 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				bankAtOpen = null;	// a bank left open across a hop/relog must not diff against another account
+				bankBaselinePending = false;
 				equipLast = null;	// re-baseline equipment on the next change so a relog emits no full-kit diff
+				flushXpGain();		// a hop ends the xp window: emit what accumulated, never drop it
+				xpFlushTicks = 0;
 				lastSkillXp.clear();	// xp deltas re-baseline per account
 				xpAccum.clear();
 				lastRegion = null;
@@ -3730,7 +3743,10 @@ public class AccountConnectPlugin extends Plugin
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				bankAtOpen = null;	// a bank open at disconnect must not diff against the next session
+				bankBaselinePending = false;
 				equipLast = null;	// re-baseline equipment on reconnect
+				flushXpGain();		// a disconnect ends the xp window: emit what accumulated, never drop it
+				xpFlushTicks = 0;
 				lastSkillXp.clear();
 				xpAccum.clear();
 				lastRegion = null;
@@ -3750,8 +3766,10 @@ public class AccountConnectPlugin extends Plugin
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				bankAtOpen = null;	// a bank open at logout must not diff against the next session
+				bankBaselinePending = false;
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
+				xpFlushTicks = 0;
 				flushFirehose();	// flush batched firehose rows before the session ends
 				lastSkillXp.clear();
 				xpAccum.clear();
@@ -3807,6 +3825,10 @@ public class AccountConnectPlugin extends Plugin
 		{
 			handleEquipmentChanged(event.getItemContainer());
 		}
+		if (event.getContainerId() == BANK_CONTAINER_ID)
+		{
+			handleBankContainerChanged(event.getItemContainer());
+		}
 	}
 
 	/**
@@ -3828,18 +3850,15 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;		// first observation this session is a baseline, no event
 		}
+		// Diff the id SETS only. A quantity change of an id worn before and after (ammo shot, a dart
+		// thrown, a stack topped up) is not an equip/unequip and emits nothing.
 		List<Map<String, Object>> equipped = new ArrayList<>();
 		List<Map<String, Object>> unequipped = new ArrayList<>();
 		for (Map.Entry<Integer, Long> e : now.entrySet())
 		{
-			long d = e.getValue() - before.getOrDefault(e.getKey(), 0L);
-			if (d > 0)
+			if (!before.containsKey(e.getKey()))
 			{
-				equipped.add(itemMapLong(e.getKey(), d));
-			}
-			else if (d < 0)
-			{
-				unequipped.add(itemMapLong(e.getKey(), -d));
+				equipped.add(itemMapLong(e.getKey(), e.getValue()));
 			}
 		}
 		for (Map.Entry<Integer, Long> e : before.entrySet())
@@ -3922,7 +3941,7 @@ public class AccountConnectPlugin extends Plugin
 			if (++xpFlushTicks >= XP_FLUSH_TICKS)
 			{
 				xpFlushTicks = 0;
-				flushXpGain();		// coalesced xp_gain every ~15s
+				flushXpGain();		// coalesced xp_gain every 5 minutes
 			}
 			checkRegionChange();	// region {from,to} on map-region change
 			if (maxCapture())
@@ -4087,7 +4106,28 @@ public class AccountConnectPlugin extends Plugin
 			// The bank is readable here — the same read forceSendSnapshot just used to set bank_synced.
 			Map<Integer, Long> b = new LinkedHashMap<>();
 			addContainerCounts(b, client.getItemContainer(InventoryID.BANK));
+			// An empty or unloaded container is not a baseline: wait for the first bank contents instead.
+			bankAtOpen = b.isEmpty() ? null : b;
+			bankBaselinePending = b.isEmpty();
+		}
+	}
+
+	/**
+	 * The bank contents arrived after an open whose container was empty or unloaded: take this first
+	 * populated state as the baseline. No event is emitted here. The close diffs against this baseline.
+	 */
+	void handleBankContainerChanged(ItemContainer bank)
+	{
+		if (!bankBaselinePending)
+		{
+			return;
+		}
+		Map<Integer, Long> b = new LinkedHashMap<>();
+		addContainerCounts(b, bank);
+		if (!b.isEmpty())
+		{
 			bankAtOpen = b;
+			bankBaselinePending = false;
 		}
 	}
 
@@ -4105,6 +4145,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<Integer, Long> before = bankAtOpen;
 		bankAtOpen = null;
+		bankBaselinePending = false;
 		if (before == null || !activityLogActive())
 		{
 			return;
