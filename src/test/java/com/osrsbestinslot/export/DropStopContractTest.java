@@ -1270,6 +1270,235 @@ public class DropStopContractTest
 			(Boolean) field(p, "dropCapturing"));
 	}
 
+	// ================================================================
+	// CASES 25-26 — ROUND 4, FINDING A: A QUEUED RETRY AFTER A WITHDRAWN GRANT
+	//
+	// THE DEFECT. postDropSegment re-checked uploadAllowed() and the token on every attempt and
+	// never asked dropProofEnabled(). uploadAllowed() is the user's own switch plus a well-formed
+	// token, and neither moves when the OPERATOR withdraws drop proof. So the guard set was
+	// INCONSISTENT: the user switch stopped a queued retry, a token swap stopped it, and the
+	// operator's own documented "turn it off" did not.
+	//
+	// WHY IT MATTERS. discardDropSessionOnWithdrawnConsent cannot reach a Runnable already sitting
+	// on the executor: the closure holds its own Segment with the frame bytes inside it. Retries
+	// run DROP_SEGMENT_RETRIES times at a CLIP_UPLOAD_TIMEOUT_SECONDS call timeout each, so the
+	// window is minutes. The server stores the late POST, because /store-frames-ingest authorizes
+	// on the staff token and never reads drop_proof.
+	//
+	// THE PROBE. The rig injects no OkHttp client, so an attempt that REACHES the network throws a
+	// NullPointerException. postDropSegmentReachedTheNetwork reports that. Every arm below is
+	// two-sided: without the live control a fix that broke all drop uploads would look identical.
+	// ================================================================
+
+	/** A real segment, and a plugin whose gates are all open, ready for one upload attempt. */
+	private static DropFrameSegmenter.Segment segmentForUpload()
+	{
+		return takeOneSegment();
+	}
+
+	// ===== CASE 25 — the operator withdraws the grant mid-retry =====
+
+	@Test
+	public void case25_aQueuedRetryIsStrandedAfterTheOperatorWithdrawsTheGrant() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		DropFrameSegmenter.Segment seg = segmentForUpload();
+
+		// THE LIVE CONTROL FIRST. With the grant still held, the identical attempt must reach the
+		// network, or every assertion below passes against a plugin that simply cannot upload.
+		assertTrue("CONTROL: with the grant live the retry must reach the network",
+			postDropSegmentReachedTheNetwork(p, TOKEN, seg));
+
+		// The operator sets drop_proof: false. Nothing else changes: the user's switch is still on
+		// and the token is unchanged and still the one the bytes were captured under.
+		p.setDropProofRolloutForTest(false);
+		assertTrue("the user's own switch is untouched", p.uploadAllowed());
+		assertEquals("and so is the token", TOKEN, p.currentLinkToken());
+
+		assertFalse("FINDING A: the queued retry must be stranded before any network work",
+			postDropSegmentReachedTheNetwork(p, TOKEN, seg));
+
+		// And it comes back when the operator restores the grant, so this is a gate and not a latch.
+		p.setDropProofRolloutForTest(true);
+		assertTrue("CONTROL: restoring the grant restores the upload",
+			postDropSegmentReachedTheNetwork(p, TOKEN, seg));
+	}
+
+	// ===== CASE 26 — the whole guard set is CONSISTENT =====
+
+	/**
+	 * THE CONSISTENCY ARM. Three ways a drop recording can lose its authority to upload, each
+	 * driven through the same call with the same segment. All three must strand it, and the live
+	 * control between each pair proves the probe still discriminates.
+	 *
+	 * The reviewer's point was not that one guard was missing. It was that two of the three were
+	 * present, which made the gap look deliberate.
+	 */
+	@Test
+	public void case26_everyWayToLoseAuthorityStrandsAQueuedRetry() throws Exception
+	{
+		DropFrameSegmenter.Segment seg = segmentForUpload();
+
+		// 1. The USER's own switch.
+		Rig a = rig();
+		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(a.plugin, TOKEN, seg));
+		a.config.upload = false;
+		assertFalse("the user switch strands it", postDropSegmentReachedTheNetwork(a.plugin, TOKEN, seg));
+
+		// 2. A TOKEN swap. The attempt carries the token the bytes were captured under.
+		Rig b = rig();
+		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(b.plugin, TOKEN, seg));
+		b.config.token = OTHER_TOKEN;
+		assertFalse("a token swap strands it", postDropSegmentReachedTheNetwork(b.plugin, TOKEN, seg));
+
+		// 3. The OPERATOR's grant. This is the one that leaked.
+		Rig c = rig();
+		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(c.plugin, TOKEN, seg));
+		c.plugin.setDropProofRolloutForTest(false);
+		assertFalse("and a withdrawn grant must strand it too",
+			postDropSegmentReachedTheNetwork(c.plugin, TOKEN, seg));
+
+		// 4. X-Clips forced off, which is the state every non-staff token is in.
+		Rig d = rig();
+		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(d.plugin, TOKEN, seg));
+		d.plugin.applyServerPolicy(policyResponse("X-Clips", "off"));
+		assertFalse("clips forced off strands it as well",
+			postDropSegmentReachedTheNetwork(d.plugin, TOKEN, seg));
+	}
+
+	// ================================================================
+	// CASES 27-30 — ROUND 4: THE REAL X-Drop-Proof HEADER PARSING PATH
+	//
+	// X-Drop-Proof was never parsed in ANY client test. Every existing arm reached the rollout flag
+	// through setDropProofRolloutForTest, which is a package-private test hook, so the only code
+	// that ever writes the flag in production was unexercised. These arms drive applyServerPolicy
+	// with a real okhttp3.Response, which is exactly what the postSnapshot callback hands it.
+	// ================================================================
+
+	/** A bare 200 carrying the given header key/value pairs, the shape applyServerPolicy reads. */
+	private static okhttp3.Response policyResponse(String... headerKV)
+	{
+		okhttp3.Response.Builder b = new okhttp3.Response.Builder()
+			.request(new okhttp3.Request.Builder().url("http://localhost/account-ingest").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1)
+			.code(200)
+			.message("OK");
+		for (int i = 0; i + 1 < headerKV.length; i += 2)
+		{
+			b.header(headerKV[i], headerKV[i + 1]);
+		}
+		return b.build();
+	}
+
+	// ===== CASE 27 — ON, in every spelling the parser accepts =====
+
+	@Test
+	public void case27_theHeaderTurnsTheGrantOnThroughTheRealParsingPath() throws Exception
+	{
+		for (String on : new String[]{"on", "enabled", "true", "1", "ON", " On "})
+		{
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			p.setDropProofRolloutForTest(false);
+			assertFalse("starts off", p.dropProofEnabled());
+
+			p.applyServerPolicy(policyResponse("X-Drop-Proof", on));
+
+			assertTrue("X-Drop-Proof: " + on + " must grant the rollout", p.dropProofEnabled());
+			dropAction(p);
+			assertTrue("and a drop must then start a session", p.dropSession.active());
+		}
+	}
+
+	// ===== CASE 28 — OFF, through the real header, ends a running session =====
+
+	/**
+	 * This is the operator's documented "turning it off" in ops/ACTIVATION.md A0d, driven end to
+	 * end for the first time: a real response header, the real parser, the real capability hook.
+	 */
+	@Test
+	public void case28_theOffHeaderEndsARunningRecordingAndItsGroundTracking() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue(p.dropSession.active());
+		assertNotNull(field(p, "dropSegmenter"));
+		assertEquals(1, p.groundDropCount());
+
+		p.applyServerPolicy(policyResponse("X-Drop-Proof", "off"));
+
+		assertFalse("the grant is gone", p.dropProofEnabled());
+		assertFalse("the session ends on that response", p.dropSession.active());
+		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
+		assertNull("the buffer is destroyed", field(p, "dropSegmenter"));
+		assertEquals("and the ground tracking is reset (finding B)", 0, p.groundDropCount());
+		assertNull("no manifest is published about a withdrawn recording", manifest(p));
+	}
+
+	// ===== CASE 29 — ABSENT leaves the flag exactly as it was, in BOTH directions =====
+
+	/**
+	 * An absent header must not revoke a live rollout, and it must not grant one either. A single
+	 * malformed or older response is the case this protects against. Both directions are asserted,
+	 * because a parser that treated absent as "off" and one that treated it as "on" are different
+	 * defects and only one of them is caught by a one-sided arm.
+	 */
+	@Test
+	public void case29_anAbsentHeaderChangesNothingInEitherDirection() throws Exception
+	{
+		Rig granted = rig();
+		granted.plugin.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+		assertTrue(granted.plugin.dropProofEnabled());
+		granted.plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		assertTrue("an absent header must not revoke a live grant",
+			granted.plugin.dropProofEnabled());
+
+		Rig never = rig();
+		never.plugin.setDropProofRolloutForTest(false);
+		never.plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		assertFalse("and it must not grant one that was never made",
+			never.plugin.dropProofEnabled());
+	}
+
+	// ===== CASE 30 — GARBAGE fails CLOSED =====
+
+	/**
+	 * Anything that is not an explicit on-value is off. The header is present, so it IS read; a
+	 * value the parser does not understand must revoke rather than be ignored, because an ignored
+	 * garbage value would leave a grant standing that the server may be trying to withdraw.
+	 */
+	@Test
+	public void case30_aGarbageHeaderValueFailsClosed() throws Exception
+	{
+		for (String junk : new String[]{"yes", "maybe", "", "  ", "0", "off", "disabled",
+			"false", "2", "on-ish", "null", "<script>"})
+		{
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			p.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+			assertTrue("the grant is live before the junk arrives", p.dropProofEnabled());
+
+			// A session is running when the junk lands, so the arm also proves it is torn down.
+			dropAction(p);
+			p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+			assertTrue(p.dropSession.active());
+
+			p.applyServerPolicy(policyResponse("X-Drop-Proof", junk));
+
+			assertFalse("X-Drop-Proof: '" + junk + "' must fail closed", p.dropProofEnabled());
+			assertFalse("and end the running session", p.dropSession.active());
+			assertEquals("and reset the ground tracking", 0, p.groundDropCount());
+			dropAction(p);
+			assertFalse("and no new session may start", p.dropSession.active());
+		}
+	}
+
 	// ============ the rollout flag is not an authorization ============
 
 	/**

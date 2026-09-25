@@ -1824,6 +1824,16 @@ public class AccountConnectPlugin extends Plugin
 			abandonDropSegment(segment.index);
 			return;
 		}
+		// AND THE GRANT ITSELF. uploadAllowed() is the user's own switch plus a well-formed token,
+		// and neither of those moves when the OPERATOR withdraws drop proof: a server withdrawal
+		// only clears serverDropProofEnabled. Without this line the guard set is inconsistent —
+		// the user switch and a token swap both stop this call and the operator's own documented
+		// "turn it off" does not.
+		if (!dropProofEnabled())
+		{
+			abandonDropSegment(segment.index);
+			return;
+		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
@@ -1851,6 +1861,22 @@ public class AccountConnectPlugin extends Plugin
 		{
 			// The user turned uploads off mid-session. Nothing more will be sent, so release the
 			// bytes rather than leaving them held for the rest of the session.
+			abandonDropSegment(segment.index);
+			return;
+		}
+		// THE GRANT ARM, and it belongs here rather than only at the entry point. A retry runs this
+		// method again minutes later: DROP_SEGMENT_RETRIES attempts at a
+		// CLIP_UPLOAD_TIMEOUT_SECONDS call timeout each. discardDropSessionOnWithdrawnConsent
+		// cannot reach a Runnable already on the executor — that closure holds its own Segment with
+		// the frame bytes inside it, and discardAll() drops the accounting, not those bytes. So the
+		// only place a queued retry can be stopped is the attempt itself.
+		//
+		// The server does not catch it either: /store-frames-ingest authorizes on the staff token
+		// and never reads drop_proof, deliberately, because rollout is not authorization. A staff
+		// token is still staff after the operator withdraws the rollout flag, so the late POST is
+		// stored. Both components are self-consistent and the seam between them leaked.
+		if (!dropProofEnabled())
+		{
 			abandonDropSegment(segment.index);
 			return;
 		}
