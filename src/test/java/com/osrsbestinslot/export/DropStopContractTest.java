@@ -40,19 +40,14 @@ public class DropStopContractTest
 	/** A config whose two user-controlled values can be changed mid-session, exactly as a user can. */
 	private static final class MutableConfig implements AccountConnectConfig
 	{
+		/** false models the user clearing the link token, the one user-side stop. */
 		volatile boolean upload = true;
 		volatile String token = TOKEN;
 
 		@Override
-		public boolean enableUpload()
-		{
-			return upload;
-		}
-
-		@Override
 		public String linkToken()
 		{
-			return token;
+			return upload ? token : "";
 		}
 	}
 

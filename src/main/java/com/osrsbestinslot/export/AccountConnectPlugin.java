@@ -72,7 +72,6 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
-import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
@@ -264,18 +263,6 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
-	/**
-	 * The client thread. A chat message may only be added from it.
-	 *
-	 * startUp does NOT run on the client thread. RuneLite starts a plugin from
-	 * PluginManager.startPlugin, which asserts it is on the Swing event dispatch thread, so a Plugin
-	 * Hub install or the 180-minute Hub auto-update calls startUp on the EDT while the user plays.
-	 * The injected client's addChatMessage checks isClientThread first and throws off it, and
-	 * startPlugin turns any throw from startUp into a stopped plugin for the rest of the session.
-	 */
-	@Inject
-	private ClientThread clientThread;
-
 	static final String CONFIG_GROUP = "osrsbisexport";
 
 	@Provides
@@ -297,9 +284,6 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		migrateUploadSwitch();
-		restoreUploadDisclosureOwed();	// a client closed before LOGGED_IN still owes the notice
-		deliverUploadDisclosure();	// a Hub install happens in-game; a restart is caught on LOGGED_IN
 		removeOrphanedKeys();
 		if (overlayManager != null)
 		{
@@ -327,329 +311,6 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		configManager.unsetConfiguration(CONFIG_GROUP, ORPHAN_SCREENSHOT_KEY);
-	}
-
-	/**
-	 * THE MIGRATION MARKER, and the reason it is a key of its own.
-	 *
-	 * The obvious migration reads enableUpload and treats null as "never chose". That is wrong on a
-	 * real client, and the failure is silent. RuneLite calls
-	 * PluginManager.loadDefaultPluginConfiguration BEFORE startUp (the client start sequence is
-	 * loadCorePlugins, loadSideLoadPlugins, loadExternalPlugins, loadDefaultPluginConfiguration,
-	 * then startPlugins), and ConfigManager.setDefaultConfiguration writes every default-valued
-	 * {@code @ConfigItem} whose string form is non-empty. A boolean false converts to "false", which
-	 * is non-empty, so osrsbisexport.enableUpload is ALREADY in the profile when startUp runs.
-	 * getConfiguration then returns "false" for a user who never chose anything, the migration reads
-	 * that as a choice, and every existing linked user stops uploading on upgrade with no message.
-	 *
-	 * This key cannot be written that way. setDefaultConfiguration walks the config interface's
-	 * declared methods and skips every method with no {@code @ConfigItem} annotation, so a key that
-	 * is not a config item has no default for RuneLite to write. Its absence therefore still means
-	 * what enableUpload's absence was wrongly assumed to mean: this profile was never migrated.
-	 */
-	static final String MIGRATION_MARKER_KEY = "uploadMigrated";
-
-	/**
-	 * The release that migrated this profile. A version, not a flag, so a later one can tell.
-	 *
-	 * IT STAYS "0.7.12" AS THE PLUGIN VERSION MOVES ON. This is not the current release — it is the
-	 * release whose upgrade needed the one-time enableUpload migration. Bumping it with the version
-	 * would make every already-migrated profile look unmigrated and re-run the migration on the
-	 * whole installed fleet. VersionDriftTest pins PLUGIN_VERSION to build.gradle and deliberately
-	 * does not pin this.
-	 */
-	static final String MIGRATION_MARKER_VALUE = "0.7.12";
-
-	/**
-	 * ONE-TIME MIGRATION for the new enableUpload switch, keyed on the marker above.
-	 *
-	 * enableUpload defaults to false, so a plain upgrade would silently stop uploading for everyone
-	 * who already pasted a token — the plugin would read as broken rather than off.
-	 *
-	 * Three branches, and the marker is written in all of them so this runs at most once per
-	 * profile. An unmarked profile with a valid token is an existing linked user, so the switch goes
-	 * on once and the disclosure is owed. An unmarked profile with no valid token is a fresh
-	 * install, so only the marker is written and the switch stays off. A marked profile is never
-	 * touched again, whatever the switch says, so an explicit off survives every later upgrade.
-	 */
-	void migrateUploadSwitch()
-	{
-		if (configManager == null)
-		{
-			return;
-		}
-		if (configManager.getConfiguration(CONFIG_GROUP, MIGRATION_MARKER_KEY) != null)
-		{
-			return;		// already migrated once — the switch belongs to the user from here on
-		}
-		if (activityLogActive())
-		{
-			configManager.setConfiguration(CONFIG_GROUP, "enableUpload", true);
-			// The config panel raises its warning dialog only for a tick the USER makes, so a
-			// programmatic write shows nothing at all. Owe the same disclosure as a chat message.
-			uploadDisclosureOwed = true;
-			// The marker is written below whatever happens, so an in-memory-only flag is lost for
-			// good if the client closes before the chat box exists. Persist the debt next to it.
-			configManager.setConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY, "true");
-			log.debug("OSRS BiS upload switch turned on once for an existing linked account");
-		}
-		else
-		{
-			log.debug("OSRS BiS upload switch left off: no valid link token to migrate");
-		}
-		configManager.setConfiguration(CONFIG_GROUP, MIGRATION_MARKER_KEY, MIGRATION_MARKER_VALUE);
-	}
-
-	/**
-	 * Set when the migration turned the switch on for an existing user, cleared when the notice is
-	 * delivered. The user never saw RuneLite's own warning dialog, because ConfigPanel raises that
-	 * from changeConfiguration and only a real tick reaches it.
-	 */
-	volatile boolean uploadDisclosureOwed;
-
-	/**
-	 * THE SAME DEBT, ON DISK.
-	 *
-	 * The migration writes the marker before the notice can be shown, and the marker stops the
-	 * migration ever running again. So a client closed between the migration and the first
-	 * LOGGED_IN used to lose the notice for good: the switch was on, the marker said migrated, and
-	 * the in-memory flag was gone. This key carries the debt across that restart. It is deliberately
-	 * NOT a {@code @ConfigItem}, for the same reason the marker is not: RuneLite default-writes
-	 * every config item before startUp, and a default-written "false" here would clear a real debt.
-	 */
-	static final String DISCLOSURE_OWED_KEY = "uploadNoticeOwed";
-
-	/**
-	 * Set while a send is queued on the client thread, so a second call does not queue a second
-	 * notice. Cleared again if the send fails, so a failed send is retried rather than dropped.
-	 */
-	private volatile boolean uploadDisclosureQueued;
-
-	/** Pick the debt back up after a restart. A debt already held in memory is left alone. */
-	void restoreUploadDisclosureOwed()
-	{
-		if (configManager == null || uploadDisclosureOwed)
-		{
-			return;
-		}
-		uploadDisclosureOwed = "true".equals(
-			configManager.getConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY));
-	}
-
-	/** What an upgraded user is told, once. The switch's own warning, shortened for one chat line. */
-	static final String UPLOAD_MIGRATION_NOTICE =
-		"OSRS BiS: uploading is now a switch in the plugin settings, and it has been left ON for "
-		+ "your linked account. It submits your IP address to a 3rd-party server not controlled or "
-		+ "verified by Runelite developers, and uploads your account, your in-game activity and "
-		+ "trade and shop screenshots to osrsbestinslot.com. Turn off \"Upload to "
-		+ "osrsbestinslot.com\" in the plugin settings to stop all of it.";
-
-	/**
-	 * Deliver the migration notice once, in game chat. Called from startUp, because a Plugin Hub
-	 * install happens while the user is logged in, and again on LOGGED_IN, because a client restart
-	 * is the other upgrade path and there is no chat box on the login screen.
-	 */
-	void deliverUploadDisclosure()
-	{
-		if (!uploadDisclosureOwed || client == null || uploadDisclosureQueued)
-		{
-			return;
-		}
-		if (client.getGameState() != GameState.LOGGED_IN)
-		{
-			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
-		}
-		if (clientThread == null)
-		{
-			// No injector, so this is a unit test. Send only if we are already on the client thread;
-			// off it the real client throws and startUp dies, so stay owed instead.
-			if (client.isClientThread())
-			{
-				sendUploadDisclosure();
-			}
-			return;
-		}
-		uploadDisclosureQueued = true;
-		clientThread.invokeLater(this::sendUploadDisclosure);
-	}
-
-	/**
-	 * THE SEND, AND WHY THE DEBT IS CLEARED AFTER IT AND NOT BEFORE.
-	 *
-	 * Runs on the client thread. If addChatMessage still fails the user has not been told, so the
-	 * debt must survive: clearing first and then throwing loses the notice silently. Nothing is
-	 * rethrown either, because this also runs from startUp on the fallback path and a throw there
-	 * stops the whole plugin for the session.
-	 */
-	void sendUploadDisclosure()
-	{
-		try
-		{
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", UPLOAD_MIGRATION_NOTICE, null);
-		}
-		catch (RuntimeException | Error e)
-		{
-			uploadDisclosureQueued = false;		// still owed — try again on the next LOGGED_IN
-			log.debug("OSRS BiS upload notice could not be shown yet", e);
-			return;
-		}
-		uploadDisclosureOwed = false;
-		uploadDisclosureQueued = false;
-		if (configManager != null)
-		{
-			configManager.unsetConfiguration(CONFIG_GROUP, DISCLOSURE_OWED_KEY);
-		}
-	}
-
-	// ---- the drop-proof one-shot notice (finding F3) ----
-
-	/**
-	 * WHY A CHAT NOTICE AND NOT A CONFIG WARNING.
-	 *
-	 * RuneLite raises a {@code @ConfigItem(warning=)} dialog from ConfigPanel.changeConfiguration,
-	 * which for a checkbox runs ONLY when the user toggles it, and RuneLite has no way to re-prompt
-	 * when the warning TEXT changes. Drop proof requires the upload switch to be ON already. So the
-	 * entire recordable population has, by definition, already passed the only moment the dialog
-	 * can fire, and the dialog reaches only users who cannot yet be recorded. That is backwards,
-	 * and it is finding F3.
-	 *
-	 * This is NOT a new config item. The standing rule is no new plugin settings, and a setting
-	 * would be wrong here anyway: the user has no drop-proof control to offer, only the upload
-	 * switch they already have.
-	 */
-	static final String DROP_PROOF_NOTICE =
-		"OSRS BiS: drop-trade screen recording is now active for this linked account. While you "
-		+ "drop items for a trade, your rendered game screen is recorded and uploaded to "
-		+ "osrsbestinslot.com, and the recording can include visible chat messages and other "
-		+ "players' names. Turn off \"Upload to osrsbestinslot.com\" in the plugin settings to "
-		+ "stop it.";
-
-	/**
-	 * THE VERSION OF THE WORDING THE USER HAS SEEN, persisted per profile.
-	 *
-	 * A plain "already shown" boolean cannot be re-armed, so a materially changed disclosure could
-	 * never be re-delivered. Storing the VERSION means bumping this constant shows the notice once
-	 * more, to everyone, and only once. Bump it when the wording changes MATERIALLY — new data
-	 * captured, a new trigger, a changed stop condition. Do not bump it for a typo.
-	 */
-	static final int DROP_PROOF_NOTICE_VERSION = 1;
-
-	/**
-	 * Where that version is stored. Deliberately NOT a {@code @ConfigItem}: RuneLite default-writes
-	 * every config item before startUp, so a default-written value here would silently satisfy a
-	 * debt the user was never shown. The same reason DISCLOSURE_OWED_KEY is a bare key.
-	 */
-	static final String DROP_PROOF_NOTICE_KEY = "dropProofNoticeVersion";
-
-	/** Set when the notice is owed and not yet shown. Mirrors the persisted version below it. */
-	volatile boolean dropProofDisclosureOwed;
-
-	/** Set while a send is queued on the client thread, so a second call does not queue a second notice. */
-	private volatile boolean dropProofDisclosureQueued;
-
-	/** The notice version this profile has already seen, or 0 for none. */
-	int dropProofNoticeSeenVersion()
-	{
-		if (configManager == null)
-		{
-			return 0;
-		}
-		String v = configManager.getConfiguration(CONFIG_GROUP, DROP_PROOF_NOTICE_KEY);
-		if (v == null)
-		{
-			return 0;
-		}
-		try
-		{
-			return Integer.parseInt(v.trim());
-		}
-		catch (NumberFormatException e)
-		{
-			return 0;	// unreadable means unproven, so the notice is owed again
-		}
-	}
-
-	/**
-	 * Owe the notice when this profile has not seen the CURRENT wording.
-	 *
-	 * Called whenever the capability becomes active. Idempotent: once the stored version matches,
-	 * nothing is owed however often a policy response repeats the grant.
-	 */
-	void noteDropProofDisclosureOwed()
-	{
-		if (dropProofDisclosureOwed)
-		{
-			return;
-		}
-		if (dropProofNoticeSeenVersion() >= DROP_PROOF_NOTICE_VERSION)
-		{
-			return;
-		}
-		dropProofDisclosureOwed = true;
-	}
-
-	/**
-	 * Deliver the notice once, in game chat.
-	 *
-	 * Same shape as deliverUploadDisclosure, including the no-chat-box-yet case: an owed notice
-	 * survives until a LOGGED_IN where it can actually be shown.
-	 */
-	void deliverDropProofDisclosure()
-	{
-		if (!dropProofDisclosureOwed || client == null || dropProofDisclosureQueued)
-		{
-			return;
-		}
-		// FINDING D2. RE-CHECK THE CAPABILITY AT DELIVERY TIME, not only when the notice was owed.
-		// The notice says "drop-trade screen recording is now active for this linked account", and
-		// sendDropProofDisclosure PERSISTS DROP_PROOF_NOTICE_VERSION the moment the line lands. So a
-		// notice delivered after a revocation is both false and final: noteDropProofDisclosureOwed
-		// then refuses to owe it again, and the real grant arriving later shows the user nothing.
-		// Returning here keeps the debt OWED, so a grant that comes back still delivers the notice.
-		if (!dropProofEnabled())
-		{
-			return;
-		}
-		if (client.getGameState() != GameState.LOGGED_IN)
-		{
-			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
-		}
-		if (clientThread == null)
-		{
-			// No injector, so this is a unit test. Send only if we are already on the client thread.
-			if (client.isClientThread())
-			{
-				sendDropProofDisclosure();
-			}
-			return;
-		}
-		dropProofDisclosureQueued = true;
-		clientThread.invokeLater(this::sendDropProofDisclosure);
-	}
-
-	/**
-	 * The send. The version is stored AFTER the chat line lands, never before: storing first and
-	 * then throwing would mark a notice delivered that the user never saw.
-	 */
-	void sendDropProofDisclosure()
-	{
-		try
-		{
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", DROP_PROOF_NOTICE, null);
-		}
-		catch (RuntimeException | Error e)
-		{
-			dropProofDisclosureQueued = false;		// still owed — try again on the next LOGGED_IN
-			log.debug("OSRS BiS drop-proof notice could not be shown yet", e);
-			return;
-		}
-		dropProofDisclosureOwed = false;
-		dropProofDisclosureQueued = false;
-		if (configManager != null)
-		{
-			configManager.setConfiguration(CONFIG_GROUP, DROP_PROOF_NOTICE_KEY,
-				Integer.toString(DROP_PROOF_NOTICE_VERSION));
-		}
 	}
 
 	@Override
@@ -2822,11 +2483,7 @@ public class AccountConnectPlugin extends Plugin
 	/**
 	 * The drop-proof capability may have just changed. Called after every policy application.
 	 *
-	 * Two jobs, and they are not symmetrical. A capability that has gone away must stop a running
-	 * recorder now rather than at the next tick. A capability that has just become reachable owes
-	 * the user the one-shot notice, because RuneLite only raises a config item's warning dialog
-	 * when the user toggles it, and a user whose upload switch is ALREADY on never toggles it
-	 * (finding F3).
+	 * A capability that has gone away must stop a running recorder now rather than at the next tick.
 	 */
 	void onDropProofCapabilityChanged()
 	{
@@ -2836,10 +2493,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				discardDropSessionOnWithdrawnConsent();
 			}
-			return;
 		}
-		noteDropProofDisclosureOwed();
-		deliverDropProofDisclosure();
 	}
 
 	/**
@@ -3281,13 +2935,11 @@ public class AccountConnectPlugin extends Plugin
 	 * THE ONE UPLOAD GATE. Every OkHttp call site in this plugin calls it and returns early when it
 	 * is false: the account snapshot, the activity events, the trade screenshot and the shop clip.
 	 *
-	 * Two conditions, both required. enableUpload is the user's own default-false switch, and it is
-	 * what the config warning is attached to. A linked token is still needed because the server has
-	 * nowhere to file an upload without one.
+	 * A valid link token is the gate: the server has nowhere to file an upload without one.
 	 */
 	boolean uploadAllowed()
 	{
-		return config.enableUpload() && activityLogActive();
+		return activityLogActive();
 	}
 
 	/**
@@ -4011,12 +3663,6 @@ public class AccountConnectPlugin extends Plugin
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
 				groundObservationUnreliable = false;
-				// An upgrade that turned the switch on owes the user the disclosure. There is no chat
-				// box on the login screen, so this is the first moment it can be shown after a restart.
-				deliverUploadDisclosure();
-				// Same for the drop-proof notice: the grant can arrive while the user is on the
-				// login screen, where there is no chat box to show it in.
-				deliverDropProofDisclosure();
 				break;
 			default:
 				break;

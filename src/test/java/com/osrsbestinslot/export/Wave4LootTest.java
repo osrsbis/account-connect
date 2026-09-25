@@ -34,8 +34,6 @@ public class Wave4LootTest
 	{
 		return new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override
 			public String linkToken()
 			{
@@ -143,7 +141,6 @@ public class Wave4LootTest
 		// No token → activity log inactive → loot buffers nothing (same gate as every event).
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig() {
-			@Override public boolean enableUpload() { return true; }
 });
 		plugin.emitLoot("Goblin", "npc", Collections.singletonList(new ItemStack(995, 10)));
 		assertTrue(plugin.pendingEvents.isEmpty());

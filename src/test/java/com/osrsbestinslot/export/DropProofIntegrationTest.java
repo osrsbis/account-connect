@@ -39,11 +39,6 @@ public class DropProofIntegrationTest
 				return TOKEN;
 			}
 
-			@Override
-			public boolean enableUpload()
-			{
-				return true;
-			}
 		});
 		p.setStoreToolsForTest(true);		// the shop-overlay grant
 		p.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag (finding F4)
@@ -328,40 +323,11 @@ public class DropProofIntegrationTest
 				return TOKEN;
 			}
 
-			@Override
-			public boolean enableUpload()
-			{
-				return true;
-			}
 		});
 		// setStoreToolsForTest NOT called: no grant.
 		dropAction(p);
 		assertFalse("an ungranted client records nothing", p.dropSession.active());
 		assertTrue(p.pendingEvents.isEmpty());
-	}
-
-	@Test
-	public void theUploadSwitchOffMeansNoSessionEither() throws Exception
-	{
-		AccountConnectPlugin p = new AccountConnectPlugin();
-		inject(p, "config", new AccountConnectConfig()
-		{
-			@Override
-			public String linkToken()
-			{
-				return TOKEN;
-			}
-
-			@Override
-			public boolean enableUpload()
-			{
-				return false;
-			}
-		});
-		p.setStoreToolsForTest(true);
-		p.setDropProofRolloutForTest(true);
-		dropAction(p);
-		assertFalse("upload off beats a server grant", p.dropSession.active());
 	}
 
 	@Test
@@ -398,11 +364,6 @@ public class DropProofIntegrationTest
 				return TOKEN;
 			}
 
-			@Override
-			public boolean enableUpload()
-			{
-				return true;
-			}
 		});
 		p.setDropProofRolloutForTest(true);
 		try

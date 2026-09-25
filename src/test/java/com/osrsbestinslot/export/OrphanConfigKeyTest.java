@@ -24,7 +24,7 @@ public class OrphanConfigKeyTest
 	@Test
 	public void startUpUnsetsTheOrphanedKey() throws Exception
 	{
-		AccountConnectPlugin plugin = UploadSwitchTest.plugin(false, "");
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		ConfigManager cm = mock(ConfigManager.class);
 		inject(plugin, "configManager", cm);
 
@@ -40,7 +40,7 @@ public class OrphanConfigKeyTest
 	@Test
 	public void aMissingConfigManagerIsASafeNoOp() throws Exception
 	{
-		AccountConnectPlugin plugin = UploadSwitchTest.plugin(false, "");
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "configManager", null);
 		plugin.removeOrphanedKeys();
 	}

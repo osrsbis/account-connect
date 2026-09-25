@@ -36,8 +36,6 @@ public class EventLogTest
 	{
 		return new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override
 			public String linkToken()
 			{
@@ -51,7 +49,6 @@ public class EventLogTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig() {
-			@Override public boolean enableUpload() { return true; }
 }); // linkToken() == "" → activity log inactive
 		plugin.emitEvent("login", null);
 		assertTrue("no token must buffer nothing", plugin.pendingEvents.isEmpty());
@@ -519,8 +516,6 @@ public class EventLogTest
 		AccountConnectPlugin staff = new AccountConnectPlugin();
 		inject(staff, "config", new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override public String linkToken() { return TEST_TOKEN; }
 			@Override public String apiBaseUrl() { return "https://staff.internal/api"; }
 		});

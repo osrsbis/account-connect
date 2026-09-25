@@ -85,8 +85,6 @@ public class UploadGatingTest
 		String baseUrl = server.url("/").toString();
 		AccountConnectConfig config = new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override
 			public String linkToken()
 			{
@@ -140,6 +138,85 @@ public class UploadGatingTest
 			Thread.sleep(10);
 		}
 		fail("backoff was never armed");
+	}
+
+	private static AccountConnectPlugin withToken(String token) throws Exception
+	{
+		AccountConnectPlugin p = new AccountConnectPlugin();
+		Field field = AccountConnectPlugin.class.getDeclaredField("config");
+		field.setAccessible(true);
+		field.set(p, new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return token;
+			}
+		});
+		return p;
+	}
+
+	/** The gate is the link token alone: a valid token allows uploads. */
+	@Test
+	public void aValidTokenAllowsUploads() throws Exception
+	{
+		assertTrue("a valid token must allow uploads", withToken(TOKEN).uploadAllowed());
+	}
+
+	/** No valid token, no uploads. */
+	@Test
+	public void noValidTokenAllowsNoUploads() throws Exception
+	{
+		for (String bad : new String[]{"", "   ", "not-a-token", "0123456789abcdef", null})
+		{
+			assertFalse("token '" + bad + "' must not allow uploads", withToken(bad).uploadAllowed());
+		}
+	}
+
+	/** The settings panel shows exactly two items: the link token and the API base URL. */
+	@Test
+	public void configDeclaresExactlyLinkTokenAndApiBaseUrl()
+	{
+		java.util.Set<String> keys = new java.util.HashSet<>();
+		for (java.lang.reflect.Method m : AccountConnectConfig.class.getDeclaredMethods())
+		{
+			net.runelite.client.config.ConfigItem item =
+				m.getAnnotation(net.runelite.client.config.ConfigItem.class);
+			if (item != null)
+			{
+				keys.add(item.keyName());
+			}
+		}
+		assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("linkToken", "apiBaseUrl")), keys);
+	}
+
+	/** The approved linkToken description: the 0.7.13 text with the two upload-switch phrases removed. */
+	@Test
+	public void linkTokenDescriptionIsTheApprovedText() throws Exception
+	{
+		String approved =
+			"Paste the token from osrsbestinslot.com (Connect account) to link this client. This "
+			+ "uploads YOUR OWN account to osrsbestinslot.com, a "
+			+ "3rd-party server not controlled or verified by the RuneLite developers: your display "
+			+ "name, account hash, account type, current world and location, skills, total and combat "
+			+ "level, quests, achievement diaries, combat achievements, slayer task, collection log, "
+			+ "equipment, inventory, bank, rune pouch, seed vault, Grand Exchange offers, wealth, "
+			+ "spellbook, attack style, active prayers, Kourend favour and minigame points. In a Group "
+			+ "Ironman group it also uploads your shared group storage, which can include items other "
+			+ "members deposited. It also uploads your account activity: Grand Exchange and "
+			+ "general-store buys and sells, completed trades INCLUDING the other player's name and the "
+			+ "items each side exchanged, items you loot from kills and from reward chests (raids, "
+			+ "Barrows, clue caskets and similar), items you drop, pick up or alch, deaths, level-ups, "
+			+ "and login and logout times. It also uploads screenshots as delivery proof: your trade "
+			+ "confirmation window when a trade completes, which shows the other player's name and the "
+			+ "items traded, and a short series of your game screen while a shop window is open, which "
+			+ "may include on-screen chat and other players' names (discarded if the visit had no "
+			+ "purchase or sale). Your IP address reaches the server with every upload. Clear the "
+			+ "token to stop all of it.";
+		net.runelite.client.config.ConfigItem item = AccountConnectConfig.class
+			.getDeclaredMethod("linkToken").getAnnotation(net.runelite.client.config.ConfigItem.class);
+		assertEquals(approved, item.description());
+		assertEquals("", item.warning());
 	}
 
 	@Test
@@ -418,8 +495,6 @@ public class UploadGatingTest
 		// local opt-in ON
 		inject("config", new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override
 			public String linkToken()
 			{

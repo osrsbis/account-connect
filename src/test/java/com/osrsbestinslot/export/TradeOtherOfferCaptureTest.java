@@ -39,8 +39,6 @@ public class TradeOtherOfferCaptureTest
 	{
 		return new AccountConnectConfig()
 		{
-			@Override public boolean enableUpload() { return true; }
-
 			@Override
 			public String linkToken()
 			{
