@@ -2509,6 +2509,10 @@ public class AccountConnectPlugin extends Plugin
 				pendingDropSessionId = null;
 			}
 		}
+		// THE PHYSICAL CHECK (round 8). Ask the game, every poll, whether the piles this session
+		// still holds keys for are actually on the ground. Runs BEFORE the backstops, so a key this
+		// releases is counted by the invariant on this same poll.
+		releaseSessionPilesGoneFromScene(now);
 		// THE STRUCTURAL BACKSTOP (round 5). Two bounds that do not care how the state went wrong:
 		// the recorder waiting on a key no tracked pile of this session can release, and a hard
 		// maximum session duration. Both end the session as INTERRUPTED and name the bound in
@@ -2527,6 +2531,78 @@ public class AccountConnectPlugin extends Plugin
 		DropSessionRecorder.Outcome outcome = dropSession.finish();
 		endDropSessionTracking();
 		stopDropCapture(outcome, sid, drops, started, reason);
+	}
+
+	/**
+	 * ROUND 8, FINDING R5 — RELEASE A KEY WHOSE PILE THE SCENE SAYS IS GONE.
+	 *
+	 * The disclosure promises the recording stops five seconds after the final dropped pile
+	 * disappears. Round 7 made that true in the EARLY direction and false in the LATE one: on the
+	 * ambiguous route the despawn we saw was credited to the rival's record, so our own record
+	 * lingers for a pile that is physically gone. dropSessionHoldsOwnedPile then keeps returning
+	 * true, the 30-second orphaned-state invariant can never accumulate its grace, and only the
+	 * 30-minute hard cap ends the session. That is up to 30 minutes of recording past the moment the
+	 * disclosure names, and every one of those frames uploads.
+	 *
+	 * The game knows the pile is gone. This asks it once per poll: for every pile this session still
+	 * holds a key for, is an item of that id still on that tile? NONE means the pile physically
+	 * left, so the key is released and the tail arms normally, which is exactly the five seconds the
+	 * disclosure promises. UNKNOWN — the tile is out of scene, or the scene could not be read —
+	 * changes nothing, and the orphaned-state invariant and the hard cap remain the backstops for
+	 * that case.
+	 *
+	 * THE SESSION IS MARKED UNPROVABLE by the release, so this can never manufacture a COMPLETE. See
+	 * DropSessionRecorder.pileGoneFromScene.
+	 */
+	void releaseSessionPilesGoneFromScene(long nowMillis)
+	{
+		String sid = dropSession.sessionId();
+		if (sid == null)
+		{
+			return;
+		}
+		List<DroppedGroundItem> gone = null;
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (!sid.equals(dropPileSession.get(g)))
+				{
+					continue;
+				}
+				// The ITEM ID is part of the question. A tile emptied of some other item says
+				// nothing about our pile, and reading "the tile is clear" off the wrong id would
+				// release a key while our pile is still lying there.
+				if (scenePileState(g.item, g.x, g.y, g.plane, null) != ScenePileState.NONE)
+				{
+					continue;
+				}
+				if (gone == null)
+				{
+					gone = new ArrayList<>();
+				}
+				gone.add(g);
+			}
+			if (gone != null)
+			{
+				groundDrops.removeAll(gone);
+			}
+		}
+		if (gone == null)
+		{
+			return;
+		}
+		for (DroppedGroundItem g : gone)
+		{
+			int seq = dropSeqForPile(g);
+			dropPileSeq.remove(g);
+			dropPileSession.remove(g);
+			if (seq > 0)
+			{
+				dropSession.pileGoneFromScene(
+					DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), nowMillis);
+			}
+		}
 	}
 
 	/**

@@ -151,6 +151,11 @@ public class DropSessionRecorder
 	 * physical pile went is unknowable, so the clip cannot be proven to cover the whole trade.
 	 */
 	public static final String REASON_AMBIGUOUS_DESPAWN = "ambiguous_despawn";
+	/**
+	 * ROUND 8. The SCENE says no item of this pile's kind is lying on its tile any more, so the pile
+	 * is physically gone even though no despawn we could attribute to it ever arrived.
+	 */
+	public static final String REASON_PILE_SCENE_GONE = "pile_gone_from_scene";
 	/** ROUND 5 backstop: the recorder held a key no tracked pile of this session could ever release. */
 	public static final String REASON_ORPHANED_STATE = "orphaned_session_state";
 	/** ROUND 5 backstop: the session hit MAX_SESSION_MILLIS. */
@@ -402,6 +407,43 @@ public class DropSessionRecorder
 		if (reason.equals(REASON_NONE))
 		{
 			reason = REASON_AMBIGUOUS_DESPAWN;
+		}
+		maybeArmStop(nowMillis);
+	}
+
+	/**
+	 * The SCENE says this pile is no longer on its tile, so it is physically gone.
+	 *
+	 * ROUND 8. This is the third sibling of pileRemoved and pileAbandoned, and the difference is
+	 * WHAT KNOWS. pileRemoved is driven by an ItemDespawned we could attribute to this pile.
+	 * pileAbandoned is driven by the caller giving up on tracking it. This one is driven by the
+	 * game's own world state: the tile is in the scene and it holds no item of this kind, so the
+	 * pile really left, whatever our own event bookkeeping did or did not see.
+	 *
+	 * THE KEY IS RELEASED, so the tail arms and the recording ends five seconds later. That is the
+	 * whole point: it is what keeps the disclosed stop honest in the LATE direction on the ambiguous
+	 * route, where the despawn we did see could not be attributed to any one pile.
+	 *
+	 * THE SESSION IS ALSO MARKED UNPROVABLE, unconditionally. Nothing here observed the pile leave;
+	 * it observed that the pile is no longer there. That is enough to stop recording and it is not
+	 * enough to claim the clip covers the whole handover, so COMPLETE must stay out of reach. This
+	 * also makes a WRONG scene read safe in the only direction that matters: a spurious release can
+	 * shorten a recording, and it can never manufacture a COMPLETE.
+	 */
+	public void pileGoneFromScene(String pileKey, long nowMillis)
+	{
+		if (sessionId == null || pileKey == null)
+		{
+			return;
+		}
+		if (!activePiles.remove(pileKey))
+		{
+			return;
+		}
+		unprovable = true;
+		if (reason.equals(REASON_NONE))
+		{
+			reason = REASON_PILE_SCENE_GONE;
 		}
 		maybeArmStop(nowMillis);
 	}

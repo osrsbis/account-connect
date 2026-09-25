@@ -3147,6 +3147,172 @@ public class DropStopContractTest
 			p.dropSession.unprovable());
 		assertNull("the scene refuses the despawn the flag would have waved through", chosen);
 	}
+
+	// ===== CASE 55 — the DISCLOSED STOP, pinned in the LATE direction =====
+
+	/**
+	 * FINDING R5. The disclosure promises the recording stops five seconds after the final dropped
+	 * pile disappears. On abdf227 the ambiguous route was late by up to THIRTY MINUTES: the despawn
+	 * was credited to the rival's record, our own record lingered for a pile that was physically
+	 * gone, dropSessionHoldsOwnedPile kept returning true, the 30-second orphaned-state invariant
+	 * could never accumulate its grace, and only the hard cap ended it. Every one of those frames
+	 * uploaded.
+	 *
+	 * The per-poll physical check ends it instead, on the first poll after the tile is clear of that
+	 * item, plus the ordinary five-second tail. This arm asserts BOTH directions: not early while an
+	 * item of that id is still on the tile, and not late once it is not.
+	 */
+	@Test
+	public void case55_theAmbiguousRouteEndsOnTheTailOnceTheTileIsPhysicallyClear() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		// The round-7 route: two REAL tracked piles of an unstackable, one of them ours.
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
+
+		// The customer takes OUR pile and walks away, leaving the rival's pile down. The despawn is
+		// ambiguous, so it is credited to the RIVAL's record and OUR record lingers for a pile that
+		// is physically gone. This is R5Linger's exact state.
+		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, ours, 500, true);
+		assertNotNull("the round-7 refusal still answers with the rival's own record", chosen);
+		assertEquals("which is the rival's record, not ours", 11L, chosen.qty);
+		poll(p, 5);
+
+		// EARLY DIRECTION. An item of that id is still on the tile, so nothing may be released.
+		assertTrue("the recording is still running", p.dropSession.active());
+		assertEquals("our key is still held", 1, p.dropSession.activePileCount());
+		assertFalse("NOT EARLY: the tail must not arm while an item of that id is still on the tile",
+			p.dropSession.stopPending());
+
+		// LATE DIRECTION. The rival's pile finally leaves. The tile is clear of item 1931, so the
+		// scene proves our pile is gone too, and the ordinary tail ends the recording.
+		scene.remove(rival);
+		poll(p, 1);
+		assertEquals("NOT LATE: the physical check releases the key on the very next poll",
+			0, p.dropSession.activePileCount());
+		assertTrue("so the ordinary five-second tail arms", p.dropSession.stopPending());
+		assertTrue("and the session is still running until it elapses", p.dropSession.active());
+		assertEquals("the recorder names the physical evidence",
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropSession.reason());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("the recording ends on the tail, NOT on the 30-minute cap",
+			p.dropSession.active());
+		Map<String, Object> m = manifest(p);
+		assertEquals("a despawn it could not attribute is never COMPLETE",
+			"INTERRUPTED", m.get("outcome"));
+		assertEquals("and the cap is NOT what ended it",
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, m.get("outcome_reason"));
+	}
+
+	// ===== CASE 56 — a tile OUT OF SCENE is not an empty tile =====
+
+	/**
+	 * UNKNOWN is the third answer and it exists so a failed read can never be read as proof.
+	 * Collapsing it into "empty" would turn every world hop, scene reload and walk out of render
+	 * distance into "your pile is gone", which is a new false negative in place of the old false
+	 * positive. Mutation (c) is exactly this collapse.
+	 *
+	 * The arm also pins the ITEM ID in the per-poll check: a tile emptied of some OTHER item says
+	 * nothing about our pile. Mutation (d) is that omission.
+	 */
+	@Test
+	public void case56_anUnreadableSceneChangesNothingAndTheItemIdIsPartOfTheQuestion()
+		throws Exception
+	{
+		// A — the tile is OUT OF SCENE. The physical check must do nothing at all.
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene.leaveScene(3200, 3400, 0);
+		assertEquals("the scene cannot answer for a tile it does not hold",
+			AccountConnectPlugin.ScenePileState.UNKNOWN,
+			p.scenePileState(1931, 3200, 3400, 0, null));
+		poll(p, 50);
+		assertEquals("UNKNOWN must NOT release the key", 1, p.dropSession.activePileCount());
+		assertTrue("so the recording keeps running", p.dropSession.active());
+		assertFalse("and the tail stays unarmed", p.dropSession.stopPending());
+		assertFalse("nothing marked it unprovable either", p.dropSession.unprovable());
+
+		// B — the tile is IN scene and holds a DIFFERENT item. Our pile of 1931 is not there, so the
+		// key is released; a pile of item 995 on the tile must not keep it alive.
+		Rig r2 = rig();
+		AccountConnectPlugin p2 = r2.plugin;
+		FakeScene scene2 = withScene(p2);
+		dropAction(p2);
+		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene2.lay("SOMEBODY ELSE'S COINS", 995, 3200, 3400);
+		poll(p2, 1);
+		assertEquals("a pile of another item is not our pile",
+			0, p2.dropSession.activePileCount());
+		assertTrue("so the tail arms", p2.dropSession.stopPending());
+		assertTrue("and the session can never claim it watched the pile go",
+			p2.dropSession.unprovable());
+		assertEquals("the reason names the physical evidence",
+			DropSessionRecorder.REASON_PILE_SCENE_GONE, p2.dropSession.reason());
+		forceTailDue(p2);
+		poll(p2, 1);
+		assertEquals("a pile that vanished without an attributable despawn is NOT complete",
+			"INTERRUPTED", manifest(p2).get("outcome"));
+
+		// C — the tile is IN scene and OUR item is still on it. Nothing may be released.
+		Rig r3 = rig();
+		AccountConnectPlugin p3 = r3.plugin;
+		FakeScene scene3 = withScene(p3);
+		dropAction(p3);
+		p3.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p3.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene3.lay("OURS", 1931, 3200, 3400);
+		poll(p3, 50);
+		assertEquals("our pile is still physically there, so the key is kept",
+			1, p3.dropSession.activePileCount());
+		assertFalse("and the tail stays unarmed", p3.dropSession.stopPending());
+
+		// D — TWO of the session's own piles of DIFFERENT items on ONE tile, and only one of them
+		// has gone. A drop trade of a rune platebody and a stack of coins onto the same tile is
+		// ordinary, and the two piles leave separately. The check must answer PER PILE: the key for
+		// the item that left is released, and the key for the item still lying there is NOT. A check
+		// that read one answer for the whole tile would either strand both keys or release both, and
+		// releasing both is an early stop with a pile still physically down.
+		Rig r4 = rig();
+		AccountConnectPlugin p4 = r4.plugin;
+		FakeScene scene4 = withScene(p4);
+		dropAction(p4);
+		p4.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p4.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 300, 900, false);
+		dropAction(p4);
+		p4.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p4.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 301, 900, false);
+		assertEquals("the session holds two keys on one tile", 2, p4.dropSession.activePileCount());
+		// Only the COINS are still physically on the tile. The 1931 pile has gone.
+		scene4.lay("OUR COINS", 995, 3200, 3400);
+		poll(p4, 50);
+		assertFalse("NO EARLY STOP: the coins are still physically down, so no tail may arm",
+			p4.dropSession.stopPending());
+		assertTrue("and the recording is still running", p4.dropSession.active());
+		assertTrue("and the screen is still being captured", (Boolean) field(p4, "dropCapturing"));
+		// The mechanism behind it.
+		assertEquals("exactly ONE key is released: the pile whose OWN item left the tile",
+			1, p4.dropSession.activePileCount());
+		assertEquals("only the departed pile's record was dropped", 1, p4.groundDropCount());
+		assertEquals("and it is the coins that are still tracked", 995, onlyTrackedPile(p4).item);
+	}
+
 	// ===== CASE 57 — the despawn verdict does not depend on an event ordering we cannot verify =====
 
 	/**
