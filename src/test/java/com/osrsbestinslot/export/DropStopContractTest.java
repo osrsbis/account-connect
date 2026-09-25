@@ -2802,4 +2802,400 @@ public class DropStopContractTest
 		assertEquals("CONTROL: it ends COMPLETE", "COMPLETE", manifest(p2).get("outcome"));
 		assertNull("naming no reason", manifest(p2).get("outcome_reason"));
 	}
+
+	// ================================================================
+	// ROUND 8 — THE SCENE IS THE SOURCE OF TRUTH. Cases 51-57.
+	//
+	// Every round from 1 to 7 inferred "is our pile still on the ground?" from our own event
+	// bookkeeping, and every round a pile the bookkeeping never knew about broke it. groundDrops
+	// only ever holds OWNERSHIP_SELF piles that had an armed drop pending, so three REAL piles are
+	// invisible to it: another player's pile, our own pile from a session that ended while the pile
+	// was still down, and a pile dropped before the token was linked.
+	//
+	// These arms model the GAME'S WORLD STATE separately from what the plugin tracked, which is the
+	// only way to express the defect at all. FakeScene is the physical ground; trackGroundDrop is
+	// the bookkeeping. An untracked rival is a FakeScene pile with no record behind it.
+	// ================================================================
+
+	/** One PHYSICAL pile lying on a tile, whether or not the plugin ever tracked it. */
+	private static final class FakePile
+	{
+		final int item;
+		final int x;
+		final int y;
+		final int plane;
+		final String label;
+
+		FakePile(String label, int item, int x, int y, int plane)
+		{
+			this.label = label;
+			this.item = item;
+			this.x = x;
+			this.y = y;
+			this.plane = plane;
+		}
+	}
+
+	/**
+	 * The game's own ground state, as the scene reader sees it.
+	 *
+	 * Four things the arms need to model, which the review named: an untracked rival present, a
+	 * rival removed, OUR pile removed, and a tile OUT OF SCENE. The last one is separate from an
+	 * empty tile on purpose: collapsing them is mutation (c).
+	 */
+	private static final class FakeScene implements AccountConnectPlugin.SceneGroundReader
+	{
+		final java.util.List<FakePile> piles = new java.util.ArrayList<>();
+		final java.util.Set<String> outOfScene = new java.util.LinkedHashSet<>();
+
+		FakePile lay(String label, int item, int x, int y)
+		{
+			FakePile f = new FakePile(label, item, x, y, 0);
+			piles.add(f);
+			return f;
+		}
+
+		void remove(FakePile f)
+		{
+			piles.remove(f);
+		}
+
+		void leaveScene(int x, int y, int plane)
+		{
+			outOfScene.add(x + ":" + y + ":" + plane);
+		}
+
+		@Override
+		public AccountConnectPlugin.ScenePileState itemOnTile(int item, int x, int y, int plane,
+			Object excluding)
+		{
+			if (outOfScene.contains(x + ":" + y + ":" + plane))
+			{
+				return AccountConnectPlugin.ScenePileState.UNKNOWN;
+			}
+			for (FakePile f : piles)
+			{
+				if (f != excluding && f.item == item && f.x == x && f.y == y && f.plane == plane)
+				{
+					return AccountConnectPlugin.ScenePileState.PRESENT;
+				}
+			}
+			return AccountConnectPlugin.ScenePileState.NONE;
+		}
+	}
+
+	/**
+	 * The game fires ONE ItemDespawned for {@code going}, and the plugin resolves it exactly as
+	 * onItemDespawned does, publishing the row when a record answers.
+	 *
+	 * @param alreadyGoneFromScene models the ORDERING we cannot verify without a live client. true
+	 *                             means the client removed the TileItem from the tile before posting
+	 *                             the event; false means it has not yet. The resolver excludes the
+	 *                             despawning TileItem by identity, so both orders must agree.
+	 * @return the record the resolver chose, or null when it refused the despawn.
+	 */
+	private static AccountConnectPlugin.DroppedGroundItem despawnInScene(AccountConnectPlugin p,
+		FakeScene scene, FakePile going, int tick, boolean alreadyGoneFromScene) throws Exception
+	{
+		if (alreadyGoneFromScene)
+		{
+			scene.remove(going);
+		}
+		AccountConnectPlugin.DroppedGroundItem g =
+			p.resolveDespawnedGroundDrop(going.item, going.x, going.y, going.plane, going);
+		if (!alreadyGoneFromScene)
+		{
+			scene.remove(going);
+		}
+		if (g == null)
+		{
+			return null;	// the resolver refused this despawn: no record removed, no row published
+		}
+		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		synchronized (q)
+		{
+			q.remove(g);
+		}
+		p.emitGroundRemoval(g, tick, false);
+		return g;
+	}
+
+	/** A rig whose scene reader is a FakeScene, so the arms control the physical ground. */
+	private static FakeScene withScene(AccountConnectPlugin p)
+	{
+		FakeScene s = new FakeScene();
+		p.setSceneReaderForTest(s);
+		return s;
+	}
+
+	// ===== CASE 51 — FINDING R4: an UNTRACKED real rival pile, with its no-rival control =====
+
+	/**
+	 * Ported from the review's R5Foreign. On abdf227 this produced a false COMPLETE: the resolver
+	 * saw exactly one matching record, OURS, called the despawn unambiguous, released the key,
+	 * stopped five seconds later with our pile still on the ground, and published our session id
+	 * and our quantity on a row describing the OTHER pile.
+	 *
+	 * The ARM and the CTRL were indistinguishable in every field the manifest and the row carried,
+	 * which is the whole defect: a reader could not tell the honest COMPLETE from the false one.
+	 */
+	@Test
+	public void case51_anUntrackedRealRivalPileMakesTheDespawnAmbiguous() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		// The physical ground: a REAL rival pile of item 1931 that the plugin NEVER tracked.
+		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
+		assertEquals("the plugin tracks only OUR pile", 1, p.groundDropCount());
+		assertEquals("and holds one key", 1, p.dropSession.activePileCount());
+		assertFalse("the RECORD-only matcher still sees no rival at all",
+			p.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
+
+		// The customer takes the RIVAL. Our pile is still physically down.
+		AccountConnectPlugin.DroppedGroundItem chosen =
+			despawnInScene(p, scene, rival, 500, true);
+		poll(p, 50);
+
+		// THE OUTCOME, asserted first.
+		assertTrue("FINDING R4: NO EARLY STOP while our pile is physically on the ground",
+			p.dropSession.active());
+		assertTrue("and the screen is still being captured", (Boolean) field(p, "dropCapturing"));
+		assertFalse("and the tail must NOT arm", p.dropSession.stopPending());
+		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropSession.unprovable());
+		assertNull("FINDING R4: no row may be published from our record for another pile's despawn",
+			lastRemoval(p));
+		// The mechanism behind it.
+		assertNull("the despawn itself is refused, because our pile may still be the one down",
+			chosen);
+		assertEquals("the session KEEPS its key", 1, p.dropSession.activePileCount());
+
+		// The customer then takes OUR pile too, and the tile is finally clear.
+		AccountConnectPlugin.DroppedGroundItem mine = despawnInScene(p, scene, ours, 600, true);
+		assertNotNull("with nothing left on the tile, our own despawn resolves normally", mine);
+		poll(p, 2);
+		assertEquals("the key is released", 0, p.dropSession.activePileCount());
+		assertTrue("so the session ends on its own tail", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("FINDING R4: a session that shared its tile with an untracked pile is NOT complete",
+			"INTERRUPTED", manifest(p).get("outcome"));
+
+		// THE CONTROL — the identical session with nothing else on the tile. Without this, a fix
+		// that called every despawn ambiguous would pass the arm above.
+		Rig r2 = rig();
+		AccountConnectPlugin p2 = r2.plugin;
+		FakeScene clean = withScene(p2);
+		dropAction(p2);
+		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		FakePile only = clean.lay("OURS", 1931, 3200, 3400);
+		AccountConnectPlugin.DroppedGroundItem got = despawnInScene(p2, clean, only, 500, true);
+		poll(p2, 2);
+		assertNotNull("CONTROL: an empty tile resolves the despawn normally", got);
+		assertTrue("CONTROL: the tail arms", p2.dropSession.stopPending());
+		assertFalse("CONTROL: nothing is unprovable", p2.dropSession.unprovable());
+		assertNotNull("CONTROL: and the row keeps its honest linkage",
+			lastRemoval(p2).get("drop_session_id"));
+		forceTailDue(p2);
+		poll(p2, 1);
+		assertEquals("CONTROL: an honest COMPLETE is still reachable",
+			"COMPLETE", manifest(p2).get("outcome"));
+	}
+
+	// ===== CASE 52 — FINDING R4 through the CONSENT-WITHDRAWAL route =====
+
+	/**
+	 * Ported from the review's R5Withdraw. This is the ordinary route, not an exotic one: the user
+	 * unticks the upload switch while a pile is still down. discardDropSessionOnWithdrawnConsent
+	 * runs endDropSessionTracking, which REMOVES the record and leaves the PILE. The switch goes
+	 * back on, session 2 drops the same unstackable on the same tile, and the customer takes the
+	 * OLD pile.
+	 */
+	@Test
+	public void case52_aPileSurvivingAConsentWithdrawalStillMakesTheDespawnAmbiguous()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		// SESSION 1 drops a real unstackable. The pile is never taken.
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		FakePile old = scene.lay("OLD", 1931, 3200, 3400);
+
+		// The user unticks the upload switch.
+		r.config.upload = false;
+		poll(p, 1);
+		assertFalse("the session ended on the withdrawal", p.dropSession.active());
+		assertEquals("and its RECORD is gone", 0, p.groundDropCount());
+		assertEquals("while the PILE is still physically on the ground", 1, scene.piles.size());
+
+		// The switch goes back on and SESSION 2 drops on the same tile.
+		r.config.upload = true;
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene.lay("OURS", 1931, 3200, 3400);
+		assertEquals("session 2 tracks only its own pile", 1, p.groundDropCount());
+
+		// The customer takes the OLD pile.
+		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
+		poll(p, 50);
+
+		assertTrue("FINDING R4: session 2 keeps recording, its own pile is still down",
+			p.dropSession.active());
+		assertFalse("NO EARLY STOP", p.dropSession.stopPending());
+		assertTrue("and it can never be proven complete", p.dropSession.unprovable());
+		assertNull("no row is published for a pile we cannot claim", lastRemoval(p));
+		assertNull("the despawn itself is refused", chosen);
+	}
+
+	// ===== CASE 53 — FINDING R4 through the HOP / LOGOUT interrupt route =====
+
+	/**
+	 * Ported from the review's R5Untracked. A hop, a logout, a disconnect, a scene reload and the
+	 * 30-minute cap all reach endDropSessionTracking, so they all leave a real pile untracked. On
+	 * abdf227 this published cause=removed_early with SESSION 2's id on a row describing session 1's
+	 * pile.
+	 */
+	@Test
+	public void case53_aPileSurvivingAnInterruptStillMakesTheDespawnAmbiguous() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		FakePile old = scene.lay("OLD", 1931, 3200, 3400);
+		p.interruptDropSession();
+		assertFalse("session 1 ended on the hop", p.dropSession.active());
+		assertEquals("its record is gone", 0, p.groundDropCount());
+		assertEquals("its pile is not", 1, scene.piles.size());
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene.lay("OURS", 1931, 3200, 3400);
+
+		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
+		poll(p, 50);
+
+		assertTrue("FINDING R4: session 2 keeps recording", p.dropSession.active());
+		assertFalse("NO EARLY STOP", p.dropSession.stopPending());
+		assertTrue("COMPLETE is out of reach", p.dropSession.unprovable());
+		assertNull("and no fabricated row is published", lastRemoval(p));
+		assertNull("the despawn itself is refused", chosen);
+	}
+
+	// ===== CASE 54 — FINDING R6: a WRONG mergeShadow flag must not reach COMPLETE =====
+
+	/**
+	 * Ported from the review's R5ShadowB, which forced the one state the review could not otherwise
+	 * reach: the ONLY unowned record on the tile carries mergeShadow=true while standing for a REAL
+	 * separate pile. On abdf227 a single wrong flag re-opened R2 in full — false COMPLETE, early
+	 * stop, fabricated linkage — because mergeShadow was the only thing between the resolver and a
+	 * guess.
+	 *
+	 * mergeShadow is KEPT, because attribution still needs it. This arm pins the missing half: with
+	 * physical confirmation, a wrong flag can no longer produce a COMPLETE while our pile is down.
+	 */
+	@Test
+	public void case54_aWrongMergeShadowFlagStillCannotReachCOMPLETE() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		// The rival record is minted from a MERGE report, so mergeShadow=true, but it stands for a
+		// REAL separate pile. That is the premise being broken on purpose.
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, true);
+		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
+		assertTrue("the rival record really carries the wrong flag",
+			onlyTrackedPile(p).mergeShadow);
+
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		scene.lay("OURS", 1931, 3200, 3400);
+		assertFalse("the RECORD-only matcher is fooled by the flag, exactly as R5ShadowB measured",
+			p.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
+
+		// The customer physically takes the RIVAL. Ours is still down.
+		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, rival, 500, true);
+		poll(p, 50);
+
+		assertTrue("FINDING R6: NO EARLY STOP with our pile still physically down",
+			p.dropSession.active());
+		assertFalse("the tail must not arm", p.dropSession.stopPending());
+		assertTrue("FINDING R6: a forced wrong shadow state can never reach COMPLETE",
+			p.dropSession.unprovable());
+		assertNull("the scene refuses the despawn the flag would have waved through", chosen);
+	}
+	// ===== CASE 57 — the despawn verdict does not depend on an event ordering we cannot verify =====
+
+	/**
+	 * RuneLite posts ItemDespawned from inside the client's own scene update, and nothing in the
+	 * 1.12.39 obfuscated client proves whether the TileItem being despawned has already left the
+	 * tile's item layer when the event arrives. If it has not, a naive scene read at despawn time
+	 * would see the very pile that is going and call EVERY despawn ambiguous.
+	 *
+	 * The resolver excludes the despawning TileItem by OBJECT IDENTITY, so both orderings must reach
+	 * the same verdict. This arm drives the same route twice, once in each order.
+	 */
+	@Test
+	public void case57_theDespawnVerdictIsTheSameInBothSceneUpdateOrders() throws Exception
+	{
+		for (boolean alreadyGone : new boolean[]{true, false})
+		{
+			String order = alreadyGone ? "already removed from the tile" : "still on the tile";
+
+			// A — nothing else on the tile: the despawn must resolve, in BOTH orders.
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			FakeScene scene = withScene(p);
+			dropAction(p);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+			FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
+			assertNotNull("the despawning pile itself must never make its own despawn ambiguous ("
+					+ order + ")",
+				despawnInScene(p, scene, ours, 500, alreadyGone));
+			poll(p, 2);
+			assertTrue("so the tail arms (" + order + ")", p.dropSession.stopPending());
+			assertFalse("and nothing is unprovable (" + order + ")", p.dropSession.unprovable());
+
+			// B — an untracked rival is also on the tile: the despawn must be refused, in BOTH orders.
+			Rig r2 = rig();
+			AccountConnectPlugin p2 = r2.plugin;
+			FakeScene scene2 = withScene(p2);
+			FakePile rival = scene2.lay("RIVAL", 1931, 3200, 3400);
+			dropAction(p2);
+			p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+			scene2.lay("OURS", 1931, 3200, 3400);
+			AccountConnectPlugin.DroppedGroundItem refused =
+				despawnInScene(p2, scene2, rival, 500, alreadyGone);
+			poll(p2, 2);
+			assertFalse("a rival on the tile arms no tail (" + order + ")",
+				p2.dropSession.stopPending());
+			assertTrue("COMPLETE is out of reach (" + order + ")", p2.dropSession.unprovable());
+			assertNull("and the despawn itself is refused (" + order + ")", refused);
+		}
+	}
 }

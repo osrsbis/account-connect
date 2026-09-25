@@ -1031,6 +1031,165 @@ public class AccountConnectPlugin extends Plugin
 	// one inventory's worth of clicks; drops cannot exceed it
 	private final java.util.Deque<InvDeltaPending> invDeltaPendings = new java.util.ArrayDeque<>();
 
+	// ---- ROUND 8: THE SCENE IS THE SOURCE OF TRUTH ----
+
+	/**
+	 * What the GAME'S OWN WORLD STATE says about one item id on one tile.
+	 *
+	 * ROUND 8, FINDING R4. Seven rounds of this resolver inferred "is our pile still on the ground?"
+	 * from our own event bookkeeping, and every round a pile the bookkeeping never knew about broke
+	 * it: another player's pile, a pile from a session that ended while the pile was still down, a
+	 * pile dropped before the token was linked. The game already knows the answer, and the scene is
+	 * where it keeps it.
+	 *
+	 * THREE ANSWERS, AND THE THIRD IS WHY THIS IS AN ENUM. A tile outside the loaded scene is not an
+	 * empty tile. Collapsing UNKNOWN into NONE would turn every world hop, every scene reload and
+	 * every walk out of render distance into "your pile is gone", which is a new false negative in
+	 * place of the old false positive. UNKNOWN means the scene cannot answer, and every caller here
+	 * treats it as "change nothing".
+	 */
+	enum ScenePileState
+	{
+		/** The tile is in the loaded scene and holds at least one item of that id. */
+		PRESENT,
+		/** The tile is in the loaded scene and holds NO item of that id. */
+		NONE,
+		/** The scene cannot answer: no client, no world view, the tile is out of scene, or it is null. */
+		UNKNOWN
+	}
+
+	/**
+	 * Reads the scene, so a test can model a rival pile, our pile going, or a tile out of scene.
+	 * The live implementation is {@link #readSceneTile}; nothing else in this class reads the scene.
+	 */
+	interface SceneGroundReader
+	{
+		/**
+		 * @param excluding a TileItem to IGNORE while counting, or null. See
+		 *                  {@link #scenePileState} for why the despawn path passes one.
+		 */
+		ScenePileState itemOnTile(int item, int x, int y, int plane, Object excluding);
+	}
+
+	/** Defaults to the live client read; swapped in tests through {@link #setSceneReaderForTest}. */
+	private volatile SceneGroundReader sceneReader = this::readSceneTile;
+
+	void setSceneReaderForTest(SceneGroundReader r)
+	{
+		sceneReader = r == null ? this::readSceneTile : r;
+	}
+
+	/**
+	 * The callers' view of the scene. Never throws; answers UNKNOWN when it cannot read.
+	 *
+	 * WHY {@code excluding} EXISTS. RuneLite fires ItemDespawned from inside the client's own scene
+	 * update, and nothing in the 1.12.39 obfuscated client proves whether the TileItem being
+	 * despawned has already left the tile's item layer at the moment the event is posted. If it has
+	 * not, a scene read at despawn time would still see the very pile that is going and answer
+	 * PRESENT for it, which would make EVERY despawn look ambiguous. Excluding that one TileItem by
+	 * OBJECT IDENTITY makes the answer the same either way, so this does not depend on an ordering
+	 * we cannot verify without a live client. The poll path passes null: nothing is going there.
+	 */
+	ScenePileState scenePileState(int item, int x, int y, int plane, Object excluding)
+	{
+		SceneGroundReader r = sceneReader;
+		if (r == null)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		try
+		{
+			ScenePileState s = r.itemOnTile(item, x, y, plane, excluding);
+			return s == null ? ScenePileState.UNKNOWN : s;
+		}
+		catch (RuntimeException e)
+		{
+			// A scene read that threw told us nothing. UNKNOWN is the only honest answer, and it is
+			// the one that changes no behaviour.
+			return ScenePileState.UNKNOWN;
+		}
+	}
+
+	/**
+	 * READ-ONLY scene lookup, RuneLite 1.12.39 API, CLIENT THREAD ONLY.
+	 *
+	 * Both callers run on the client thread already: onItemDespawned is an event subscriber and
+	 * pollDropSession runs from onGameTick. Nothing here mutates the scene or the client.
+	 *
+	 * The route is: Client.getTopLevelWorldView() -> WorldView.getScene() ->
+	 * Scene.getTiles()[plane][sceneX][sceneY] -> Tile.getGroundItems() -> List&lt;TileItem&gt;, with
+	 * the world-to-scene conversion done by LocalPoint.fromWorld(WorldView, x, y), which already
+	 * returns null for a point outside the scene (verified in the 1.12.39 runelite-api bytecode:
+	 * fromWorld calls WorldPoint.isInScene first and returns null when it is false).
+	 *
+	 * EVERY failure to read answers UNKNOWN, never NONE. A missing client, a missing world view, a
+	 * plane outside the tile array, a null tile and a null ground-item list are all "the scene
+	 * cannot tell us", and the difference between that and "the tile is empty" is the entire point
+	 * of this method.
+	 */
+	private ScenePileState readSceneTile(int item, int x, int y, int plane, Object excluding)
+	{
+		if (client == null)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		net.runelite.api.WorldView wv = client.getTopLevelWorldView();
+		if (wv == null)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		net.runelite.api.Scene scene = wv.getScene();
+		if (scene == null)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		net.runelite.api.coords.LocalPoint lp =
+			net.runelite.api.coords.LocalPoint.fromWorld(wv, x, y);
+		if (lp == null)
+		{
+			return ScenePileState.UNKNOWN;	// the tile is not in the loaded scene
+		}
+		net.runelite.api.Tile[][][] tiles = scene.getTiles();
+		if (tiles == null || plane < 0 || plane >= tiles.length)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		int sx = lp.getSceneX();
+		int sy = lp.getSceneY();
+		net.runelite.api.Tile[][] atPlane = tiles[plane];
+		if (atPlane == null || sx < 0 || sx >= atPlane.length)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		net.runelite.api.Tile[] col = atPlane[sx];
+		if (col == null || sy < 0 || sy >= col.length)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		net.runelite.api.Tile tile = col[sy];
+		if (tile == null)
+		{
+			return ScenePileState.UNKNOWN;
+		}
+		java.util.List<net.runelite.api.TileItem> items = tile.getGroundItems();
+		if (items == null)
+		{
+			// The tile exists but carries no item layer at all. RuneLite's Tile.getGroundItems
+			// returns null when there is no item layer, which is a genuinely EMPTY tile, not a
+			// failure to read. Verified in the 1.12.39 injected client: the null return happens only
+			// on a missing ItemLayer.
+			return ScenePileState.NONE;
+		}
+		for (net.runelite.api.TileItem it : items)
+		{
+			if (it != null && it != excluding && it.getId() == item)
+			{
+				return ScenePileState.PRESENT;
+			}
+		}
+		return ScenePileState.NONE;
+	}
+
 	/**
 	 * A ground item WE dropped, tracked from its own-tile spawn until it leaves the ground.
 	 *
@@ -5589,13 +5748,71 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	DroppedGroundItem resolveDespawnedGroundDrop(int item, int x, int y, int plane)
 	{
+		return resolveDespawnedGroundDrop(item, x, y, plane, null);
+	}
+
+	/**
+	 * ROUND 8, FINDING R4 — THE SCENE DECIDES WHETHER A DESPAWN IS AMBIGUOUS, NOT OUR BOOKKEEPING.
+	 *
+	 * Round 7 asked "do I hold TWO matching RECORDS?". That question can only see a rival the plugin
+	 * TRACKED, and groundDrops only ever holds OWNERSHIP_SELF piles that had an armed drop pending.
+	 * Three real piles are invisible to it: another player's pile, our own pile from a session that
+	 * ended while the pile was still down (every end path runs endDropSessionTracking, which removes
+	 * the records and leaves the PILES), and a pile dropped before the token was linked. When one of
+	 * those despawns, round 7 saw exactly one matching record — OURS — called it unambiguous,
+	 * released the key, stopped recording five seconds later with our pile still on the ground, and
+	 * published COMPLETE with our session id on a row describing somebody else's pile.
+	 *
+	 * SO THE QUESTION CHANGES to one the game can answer: after this despawn, is there still an item
+	 * of this id on this tile? If there is, the despawn is AMBIGUOUS whatever we tracked, because
+	 * our pile may be the one still lying there. If there is not, it is unambiguous: nothing of that
+	 * kind is left, so our pile went.
+	 *
+	 * THE SCENE CAN ONLY MAKE A DESPAWN MORE AMBIGUOUS, NEVER LESS. A round-7 ambiguity stands
+	 * whatever the scene says. UNKNOWN changes nothing, because a tile out of scene is not an empty
+	 * tile and this must not invent certainty from a failed read.
+	 *
+	 * @param despawnedItem the TileItem that is going, excluded from the scene count by identity, or
+	 *                      null. See {@link #scenePileState}.
+	 */
+	DroppedGroundItem resolveDespawnedGroundDrop(int item, int x, int y, int plane,
+		Object despawnedItem)
+	{
 		GroundDespawnMatch m = matchDespawnedGroundDrop(item, x, y, plane);
 		if (m.record != null && m.ambiguous)
 		{
-			// Carried on the RECORD, because a parked removal publishes its row ticks later and must
-			// publish the same refusal this despawn decided.
+			// ROUND 7. Two records matched and one of them is a real rival pile, so the OTHER pile's
+			// own record answers the despawn and the flag rides on it. Carried on the RECORD, because
+			// a parked removal publishes its row ticks later and must publish the same refusal this
+			// despawn decided. Our own record stays tracked and our key stays held.
 			m.record.attributionAmbiguous = true;
 			dropSession.resolutionAmbiguous(System.currentTimeMillis());
+			return m.record;
+		}
+		// ROUND 8. The resolver is about to credit this despawn to THIS SESSION'S OWN pile, and the
+		// scene says an item of that id is STILL on that tile. Something we never tracked was down
+		// there, so which pile just went is unknowable and it may not be ours.
+		//
+		// ONLY a despawn about to be credited to our own pile is tested. A record that is not ours
+		// releases no key and claims no session linkage, so there is nothing here for the scene to
+		// protect.
+		if (m.record != null
+			&& dropSession.sessionId() != null
+			&& dropSession.sessionId().equals(dropSessionForPile(m.record))
+			&& scenePileState(item, x, y, plane, despawnedItem) == ScenePileState.PRESENT)
+		{
+			// THE DESPAWN IS REFUSED WHOLE, which is the round-7 handling with no rival record to
+			// hand it to. Returning null leaves our record TRACKED and our key HELD, so the tail
+			// cannot arm while our pile may still be down, and publishes NO row: a row built from our
+			// record would describe a pile that did not necessarily go, which is the fabricated
+			// attribution round 7 exists to refuse.
+			//
+			// attributionAmbiguous is deliberately NOT set on our record. Our pile is still down and
+			// its own later removal may be perfectly attributable; the flag never clears, so setting
+			// it here would refuse an honest linkage we have not yet lost. COMPLETE is already out of
+			// reach through the recorder, which is the property that matters.
+			dropSession.resolutionAmbiguous(System.currentTimeMillis());
+			return null;
 		}
 		return m.record;
 	}
@@ -6057,10 +6274,12 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		DroppedGroundItem g = resolveDespawnedGroundDrop(
-			event.getItem().getId(), tw.getX(), tw.getY(), tw.getPlane());
+			event.getItem().getId(), tw.getX(), tw.getY(), tw.getPlane(), event.getItem());
 		if (g == null)
 		{
-			return;	// not one of ours — every other pile on the map despawns constantly
+			// Not one of ours — every other pile on the map despawns constantly — OR the scene
+			// refused this despawn because an item of that id is still on the tile (round 8).
+			return;
 		}
 		synchronized (groundDrops)
 		{
