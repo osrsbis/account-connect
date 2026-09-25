@@ -2038,4 +2038,103 @@ public class DropStopContractTest
 		assertTrue("the cap must sit comfortably above a real 20-minute drop trade",
 			DropSessionRecorder.MAX_SESSION_MILLIS >= 30L * 60L * 1_000L);
 	}
+
+	// ================================================================
+	// CASE 40 — ROUND 5, FINDING E2: A 403 ON A DROP SEGMENT IS A REVOCATION
+	//
+	// /store-frames-ingest answers a revoked link with 403, from revocationBlock, which runs before
+	// anything is stored — so no data reaches the server and this is not a disclosure. What DID
+	// happen is that the recorder kept capturing the rendered screen and kept posting segments that
+	// all got the same 403, until the player logged out. Recording locally with nowhere to send is
+	// exactly what a withdrawn grant is supposed to stop.
+	//
+	// The 403 clears the rollout flag rather than tearing the session down on the OkHttp callback
+	// thread, so the next pollDropSession runs the SAME withdrawal path an X-Drop-Proof: off header
+	// runs. One revocation path, not two.
+	// ================================================================
+
+	@Test
+	public void case40_a403OnADropSegmentEndsTheSessionAndA404DoesNot() throws Exception
+	{
+		assertGrantAfterUploadStatus(403, false,
+			"FINDING E2: a 403 is a revocation and must withdraw the grant");
+		assertGrantAfterUploadStatus(404, true,
+			"CONTROL: an ordinary 4xx is a segment failure and must NOT withdraw the grant");
+		assertGrantAfterUploadStatus(400, true,
+			"CONTROL: nor does a 400");
+	}
+
+	/** Drive one real upload against a local server answering {@code status}, then read the grant. */
+	private void assertGrantAfterUploadStatus(int status, boolean expectGrantHeld, String why)
+		throws Exception
+	{
+		com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+			new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+		final java.util.concurrent.CountDownLatch hit = new java.util.concurrent.CountDownLatch(1);
+		server.createContext("/", exchange ->
+		{
+			byte[] buf = new byte[4096];
+			while (exchange.getRequestBody().read(buf) > 0)
+			{
+				// drain, so the client's write completes before the response
+			}
+			byte[] body = "{\"ok\":false,\"error\":\"This link has been revoked.\"}"
+				.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(status, body.length);
+			exchange.getResponseBody().write(body);
+			exchange.close();
+			hit.countDown();
+		});
+		server.start();
+		java.util.concurrent.ScheduledExecutorService exec =
+			java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+		try
+		{
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			Field ex = AccountConnectPlugin.class.getDeclaredField("executor");
+			ex.setAccessible(true);
+			ex.set(p, exec);
+			Field ok = AccountConnectPlugin.class.getDeclaredField("okHttpClient");
+			ok.setAccessible(true);
+			ok.set(p, new okhttp3.OkHttpClient());
+
+			// A real session, recording, exactly as it would be when the revocation lands.
+			dropAction(p);
+			p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			assertTrue("CONTROL: the grant is held before the upload", p.dropProofEnabled());
+			assertTrue(p.dropSession.active());
+
+			String base = "http://127.0.0.1:" + server.getAddress().getPort();
+			Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+				String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
+			m.setAccessible(true);
+			m.invoke(p, base, TOKEN, takeOneSegment(), "sid", 0);
+
+			assertTrue("the server never received the upload",
+				hit.await(15, java.util.concurrent.TimeUnit.SECONDS));
+
+			// The flag is written on the OkHttp callback thread, so wait for the counter first.
+			java.util.concurrent.atomic.AtomicInteger failed =
+				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsFailed");
+			long deadline = System.currentTimeMillis() + 15_000L;
+			while (System.currentTimeMillis() < deadline && failed.get() == 0)
+			{
+				Thread.sleep(20L);
+			}
+			assertEquals("the segment is counted failed either way", 1, failed.get());
+			assertEquals(why, expectGrantHeld, p.dropProofEnabled());
+
+			// And when the grant is gone, the next poll runs the ordinary withdrawal path.
+			poll(p, 1);
+			assertEquals(why + " — and the session follows the grant",
+				expectGrantHeld, p.dropSession.active());
+		}
+		finally
+		{
+			exec.shutdownNow();
+			server.stop(0);
+		}
+	}
 }

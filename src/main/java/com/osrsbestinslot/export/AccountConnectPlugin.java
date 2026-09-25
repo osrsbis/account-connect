@@ -1956,6 +1956,31 @@ public class AccountConnectPlugin extends Plugin
 					}
 					else
 					{
+						// FINDING E2. A 403 IS A REVOCATION, NOT AN ORDINARY FAILURE.
+						// /store-frames-ingest answers a revoked link with 403, from revocationBlock,
+						// which runs before anything is stored. So no data reaches the server — but
+						// without this the recorder keeps capturing the rendered screen and keeps
+						// posting segments that will all get the same 403, until the player logs out.
+						// Recording locally with nowhere to send is exactly what the grant being
+						// withdrawn is supposed to stop.
+						//
+						// It clears the rollout flag rather than tearing the session down here,
+						// because this runs on an OkHttp callback thread and the teardown touches
+						// the DrawManager and the segmenter, which belong to the client thread.
+						// Clearing the flag makes dropProofEnabled() false, and the next
+						// pollDropSession — the client thread, next game tick — runs the SAME
+						// withdrawal path an X-Drop-Proof: off header runs. One revocation path, not
+						// two. A server that has not in fact revoked the link restores the flag on
+						// its next policy response.
+						//
+						// The flag is cleared BEFORE the counters, so an observer that waits on the
+						// segment count can never read the flag in its old state.
+						if (code == 403)
+						{
+							serverDropProofEnabled = false;
+							log.debug("OSRS BiS drop segment {} got a 403: treating the grant as "
+								+ "withdrawn", segment.index);
+						}
 						dropSegmentsFailed.incrementAndGet();
 						abandonDropSegment(segment.index);
 						log.debug("OSRS BiS drop segment {} rejected: {}", segment.index, code);
