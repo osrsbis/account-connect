@@ -1874,4 +1874,168 @@ public class DropStopContractTest
 			1, p.groundDropCount());
 		assertEquals("and it is the unrelated one", 4151, onlyTrackedPile(p).item);
 	}
+
+	// ================================================================
+	// CASES 37-39 — ROUND 5, THE STRUCTURAL BACKSTOP
+	//
+	// WHY A BACKSTOP AND NOT A FOURTH PATCH. "The recording always ends" has now failed three
+	// review rounds by three different routes: a merged stack, the consent-withdrawal end path, and
+	// finding B2's never-owned pile. The END-PATH ENUMERATION WAS COMPLETE EVERY TIME. The defect
+	// was always in how stale state ENTERS, and entry routes are an open set. So these arms pin a
+	// bound that does not care how the state went wrong.
+	//
+	// THEY MUST NOT DEPEND ON THE B2 FIX. Each one injects the broken state DIRECTLY — an owned key
+	// the caller holds no pile for, or a session clock rewound past the cap — so reverting the B2
+	// fix leaves them green and removing the backstop turns them red. That is what makes them an
+	// independent last line of defence rather than a second reading of case 33.
+	// ================================================================
+
+	/**
+	 * LEAK AN OWNED KEY, exactly as an unknown entry route would.
+	 *
+	 * The recorder is left holding a live key for a pile the caller no longer tracks, with no
+	 * pending outstanding. Nothing can ever release that key: a removal is only reported for a pile
+	 * that is still in groundDrops. This is the invariant violation itself, injected rather than
+	 * reached, so no arm below inherits any assumption about which route produced it.
+	 */
+	private static void leakOneOwnedKey(AccountConnectPlugin p) throws Exception
+	{
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.dropSession.activePileCount());
+		AccountConnectPlugin.DroppedGroundItem g = onlyTrackedPile(p);
+		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		synchronized (q)
+		{
+			q.remove(g);		// the pile is gone from the tracker; the KEY is not released
+		}
+		assertEquals("the caller tracks nothing", 0, p.groundDropCount());
+		assertEquals("and the recorder still waits on a key", 1, p.dropSession.activePileCount());
+		assertFalse("so the tail can never arm by itself", p.dropSession.stopPending());
+	}
+
+	/** Rewind the recorder's orphan stopwatch, so the grace elapses without sleeping 30 seconds. */
+	private static void forceOrphanGraceElapsed(AccountConnectPlugin p) throws Exception
+	{
+		Field f = DropSessionRecorder.class.getDeclaredField("orphanedSinceMillis");
+		f.setAccessible(true);
+		long since = f.getLong(p.dropSession);
+		assertTrue("the invariant must already be tripped before the grace can elapse", since > 0L);
+		f.setLong(p.dropSession, since - DropSessionRecorder.ORPHANED_STATE_GRACE_MILLIS);
+	}
+
+	// ===== CASE 37 — the invariant backstop ends a session with a leaked key =====
+
+	@Test
+	public void case37_aLeakedOwnedKeyIsEndedByTheInvariantBackstop() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		leakOneOwnedKey(p);
+		assertTrue("the recorder is capturing", (Boolean) field(p, "dropCapturing"));
+
+		poll(p, 1);			// first poll: the invariant trips and the stopwatch starts
+		assertTrue("the grace has not elapsed yet, so the session runs on", p.dropSession.active());
+
+		forceOrphanGraceElapsed(p);
+		poll(p, 2);
+
+		assertFalse("THE BACKSTOP: an immortal recorder must be ended by the bound",
+			p.dropSession.active());
+		assertFalse("and capture disarmed", (Boolean) field(p, "dropCapturing"));
+		Map<String, Object> m = manifest(p);
+		assertNotNull("the footage is still published", m);
+		assertEquals("a backstop end can NEVER be COMPLETE", "INTERRUPTED", m.get("outcome"));
+		assertEquals("and the manifest names the bound that fired",
+			DropSessionRecorder.REASON_ORPHANED_STATE, m.get("outcome_reason"));
+	}
+
+	// ===== CASE 38 — THE CONTROL: a healthy session is never touched by the invariant =====
+
+	/**
+	 * Without this arm a backstop that simply ended every session after one poll would pass case
+	 * 37. Two healthy states are driven: a live pile, which is a drop trade waiting for a customer
+	 * and may legitimately run for many minutes, and an outstanding pending drop.
+	 */
+	@Test
+	public void case38_aHealthySessionIsNeverEndedByTheInvariantBackstop() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+
+		poll(p, 200);
+		assertTrue("a live pile is a healthy session, however long it waits",
+			p.dropSession.active());
+		assertFalse("and no stop is armed while it is on the ground", p.dropSession.stopPending());
+
+		// A pending drop with no pile yet is healthy too.
+		Rig r2 = rig();
+		AccountConnectPlugin p2 = r2.plugin;
+		dropAction(p2);
+		assertEquals(1, p2.dropSession.pendingDropCount());
+		poll(p2, 3);
+		assertTrue("an outstanding pending is healthy", p2.dropSession.active());
+
+		// And the stopwatch does not accumulate across a healthy poll: the pile goes, the tail arms
+		// the ordinary way, and the manifest says COMPLETE rather than naming a backstop.
+		AccountConnectPlugin.DroppedGroundItem g = onlyTrackedPile(p);
+		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		synchronized (q)
+		{
+			q.remove(g);
+		}
+		release(p, g);
+		assertTrue("the ordinary tail still arms", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("an ordinary end is COMPLETE, not a backstop end",
+			"COMPLETE", manifest(p).get("outcome"));
+		assertNull("and names no reason", manifest(p).get("outcome_reason"));
+	}
+
+	// ===== CASE 39 — the HARD CAP ends a session that is otherwise perfectly healthy =====
+
+	/**
+	 * The second bound, and it is deliberately the one the invariant cannot reach: a live pile on
+	 * the ground the whole time, so every other check reads this session as healthy. Only the
+	 * clock ends it.
+	 *
+	 * IT KEEPS THE DISCLOSURE TRUE. Both strings promise recording continues UNTIL five seconds
+	 * after the final dropped pile disappears. A cap can only ever end a recording EARLIER than
+	 * that, never later, so it removes recording the user was told about and adds none.
+	 */
+	@Test
+	public void case39_theHardCapEndsAnOtherwiseHealthySession() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertEquals("a live pile, so the invariant can never fire",
+			1, p.dropSession.activePileCount());
+
+		poll(p, 5);
+		assertTrue("well inside the cap, the session runs", p.dropSession.active());
+
+		// Rewind the session's start past MAX_SESSION_MILLIS, rather than record for half an hour.
+		Field started = DropSessionRecorder.class.getDeclaredField("startedAtMillis");
+		started.setAccessible(true);
+		started.setLong(p.dropSession,
+			started.getLong(p.dropSession) - DropSessionRecorder.MAX_SESSION_MILLIS);
+
+		poll(p, 2);
+		assertFalse("THE HARD CAP: no recording may outlive it", p.dropSession.active());
+		assertEquals("a capped session can NEVER be COMPLETE",
+			"INTERRUPTED", manifest(p).get("outcome"));
+		assertEquals("and the manifest names the cap",
+			DropSessionRecorder.REASON_MAX_DURATION, manifest(p).get("outcome_reason"));
+		assertTrue("the cap must sit comfortably above a real 20-minute drop trade",
+			DropSessionRecorder.MAX_SESSION_MILLIS >= 30L * 60L * 1_000L);
+	}
 }

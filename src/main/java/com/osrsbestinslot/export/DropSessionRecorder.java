@@ -84,6 +84,44 @@ public class DropSessionRecorder
 	 */
 	public static final long PENDING_DROP_EXPIRY_MILLIS = 10_000L;
 
+	/**
+	 * THE HARD CEILING on one recording, however the state machine is feeling. Thirty minutes.
+	 *
+	 * ROUND 5, THE STRUCTURAL BACKSTOP. "The recording always ends" has now been claimed and
+	 * measured false three times, by three different routes, and every time the END paths were
+	 * enumerated correctly. The defect was always in how STALE STATE ENTERS, which is an open set:
+	 * the next unknown entry route produces the same immortal recorder. So the last line of defence
+	 * is not another end path, it is a bound that does not care how the state got wrong.
+	 *
+	 * WHY THIRTY MINUTES. The design supports a 20-minute drop trade: the customer takes as long as
+	 * the customer takes, and nothing stops a staff member waiting that long with piles on the
+	 * ground. Thirty is comfortably above that, so no real trade is cut short, and it is still a
+	 * hard bound rather than "until logout". A session ended by this cap is INTERRUPTED, never
+	 * COMPLETE: the cap is the admission that coverage could not be proven whole.
+	 *
+	 * IT DOES NOT FALSIFY THE DISCLOSURE. Both strings promise recording continues UNTIL five
+	 * seconds after the final dropped pile disappears. A cap can only ever end a recording EARLIER
+	 * than that, never later, so it removes recording the user was told about and adds none.
+	 */
+	public static final long MAX_SESSION_MILLIS = 30L * 60L * 1_000L;
+
+	/**
+	 * How long the caller's bookkeeping may disagree with this recorder before the session is ended.
+	 *
+	 * ROUND 5, THE INVARIANT BACKSTOP. The recorder waits on pile KEYS. The caller owns the piles
+	 * those keys stand for. When the recorder holds a key and the caller tracks no pile for this
+	 * session to match it, that key can never be released and the tail can never arm: that is the
+	 * exact shape of every immortal recorder found so far, arrived at by three different routes.
+	 *
+	 * WHY THIRTY SECONDS. It must be longer than any legitimate disagreement. The longest one the
+	 * code can produce is a pending drop that runs its full PENDING_DROP_EXPIRY_MILLIS (10s) and
+	 * then the TAIL_MILLIS tail (5s), which is 15 seconds, and the caller's own bookkeeping updates
+	 * within a single 0.6-second game tick. Thirty seconds is twice that worst case, so a healthy
+	 * session can never trip it. It is also short enough that a leaked key costs at most half a
+	 * minute of extra recording instead of running until logout.
+	 */
+	public static final long ORPHANED_STATE_GRACE_MILLIS = 30_000L;
+
 	/** No stop is pending. Deliberately not 0, which is a legal clock value under test. */
 	private static final long NO_STOP = -1L;
 
@@ -108,6 +146,10 @@ public class DropSessionRecorder
 	public static final String REASON_PENDING_DROPS = "pending_drops_outstanding";
 	public static final String REASON_PENDING_EXPIRED = "pending_drop_expired";
 	public static final String REASON_PILE_ABANDONED = "pile_abandoned";
+	/** ROUND 5 backstop: the recorder held a key no tracked pile of this session could ever release. */
+	public static final String REASON_ORPHANED_STATE = "orphaned_session_state";
+	/** ROUND 5 backstop: the session hit MAX_SESSION_MILLIS. */
+	public static final String REASON_MAX_DURATION = "max_session_duration";
 
 	private String sessionId;
 	private int nextSeq;
@@ -129,6 +171,18 @@ public class DropSessionRecorder
 	/** Set the moment anything happens that makes full coverage unprovable. Never cleared mid-session. */
 	private boolean unprovable;
 	private String reason = REASON_NONE;
+	/**
+	 * The reason a ROUND 5 backstop ended this session, or null.
+	 *
+	 * A separate field, and it outranks every other reason including REASON_EXTERNAL. A backstop
+	 * firing is the single most important thing to be able to read off a manifest: it says the
+	 * ordinary lifecycle failed and a bound had to end the recording. Folding it into {@code reason}
+	 * would let the interrupt flag mask it, because an interrupt is exactly how a backstop ends a
+	 * session.
+	 */
+	private String backstopReason;
+	/** When the caller was first seen holding nothing this session could ever resolve. NO_STOP when healthy. */
+	private long orphanedSinceMillis = NO_STOP;
 
 	/** The current session id, or null when idle. */
 	public String sessionId()
@@ -171,6 +225,10 @@ public class DropSessionRecorder
 	/** Why the session cannot report COMPLETE, or REASON_NONE. Reporting only. */
 	public String reason()
 	{
+		if (backstopReason != null)
+		{
+			return backstopReason;		// a bound had to end this; that outranks every other reason
+		}
 		if (interrupted)
 		{
 			return REASON_EXTERNAL;
@@ -218,6 +276,8 @@ public class DropSessionRecorder
 			interrupted = false;
 			unprovable = false;
 			reason = REASON_NONE;
+			backstopReason = null;
+			orphanedSinceMillis = NO_STOP;
 			activePiles.clear();
 			pendingDrops.clear();
 			dropCount = 0;
@@ -356,6 +416,62 @@ public class DropSessionRecorder
 	}
 
 	/**
+	 * THE STRUCTURAL BACKSTOP. Two bounds that do not care HOW the state went wrong.
+	 *
+	 * ROUND 5. Every immortal recorder found so far had the same shape and a different cause: the
+	 * recorder was waiting on something the caller could no longer produce. The end paths were
+	 * enumerated correctly each time, and each time a new ENTRY route for stale state was found.
+	 * Entry routes are an open set, so this check does not try to name them. It asks one question
+	 * every poll: is this session still waiting on anything that can actually arrive?
+	 *
+	 *   BOUND 1, the invariant. The caller holds no live pile for this session and nothing is
+	 *   pending. Nothing can ever release a key the recorder still holds, and no removal can arrive.
+	 *   A healthy session in that state arms its tail and ends within TAIL_MILLIS, so being in it
+	 *   for ORPHANED_STATE_GRACE_MILLIS means the ordinary lifecycle has failed.
+	 *
+	 *   BOUND 2, the hard cap. MAX_SESSION_MILLIS since the session started, whatever its state.
+	 *
+	 * Both end the session as INTERRUPTED. A bound firing is the opposite of proven coverage, and
+	 * the manifest names which bound in outcome_reason.
+	 *
+	 * @param callerHoldsOwnedPile whether the CALLER still tracks a ground pile owned by this
+	 *                             session. The recorder cannot know this: it holds keys, the caller
+	 *                             holds the piles those keys stand for, and the whole defect class
+	 *                             is the two disagreeing.
+	 * @return true when a bound fired and the session is now due to stop.
+	 */
+	public boolean enforceBackstops(long nowMillis, boolean callerHoldsOwnedPile)
+	{
+		if (sessionId == null)
+		{
+			return false;
+		}
+		if (nowMillis - startedAtMillis >= MAX_SESSION_MILLIS)
+		{
+			backstopReason = REASON_MAX_DURATION;
+			interrupt();
+			return true;
+		}
+		if (callerHoldsOwnedPile || !pendingDrops.isEmpty())
+		{
+			orphanedSinceMillis = NO_STOP;		// healthy again: the grace never accumulates
+			return false;
+		}
+		if (orphanedSinceMillis == NO_STOP)
+		{
+			orphanedSinceMillis = nowMillis;
+			return false;
+		}
+		if (nowMillis - orphanedSinceMillis >= ORPHANED_STATE_GRACE_MILLIS)
+		{
+			backstopReason = REASON_ORPHANED_STATE;
+			interrupt();
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Arm the tail when, and only when, nothing is outstanding and no stop is armed already.
 	 *
 	 * Guarding on {@code stopAtMillis == NO_STOP} keeps an already-armed deadline from sliding
@@ -440,6 +556,8 @@ public class DropSessionRecorder
 		interrupted = false;
 		unprovable = false;
 		reason = REASON_NONE;
+		backstopReason = null;
+		orphanedSinceMillis = NO_STOP;
 		activePiles.clear();
 		pendingDrops.clear();
 		nextSeq = 0;

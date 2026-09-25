@@ -2155,6 +2155,34 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Does the ground tracker still hold a pile the CURRENT session owns?
+	 *
+	 * ROUND 5. This is the caller half of the backstop invariant. The recorder waits on pile KEYS;
+	 * this map is where the piles those keys stand for actually live. When the recorder holds a key
+	 * and this returns false, nothing can ever release that key, because a removal is only reported
+	 * for a pile that is tracked here.
+	 */
+	boolean dropSessionHoldsOwnedPile()
+	{
+		String sid = dropSession.sessionId();
+		if (sid == null)
+		{
+			return false;
+		}
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (sid.equals(dropPileSession.get(g)))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * A tracked pile left the ground. Tells the session, which arms the 5-second tail when it was
 	 * the last one.
 	 */
@@ -2264,6 +2292,13 @@ public class AccountConnectPlugin extends Plugin
 				pendingDropSessionId = null;
 			}
 		}
+		// THE STRUCTURAL BACKSTOP (round 5). Two bounds that do not care how the state went wrong:
+		// the recorder waiting on a key no tracked pile of this session can release, and a hard
+		// maximum session duration. Both end the session as INTERRUPTED and name the bound in
+		// outcome_reason. This runs AFTER settle, so a pending that expires on this very poll is
+		// counted before the invariant reads it, and BEFORE shouldStop, so a bound that fires ends
+		// the session on this same poll rather than a tick later.
+		dropSession.enforceBackstops(now, dropSessionHoldsOwnedPile());
 		if (!dropSession.shouldStop(now))
 		{
 			return;
