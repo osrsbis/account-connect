@@ -161,6 +161,111 @@ public class UploadGatingTest
 		assertEquals(1, server.getRequestCount());
 	}
 
+	// ================================================================
+	// ROUND 4, FINDING C — THE POLICY HEARTBEAT
+	//
+	// applyServerPolicy has exactly one caller, inside the postSnapshot response callback, and
+	// postSnapshot's four callers are all snapshot sends. So an idle logged-in client whose
+	// canonical hash is stable had NO policy channel at all, and X-Drop-Proof: off could not reach
+	// it. ops/ACTIVATION.md A0d claimed it stops "on that poll", which was a poll the client did
+	// not make.
+	//
+	// The heartbeat is scoped to clients that HOLD the grant, so no ordinary user pays for it.
+	// ================================================================
+
+	@Test
+	public void anIdleGrantedClientStillPollsSoARevocationCanReachIt() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		plugin.setStoreToolsForTest(true);
+		plugin.setDropProofRolloutForTest(true);
+		assertTrue("the rig holds the grant", plugin.dropProofEnabled());
+
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+		plugin.syncTask();
+		assertNotNull("the first tick uploads", server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+
+		// Idle: the state has not changed, so the hash gate holds the send.
+		plugin.syncTask();
+		assertNull("an unchanged tick inside the heartbeat window must not send",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
+
+		// The heartbeat window elapses. Nothing about the player has changed.
+		plugin.lastSendMillis =
+			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+
+		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Drop-Proof", "off"));
+		plugin.syncTask();
+		assertNotNull("FINDING C: a granted idle client must poll once the window elapses",
+			server.takeRequest(5, TimeUnit.SECONDS));
+		assertEquals(2, server.getRequestCount());
+
+		// And the revocation the poll carried must actually land.
+		long deadline = System.currentTimeMillis() + 5000L;
+		while (System.currentTimeMillis() < deadline && plugin.dropProofEnabled())
+		{
+			Thread.sleep(10);
+		}
+		assertFalse("and the revocation it carried must revoke the grant",
+			plugin.dropProofEnabled());
+	}
+
+	/**
+	 * THE COST CONTROL. A client with no grant has nothing to revoke, so it must get no extra
+	 * traffic at all. Without this arm the heartbeat could quietly become a clock firehose against
+	 * the server's 150 requests per hour per token.
+	 */
+	@Test
+	public void anIdleClientWithoutTheGrantNeverHeartbeats() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		assertFalse("the rig holds no grant", plugin.dropProofEnabled());
+
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+		plugin.syncTask();
+		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+
+		plugin.lastSendMillis =
+			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS * 10L;
+		plugin.syncTask();
+		plugin.syncTask();
+		plugin.syncTask();
+		assertNull("an ungranted client must never pay for the heartbeat",
+			server.takeRequest(500, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
+	}
+
+	/** The heartbeat must not defeat the 429 backoff: the server explicitly said stop. */
+	@Test
+	public void theHeartbeatStillHonoursA429Backoff() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		plugin.setStoreToolsForTest(true);
+		plugin.setDropProofRolloutForTest(true);
+
+		server.enqueue(new MockResponse().setResponseCode(200));
+		setSkillXp(1000);
+		plugin.syncTask();
+		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+
+		plugin.backoffUntilMillis = System.currentTimeMillis() + 60_000L;
+		plugin.lastSendMillis =
+			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.syncTask();
+		assertNull("a heartbeat must never override an active backoff",
+			server.takeRequest(500, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
+	}
+
 	@Test
 	public void stateChangeSendsButNeverBeforeMinInterval() throws Exception
 	{

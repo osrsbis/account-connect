@@ -3207,6 +3207,22 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Longest a client holding the drop-proof grant may go without asking the server whether it
+	 * still holds it.
+	 *
+	 * This is the bound on revocation latency for an IDLE client, and it is the number
+	 * ops/ACTIVATION.md must quote. Fifteen minutes, chosen against the two costs it sits between:
+	 * the server allows 150 requests per hour per token and this spends 4 of them, and a screen
+	 * recorder that can start under a grant the operator already withdrew should not be able to do
+	 * so for a whole session.
+	 *
+	 * It bounds the IDLE case only. A client that is actually drop-trading refreshes its policy far
+	 * sooner, because "drop" is in SNAPSHOT_TRIGGER_EVENTS and maybeForceSnapshotForEvent bypasses
+	 * the hash gate entirely.
+	 */
+	static final long DROP_PROOF_POLICY_HEARTBEAT_MILLIS = 900_000L;
+
+	/**
 	 * Non-async @Schedule runs on the client thread, so reading client state below is safe.
 	 * The network POST itself is async (OkHttp enqueue), so it never blocks the game.
 	 */
@@ -3268,7 +3284,28 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (hash.equals(lastUploadedHash))
 		{
-			return; // nothing meaningfully changed since the last accepted upload
+			// THE POLICY HEARTBEAT. applyServerPolicy has exactly one caller, inside the
+			// postSnapshot response callback, so a client that sends nothing has NO policy channel
+			// at all and keeps whatever grant it last read. For an idle logged-in player the
+			// canonical hash is stable, so this return used to make the revocation latency
+			// unbounded, and ops/ACTIVATION.md A0d promised the opposite.
+			//
+			// SCOPED TO CLIENTS THAT HOLD THE GRANT, on purpose. A client with no drop-proof grant
+			// has nothing to revoke and gets no extra traffic at all, so the server's 150 req/hr
+			// per token budget is untouched for every ordinary user. A granted client costs at most
+			// one extra request per DROP_PROOF_POLICY_HEARTBEAT_MILLIS, which is 4 per hour.
+			//
+			// It deliberately does NOT force a send for a client whose grant is off. That direction
+			// is a GRANT arriving, not a revocation, and failing to hear about it only delays a
+			// feature. Failing to hear about a revocation keeps a screen recorder alive.
+			if (!dropProofEnabled()
+				|| now - lastSendMillis < DROP_PROOF_POLICY_HEARTBEAT_MILLIS)
+			{
+				return; // nothing meaningfully changed since the last accepted upload
+			}
+			lastSendMillis = now;
+			postSnapshot(token, snapshot, hash);
+			return;
 		}
 		if (now - lastSendMillis < minUploadIntervalMillis)
 		{
