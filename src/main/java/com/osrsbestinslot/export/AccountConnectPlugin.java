@@ -2101,6 +2101,51 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * THE ONE TEARDOWN. Every path that ends a drop session calls exactly this, and nothing else
+	 * clears drop-session state.
+	 *
+	 * WHY IT IS ONE METHOD. This teardown used to be five copied lines at three call sites, with a
+	 * fourth half of it (clearGroundDrops) written out separately at the four GameState arms. The
+	 * withdrawal path got the five lines and not the ground half, and that single omission is
+	 * finding F1 path A coming back through a different door:
+	 *
+	 *   1. the maps are cleared while the pile is still physically on the ground and still tracked;
+	 *   2. the player re-drops the same stackable onto the same tile, the game MERGES it into that
+	 *      pile and will fire exactly ONE ItemDespawned for the result;
+	 *   3. liveSessionPileAt refuses the stale pile, because dropPileSession no longer names it, so
+	 *      trackGroundDrop mints a SECOND DroppedGroundItem for ONE physical pile;
+	 *   4. the one despawn resolves to the oldest match, which is the stale entry, and the new
+	 *      session's key is never released. The tail can never arm and the recorder never stops.
+	 *
+	 * So untracking the session's piles is part of ENDING a session, not a courtesy the GameState
+	 * arms happen to perform first. Only piles this session owned are untracked: groundDrops also
+	 * holds ordinary piles that have nothing to do with a drop session, and clearing those would
+	 * silently drop their ground_removed events. The GameState arms keep their own broader
+	 * clearGroundDrops() call, which is about the scene and the world, not about this session.
+	 */
+	private void endDropSessionTracking()
+	{
+		synchronized (groundDrops)
+		{
+			// Read the ownership BEFORE the maps are cleared, or every pile looks unowned.
+			java.util.List<DroppedGroundItem> owned = new ArrayList<>();
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (dropPileSession.get(g) != null || dropPileSeq.get(g) != null)
+				{
+					owned.add(g);
+				}
+			}
+			groundDrops.removeAll(owned);
+		}
+		dropPileSeq.clear();
+		dropPileSession.clear();
+		pendingDropSessionId = null;
+		pendingDropSeq = 0;
+		dropSessionToken = null;	// the next session binds its own identity; this one cannot return
+	}
+
+	/**
 	 * Per-tick session poll: stop when the tail has elapsed.
 	 *
 	 * Reads the session's identity BEFORE finishing it, because finish() clears the state the
@@ -2150,11 +2195,7 @@ public class AccountConnectPlugin extends Plugin
 		long started = dropSession.startedAtMillis();
 		String reason = dropSession.reason();		// read BEFORE finish(), which clears it
 		DropSessionRecorder.Outcome outcome = dropSession.finish();
-		dropPileSeq.clear();
-		dropPileSession.clear();
-		pendingDropSessionId = null;
-		pendingDropSeq = 0;
-		dropSessionToken = null;
+		endDropSessionTracking();
 		stopDropCapture(outcome, sid, drops, started, reason);
 	}
 
@@ -2176,11 +2217,7 @@ public class AccountConnectPlugin extends Plugin
 		dropSession.interrupt();
 		String reason = dropSession.reason();		// read BEFORE finish(), which clears it
 		DropSessionRecorder.Outcome outcome = dropSession.finish();
-		dropPileSeq.clear();
-		dropPileSession.clear();
-		pendingDropSessionId = null;
-		pendingDropSeq = 0;
-		dropSessionToken = null;
+		endDropSessionTracking();
 		stopDropCapture(outcome, sid, drops, started, reason);
 	}
 
@@ -2204,11 +2241,7 @@ public class AccountConnectPlugin extends Plugin
 			dropSession.interrupt();
 			dropSession.finish();
 		}
-		dropPileSeq.clear();
-		dropPileSession.clear();
-		pendingDropSessionId = null;
-		pendingDropSeq = 0;
-		dropSessionToken = null;	// the next session binds its own identity; this one cannot return
+		endDropSessionTracking();
 		dropCapturing = false;
 		dropFramePending = false;
 		if (drawManager != null)

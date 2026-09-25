@@ -3,6 +3,8 @@ package com.osrsbestinslot.export;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
+import net.runelite.api.GameState;
+import net.runelite.api.events.GameStateChanged;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -397,45 +399,61 @@ public class DropStopContractTest
 
 	// ================= CASES 7, 8, 9 — the external ends =================
 
-	@Test
-	public void case07_logoutEndsTheSessionInterrupted() throws Exception
-	{
-		assertExternalEndIsInterrupted();
-	}
-
-	@Test
-	public void case08_worldHopEndsTheSessionInterrupted() throws Exception
-	{
-		assertExternalEndIsInterrupted();
-	}
-
-	@Test
-	public void case09_disconnectOrSceneResetEndsTheSessionInterrupted() throws Exception
-	{
-		assertExternalEndIsInterrupted();
-	}
-
 	/**
-	 * Logout, hop, disconnect and scene reload all reach interruptDropSession, which is the single
-	 * method the four GameState arms call. Driving that method is therefore the same test three
-	 * times over, and saying so is more honest than three copies pretending to differ.
+	 * ROUND 4. These three used to call interruptDropSession() DIRECTLY, so the wiring from a real
+	 * GameState to the recorder was never exercised: deleting the interruptDropSession() call from
+	 * any one of the four GameState arms, or adding a fifth state without one, passed all three
+	 * green. They now post a real GameStateChanged into the real @Subscribe handler, which is the
+	 * only entry point a running client ever uses.
 	 *
 	 * THE FOOTAGE IS KEPT HERE, deliberately. The user still consents; the session merely ended
 	 * untidily, and that is exactly the session somebody needs to look at. Contrast case 10, where
 	 * consent itself is withdrawn and the frames are destroyed.
 	 */
-	private void assertExternalEndIsInterrupted() throws Exception
+	@Test
+	public void case07_logoutEndsTheSessionInterrupted() throws Exception
+	{
+		assertGameStateEndIsInterrupted(GameState.LOGIN_SCREEN);
+	}
+
+	@Test
+	public void case08_worldHopEndsTheSessionInterrupted() throws Exception
+	{
+		assertGameStateEndIsInterrupted(GameState.HOPPING);
+	}
+
+	@Test
+	public void case09_disconnectOrSceneResetEndsTheSessionInterrupted() throws Exception
+	{
+		assertGameStateEndIsInterrupted(GameState.CONNECTION_LOST);
+		assertGameStateEndIsInterrupted(GameState.LOADING);
+		assertGameStateEndIsInterrupted(GameState.LOGGING_IN);
+	}
+
+	private static GameStateChanged gameState(GameState st)
+	{
+		GameStateChanged ev = new GameStateChanged();
+		ev.setGameState(st);
+		return ev;
+	}
+
+	private void assertGameStateEndIsInterrupted(GameState state) throws Exception
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
-		attach(p, g);
+		// A REAL tracked pile, not a bare attach: the ground-tracking teardown assertion below is
+		// meaningless against a session whose pile was never in groundDrops.
+		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 7}, 1_000L);
+		assertEquals("the pile is tracked before the end", 1, p.groundDropCount());
 
-		p.interruptDropSession();
+		p.onGameStateChanged(gameState(state));
 
-		assertFalse(p.dropSession.active());
+		assertFalse(state + " must end the session", p.dropSession.active());
+		assertEquals("ROUND 4: and it must untrack the session's pile, or a later merged re-drop "
+			+ "onto that tile mints a second entry for one physical pile (finding B)",
+			0, p.groundDropCount());
 		Map<String, Object> m = manifest(p);
 		assertNotNull("an interrupted session still publishes its manifest", m);
 		assertEquals("INTERRUPTED", m.get("outcome"));
@@ -455,10 +473,10 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
-		attach(p, g);
+		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		assertNotNull(field(p, "dropSegmenter"));
+		assertEquals("the pile is tracked before the withdrawal", 1, p.groundDropCount());
 
 		r.config.upload = false;
 
@@ -468,6 +486,10 @@ public class DropStopContractTest
 		assertFalse("the session is over", p.dropSession.active());
 		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
 		assertNull("and the buffer is gone", field(p, "dropSegmenter"));
+		assertEquals("ROUND 4, FINDING B: the ground tracking is reset too. Without this the pile "
+			+ "stays tracked and unowned, and the next merged re-drop onto that tile makes a "
+			+ "second entry for one physical pile",
+			0, p.groundDropCount());
 		assertNull("no manifest either: publishing one is itself an upload about withdrawn consent",
 			manifest(p));
 	}
@@ -524,19 +546,22 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		attach(p, pile(995, 5L, 3200, 3400));
+		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		for (int i = 0; i < 10; i++)
 		{
 			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
 		}
 		DropFrameSegmenter before = (DropFrameSegmenter) field(p, "dropSegmenter");
 		assertEquals("ten frames were captured while consent held", 10, before.acceptedFrames());
+		assertEquals("the pile is tracked before the withdrawal", 1, p.groundDropCount());
 
 		r.config.upload = false;
 		poll(p, 1);
 		assertNull("the buffer is destroyed at the moment consent is withdrawn",
 			field(p, "dropSegmenter"));
 		assertEquals("and the frames it held are gone", 0, before.bufferedFrames());
+		assertEquals("ROUND 4, FINDING B: the ground tracking is reset too",
+			0, p.groundDropCount());
 
 		// Frames offered while OFF are refused outright.
 		for (int i = 0; i < 10; i++)
@@ -684,7 +709,7 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		attach(p, pile(995, 5L, 3200, 3400));
+		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		// Baseline-cadence frames are HELD as pre-roll rather than kept, which is the thing that
 		// has to die: a pre-roll survivor would be flushed into the next burst's clip.
 		for (int i = 0; i < 12; i++)
@@ -706,6 +731,8 @@ public class DropStopContractTest
 		assertEquals("and the frames it was holding are gone, not merely unreferenced",
 			0, rateUnderA.preRollSize());
 		assertNull("and no pending session state survives", field(p, "pendingDropSessionId"));
+		assertEquals("ROUND 4, FINDING B: the ground tracking is reset on the identity path too",
+			0, p.groundDropCount());
 	}
 
 	// ===== CASE 15 — A -> empty =====
@@ -1003,6 +1030,244 @@ public class DropStopContractTest
 		assertNotNull("and it DOES publish its own manifest", m);
 		assertEquals("named for the new session, never the old one", newId, m.get("drop_session_id"));
 		assertEquals("COMPLETE", m.get("outcome"));
+	}
+
+	// ================================================================
+	// CASES 21-23 — ROUND 4, FINDING B: A WITHDRAWAL MUST NOT STRAND A PILE
+	//
+	// THE DEFECT. discardDropSessionOnWithdrawnConsent cleared dropPileSeq and dropPileSession and
+	// left the pile in groundDrops. Every GameState path already untracked its piles; the
+	// withdrawal path was the single exception, and it is the only end path a player can enter and
+	// LEAVE with the pile still physically on the ground.
+	//
+	// WHAT THAT COSTS. The next session re-drops the same stackable onto the same tile. The game
+	// MERGES the two into one pile and fires exactly ONE ItemDespawned. liveSessionPileAt refuses
+	// the stale entry, because dropPileSession no longer names it, so trackGroundDrop mints a
+	// SECOND DroppedGroundItem for ONE physical pile. The one despawn resolves to the OLDEST match,
+	// which is the stale entry, releasePileFromDropSession reads seq -1 and tells the recorder
+	// nothing. The new session's key is never released, the tail can never arm, and the recorder
+	// runs until a logout. That is finding F1 path A returning through a different door.
+	//
+	// THE FIX is one shared teardown, endDropSessionTracking(), that every end path calls.
+	//
+	// Case 23 is the control arm. A fix that untracked every pile, or that stopped recording
+	// altogether, would pass 21 and 22.
+	// ================================================================
+
+	/**
+	 * Drive the ONE ItemDespawned the game fires for a merged pile, exactly as onItemDespawned
+	 * drives it: resolve the oldest tracked match, remove it, then tell the session.
+	 *
+	 * Going through findGroundDrop rather than through a pile reference is the whole point. The
+	 * defect is that the oldest match is the WRONG entry, and a test holding the right reference
+	 * would never see it.
+	 */
+	private static void despawnOldestTrackedPileAt(AccountConnectPlugin p, int item, int x, int y)
+		throws Exception
+	{
+		Method find = AccountConnectPlugin.class.getDeclaredMethod(
+			"findGroundDrop", int.class, int.class, int.class, int.class);
+		find.setAccessible(true);
+		AccountConnectPlugin.DroppedGroundItem g =
+			(AccountConnectPlugin.DroppedGroundItem) find.invoke(p, item, x, y, 0);
+		assertNotNull("the despawn must resolve to a tracked pile", g);
+		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		synchronized (q)
+		{
+			q.remove(g);
+		}
+		release(p, g);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static java.util.Deque<AccountConnectPlugin.DroppedGroundItem> groundDrops(
+		AccountConnectPlugin p) throws Exception
+	{
+		return (java.util.Deque<AccountConnectPlugin.DroppedGroundItem>) field(p, "groundDrops");
+	}
+
+	// ===== CASE 21 — the USER's own switch, off then on, then a merged re-drop =====
+
+	@Test
+	public void case21_aWithdrawalThenAMergedReDropOntoTheSameTileStillStops() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		// Session 1: a real tracked pile of a stackable on one tile.
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.groundDropCount());
+		assertEquals(1, p.dropSession.activePileCount());
+
+		// The user unticks the upload switch. The pile is still physically on the ground.
+		r.config.upload = false;
+		poll(p, 1);
+		assertFalse("the withdrawal ends the session", p.dropSession.active());
+		assertEquals("FINDING B: and it must not leave the pile tracked but unowned",
+			0, p.groundDropCount());
+
+		// The switch goes back on and session 2 drops the SAME stackable onto the SAME tile.
+		r.config.upload = true;
+		dropAction(p);
+		assertTrue("a new session starts", p.dropSession.active());
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		assertEquals("one physical pile means ONE tracked entry", 1, p.groundDropCount());
+		dropAction(p);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		assertEquals("a merge is still ONE tracked entry", 1, p.groundDropCount());
+		assertEquals("and the session holds ONE key for it", 1, p.dropSession.activePileCount());
+		assertEquals("with no pending left outstanding", 0, p.dropSession.pendingDropCount());
+
+		// The ONE despawn the game fires.
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		forcePendingsExpired(p);
+		poll(p, 50);
+		assertTrue("the single despawn must arm the tail", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("NO IMMORTAL RECORDER: the session must actually end",
+			p.dropSession.active());
+		assertFalse("and capture must be disarmed", (Boolean) field(p, "dropCapturing"));
+	}
+
+	// ===== CASE 22 — the OPERATOR withdrawing and restoring the grant =====
+
+	@Test
+	public void case22_aGrantWithdrawalThenAMergedReDropOntoTheSameTileStillStops() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.groundDropCount());
+
+		// The operator sets drop_proof: false. This is the path ops/ACTIVATION.md A0d documents.
+		p.setDropProofRolloutForTest(false);
+		p.onDropProofCapabilityChanged();
+		assertFalse("the withdrawn grant ends the session", p.dropSession.active());
+		assertEquals("FINDING B: and it must not strand the pile", 0, p.groundDropCount());
+
+		// The grant comes back.
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+
+		dropAction(p);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		dropAction(p);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		assertEquals("one physical pile, one tracked entry", 1, p.groundDropCount());
+		assertEquals("one session key", 1, p.dropSession.activePileCount());
+
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		forcePendingsExpired(p);
+		poll(p, 50);
+		assertTrue(p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("NO IMMORTAL RECORDER on the operator path either", p.dropSession.active());
+	}
+
+	// ===== CASE 23 — THE CONTROL: the teardown must untrack only the SESSION's piles =====
+
+	/**
+	 * A fix that called clearGroundDrops() would pass cases 21 and 22 and silently delete the
+	 * ground_removed evidence for every ordinary pile the player is tracking for unrelated reasons.
+	 * This arm fails that fix, and it also fails a fix that simply stopped recording.
+	 */
+	@Test
+	public void case23_theTeardownUntracksOnlyTheSessionsOwnPiles() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		// A pile tracked with NO drop session running. Nothing about it belongs to drop proof.
+		p.trackGroundDrop(4151, 1L, 3300, 3500, 0, null, 50, 400, false);
+		assertEquals(1, p.groundDropCount());
+		assertNull("it belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+
+		// Now a real session with its own pile on a different tile.
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(2, p.groundDropCount());
+
+		r.config.upload = false;
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("the unrelated pile MUST survive the teardown", 1, p.groundDropCount());
+		AccountConnectPlugin.DroppedGroundItem survivor = onlyTrackedPile(p);
+		assertEquals("and it is the unrelated one, not the session's", 4151, survivor.item);
+
+		// And recording still works afterwards, so this is not a fix that broke capture.
+		r.config.upload = true;
+		dropAction(p);
+		assertTrue("a fresh session still records", p.dropSession.active());
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertNotNull("with a live buffer", field(p, "dropSegmenter"));
+		p.trackGroundDrop(995, 5L, 3201, 3400, 0, null, 300, 400, false);
+		despawnOldestTrackedPileAt(p, 995, 3201, 3400);
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and it ends normally", p.dropSession.active());
+		assertNotNull("publishing its own manifest", manifest(p));
+	}
+
+	// ===== CASE 24 — THE HARM ITSELF, asserted with NO intermediate state check =====
+
+	/**
+	 * ROUND 4, FINDING B, THE OUTCOME ARM.
+	 *
+	 * Cases 21 and 22 catch the stranded pile at the moment it is stranded, which is the earliest
+	 * and clearest signal. This arm deliberately asserts NOTHING about groundDrops. It drives the
+	 * whole scenario and asserts only the property the two user-facing strings promise: the
+	 * recording always ends. It is the arm that would have caught this defect written by somebody
+	 * who had never heard of groundDrops.
+	 *
+	 * IT NEVER CALLS forceTailDue BEFORE THE ARM. forceTailDue writes stopAtMillis straight into
+	 * the recorder, which is exactly what an immortal recorder cannot do for itself, so using it
+	 * here would hide the defect: the stranded key means maybeArmStop is NEVER REACHED, and a
+	 * forced stopAtMillis would end the session anyway and leave the arm green. The discriminating
+	 * assertion is therefore that the tail ARMS ON ITS OWN after the single despawn. forceTailDue
+	 * appears only after that, to show the armed tail then really ends the session.
+	 */
+	@Test
+	public void case24_theRecordingAlwaysEndsAfterAWithdrawalAndAMergedReDrop() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+
+		r.config.upload = false;
+		poll(p, 1);
+		r.config.upload = true;
+
+		dropAction(p);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		dropAction(p);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue("the second session is recording", (Boolean) field(p, "dropCapturing"));
+
+		// The ONE despawn the game fires for the merged pile. Every pending is expired and the
+		// poll is driven 50 times, so only a genuinely stranded key can hold the session open.
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		forcePendingsExpired(p);
+		poll(p, 50);
+
+		assertEquals("the despawn released the session's only pile key",
+			0, p.dropSession.activePileCount());
+		assertEquals("and nothing is pending", 0, p.dropSession.pendingDropCount());
+		assertTrue("NO IMMORTAL RECORDER: with nothing outstanding the tail MUST have armed itself",
+			p.dropSession.stopPending());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
+		assertFalse("and the screen is no longer being captured",
+			(Boolean) field(p, "dropCapturing"));
 	}
 
 	// ============ the rollout flag is not an authorization ============
