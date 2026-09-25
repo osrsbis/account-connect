@@ -1499,6 +1499,141 @@ public class DropStopContractTest
 		}
 	}
 
+	// ================================================================
+	// CASE 31 — ROUND 4, FINDING E: A 200-WITH-dropped IS NOT AN UPLOAD
+	//
+	// /store-frames-ingest answers a deliberate refusal with 200 {ok:true, dropped:'not_staff'} or
+	// 200 {ok:true, dropped:'clips_disabled'}. The 200 is deliberate: it stops a public plugin
+	// error-retrying something the server meant to throw away. The client read only
+	// response.isSuccessful(), so it counted the refusal as sent and acknowledged the segment, and
+	// segments_uploaded_at_emit then overstated what actually reached R2.
+	// ================================================================
+
+	/** A 2xx with the given JSON body, the shape /store-frames-ingest returns. */
+	private static okhttp3.Response jsonResponse(int code, String body)
+	{
+		return new okhttp3.Response.Builder()
+			.request(new okhttp3.Request.Builder().url("http://localhost/store-frames-ingest").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1)
+			.code(code)
+			.message("OK")
+			.body(okhttp3.ResponseBody.create(
+				okhttp3.MediaType.parse("application/json"), body))
+			.build();
+	}
+
+	@Test
+	public void case31_a200CarryingDroppedIsCountedAsARefusalNotAnUpload() throws Exception
+	{
+		// THE REFUSALS the server actually sends.
+		assertTrue("not_staff is a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+			jsonResponse(200, "{\"ok\":true,\"dropped\":\"not_staff\"}")));
+		assertTrue("clips_disabled is a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+			jsonResponse(200, "{\"ok\":true,\"dropped\":\"clips_disabled\"}")));
+
+		// THE CONTROL SIDE, and it is what stops this becoming "no drop upload ever counts".
+		assertFalse("a real store is NOT a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+			jsonResponse(200, "{\"ok\":true,\"key\":\"drop/abc/0.jpg\"}")));
+		assertFalse("an empty body is not a refusal",
+			AccountConnectPlugin.dropSegmentWasRefused(jsonResponse(200, "")));
+		assertFalse("and neither is a body that merely mentions the word",
+			AccountConnectPlugin.dropSegmentWasRefused(
+				jsonResponse(200, "{\"ok\":true,\"note\":\"nothing dropped here\"}")));
+		assertFalse("a null response can never invent a failure",
+			AccountConnectPlugin.dropSegmentWasRefused(null));
+
+		// THE BODY IS NOT CONSUMED. peekBody must leave the response readable, or the real callback
+		// would break the paths that read a body after this check.
+		okhttp3.Response live = jsonResponse(200, "{\"ok\":true,\"dropped\":\"not_staff\"}");
+		assertTrue(AccountConnectPlugin.dropSegmentWasRefused(live));
+		assertTrue("the body survives the peek",
+			live.body().string().contains("not_staff"));
+	}
+
+	// ===== CASE 32 — THE REAL CALLBACK, against a server that really refuses =====
+
+	/**
+	 * Case 31 pins the predicate. This arm drives the whole upload through the real OkHttp callback
+	 * against a live local HTTP server, because the predicate being right proves nothing about the
+	 * callback calling it. The server answers exactly what /store-frames-ingest answers for a
+	 * deliberate drop, and the arm asserts on the plugin's own counters.
+	 *
+	 * The control is the same server on the second run answering a real store, so a fix that
+	 * counted every upload as failed fails this arm.
+	 */
+	@Test
+	public void case32_theRealCallbackCountsARefusalAsFailedAndAStoreAsSent() throws Exception
+	{
+		assertUploadCounted("{\"ok\":true,\"dropped\":\"clips_disabled\"}", 0, 1,
+			"a 200-with-dropped is a refusal and must never be counted as sent");
+		assertUploadCounted("{\"ok\":true,\"key\":\"drop/abc/0.jpg\"}", 1, 0,
+			"CONTROL: a real store must still be counted as sent");
+	}
+
+	private void assertUploadCounted(String responseBody, int expectSent, int expectFailed,
+		String why) throws Exception
+	{
+		byte[] resp = responseBody.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+			new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+		final java.util.concurrent.CountDownLatch hit = new java.util.concurrent.CountDownLatch(1);
+		server.createContext("/", exchange ->
+		{
+			byte[] buf = new byte[4096];
+			while (exchange.getRequestBody().read(buf) > 0)
+			{
+				// drain, so the client's write completes before the response
+			}
+			exchange.sendResponseHeaders(200, resp.length);
+			exchange.getResponseBody().write(resp);
+			exchange.close();
+			hit.countDown();
+		});
+		server.start();
+		java.util.concurrent.ScheduledExecutorService exec =
+			java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+		try
+		{
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			Field ex = AccountConnectPlugin.class.getDeclaredField("executor");
+			ex.setAccessible(true);
+			ex.set(p, exec);
+			Field ok = AccountConnectPlugin.class.getDeclaredField("okHttpClient");
+			ok.setAccessible(true);
+			ok.set(p, new okhttp3.OkHttpClient());
+
+			String base = "http://127.0.0.1:" + server.getAddress().getPort();
+			Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+				String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
+			m.setAccessible(true);
+			m.invoke(p, base, TOKEN, takeOneSegment(), "sid", 0);
+
+			assertTrue("the server never received the upload",
+				hit.await(15, java.util.concurrent.TimeUnit.SECONDS));
+
+			java.util.concurrent.atomic.AtomicInteger sent =
+				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsSent");
+			java.util.concurrent.atomic.AtomicInteger failed =
+				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsFailed");
+			// The counter is written on the OkHttp callback thread, so wait for it rather than
+			// reading it the instant the server's handler returned.
+			long deadline = System.currentTimeMillis() + 15_000L;
+			while (System.currentTimeMillis() < deadline
+				&& sent.get() + failed.get() == 0)
+			{
+				Thread.sleep(20L);
+			}
+			assertEquals(why, expectSent, sent.get());
+			assertEquals(why + " (failed count)", expectFailed, failed.get());
+		}
+		finally
+		{
+			exec.shutdownNow();
+			server.stop(0);
+		}
+	}
+
 	// ============ the rollout flag is not an authorization ============
 
 	/**

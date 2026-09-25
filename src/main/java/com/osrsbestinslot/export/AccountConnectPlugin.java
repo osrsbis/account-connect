@@ -1914,6 +1914,26 @@ public class AccountConnectPlugin extends Plugin
 				{
 					if (response.isSuccessful())
 					{
+						// A 200 IS NOT ALWAYS A STORE. /store-frames-ingest answers a deliberate
+						// refusal with 200 {ok:true, dropped:'not_staff'} or
+						// 200 {ok:true, dropped:'clips_disabled'}, on purpose: a 200 stops a public
+						// plugin error-retrying something the server meant to throw away. Counting
+						// those as sent made segments_uploaded_at_emit overstate what reached R2,
+						// so a manifest could read as a clean success for footage that does not
+						// exist. Reachable today the moment a staff token gets clips: 'off' in
+						// acct:policy_map, which account-ingest explicitly permits.
+						//
+						// A refusal is NOT retried. The server meant it, and retrying it would be
+						// the error loop the 200 exists to prevent. The bytes are released and the
+						// segment is counted as failed, which is what it is.
+						if (dropSegmentWasRefused(response))
+						{
+							dropSegmentsFailed.incrementAndGet();
+							abandonDropSegment(segment.index);
+							log.debug("OSRS BiS drop segment {} refused by the server with a 200",
+								segment.index);
+							return;
+						}
 						dropSegmentsSent.incrementAndGet();
 						acknowledgeDropSegment(segment.index);
 						return;
@@ -1951,6 +1971,38 @@ public class AccountConnectPlugin extends Plugin
 			}
 		});
 	}
+
+	/**
+	 * Did a 2xx actually REFUSE the segment?
+	 *
+	 * /store-frames-ingest returns 200 {ok:true, dropped:'<why>'} for a deliberate drop, so the
+	 * status code alone cannot distinguish a store from a refusal. The body is peeked with
+	 * peekBody, which does NOT consume the response: the caller still closes it in its own finally
+	 * block, and a peek that fails for any reason reports "not refused" so an unreadable body can
+	 * never turn a real store into a phantom failure.
+	 *
+	 * The bound is small on purpose. A refusal body is a few dozen bytes; a larger body is a
+	 * successful store and there is no reason to hold it in memory.
+	 */
+	static boolean dropSegmentWasRefused(Response response)
+	{
+		if (response == null)
+		{
+			return false;
+		}
+		try
+		{
+			String body = response.peekBody(DROP_REFUSAL_PEEK_BYTES).string();
+			return body != null && body.contains("\"dropped\"");
+		}
+		catch (IOException | RuntimeException e)
+		{
+			return false;	// unreadable body: never invent a failure
+		}
+	}
+
+	/** Enough of a 2xx body to see a refusal marker. A store's body is larger and is not read. */
+	static final long DROP_REFUSAL_PEEK_BYTES = 512L;
 
 	/**
 	 * Multipart body for a drop segment.
