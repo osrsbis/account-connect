@@ -307,6 +307,124 @@ public class DropProofDisclosureTest
 	 * The one-shot chat notice added for finding F3 is deliberately NOT a config item, and this arm
 	 * is what stops a future change from turning it into one.
 	 */
+	// ================================================================
+	// ROUND 5, FINDING D2 — THE NOTICE DEBT MUST NOT SURVIVE A REVOCATION INTO A DELIVERY
+	//
+	// THE DEFECT. onDropProofCapabilityChanged owes the notice when dropProofEnabled() is true, and
+	// when there is no chat box yet the debt is HELD and re-delivered on the next LOGGED_IN. That
+	// holding is correct. What was missing is a re-check of the capability at DELIVERY time, and
+	// deliverDropProofDisclosure returned early only on the debt, a null client, an already-queued
+	// send and a non-LOGGED_IN game state — never on the capability.
+	//
+	// TWO CONSEQUENCES, and the second is the one that matters. The line says "drop-trade screen
+	// recording is now active for this linked account", which after a revocation is false. And
+	// sendDropProofDisclosure PERSISTS DROP_PROOF_NOTICE_VERSION as soon as the line lands, so
+	// noteDropProofDisclosureOwed then refuses to owe it again: the user is shown the notice at a
+	// moment when nothing is recording, and when recording genuinely begins later they are shown
+	// nothing. The notice and the capability drift apart by exactly one revocation.
+	//
+	// THE FIX is one guard at the top of deliverDropProofDisclosure. The debt stays OWED, so a
+	// grant that comes back still shows the notice.
+	// ================================================================
+
+	/** A plugin with a real chat box, a real config store, and every drop-proof grant in hand. */
+	private static AccountConnectPlugin withChatBox(java.util.List<String> lines,
+		java.util.Map<String, String> store) throws Exception
+	{
+		AccountConnectPlugin p = granted();
+		p.setStoreToolsForTest(true);
+		p.setDropProofRolloutForTest(true);
+
+		net.runelite.api.Client client = org.mockito.Mockito.mock(net.runelite.api.Client.class);
+		org.mockito.Mockito.when(client.getGameState())
+			.thenReturn(net.runelite.api.GameState.LOGGED_IN);
+		org.mockito.Mockito.when(client.isClientThread()).thenReturn(true);
+		org.mockito.Mockito.doAnswer(inv ->
+		{
+			lines.add((String) inv.getArguments()[2]);
+			return null;
+		}).when(client).addChatMessage(org.mockito.Mockito.any(), org.mockito.Mockito.anyString(),
+			org.mockito.Mockito.anyString(), org.mockito.Mockito.any());
+		inject(p, "client", client);
+
+		net.runelite.client.config.ConfigManager cm =
+			org.mockito.Mockito.mock(net.runelite.client.config.ConfigManager.class);
+		org.mockito.Mockito.when(cm.getConfiguration(org.mockito.Mockito.anyString(),
+			org.mockito.Mockito.anyString()))
+			.thenAnswer(inv -> store.get((String) inv.getArguments()[1]));
+		org.mockito.Mockito.doAnswer(inv ->
+		{
+			store.put((String) inv.getArguments()[1], String.valueOf(inv.getArguments()[2]));
+			return null;
+		}).when(cm).setConfiguration(org.mockito.Mockito.anyString(),
+			org.mockito.Mockito.anyString(), org.mockito.Mockito.any());
+		inject(p, "configManager", cm);
+		return p;
+	}
+
+	private static void inject(AccountConnectPlugin p, String name, Object value) throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField(name);
+		f.setAccessible(true);
+		f.set(p, value);
+	}
+
+	private static void setGrant(AccountConnectPlugin p, boolean on)
+	{
+		p.setDropProofRolloutForTest(on);
+	}
+
+	/**
+	 * FINDING D2, THE OUTCOME ARM. The grant is owed while there is no chat box, revoked, and then
+	 * restored. The notice must be shown EXACTLY ONCE, and AFTER the restore.
+	 *
+	 * The discriminating moment is the delivery attempt made while the grant is gone. Before the
+	 * fix that attempt sent the line and persisted the version, so the restore showed nothing.
+	 */
+	@Test
+	public void aRevokedGrantNeverDeliversTheRecordingIsActiveNotice() throws Exception
+	{
+		java.util.List<String> lines = new java.util.ArrayList<>();
+		java.util.Map<String, String> store = new java.util.LinkedHashMap<>();
+		AccountConnectPlugin p = withChatBox(lines, store);
+
+		// The grant lands with no chat box, so the notice is owed and held.
+		inject(p, "client", null);
+		p.onDropProofCapabilityChanged();
+		assertTrue("the notice is owed", p.dropProofDisclosureOwed);
+
+		// The chat box arrives, but the grant has been revoked in the meantime.
+		AccountConnectPlugin p2 = withChatBox(lines, store);
+		p2.dropProofDisclosureOwed = true;
+		setGrant(p2, false);
+		assertFalse("the grant really is gone", p2.dropProofEnabled());
+
+		p2.deliverDropProofDisclosure();
+
+		assertTrue("FINDING D2: a revoked grant must deliver NOTHING", lines.isEmpty());
+		assertTrue("and the debt must stay owed", p2.dropProofDisclosureOwed);
+		assertNull("and no notice version may be persisted",
+			store.get(AccountConnectPlugin.DROP_PROOF_NOTICE_KEY));
+
+		// The grant comes back. NOW the user is told, once, and only now.
+		setGrant(p2, true);
+		p2.deliverDropProofDisclosure();
+
+		assertEquals("CONTROL: the restored grant delivers the notice exactly once",
+			1, lines.size());
+		assertTrue("and it is the drop-proof notice",
+			lines.get(0).contains("drop-trade screen recording is now active"));
+		assertFalse("the debt is settled", p2.dropProofDisclosureOwed);
+		assertEquals("and the version is persisted only now",
+			Integer.toString(AccountConnectPlugin.DROP_PROOF_NOTICE_VERSION),
+			store.get(AccountConnectPlugin.DROP_PROOF_NOTICE_KEY));
+
+		// And it is never shown a second time.
+		p2.noteDropProofDisclosureOwed();
+		p2.deliverDropProofDisclosure();
+		assertEquals("a delivered notice is never repeated", 1, lines.size());
+	}
+
 	@Test
 	public void disclosureDidNotSmuggleInANewSetting()
 	{

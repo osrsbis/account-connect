@@ -600,6 +600,16 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		// FINDING D2. RE-CHECK THE CAPABILITY AT DELIVERY TIME, not only when the notice was owed.
+		// The notice says "drop-trade screen recording is now active for this linked account", and
+		// sendDropProofDisclosure PERSISTS DROP_PROOF_NOTICE_VERSION the moment the line lands. So a
+		// notice delivered after a revocation is both false and final: noteDropProofDisclosureOwed
+		// then refuses to owe it again, and the real grant arriving later shows the user nothing.
+		// Returning here keeps the debt OWED, so a grant that comes back still delivers the notice.
+		if (!dropProofEnabled())
+		{
+			return;
+		}
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
 			return;		// no chat box yet — stay owed and deliver on LOGGED_IN
