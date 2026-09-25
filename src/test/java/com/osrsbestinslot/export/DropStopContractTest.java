@@ -1055,14 +1055,14 @@ public class DropStopContractTest
 	// ================================================================
 
 	/**
-	 * Drive the ONE ItemDespawned the game fires for a merged pile, exactly as onItemDespawned
-	 * drives it: resolve the oldest tracked match, remove it, then tell the session.
+	 * Drive the ONE ItemDespawned the game fires for a pile, exactly as onItemDespawned drives it:
+	 * resolve through findGroundDrop, remove that record, then tell the session.
 	 *
 	 * Going through findGroundDrop rather than through a pile reference is the whole point. The
-	 * defect is that the oldest match is the WRONG entry, and a test holding the right reference
+	 * defect is that the resolver can pick the WRONG entry, and a test holding the right reference
 	 * would never see it.
 	 */
-	private static void despawnOldestTrackedPileAt(AccountConnectPlugin p, int item, int x, int y)
+	private static void despawnTrackedPileAt(AccountConnectPlugin p, int item, int x, int y)
 		throws Exception
 	{
 		Method find = AccountConnectPlugin.class.getDeclaredMethod(
@@ -1120,7 +1120,7 @@ public class DropStopContractTest
 		assertEquals("with no pending left outstanding", 0, p.dropSession.pendingDropCount());
 
 		// The ONE despawn the game fires.
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		forcePendingsExpired(p);
 		poll(p, 50);
 		assertTrue("the single despawn must arm the tail", p.dropSession.stopPending());
@@ -1160,7 +1160,7 @@ public class DropStopContractTest
 		assertEquals("one physical pile, one tracked entry", 1, p.groundDropCount());
 		assertEquals("one session key", 1, p.dropSession.activePileCount());
 
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		forcePendingsExpired(p);
 		poll(p, 50);
 		assertTrue(p.dropSession.stopPending());
@@ -1206,7 +1206,7 @@ public class DropStopContractTest
 		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		assertNotNull("with a live buffer", field(p, "dropSegmenter"));
 		p.trackGroundDrop(995, 5L, 3201, 3400, 0, null, 300, 400, false);
-		despawnOldestTrackedPileAt(p, 995, 3201, 3400);
+		despawnTrackedPileAt(p, 995, 3201, 3400);
 		forceTailDue(p);
 		poll(p, 1);
 		assertFalse("and it ends normally", p.dropSession.active());
@@ -1253,7 +1253,7 @@ public class DropStopContractTest
 
 		// The ONE despawn the game fires for the merged pile. Every pending is expired and the
 		// poll is driven 50 times, so only a genuinely stranded key can hold the session open.
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		forcePendingsExpired(p);
 		poll(p, 50);
 
@@ -1741,7 +1741,7 @@ public class DropStopContractTest
 		assertEquals("with nothing left pending", 0, p.dropSession.pendingDropCount());
 
 		// The ONE despawn the game fires.
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 		assertTrue("NO IMMORTAL RECORDER: the single despawn MUST arm the tail on its own",
 			p.dropSession.stopPending());
@@ -1779,7 +1779,7 @@ public class DropStopContractTest
 		assertEquals("FINDING B2: still ONE tracked entry", 1, p.groundDropCount());
 		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
 
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 		assertTrue("NO IMMORTAL RECORDER on the user's own path either",
 			p.dropSession.stopPending());
@@ -1825,7 +1825,7 @@ public class DropStopContractTest
 		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
 		assertEquals("with nothing pending", 0, p.dropSession.pendingDropCount());
 
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 		assertTrue("NO IMMORTAL RECORDER after a late pile either", p.dropSession.stopPending());
 		forceTailDue(p);
@@ -1910,7 +1910,7 @@ public class DropStopContractTest
 		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		assertTrue("the session is recording", (Boolean) field(p, "dropCapturing"));
 
-		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 
 		assertEquals("the despawn released the session's only pile key",
@@ -2187,5 +2187,259 @@ public class DropStopContractTest
 			exec.shutdownNow();
 			server.stop(0);
 		}
+	}
+
+	// ================================================================
+	// CASES 41-45 — ROUND 6, FINDING R1: THE PHANTOM RECORD
+	//
+	// The merge branch in trackGroundDrop is scoped to a running session, so with NO session a
+	// stackable dropped twice onto one tile is still TWO records for ONE physical pile. The single
+	// despawn consumed one and left the other on a tile that is now physically empty: a PHANTOM.
+	// Nothing removes it, because a teardown only untracks the session's own piles and no despawn
+	// will ever come for a pile that is not there.
+	//
+	// A later session dropping on that tile then lost its OWN despawn to the phantom, because the
+	// resolver returned the OLDEST match. Its recorder key was never released, the tail never armed,
+	// and only MAX_SESSION_MILLIS ended the recording — up to 30 minutes, where both user-facing
+	// strings promise five seconds after the final pile.
+	//
+	// THE FIX IS THE RESOLUTION ORDER, and these arms are written against the OUTCOME. Each one
+	// asserts the tail ARMS ON ITS OWN and the session ends, and NONE of them calls forceTailDue
+	// before that assertion: forceTailDue writes stopAtMillis straight into the recorder, which is
+	// exactly what a stranded recorder cannot do for itself.
+	//
+	// THEY DO NOT LEAN ON THE BACKSTOP EITHER. Every poll count here is far below
+	// ORPHANED_STATE_GRACE_MILLIS, and the invariant is structurally blind to this state anyway: the
+	// session still owns the record whose physical pile is gone, so dropSessionHoldsOwnedPile reads
+	// healthy on every poll.
+	//
+	// CASE 44 is the other side. It kills a resolver that prefers the NEWEST record instead of the
+	// session's own. CASE 45 pins the no-session order, which the ground-removal arms depend on.
+	// ================================================================
+
+	/** Two records for ONE physical pile, made with no session running, then one despawn. */
+	private static void seedPhantomRecordWithNoSession(AccountConnectPlugin p) throws Exception
+	{
+		assertFalse("the phantom is seeded with NO session running", p.dropSession.active());
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("the merge branch is scoped out, so one real stack is tracked twice",
+			2, p.groundDropCount());
+
+		// The customer takes the stack. The game fires exactly ONE ItemDespawned for it.
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		assertEquals("the tile is now physically EMPTY and one record lingers",
+			1, p.groundDropCount());
+		assertNull("and the lingering record belongs to no session",
+			p.dropSessionForPile(onlyTrackedPile(p)));
+	}
+
+	// ===== CASE 41 — a phantom left by an earlier no-session drop, then a session on that tile =====
+
+	@Test
+	public void case41_aSessionDroppingOntoAPhantomsTileStillEndsOnItsOwnTail() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.setDropProofRolloutForTest(false);
+		seedPhantomRecordWithNoSession(p);
+
+		// The grant lands and an ordinary drop trade runs on that same tile. The pile SPAWNS, so
+		// the merge branch is never even reached and the phantom is untouched by it.
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("the session owns exactly one key", 1, p.dropSession.activePileCount());
+
+		// The customer takes it. The ONE despawn must resolve to the SESSION'S record, not the
+		// older phantom, or the key is never released.
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+
+		assertEquals("FINDING R1: the despawn must release the session's own key",
+			0, p.dropSession.activePileCount());
+		assertEquals("and nothing is left pending", 0, p.dropSession.pendingDropCount());
+		assertTrue("NO 30-MINUTE OVERRUN: the tail MUST arm on its own",
+			p.dropSession.stopPending());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
+		assertFalse("and the screen is no longer captured", (Boolean) field(p, "dropCapturing"));
+	}
+
+	// ===== CASE 42 — the phantom strands the session INSIDE one ordinary two-drop trade =====
+
+	/**
+	 * The narrowest route: the staff member drops before the grant arrives, the grant lands, and
+	 * the recorded trade is two drops onto the same tile. No session ever ends in between.
+	 */
+	@Test
+	public void case42_aTwoDropTradeOverAPhantomStillEndsOnItsOwnTail() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("one physical pile, two records", 2, p.groundDropCount());
+
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+
+		// DROP 1 of the recorded trade merges into that same pile and adopts a record.
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		assertEquals("the merge adds no third record", 2, p.groundDropCount());
+		assertEquals("and the session holds one key", 1, p.dropSession.activePileCount());
+
+		// The customer takes it: ONE despawn. A phantom record survives on an empty tile.
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 2);
+		assertTrue("the first take arms the tail", p.dropSession.stopPending());
+		assertEquals("and leaves the phantom behind", 1, p.groundDropCount());
+
+		// DROP 2, inside the tail. Physically a NEW pile on the same tile.
+		dropAction(p);
+		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("the second drop re-arms the session", 1, p.dropSession.activePileCount());
+		assertFalse("so the tail is disarmed again", p.dropSession.stopPending());
+
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+
+		assertEquals("FINDING R1: the second despawn must release the session's own key",
+			0, p.dropSession.activePileCount());
+		assertTrue("NO 30-MINUTE OVERRUN inside one trade: the tail MUST re-arm on its own",
+			p.dropSession.stopPending());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+	}
+
+	// ===== CASE 43 — the phantom outlives a CLEAN session end and strands the NEXT session =====
+
+	@Test
+	public void case43_aPhantomSurvivingACleanSessionEndDoesNotStrandTheNextOne() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+
+		// SESSION ONE. It merges into the pile, the customer takes it, and it ends normally.
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 5);
+		assertTrue("session one arms its tail", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("session one is over", p.dropSession.active());
+		assertEquals("but the phantom outlives it", 1, p.groundDropCount());
+		assertNull("unowned, so no teardown removed it",
+			p.dropSessionForPile(onlyTrackedPile(p)));
+
+		// SESSION TWO, on that same tile, with the phantom already sitting there.
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertTrue("a second session is running", p.dropSession.active());
+		assertEquals("holding one key", 1, p.dropSession.activePileCount());
+
+		despawnTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+
+		assertEquals("FINDING R1: a phantom from an earlier session must not absorb this despawn",
+			0, p.dropSession.activePileCount());
+		assertTrue("NO 30-MINUTE OVERRUN across sessions: the tail MUST arm on its own",
+			p.dropSession.stopPending());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+	}
+
+	// ===== CASE 44 — THE OTHER SIDE: the NEWEST record is not the answer either =====
+
+	/**
+	 * A resolver that simply preferred the NEWEST record would pass cases 41-43, because in all
+	 * three the session's record is also the newest. This arm makes the session's record the OLDER
+	 * one, so only "prefer the session's own" is green.
+	 *
+	 * The route is case 35's, on an UNSTACKABLE, where two piles on one tile are two real piles: the
+	 * session's own pile spawns first, its pending then expires, and a second pile lands unowned
+	 * because attachPileToDropSession refuses it with pendingDropSeq at 0.
+	 */
+	@Test
+	public void case44_aNewerUnownedPileNeverAbsorbsTheSessionsOwnDespawn() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the session owns its pile", 1, p.dropSession.activePileCount());
+
+		// A second Drop whose pending expires before its pile lands. The pile is tracked and
+		// unowned, and it is NEWER than the session's own record.
+		dropAction(p);
+		forcePendingsExpired(p);
+		poll(p, 1);
+		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 130, 400, false);
+		assertEquals("two real piles on one tile", 2, p.groundDropCount());
+		assertEquals("and the session still holds exactly one key",
+			1, p.dropSession.activePileCount());
+
+		// One despawn. It must resolve to the SESSION'S record, which is the OLDER of the two.
+		despawnTrackedPileAt(p, 1931, 3200, 3400);
+		poll(p, 50);
+
+		assertEquals("FINDING R1: the session's own key must be the one released",
+			0, p.dropSession.activePileCount());
+		assertTrue("so the tail MUST arm on its own", p.dropSession.stopPending());
+		assertEquals("the unowned record must be the one left behind", 1, p.groundDropCount());
+		assertNull("and it is the unowned one", p.dropSessionForPile(onlyTrackedPile(p)));
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+	}
+
+	// ===== CASE 45 — THE CONTROL: with no session, the OLDEST record still answers =====
+
+	/**
+	 * The no-session order is what the ground-removal arms pin, and the fix must not move it. With
+	 * no session there is no owner, so the resolver falls straight through to the oldest match and
+	 * the two-records-for-one-stack behaviour is exactly as it was.
+	 */
+	@Test
+	public void case45_withNoSessionTheOldestRecordStillAnswersTheDespawn() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.setDropProofRolloutForTest(false);
+
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("one real stack is tracked twice, as it always was", 2, p.groundDropCount());
+		assertFalse("and no session exists", p.dropSession.active());
+
+		Method find = AccountConnectPlugin.class.getDeclaredMethod(
+			"findGroundDrop", int.class, int.class, int.class, int.class);
+		find.setAccessible(true);
+		AccountConnectPlugin.DroppedGroundItem resolved =
+			(AccountConnectPlugin.DroppedGroundItem) find.invoke(p, 995, 3200, 3400, 0);
+		assertNotNull(resolved);
+		assertEquals("with no session the OLDEST record answers, unchanged", 500L, resolved.qty);
 	}
 }

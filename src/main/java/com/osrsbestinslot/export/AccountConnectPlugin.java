@@ -5412,11 +5412,53 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
-	/** Find the oldest tracked pile matching this item at this exact tile, or null. */
+	/**
+	 * Resolve a removal or a merge at this item and tile: the RUNNING SESSION'S OWN record first,
+	 * then the oldest match.
+	 *
+	 * ROUND 6, FINDING R1 — WHY OWNERSHIP IS PART OF THE RESOLUTION ORDER. The merge branch above is
+	 * scoped to a running session, so with no session a stackable dropped twice onto one tile is
+	 * still TWO records for ONE physical pile. The single despawn consumed the OLDEST of them and
+	 * left the other on a tile that is now physically empty: a PHANTOM. It is unowned, so no
+	 * teardown removes it, and no despawn will ever come for it.
+	 *
+	 * A later session then dropped on that same tile and the ONE despawn it gets resolved to the
+	 * phantom again, because the phantom is older. The session's own key was never released, the
+	 * tail never armed, and only MAX_SESSION_MILLIS ended the recording — 30 minutes rather than the
+	 * five seconds after the final pile both user-facing strings promise. The invariant backstop
+	 * cannot see it either: dropSessionHoldsOwnedPile asks whether the session owns ANY tracked
+	 * record, and it still owns the record whose physical pile is gone. The disagreement is between
+	 * the tracked RECORD and the PHYSICAL pile, which neither half of that invariant can observe.
+	 *
+	 * So when a session is running its own record wins. A despawn on a tile the session dropped on
+	 * is the session's pile far more often than it is a stale record, and the session's record is
+	 * the only one whose resolution can release a recorder key.
+	 *
+	 * NO-SESSION BEHAVIOUR IS UNCHANGED, deliberately. With no session there is no owner, the loop
+	 * falls straight through to the oldest match, and the two-records-for-one-stack attribution the
+	 * ground-removal arms pin is exactly as it was. That behaviour makes a removal report `unknown`
+	 * rather than fabricate an attribution, and this change must not touch it.
+	 *
+	 * ONE RESOLVER, BOTH CALLERS. trackGroundDrop's merge lookup and onItemDespawned use this same
+	 * method, so the record a merge ADOPTS is exactly the record the despawn will later resolve to.
+	 * Finding B2 was caused by those two asking different questions.
+	 */
 	private DroppedGroundItem findGroundDrop(int item, int x, int y, int plane)
 	{
+		String sid = dropSession.sessionId();
 		synchronized (groundDrops)
 		{
+			if (sid != null)
+			{
+				for (DroppedGroundItem g : groundDrops)
+				{
+					if (g.item == item && g.x == x && g.y == y && g.plane == plane
+						&& sid.equals(dropPileSession.get(g)))
+					{
+						return g;
+					}
+				}
+			}
 			for (DroppedGroundItem g : groundDrops)
 			{
 				if (g.item == item && g.x == x && g.y == y && g.plane == plane)
