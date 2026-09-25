@@ -1875,6 +1875,57 @@ public class DropStopContractTest
 		assertEquals("and it is the unrelated one", 4151, onlyTrackedPile(p).item);
 	}
 
+	// ===== CASE 36b — THE HARM ITSELF, with NO reference to groundDrops =====
+
+	/**
+	 * ROUND 5, FINDING B2, THE OUTCOME ARM, and the exact shape case 24 has for finding B.
+	 *
+	 * Cases 33-35 catch the second tracked entry at the moment it is minted, which is the earliest
+	 * and clearest signal. Under a reverted fix they fail on that count, before they ever reach the
+	 * tail. This arm deliberately asserts NOTHING about groundDrops. It drives the grant-arrives-
+	 * late route and asserts only the property the two user-facing strings promise: the recording
+	 * always ends. It is the arm that would have caught this defect written by somebody who had
+	 * never heard of groundDrops.
+	 *
+	 * IT NEVER CALLS forceTailDue BEFORE THE ARM, for the reason case 24 states: forceTailDue
+	 * writes stopAtMillis straight into the recorder, which is exactly what an immortal recorder
+	 * cannot do for itself, so using it early would hide the defect.
+	 *
+	 * IT ALSO DOES NOT LEAN ON THE BACKSTOP. The poll count is far below the invariant grace, so
+	 * only the merge-detection fix can make this arm green.
+	 */
+	@Test
+	public void case36b_theRecordingAlwaysEndsAfterAGrantArrivesOverAnExistingPile() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+
+		dropAction(p);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue("the session is recording", (Boolean) field(p, "dropCapturing"));
+
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+
+		assertEquals("the despawn released the session's only pile key",
+			0, p.dropSession.activePileCount());
+		assertEquals("and nothing is pending", 0, p.dropSession.pendingDropCount());
+		assertTrue("NO IMMORTAL RECORDER: with nothing outstanding the tail MUST have armed itself",
+			p.dropSession.stopPending());
+
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
+		assertFalse("and the screen is no longer being captured",
+			(Boolean) field(p, "dropCapturing"));
+	}
+
 	// ================================================================
 	// CASES 37-39 — ROUND 5, THE STRUCTURAL BACKSTOP
 	//
