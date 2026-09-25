@@ -317,7 +317,7 @@ public class StoreClipRetryTest
 			void scheduleClipRetry(Runnable retry, long delayMs)
 			{
 				delays.add(delayMs);
-				tok[0] = "fedcba9876543210fedcba9876543210";
+				tok[0] = "fedcba9876543210".repeat(2);
 				retry.run();
 			}
 		};

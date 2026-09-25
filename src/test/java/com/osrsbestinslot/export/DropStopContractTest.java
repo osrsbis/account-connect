@@ -35,7 +35,7 @@ import static org.junit.Assert.assertTrue;
 public class DropStopContractTest
 {
 	private static final String TOKEN = "0123456789abcdef0123456789abcdef";
-	private static final String OTHER_TOKEN = "fedcba9876543210fedcba9876543210";
+	private static final String OTHER_TOKEN = "fedcba9876543210".repeat(2);
 
 	/** A config whose two user-controlled values can be changed mid-session, exactly as a user can. */
 	private static final class MutableConfig implements AccountConnectConfig
