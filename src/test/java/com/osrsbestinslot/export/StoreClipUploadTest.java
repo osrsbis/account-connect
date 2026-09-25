@@ -178,17 +178,17 @@ public class StoreClipUploadTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin()
 		{
 			@Override
-			void submitStoreClipUpload(List<byte[]> frames)
+			void submitStoreClipUpload(List<byte[]> frames, List<Long> capturedAtMillis)
 			{
 				uploaded[0] = true;
 			}
 		};
 		inject(plugin, "config", enabledConfig(null));
 		inject(plugin, "drawManager", new DrawManager());
-		ClipRingBuffer ring = new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES);
-		ring.add(jpeg(16, 12));
-		ring.add(jpeg(16, 12));
-		inject(plugin, "clipRing", ring);
+		StoreVisitClip ring = newVisit();
+		ring.offer(jpeg(16, 12), 1_000L);
+		ring.offer(jpeg(16, 12), 1_033L);
+		inject(plugin, "clipVisit", ring);
 		inject(plugin, "clipCapturing", true);
 		plugin.storeTxThisVisit = false;			// the visit had NO buy/sell
 
@@ -202,16 +202,16 @@ public class StoreClipUploadTest
 		AccountConnectPlugin plugin2 = new AccountConnectPlugin()
 		{
 			@Override
-			void submitStoreClipUpload(List<byte[]> frames)
+			void submitStoreClipUpload(List<byte[]> frames, List<Long> capturedAtMillis)
 			{
 				uploaded2[0] = true;
 			}
 		};
 		inject(plugin2, "config", enabledConfig(null));
 		inject(plugin2, "drawManager", new DrawManager());
-		ClipRingBuffer ring2 = new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES);
-		ring2.add(jpeg(16, 12));
-		inject(plugin2, "clipRing", ring2);
+		StoreVisitClip ring2 = newVisit();
+		ring2.offer(jpeg(16, 12), 1_000L);
+		inject(plugin2, "clipVisit", ring2);
 		inject(plugin2, "clipCapturing", true);
 		plugin2.storeTxThisVisit = true;			// a buy/sell happened
 
@@ -250,7 +250,8 @@ public class StoreClipUploadTest
 			frames.add(jpeg(40, 30));
 			frames.add(jpeg(40, 30));
 			frames.add(jpeg(40, 30));
-			plugin.submitStoreClipUpload(frames);
+			plugin.submitStoreClipUpload(frames, java.util.Arrays.asList(1_700_000_000_000L,
+				1_700_000_000_033L, 1_700_000_000_066L));
 
 			Capture c = received.poll(15, TimeUnit.SECONDS);
 			assertNotNull("burst upload never arrived", c);
@@ -272,6 +273,12 @@ public class StoreClipUploadTest
 	}
 
 	// ---- helpers ----
+
+	private static StoreVisitClip newVisit()
+	{
+		return new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
+			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
+	}
 
 	private static byte[] sized(int len, int tag)
 	{

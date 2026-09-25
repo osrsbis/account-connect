@@ -280,6 +280,33 @@ public class StoreNearbyCaptureTest
 	}
 
 	/**
+	 * A store_taken during a capturing visit marks a moment on the visit clip, so the clip keeps the
+	 * seconds around the customer buying our item out. Without the call the moment is lost to the
+	 * 1fps baseline.
+	 */
+	@Test
+	public void storeTakenMarksAMomentOnTheVisitClip() throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self), 412, 200);
+		StoreVisitClip clip = new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
+			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
+		inject(plugin, "clipVisit", clip);
+		inject(plugin, "clipCapturing", true);
+
+		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
+		sold.add(20997);
+		inject(plugin, "soldThisVisit", sold);
+		java.util.Map<Integer, Integer> baseline = new java.util.LinkedHashMap<>();
+		baseline.put(20997, 1);
+		inject(plugin, "shopStock", baseline);
+
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+
+		assertEquals("store_taken must mark one moment on the visit clip", 1, clip.momentCount());
+	}
+
+	/**
 	 * The candidate list is EVIDENCE, not an accusation, and the code is careful to call it
 	 * taken_by_candidates. An empty shop must therefore emit the event with NO candidate list at all
 	 * rather than an empty one — "we do not know who" must not read as "nobody".

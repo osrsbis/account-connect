@@ -222,7 +222,8 @@ public class StoreClipCaptureTest
 			}
 		});
 		inject(plugin, "clipCapturing", true);
-		inject(plugin, "clipRing", new ClipRingBuffer(AccountConnectPlugin.MAX_CLIP_FRAMES));
+		inject(plugin, "clipVisit", new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
+			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES));
 
 		plugin.onClipFrameTick();		// first sample: null frame comes back
 		assertFalse("a null frame must release the in-flight latch", pending(plugin));

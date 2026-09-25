@@ -1122,7 +1122,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
-	// While a shop is open, sample the render at a low WALL-CLOCK rate into a bounded ring buffer. On
+	// While a shop is open, sample the render at a WALL-CLOCK rate into a bounded StoreVisitClip. On
 	// shop-close, if the visit had a buy/sell the frames go to the (B3) uploader; otherwise they are
 	// dropped. Frames are captured raw here — no video encode in the plugin; the server stitches them.
 	// SAMPLE RATE — raised 1 -> 3 on 2026-09-02, with the retained window cut 120s -> 40s so the ring
@@ -1140,12 +1140,14 @@ public class AccountConnectPlugin extends Plugin
 	// (10.8MB — fits). The 704px/q0.55 frame was checked for LEGIBILITY, not just size: shop item text
 	// and chat remain readable, which is the property MAX_FRAME_WIDTH exists to protect.
 	//
-	// 12 seconds is the deliberate trade. A store visit's evidence is the transaction and the seconds
-	// around it, and the ring keeps the NEWEST frames, so a longer visit loses its opening and never its
-	// transaction. Twelve seconds at 30fps shows the approach, the click and the result.
+	// 360 frames is the per-VISIT frame budget. It used to be the NEWEST 12 seconds of the visit, and
+	// that lost the transaction whenever the visit ran longer than 12 seconds after the last sale
+	// (Arengees 2026-09-25: sells 16:37:59-16:39:51, frames 16:39:55-16:40:06, no sale on video).
+	// The same budget is now spent by StoreVisitClip on the visit start, a window around every
+	// buy / sell / taken moment, and a 1fps baseline between them.
 	static final int CLIP_FPS = 30;					// sample rate (constant, NOT a user setting)
-	static final int CLIP_SECONDS = 12;				// max clip length retained (was 120 @ 1fps)
-	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// ring capacity = 120 frames
+	static final int CLIP_SECONDS = 12;				// budget expressed as seconds at CLIP_FPS
+	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// per-visit frame budget = 360 frames
 	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
 	// (Plan body text says 640px; 768 is the ratified Task-0 override.) Lowered 768 -> 704 on 2026-09-02
 	// to pay for 30fps: 360 frames only fits the 12MB burst cap at ~30KB/frame. 704 was chosen over 640
@@ -1169,8 +1171,10 @@ public class AccountConnectPlugin extends Plugin
 	private volatile boolean clipCapturing;
 	/** Set the moment a general-store buy/sell fires during the visit — a visit without one is dropped. */
 	volatile boolean storeTxThisVisit;
-	/** Bounded FIFO of sampled frames; created per capture, snapshotted + cleared on stop. */
-	private volatile ClipRingBuffer clipRing;
+	/** The visit's kept frames (start, every moment, baseline); created per capture, cleared on stop. */
+	private volatile StoreVisitClip clipVisit;
+	/** Wall time (ms) the frame in flight was sampled at. The frame is kept at THIS time, not its encode time. */
+	private volatile long clipFrameSampledAtMillis;
 	/** Wall-clock (nanoTime) of the next frame to sample; a render tick before this is skipped. */
 	private volatile long nextClipSampleAt;
 	/** Set on a sampled tick to request one frame from DrawManager; cleared when that frame arrives. */
@@ -1182,8 +1186,8 @@ public class AccountConnectPlugin extends Plugin
 	//
 	// This is a SECOND consumer of the same frame-capture machinery the store path uses, not a rival
 	// pipeline. It shares the sampler, the encoder, the downscaler and the multipart upload idiom.
-	// What differs is WHAT is retained and WHEN: the store path keeps the newest 12 seconds in a
-	// ring, and a drop trade must keep the START (the drop itself) however long the customer takes.
+	// What differs is WHAT is retained and WHEN: the store path keeps one 360-frame budget per visit
+	// (StoreVisitClip), and a drop trade must keep everything however long the customer takes.
 
 	/** Session state machine. Owns start, the 5-second tail, and which piles are still live. */
 	final DropSessionRecorder dropSession = new DropSessionRecorder();
@@ -2546,7 +2550,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		clipRing = new ClipRingBuffer(MAX_CLIP_FRAMES);
+		clipVisit = new StoreVisitClip(MAX_CLIP_FRAMES, MAX_CLIP_BURST_BYTES, MAX_CLIP_FRAME_BYTES);
 		storeTxThisVisit = false;
 		nextClipSampleAt = 0L;			// 0 => the first render tick samples immediately
 		clipFramePending = false;
@@ -2612,6 +2616,8 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		clipFramePending = true;
+		final long sampledAt = System.currentTimeMillis();
+		clipFrameSampledAtMillis = sampledAt;
 		drawManager.requestNextFrameListener(img ->
 		{
 			if (img == null)
@@ -2630,10 +2636,10 @@ public class AccountConnectPlugin extends Plugin
 			{
 				try
 				{
-					ClipRingBuffer ring = clipRing;
-					if (ring != null)
+					StoreVisitClip visit = clipVisit;
+					if (visit != null)
 					{
-						ring.add(encodeJpeg(scaled));	// null/empty is ignored by the ring
+						visit.offer(encodeJpeg(scaled), sampledAt);	// null/empty is ignored
 					}
 				}
 				finally
@@ -2657,25 +2663,38 @@ public class AccountConnectPlugin extends Plugin
 		}
 		clipCapturing = false;
 		drawManager.unregisterEveryFrameListener(clipFrameTick);
-		ClipRingBuffer ring = clipRing;
-		clipRing = null;
+		StoreVisitClip visit = clipVisit;
+		clipVisit = null;
 		clipFramePending = false;
 		boolean hadTx = storeTxThisVisit;
 		storeTxThisVisit = false;
-		if (ring == null)
+		if (visit == null)
 		{
 			return;
 		}
 		if (!upload || !hadTx)
 		{
-			ring.clear();		// no purchase, or shutdown/hop drop — discard without uploading
+			visit.clear();		// no purchase, or shutdown/hop drop — discard without uploading
 			return;
 		}
-		List<byte[]> frames = ring.snapshot();	// already JPEG-encoded at capture time
-		ring.clear();
-		if (!frames.isEmpty())
+		StoreVisitClip.Snapshot snap = visit.snapshot();	// already JPEG-encoded at capture time
+		visit.clear();
+		if (!snap.frames.isEmpty())
 		{
-			submitStoreClipUpload(frames);
+			submitStoreClipUpload(snap.frames, snap.capturedAtMillis);
+		}
+	}
+
+	/**
+	 * A buy / sell click or a store_taken during a capturing visit. The clip keeps the seconds before
+	 * and after it at the full rate. No-op when no visit is capturing.
+	 */
+	void markStoreClipMoment()
+	{
+		StoreVisitClip visit = clipVisit;
+		if (clipCapturing && visit != null)
+		{
+			visit.onMoment(System.currentTimeMillis());
 		}
 	}
 
@@ -2766,48 +2785,49 @@ public class AccountConnectPlugin extends Plugin
 	 * thread; a bad token or an empty burst is a silent no-op.
 	 *
 	 * REASSEMBLY CONTRACT — the collector joins chunks on `captured_at`, so each chunk carries the wall
-	 * time of ITS OWN first frame, not the visit's. That gives the collector two things it cannot get
-	 * any other way: the ORDER of the chunks, and the REAL frame rate (a chunk's frame count divided by
-	 * the gap to the next chunk's captured_at). The real rate matters because the server clamps the
-	 * DECLARED fps to a range that predates 30fps capture — so the declared value can be wrong, while a
-	 * rate derived from two timestamps cannot be.
+	 * time of ITS OWN first frame, read from the frame's real capture time, not the visit's. That gives
+	 * the collector the ORDER of the chunks. Since StoreVisitClip the frames are NOT one continuous
+	 * span: moments are at the full rate and the gaps between them at 1fps. Every chunk still declares
+	 * CLIP_FPS, because the collector refuses to join chunks whose rates differ; the 1fps stretches
+	 * therefore play faster than real time, and the moments play at real time.
 	 */
-	void submitStoreClipUpload(java.util.List<byte[]> frames)
+	void submitStoreClipUpload(java.util.List<byte[]> frames, java.util.List<Long> capturedAtMillis)
 	{
 		if (!uploadAllowed())
 		{
 			return;		// upload switch off — send nothing
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
-		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty())
+		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty()
+			|| capturedAtMillis == null || capturedAtMillis.size() != frames.size())
 		{
 			return;	// same guard as the trade path — no / malformed token, or nothing to send
 		}
-		// The visit ENDED now, so the first frame is (frames-1)/fps seconds ago. Anchoring on the end
-		// and working backwards keeps each chunk's captured_at on the same real timeline even though
-		// all of them are uploaded at once, after the fact.
-		final long endMillis = System.currentTimeMillis();
-		final long startMillis = endMillis - (long) (frames.size() - 1) * 1000L / CLIP_FPS;
+		final java.util.List<byte[]> allFrames = new java.util.ArrayList<>(frames);
+		final java.util.List<Long> allTimes = new java.util.ArrayList<>(capturedAtMillis);
 		executor.submit(() ->
 		{
-			// Frames arrive ALREADY ENCODED (onClipFrameTick encodes each one as it is captured), so
-			// there is no second decoded copy here — that copy is what put ~400MB on the heap and froze
-			// the client. selectStoreClipFrames still filters null / oversized entries.
-			java.util.List<byte[]> kept = selectStoreClipFrames(
-				frames, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
+			// Frames arrive ALREADY ENCODED and already inside the visit budget (StoreVisitClip).
+			// selectStoreClipFrames still filters null / oversized entries as a second line.
+			java.util.List<Integer> kept = selectStoreClipFrameIndexes(
+				allFrames, MAX_CLIP_FRAMES, MAX_CLIP_FRAME_BYTES, MAX_CLIP_BURST_BYTES);
 			if (kept.isEmpty())
 			{
 				return;
 			}
-			// selectStoreClipFrames keeps the NEWEST suffix, so a trimmed burst starts later than the
-			// visit did. Re-anchor on the END, which is the frame that is never dropped.
-			long firstKeptMillis = endMillis - (long) (kept.size() - 1) * 1000L / CLIP_FPS;
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 			for (int off = 0; off < kept.size(); off += CLIP_CHUNK_FRAMES)
 			{
-				java.util.List<byte[]> chunk =
-					kept.subList(off, Math.min(off + CLIP_CHUNK_FRAMES, kept.size()));
-				long chunkAtMillis = firstKeptMillis + (long) off * 1000L / CLIP_FPS;
+				java.util.List<Integer> idx = kept.subList(off, Math.min(off + CLIP_CHUNK_FRAMES, kept.size()));
+				java.util.List<byte[]> chunk = new java.util.ArrayList<>(idx.size());
+				for (int i : idx)
+				{
+					chunk.add(allFrames.get(i));
+				}
+				// Each chunk carries the REAL capture time of its own first frame. The visit is not one
+				// continuous span any more (start, moments, baseline), so a time derived from the frame
+				// count would be wrong; the collector orders chunks on this value.
+				long chunkAtMillis = allTimes.get(idx.get(0));
 				postStoreClipChunk(base, token, chunk, chunkAtMillis / 1000L);
 			}
 		});
@@ -2879,20 +2899,32 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static java.util.List<byte[]> selectStoreClipFrames(java.util.List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
 	{
-		java.util.List<byte[]> valid = new java.util.ArrayList<>(encoded.size());
-		for (byte[] b : encoded)
+		java.util.List<byte[]> out = new java.util.ArrayList<>();
+		for (int i : selectStoreClipFrameIndexes(encoded, maxFrames, maxFrameBytes, maxBurstBytes))
 		{
+			out.add(encoded.get(i));
+		}
+		return out;
+	}
+
+	/** selectStoreClipFrames as indexes into `encoded`, so a caller can keep each frame's capture time. */
+	static java.util.List<Integer> selectStoreClipFrameIndexes(java.util.List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
+	{
+		java.util.List<Integer> valid = new java.util.ArrayList<>(encoded.size());
+		for (int i = 0; i < encoded.size(); i++)
+		{
+			byte[] b = encoded.get(i);
 			if (b != null && b.length > 0 && b.length <= maxFrameBytes)
 			{
-				valid.add(b);
+				valid.add(i);
 			}
 		}
 		int start = valid.size();
 		long total = 0;
 		int kept = 0;
-		while (start > 0 && kept < maxFrames && total + valid.get(start - 1).length <= maxBurstBytes)
+		while (start > 0 && kept < maxFrames && total + encoded.get(valid.get(start - 1)).length <= maxBurstBytes)
 		{
-			total += valid.get(start - 1).length;
+			total += encoded.get(valid.get(start - 1)).length;
 			start--;
 			kept++;
 		}
@@ -4305,6 +4337,7 @@ public class AccountConnectPlugin extends Plugin
 		if (clipCapturing && shopOpen && isStoreBuyOrSell(event))
 		{
 			storeTxThisVisit = true;
+			markStoreClipMoment();
 		}
 		// Off-book value events (drop / pickup / alch): own gate (not shop-scoped) — arm an inventory-delta
 		// pending resolved on the next INVENTORY change. BEFORE the store gate so the shop-open early-return
@@ -4849,6 +4882,7 @@ public class AccountConnectPlugin extends Plugin
 				f.put("world", client.getWorld());
 			}
 			emitEvent("store_taken", f);
+			markStoreClipMoment();
 		}
 		shopStock.clear();
 		shopStock.putAll(now);
