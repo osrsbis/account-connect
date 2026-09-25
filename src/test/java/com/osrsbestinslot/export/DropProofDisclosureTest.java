@@ -7,6 +7,7 @@ import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -126,6 +127,75 @@ public class DropProofDisclosureTest
 				assertTrue("both disclosure strings must carry: " + claim, s.contains(claim));
 			}
 		}
+	}
+
+	/**
+	 * ROUND 4, FINDING D. `counterparty_inferred` names a specific other player as the likely taker
+	 * of an item you dropped, and no disclosure sentence described it.
+	 *
+	 * THE INCREMENTAL NAME EXPOSURE IS ZERO. The same name is already in `taken_by_candidates` on
+	 * the same row, which is pre-existing and sits under Lukas's standing 2026-07-16 decision. This
+	 * arm does not re-open that decision and does not change what is sent. What was missing was the
+	 * CLAIM: the plugin now asserts, in a field whose name reads as an answer, that a named third
+	 * party took your item, and the user was never told.
+	 *
+	 * The gate is worth stating plainly, because it is wider than drop proof: emitGroundRemoval is
+	 * gated on activityLogActive(), which is a valid link token. So this fires for every ordinary
+	 * linked user with the upload switch on, not only for a staff member holding the drop-proof
+	 * grant. The sentence therefore sits in the general upload paragraph, not in the drop-proof one.
+	 */
+	@Test
+	public void bothStringsDiscloseTheInferredTaker() throws Exception
+	{
+		String[] claims = {
+			"uploads the names of players standing near that item",
+			"records that name as the likely taker",
+		};
+		for (String s : bothStrings())
+		{
+			for (String claim : claims)
+			{
+				assertTrue("both disclosure strings must carry: " + claim, s.contains(claim));
+			}
+		}
+	}
+
+	/**
+	 * AND THE SENTENCE MUST STAY TRUE OF THE CODE. It promises the name is recorded only where
+	 * EXACTLY ONE player stands on the pile, so the resolver is driven to prove that.
+	 *
+	 * Without this the disclosure could outlive the rule it describes: a future change that
+	 * resolved on two candidates, or on a player merely nearby, would leave the string quietly
+	 * overstating our own restraint in the safe-sounding direction.
+	 */
+	@Test
+	public void theInferredTakerRuleMatchesTheSentence() throws Exception
+	{
+		assertEquals("exactly one player ON the tile is named",
+			"Alice", DropCandidates.resolveCounterparty(candidates(cand("Alice", 0))));
+		assertNull("two on the tile is ambiguous and names nobody",
+			DropCandidates.resolveCounterparty(candidates(cand("Alice", 0), cand("Bob", 0))));
+		assertNull("a player merely NEARBY is never named as the taker",
+			DropCandidates.resolveCounterparty(candidates(cand("Alice", 1))));
+		assertNull("nor is the nearest of several nearby players",
+			DropCandidates.resolveCounterparty(candidates(cand("Alice", 1), cand("Bob", 2))));
+		assertNull("an empty tile names nobody",
+			DropCandidates.resolveCounterparty(candidates()));
+	}
+
+	private static java.util.Map<String, Object> cand(String rsn, int dist)
+	{
+		java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+		m.put("rsn", rsn);
+		m.put("dist", dist);
+		return m;
+	}
+
+	@SafeVarargs
+	private static java.util.List<java.util.Map<String, Object>> candidates(
+		java.util.Map<String, Object>... cs)
+	{
+		return new java.util.ArrayList<>(java.util.Arrays.asList(cs));
 	}
 
 	/**
