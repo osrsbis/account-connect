@@ -1059,8 +1059,53 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * ROUND 9 — WHAT THE SCENE SAYS ABOUT ITEMS OF ONE ID ON ONE TILE.
+	 *
+	 * Round 8 asked the scene a YES/NO question — "is an item of this id still on this tile?" — and
+	 * FINDING R7 is the price of that question: it cannot tell OUR OWN second pile from a
+	 * stranger's. Ten of our own piles on one tile made the first nine despawns look exactly like an
+	 * untracked rival, so nine of ten evidence rows were never published and the surviving row
+	 * described the wrong pile.
+	 *
+	 * A COUNT can tell them apart. With |S| of our own records still on that tile, a remaining count
+	 * BELOW |S| means one of OURS left; a count at or above |S| means a stranger's pile may be the
+	 * one that went. The QUANTITIES say WHICH of ours, where the reader can supply them.
+	 */
+	static final class SceneTileItems
+	{
+		/** UNKNOWN when the scene could not be read; NONE for a count of zero; PRESENT otherwise. */
+		final ScenePileState state;
+		/** Piles of that item id on that tile, excluding the one the caller asked to exclude. */
+		final int count;
+		/** One quantity per counted pile, or null when this reader cannot say. */
+		final long[] quantities;
+
+		private SceneTileItems(ScenePileState state, int count, long[] quantities)
+		{
+			this.state = state;
+			this.count = count;
+			this.quantities = quantities;
+		}
+
+		static SceneTileItems unknown()
+		{
+			return new SceneTileItems(ScenePileState.UNKNOWN, 0, null);
+		}
+
+		/** @param quantities one per pile, or null when the reader cannot expose them. */
+		static SceneTileItems of(int count, long[] quantities)
+		{
+			return new SceneTileItems(
+				count <= 0 ? ScenePileState.NONE : ScenePileState.PRESENT,
+				Math.max(count, 0),
+				quantities);
+		}
+	}
+
+	/**
 	 * Reads the scene, so a test can model a rival pile, our pile going, or a tile out of scene.
-	 * The live implementation is {@link #readSceneTile}; nothing else in this class reads the scene.
+	 * The live implementation is {@link #readSceneTileItems}; nothing else in this class reads the
+	 * scene.
 	 */
 	interface SceneGroundReader
 	{
@@ -1068,15 +1113,15 @@ public class AccountConnectPlugin extends Plugin
 		 * @param excluding a TileItem to IGNORE while counting, or null. See
 		 *                  {@link #scenePileState} for why the despawn path passes one.
 		 */
-		ScenePileState itemOnTile(int item, int x, int y, int plane, Object excluding);
+		SceneTileItems itemsOnTile(int item, int x, int y, int plane, Object excluding);
 	}
 
 	/** Defaults to the live client read; swapped in tests through {@link #setSceneReaderForTest}. */
-	private volatile SceneGroundReader sceneReader = this::readSceneTile;
+	private volatile SceneGroundReader sceneReader = this::readSceneTileItems;
 
 	void setSceneReaderForTest(SceneGroundReader r)
 	{
-		sceneReader = r == null ? this::readSceneTile : r;
+		sceneReader = r == null ? this::readSceneTileItems : r;
 	}
 
 	/**
@@ -1092,21 +1137,27 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	ScenePileState scenePileState(int item, int x, int y, int plane, Object excluding)
 	{
+		return sceneTileItems(item, x, y, plane, excluding).state;
+	}
+
+	/** The counting form of {@link #scenePileState}. Never throws; answers UNKNOWN when it cannot read. */
+	SceneTileItems sceneTileItems(int item, int x, int y, int plane, Object excluding)
+	{
 		SceneGroundReader r = sceneReader;
 		if (r == null)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		try
 		{
-			ScenePileState s = r.itemOnTile(item, x, y, plane, excluding);
-			return s == null ? ScenePileState.UNKNOWN : s;
+			SceneTileItems s = r.itemsOnTile(item, x, y, plane, excluding);
+			return s == null || s.state == null ? SceneTileItems.unknown() : s;
 		}
 		catch (RuntimeException e)
 		{
 			// A scene read that threw told us nothing. UNKNOWN is the only honest answer, and it is
 			// the one that changes no behaviour.
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 	}
 
@@ -1127,49 +1178,49 @@ public class AccountConnectPlugin extends Plugin
 	 * cannot tell us", and the difference between that and "the tile is empty" is the entire point
 	 * of this method.
 	 */
-	private ScenePileState readSceneTile(int item, int x, int y, int plane, Object excluding)
+	private SceneTileItems readSceneTileItems(int item, int x, int y, int plane, Object excluding)
 	{
 		if (client == null)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		net.runelite.api.WorldView wv = client.getTopLevelWorldView();
 		if (wv == null)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		net.runelite.api.Scene scene = wv.getScene();
 		if (scene == null)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		net.runelite.api.coords.LocalPoint lp =
 			net.runelite.api.coords.LocalPoint.fromWorld(wv, x, y);
 		if (lp == null)
 		{
-			return ScenePileState.UNKNOWN;	// the tile is not in the loaded scene
+			return SceneTileItems.unknown();	// the tile is not in the loaded scene
 		}
 		net.runelite.api.Tile[][][] tiles = scene.getTiles();
 		if (tiles == null || plane < 0 || plane >= tiles.length)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		int sx = lp.getSceneX();
 		int sy = lp.getSceneY();
 		net.runelite.api.Tile[][] atPlane = tiles[plane];
 		if (atPlane == null || sx < 0 || sx >= atPlane.length)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		net.runelite.api.Tile[] col = atPlane[sx];
 		if (col == null || sy < 0 || sy >= col.length)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		net.runelite.api.Tile tile = col[sy];
 		if (tile == null)
 		{
-			return ScenePileState.UNKNOWN;
+			return SceneTileItems.unknown();
 		}
 		java.util.List<net.runelite.api.TileItem> items = tile.getGroundItems();
 		if (items == null)
@@ -1178,16 +1229,25 @@ public class AccountConnectPlugin extends Plugin
 			// returns null when there is no item layer, which is a genuinely EMPTY tile, not a
 			// failure to read. Verified in the 1.12.39 injected client: the null return happens only
 			// on a missing ItemLayer.
-			return ScenePileState.NONE;
+			return SceneTileItems.of(0, new long[0]);
 		}
+		// ROUND 9. COUNT them, do not stop at the first match. The count is what separates our own
+		// second pile from a stranger's, and TileItem.getQuantity() is what says WHICH of ours went.
+		// Both signatures read from runelite-api-1.12.39 with javap: getId()I and getQuantity()I.
+		java.util.List<Long> qty = new ArrayList<>();
 		for (net.runelite.api.TileItem it : items)
 		{
 			if (it != null && it != excluding && it.getId() == item)
 			{
-				return ScenePileState.PRESENT;
+				qty.add((long) it.getQuantity());
 			}
 		}
-		return ScenePileState.NONE;
+		long[] q = new long[qty.size()];
+		for (int i = 0; i < q.length; i++)
+		{
+			q[i] = qty.get(i);
+		}
+		return SceneTileItems.of(q.length, q);
 	}
 
 	/**
@@ -1275,6 +1335,19 @@ public class AccountConnectPlugin extends Plugin
 		 * publishes the same refusal the despawn decided.
 		 */
 		volatile boolean attributionAmbiguous;
+		/**
+		 * ROUND 9. Set when the count proved one of OUR OWN piles left this tile, but two or more of
+		 * our own records on it carry the SAME quantity, so which of those equal piles went cannot
+		 * be told apart.
+		 *
+		 * This is WEAKER than {@link #attributionAmbiguous} on purpose, and the difference is the
+		 * whole point. The pile that left was certainly OURS and its quantity is certainly this one,
+		 * so the row keeps its drop_session_id and its qty and stays honest evidence. What is
+		 * uncertain is only WHICH of our equal piles it was, which is drop_seq and therefore
+		 * ticks_on_ground. The row says so in `attribution_uncertain`, and the SESSION is not marked
+		 * unprovable: two of our own equal piles are not a stranger.
+		 */
+		volatile boolean qtyTieUncertain;
 
 		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 			int dropTick, int despawnTick)
@@ -2554,6 +2627,49 @@ public class AccountConnectPlugin extends Plugin
 	 * THE SESSION IS MARKED UNPROVABLE by the release, so this can never manufacture a COMPLETE. See
 	 * DropSessionRecorder.pileGoneFromScene.
 	 */
+	/**
+	 * ROUND 9 — WHICH of our own piles on one tile are the ones that left.
+	 *
+	 * {@code release} is already decided by the count. This only chooses WHICH records it names.
+	 * Every quantity the scene still shows is matched against one of our records, oldest first; a
+	 * record that survives the matching is still physically down. What is left over went, and the
+	 * OLDEST {@code release} of those are released. When the reader cannot expose quantities, the
+	 * oldest {@code release} records are released, which is the order they were dropped in.
+	 *
+	 * A scene quantity that matches NONE of our records is a stranger's pile. It is simply not
+	 * matched, and because the return is capped at {@code release} it can never cause an extra key
+	 * to be released.
+	 */
+	private static List<DroppedGroundItem> pilesGoneByQuantity(List<DroppedGroundItem> own,
+		SceneTileItems scene, int release)
+	{
+		List<DroppedGroundItem> candidates = new ArrayList<>(own);
+		if (scene.quantities != null)
+		{
+			for (long q : scene.quantities)
+			{
+				for (java.util.Iterator<DroppedGroundItem> it = candidates.iterator(); it.hasNext(); )
+				{
+					if (it.next().qty == q)
+					{
+						it.remove();	// this record is still physically down
+						break;
+					}
+				}
+			}
+		}
+		List<DroppedGroundItem> out = new ArrayList<>();
+		for (DroppedGroundItem g : candidates)
+		{
+			if (out.size() >= release)
+			{
+				break;
+			}
+			out.add(g);
+		}
+		return out;
+	}
+
 	void releaseSessionPilesGoneFromScene(long nowMillis)
 	{
 		String sid = dropSession.sessionId();
@@ -2564,24 +2680,54 @@ public class AccountConnectPlugin extends Plugin
 		List<DroppedGroundItem> gone = null;
 		synchronized (groundDrops)
 		{
+			// ROUND 9, FINDING R8 — COUNT PER (ITEM, TILE), NOT PRESENCE.
+			//
+			// Round 8 asked the tile a yes/no question once per RECORD, so two of our records for
+			// one item on one tile asked the SAME question and got the SAME answer: released
+			// together or kept together. The count says how many of ours went. We own |S| records
+			// there and the scene shows C piles of that id, so |S| - C of ours have left. Release
+			// exactly that many and no more, choosing by QUANTITY where the reader exposes it, so
+			// the key released stands for a pile that is really gone. When the scene cannot say
+			// which quantities remain, the OLDEST are released, which is the order they were
+			// dropped in.
+			//
+			// CONSERVATIVE ON ANY DOUBT. UNKNOWN releases nothing. A count at or above ours releases
+			// nothing. Keeping a key too long is bounded by the invariant and the hard cap;
+			// releasing one too early would shorten a recording the disclosure promised.
+			Map<String, List<DroppedGroundItem>> byTile = new LinkedHashMap<>();
 			for (DroppedGroundItem g : groundDrops)
 			{
 				if (!sid.equals(dropPileSession.get(g)))
 				{
 					continue;
 				}
-				// The ITEM ID is part of the question. A tile emptied of some other item says
-				// nothing about our pile, and reading "the tile is clear" off the wrong id would
-				// release a key while our pile is still lying there.
-				if (scenePileState(g.item, g.x, g.y, g.plane, null) != ScenePileState.NONE)
+				// The ITEM ID is part of the key. A tile emptied of some other item says nothing
+				// about our pile, and reading "the tile is clear" off the wrong id would release a
+				// key while our pile is still lying there.
+				byTile.computeIfAbsent(g.item + ":" + g.x + ":" + g.y + ":" + g.plane,
+					k -> new ArrayList<>()).add(g);
+			}
+			for (List<DroppedGroundItem> own : byTile.values())
+			{
+				DroppedGroundItem first = own.get(0);
+				SceneTileItems scene = sceneTileItems(first.item, first.x, first.y, first.plane, null);
+				if (scene.state == ScenePileState.UNKNOWN)
 				{
 					continue;
 				}
-				if (gone == null)
+				int release = own.size() - scene.count;
+				if (release <= 0)
 				{
-					gone = new ArrayList<>();
+					continue;
 				}
-				gone.add(g);
+				for (DroppedGroundItem g : pilesGoneByQuantity(own, scene, release))
+				{
+					if (gone == null)
+					{
+						gone = new ArrayList<>();
+					}
+					gone.add(g);
+				}
 			}
 			if (gone != null)
 			{
@@ -5828,6 +5974,61 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * Every record THIS SESSION owns for that item on that tile, oldest first.
+	 *
+	 * ROUND 9. The count of these is |S| in the despawn rule below. groundDrops is append-ordered,
+	 * so the returned order is the order the piles were dropped.
+	 */
+	List<DroppedGroundItem> sessionOwnedPilesAt(int item, int x, int y, int plane)
+	{
+		List<DroppedGroundItem> out = new ArrayList<>();
+		String sid = dropSession.sessionId();
+		if (sid == null)
+		{
+			return out;
+		}
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (g.item == item && g.x == x && g.y == y && g.plane == plane
+					&& sid.equals(dropPileSession.get(g)))
+				{
+					out.add(g);
+				}
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * A despawning pile that can state its own quantity.
+	 *
+	 * The live path passes a {@code net.runelite.api.TileItem}, whose {@code getQuantity()} was read
+	 * from the resolved runelite-api-1.12.39 jar with javap. The test harness models a physical pile
+	 * with its own type, so this interface is the seam that lets both answer the same question
+	 * without the harness having to implement the whole TileItem surface.
+	 */
+	interface DespawnQuantity
+	{
+		long despawnedQuantity();
+	}
+
+	/** The quantity of the pile that is going, or null when nothing can say. */
+	static Long despawningQuantity(Object despawnedItem)
+	{
+		if (despawnedItem instanceof net.runelite.api.TileItem)
+		{
+			return (long) ((net.runelite.api.TileItem) despawnedItem).getQuantity();
+		}
+		if (despawnedItem instanceof DespawnQuantity)
+		{
+			return ((DespawnQuantity) despawnedItem).despawnedQuantity();
+		}
+		return null;
+	}
+
+	/**
 	 * ROUND 8, FINDING R4 — THE SCENE DECIDES WHETHER A DESPAWN IS AMBIGUOUS, NOT OUR BOOKKEEPING.
 	 *
 	 * Round 7 asked "do I hold TWO matching RECORDS?". That question can only see a rival the plugin
@@ -5865,32 +6066,103 @@ public class AccountConnectPlugin extends Plugin
 			dropSession.resolutionAmbiguous(System.currentTimeMillis());
 			return m.record;
 		}
-		// ROUND 8. The resolver is about to credit this despawn to THIS SESSION'S OWN pile, and the
-		// scene says an item of that id is STILL on that tile. Something we never tracked was down
-		// there, so which pile just went is unknowable and it may not be ours.
+		// ROUND 9, FINDING R7 — COUNT THE TILE, AND USE THE QUANTITY. DO NOT ASK PRESENCE.
+		//
+		// Round 8 asked "is an item of this id still on this tile?". That question cannot tell our
+		// OWN second pile from a stranger's, so a session that dropped ten piles of one item on one
+		// tile had the first nine despawns refused, published one of its ten evidence rows, and that
+		// row described the WRONG pile. An ordinary store delivery is exactly that shape.
+		//
+		// The counting question CAN tell them apart. |S| is how many records this session still owns
+		// for that item on that tile, INCLUDING the one this despawn is about to credit. C is how
+		// many piles of that id the scene still shows, with the despawning TileItem excluded by
+		// identity. After this removal the scene holds C piles while we still claim |S|, so:
+		//
+		//   C >= |S|  AMBIGUOUS. At least as many piles are left as we own, so at least one of them
+		//             is not ours, and the one that left may equally have been that stranger's.
+		//   C <  |S|  UNAMBIGUOUS. There are fewer piles left than we own, so one of OURS went.
 		//
 		// ONLY a despawn about to be credited to our own pile is tested. A record that is not ours
 		// releases no key and claims no session linkage, so there is nothing here for the scene to
-		// protect.
+		// protect. UNKNOWN keeps round-8 behaviour: no refusal is ever inferred from a failed read,
+		// and the invariant and the hard cap remain the backstops.
 		if (m.record != null
 			&& dropSession.sessionId() != null
-			&& dropSession.sessionId().equals(dropSessionForPile(m.record))
-			&& scenePileState(item, x, y, plane, despawnedItem) == ScenePileState.PRESENT)
+			&& dropSession.sessionId().equals(dropSessionForPile(m.record)))
 		{
-			// THE DESPAWN IS REFUSED WHOLE, which is the round-7 handling with no rival record to
-			// hand it to. Returning null leaves our record TRACKED and our key HELD, so the tail
-			// cannot arm while our pile may still be down, and publishes NO row: a row built from our
-			// record would describe a pile that did not necessarily go, which is the fabricated
-			// attribution round 7 exists to refuse.
-			//
-			// attributionAmbiguous is deliberately NOT set on our record. Our pile is still down and
-			// its own later removal may be perfectly attributable; the flag never clears, so setting
-			// it here would refuse an honest linkage we have not yet lost. COMPLETE is already out of
-			// reach through the recorder, which is the property that matters.
+			SceneTileItems scene = sceneTileItems(item, x, y, plane, despawnedItem);
+			if (scene.state != ScenePileState.UNKNOWN)
+			{
+				List<DroppedGroundItem> own = sessionOwnedPilesAt(item, x, y, plane);
+				if (scene.count >= own.size())
+				{
+					// THE DESPAWN IS REFUSED WHOLE, which is the round-7 handling with no rival
+					// record to hand it to. Returning null leaves our record TRACKED and our key
+					// HELD, so the tail cannot arm while our pile may still be down, and publishes
+					// NO row: a row built from our record would describe a pile that did not
+					// necessarily go, which is the fabricated attribution round 7 exists to refuse.
+					//
+					// attributionAmbiguous is deliberately NOT set on our record. Our pile is still
+					// down and its own later removal may be perfectly attributable; the flag never
+					// clears, so setting it here would refuse an honest linkage we have not yet
+					// lost. COMPLETE is already out of reach through the recorder, which is the
+					// property that matters.
+					dropSession.resolutionAmbiguous(System.currentTimeMillis());
+					return null;
+				}
+				if (own.size() > 1)
+				{
+					return chooseOwnPileByQuantity(own, despawnedItem);
+				}
+			}
+		}
+		return m.record;
+	}
+
+	/**
+	 * ROUND 9 — WHICH of our own piles just left, when several of ours are on that tile.
+	 *
+	 * The count already proved one of OURS went. The QUANTITY says which one.
+	 * {@code TileItem.getQuantity()} was read from runelite-api-1.12.39 with javap.
+	 *
+	 * <ul>
+	 * <li>EXACTLY ONE of our records carries that quantity: that is the pile, with its own
+	 *     drop_seq, its own ticks_on_ground and its own qty. This is the ordinary delivery.</li>
+	 * <li>SEVERAL of our records carry it: they are indistinguishable BY QUANTITY, and nothing else
+	 *     on the tile can separate them. The oldest is released so its row is published, and ONLY
+	 *     that row's attribution is marked uncertain. The session is NOT marked unprovable: every
+	 *     candidate is ours, every quantity is the same, and the row's own qty is right. Refusing
+	 *     the whole session over two of our own equal piles would be FINDING R7 again.</li>
+	 * <li>NONE of our records carries it, or nothing could state the despawning quantity: a pile of
+	 *     a size we never dropped left that tile, so it was a stranger's. Refuse.</li>
+	 * </ul>
+	 */
+	private DroppedGroundItem chooseOwnPileByQuantity(List<DroppedGroundItem> own,
+		Object despawnedItem)
+	{
+		Long q = despawningQuantity(despawnedItem);
+		List<DroppedGroundItem> matches = new ArrayList<>();
+		if (q != null)
+		{
+			for (DroppedGroundItem g : own)
+			{
+				if (g.qty == q)
+				{
+					matches.add(g);
+				}
+			}
+		}
+		if (matches.isEmpty())
+		{
 			dropSession.resolutionAmbiguous(System.currentTimeMillis());
 			return null;
 		}
-		return m.record;
+		DroppedGroundItem chosen = matches.get(0);	// oldest, groundDrops is append-ordered
+		if (matches.size() > 1)
+		{
+			chosen.qtyTieUncertain = true;
+		}
+		return chosen;
 	}
 
 	void clearGroundDrops()
@@ -6282,6 +6554,14 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("drop_session_id", dropSid);
 			fields.put("drop_seq", dropSeq);
+			// ROUND 9. Two or more of OUR OWN piles of this item on this tile carried the same
+			// quantity, so which of them left cannot be told apart. The linkage and the qty are
+			// still ours and still right; only drop_seq and ticks_on_ground name one of several
+			// equal candidates. Said on the row rather than hidden, so a reader is never misled.
+			if (g.qtyTieUncertain)
+			{
+				fields.put("attribution_uncertain", "equal_quantity_own_piles");
+			}
 		}
 		// The pile's own tile, on every row. A reader must be able to locate the pile without
 		// knowing where our character stood, and the candidate offsets below are relative to THIS.

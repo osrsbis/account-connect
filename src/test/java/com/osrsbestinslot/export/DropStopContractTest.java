@@ -2817,22 +2817,37 @@ public class DropStopContractTest
 	// the bookkeeping. An untracked rival is a FakeScene pile with no record behind it.
 	// ================================================================
 
-	/** One PHYSICAL pile lying on a tile, whether or not the plugin ever tracked it. */
-	private static final class FakePile
+	/**
+	 * One PHYSICAL pile lying on a tile, whether or not the plugin ever tracked it.
+	 *
+	 * ROUND 9. A pile carries its QUANTITY, and it can state that quantity when it is the one
+	 * despawning. The live path reads it from {@code net.runelite.api.TileItem.getQuantity()};
+	 * implementing {@link AccountConnectPlugin.DespawnQuantity} is how the harness answers the same
+	 * question without implementing the whole TileItem interface.
+	 */
+	private static final class FakePile implements AccountConnectPlugin.DespawnQuantity
 	{
 		final int item;
 		final int x;
 		final int y;
 		final int plane;
+		final long qty;
 		final String label;
 
-		FakePile(String label, int item, int x, int y, int plane)
+		FakePile(String label, int item, int x, int y, int plane, long qty)
 		{
 			this.label = label;
 			this.item = item;
 			this.x = x;
 			this.y = y;
 			this.plane = plane;
+			this.qty = qty;
+		}
+
+		@Override
+		public long despawnedQuantity()
+		{
+			return qty;
 		}
 	}
 
@@ -2850,7 +2865,13 @@ public class DropStopContractTest
 
 		FakePile lay(String label, int item, int x, int y)
 		{
-			FakePile f = new FakePile(label, item, x, y, 0);
+			return lay(label, item, x, y, 1L);
+		}
+
+		/** ROUND 9. A pile whose QUANTITY the scene can state, which is what names it at despawn. */
+		FakePile lay(String label, int item, int x, int y, long qty)
+		{
+			FakePile f = new FakePile(label, item, x, y, 0, qty);
 			piles.add(f);
 			return f;
 		}
@@ -2865,22 +2886,32 @@ public class DropStopContractTest
 			outOfScene.add(x + ":" + y + ":" + plane);
 		}
 
+		/**
+		 * ROUND 9. COUNTS the piles and reports their quantities, exactly as the live reader now
+		 * does. Round 8 returned on the first match, which is the shape FINDING R7 lived in.
+		 */
 		@Override
-		public AccountConnectPlugin.ScenePileState itemOnTile(int item, int x, int y, int plane,
+		public AccountConnectPlugin.SceneTileItems itemsOnTile(int item, int x, int y, int plane,
 			Object excluding)
 		{
 			if (outOfScene.contains(x + ":" + y + ":" + plane))
 			{
-				return AccountConnectPlugin.ScenePileState.UNKNOWN;
+				return AccountConnectPlugin.SceneTileItems.unknown();
 			}
+			java.util.List<Long> q = new java.util.ArrayList<>();
 			for (FakePile f : piles)
 			{
 				if (f != excluding && f.item == item && f.x == x && f.y == y && f.plane == plane)
 				{
-					return AccountConnectPlugin.ScenePileState.PRESENT;
+					q.add(f.qty);
 				}
 			}
-			return AccountConnectPlugin.ScenePileState.NONE;
+			long[] qs = new long[q.size()];
+			for (int i = 0; i < qs.length; i++)
+			{
+				qs[i] = q.get(i);
+			}
+			return AccountConnectPlugin.SceneTileItems.of(qs.length, qs);
 		}
 	}
 
@@ -3363,5 +3394,348 @@ public class DropStopContractTest
 			assertTrue("COMPLETE is out of reach (" + order + ")", p2.dropSession.unprovable());
 			assertNull("and the despawn itself is refused (" + order + ")", refused);
 		}
+	}
+
+	// ================================================================
+	// ROUND 9 — COUNT AND QUANTITY, NOT PRESENCE. Cases 58-62.
+	//
+	// FINDING R7 (review D round 6, HIGH) is a regression of bb1e090. The round-8 refusal asked the
+	// scene "is an item of this id still on this tile?", and that question cannot tell the session's
+	// OWN second pile from a stranger's. Ten of our own piles of one item on one tile made the first
+	// nine despawns look exactly like FINDING R4's untracked rival: nine of ten evidence rows were
+	// never published, the one that survived described the WRONG pile under our session id, and the
+	// manifest always said INTERRUPTED.
+	//
+	// The review could not see it from the suite because cases 49 and 50 never call
+	// setSceneReaderForTest, so they run with UNKNOWN on every read. EVERY arm below installs a
+	// working scene reader. That is the whole reason R7 shipped.
+	// ================================================================
+
+	/** Every ground_removed row published so far, oldest first. */
+	private static java.util.List<Map<String, Object>> allRemovals(AccountConnectPlugin p)
+	{
+		java.util.List<Map<String, Object>> out = new java.util.ArrayList<>();
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if ("ground_removed".equals(e.get("type")))
+			{
+				out.add(e);
+			}
+		}
+		return out;
+	}
+
+	// ===== CASE 58 — FINDING R7, ported from the review's R6Multi and R6Rows =====
+
+	/**
+	 * TEN of the session's OWN piles of ONE item on ONE tile, with DISTINCT quantities, a working
+	 * scene reader, and nothing untracked anywhere. This is the ordinary shape of a store delivery:
+	 * DROP_SPAWN_MAX_DIST is 2, so every pile normally lands on the same tile.
+	 *
+	 * On 3967e39 this printed `take 1..9: resolver=REFUSED rows=0` and
+	 * `RESULT MANIFEST outcome=INTERRUPTED reason=ambiguous_despawn drops=10`. Ten physical removals
+	 * produced ONE row, and that row carried the oldest record's quantity and drop_seq.
+	 *
+	 * The outcome is asserted first, then the per-row attribution, then the mechanism.
+	 */
+	@Test
+	public void case58_tenOwnPilesOfOneItemOnOneTilePublishTenHonestRowsAndComplete()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		FakePile[] physical = new FakePile[10];
+		for (int i = 0; i < 10; i++)
+		{
+			dropAction(p);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			// Distinct quantities and distinct drop ticks, so a WRONG choice is visible on the row.
+			p.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
+			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 11L * (i + 1));
+		}
+		assertEquals("ten of our own piles on one tile", 10, p.groundDropCount());
+		assertEquals("and ten keys held", 10, p.dropSession.activePileCount());
+
+		// The customer takes them NEWEST FIRST, which is the order that exposed the wrong
+		// attribution in R6Attrib.
+		for (int i = 9; i >= 0; i--)
+		{
+			AccountConnectPlugin.DroppedGroundItem chosen =
+				despawnInScene(p, scene, physical[i], 500 + (9 - i), true);
+			assertNotNull("FINDING R7: take " + (10 - i) + " of 10 must NOT be refused; every pile "
+					+ "on this tile is ours and the count proves one of ours went", chosen);
+			assertEquals("FINDING R7: and the resolver must choose the pile that actually left",
+				11L * (i + 1), chosen.qty);
+			poll(p, 2);
+		}
+
+		// THE OUTCOME, asserted first.
+		assertEquals("FINDING R7: all TEN evidence rows are published, not one",
+			10, allRemovals(p).size());
+		assertEquals("every key is released", 0, p.dropSession.activePileCount());
+		assertTrue("so the tail arms", p.dropSession.stopPending());
+		assertFalse("FINDING R7: an honest same-item multi-pile trade is NOT unprovable",
+			p.dropSession.unprovable());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("FINDING R7: a trade in which every pile was ours ends COMPLETE",
+			"COMPLETE", manifest(p).get("outcome"));
+		assertNull("naming no reason", manifest(p).get("outcome_reason"));
+		assertEquals("all ten drops counted", 10, manifest(p).get("drops"));
+
+		// PER-ROW ATTRIBUTION. The rows were published newest-first, so row k describes pile 9-k.
+		java.util.List<Map<String, Object>> rows = allRemovals(p);
+		for (int k = 0; k < 10; k++)
+		{
+			int pileIndex = 9 - k;
+			Map<String, Object> row = rows.get(k);
+			assertEquals("FINDING R7: row " + k + " carries the DEPARTED pile's quantity",
+				11L * (pileIndex + 1), row.get("qty"));
+			assertEquals("FINDING R7: and the DEPARTED pile's drop_seq",
+				pileIndex + 1, row.get("drop_seq"));
+			assertEquals("FINDING R7: and the DEPARTED pile's own lifetime, not the oldest one's",
+				(500 + k) - (100 + pileIndex), row.get("ticks_on_ground"));
+			assertNotNull("and its honest session linkage", row.get("drop_session_id"));
+			assertNull("with no uncertainty marker, because every quantity was distinct",
+				row.get("attribution_uncertain"));
+		}
+	}
+
+	// ===== CASE 59 — FINDING R7, ported from the review's R6Attrib, BOTH take orders =====
+
+	/**
+	 * Three own piles of item 1931 with quantities 11, 22 and 33, driven in BOTH physical take
+	 * orders. On 3967e39 both orders published a single row reading `qty=11 drop_seq=1
+	 * ticks_on_ground=420` whatever actually left: a row with our session id and our sequence number
+	 * describing a different pile of ours.
+	 */
+	@Test
+	public void case59_theRowDescribesThePileThatActuallyLeftInBothTakeOrders() throws Exception
+	{
+		for (boolean oldestFirst : new boolean[]{true, false})
+		{
+			String order = oldestFirst ? "OLDEST first" : "NEWEST first";
+			Rig r = rig();
+			AccountConnectPlugin p = r.plugin;
+			FakeScene scene = withScene(p);
+
+			long[] qty = {11L, 22L, 33L};
+			FakePile[] physical = new FakePile[3];
+			for (int i = 0; i < 3; i++)
+			{
+				dropAction(p);
+				p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+				p.trackGroundDrop(1931, qty[i], 3200, 3400, 0, null, 100 + i, 900, false);
+				physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, qty[i]);
+			}
+
+			int[] takeOrder = oldestFirst ? new int[]{0, 1, 2} : new int[]{2, 1, 0};
+			for (int t = 0; t < 3; t++)
+			{
+				int i = takeOrder[t];
+				AccountConnectPlugin.DroppedGroundItem chosen =
+					despawnInScene(p, scene, physical[i], 500 + t * 10, true);
+				assertNotNull("FINDING R7 (" + order + "): take " + (t + 1) + " must not be refused",
+					chosen);
+				poll(p, 2);
+				Map<String, Object> row = lastRemoval(p);
+				assertEquals("FINDING R7 (" + order + "): the row must carry the DEPARTED pile's qty",
+					qty[i], row.get("qty"));
+				assertEquals("FINDING R7 (" + order + "): and its own drop_seq",
+					i + 1, row.get("drop_seq"));
+			}
+
+			assertEquals("all three rows published (" + order + ")", 3, allRemovals(p).size());
+			assertFalse("nothing is unprovable (" + order + ")", p.dropSession.unprovable());
+			forceTailDue(p);
+			poll(p, 1);
+			assertEquals("FINDING R7 (" + order + "): the trade ends COMPLETE",
+				"COMPLETE", manifest(p).get("outcome"));
+		}
+	}
+
+	// ===== CASE 60 — the SAME trade with ONE STRANGER'S PILE: refused, never COMPLETE =====
+
+	/**
+	 * Ten own piles PLUS one untracked rival of the same item on the same tile. The count rule must
+	 * come down on the CONSERVATIVE side here: with C piles left and |S| records owned, C >= |S|
+	 * means at least one pile on that tile is not ours, so the despawn is refused whole. No row may
+	 * be fabricated and the manifest must never say COMPLETE.
+	 *
+	 * This is the control that stops "just stop refusing" from passing case 58. FINDING R4 must stay
+	 * closed.
+	 */
+	@Test
+	public void case60_oneStrangerPileAmongTenOwnPilesStillRefusesAndNeverCompletes()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		// The physical ground: a REAL rival pile of item 1931 the plugin NEVER tracked.
+		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400, 777L);
+
+		FakePile[] physical = new FakePile[10];
+		for (int i = 0; i < 10; i++)
+		{
+			dropAction(p);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
+			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 11L * (i + 1));
+		}
+		assertEquals("the plugin tracks only OUR ten", 10, p.groundDropCount());
+
+		// The customer takes one of OURS while the stranger's pile is still down.
+		AccountConnectPlugin.DroppedGroundItem chosen =
+			despawnInScene(p, scene, physical[0], 500, true);
+		poll(p, 5);
+
+		// THE OUTCOME, asserted first.
+		assertTrue("FINDING R4: NO EARLY STOP while a pile we do not own is on the tile",
+			p.dropSession.active());
+		assertFalse("and the tail must NOT arm", p.dropSession.stopPending());
+		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropSession.unprovable());
+		assertEquals("FINDING R4: NO row may be fabricated for an ambiguous take",
+			0, allRemovals(p).size());
+		assertNull("the despawn itself is refused", chosen);
+		assertEquals("the session keeps every key", 10, p.dropSession.activePileCount());
+
+		// The whole tile then clears, ours and the stranger's alike.
+		for (int i = 1; i < 10; i++)
+		{
+			despawnInScene(p, scene, physical[i], 510 + i, true);
+			poll(p, 2);
+		}
+		despawnInScene(p, scene, rival, 600, true);
+		poll(p, 5);
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("FINDING R4: a session that shared its tile with a stranger's pile is "
+				+ "INTERRUPTED, never COMPLETE", "INTERRUPTED", manifest(p).get("outcome"));
+	}
+
+	// ===== CASE 61 — EQUAL-quantity own piles: rows still published, session still provable =====
+
+	/**
+	 * Three of the session's own piles of one item on one tile, ALL with the same quantity. The
+	 * count still proves one of OURS left, so a row is owed. Which of our equal piles it was cannot
+	 * be told apart, so the row says so in `attribution_uncertain` and keeps its honest qty and
+	 * session linkage.
+	 *
+	 * The SESSION must NOT be marked unprovable. Two of our own equal piles are not a stranger, and
+	 * refusing the whole trade over them would be FINDING R7 again in a smaller form.
+	 */
+	@Test
+	public void case61_equalQuantityOwnPilesStillPublishRowsAndTheSessionStaysProvable()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		FakePile[] physical = new FakePile[3];
+		for (int i = 0; i < 3; i++)
+		{
+			dropAction(p);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.trackGroundDrop(1931, 50L, 3200, 3400, 0, null, 100 + i, 900, false);
+			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 50L);
+		}
+
+		for (int t = 0; t < 3; t++)
+		{
+			AccountConnectPlugin.DroppedGroundItem chosen =
+				despawnInScene(p, scene, physical[t], 500 + t, true);
+			assertNotNull("equal quantities are OURS either way, so the take is not refused", chosen);
+			poll(p, 2);
+		}
+
+		// THE OUTCOME, asserted first.
+		assertEquals("all three rows are published", 3, allRemovals(p).size());
+		assertFalse("the session is NOT unprovable: every candidate pile was ours",
+			p.dropSession.unprovable());
+		assertTrue("the tail arms", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertEquals("and the trade ends COMPLETE", "COMPLETE", manifest(p).get("outcome"));
+
+		// The rows are honest about the ONE thing that is uncertain.
+		java.util.List<Map<String, Object>> rows = allRemovals(p);
+		assertEquals("the first two rows name their tie", "equal_quantity_own_piles",
+			rows.get(0).get("attribution_uncertain"));
+		assertEquals("equal_quantity_own_piles", rows.get(1).get("attribution_uncertain"));
+		assertNull("the LAST pile has no equal left to be confused with",
+			rows.get(2).get("attribution_uncertain"));
+		for (Map<String, Object> row : rows)
+		{
+			assertEquals("the quantity is certain, because every candidate carried it",
+				50L, row.get("qty"));
+			assertNotNull("and the linkage is kept: the pile was certainly ours",
+				row.get("drop_session_id"));
+		}
+	}
+
+	// ===== CASE 62 — FINDING R8: the per-poll release COUNTS, it does not ask presence =====
+
+	/**
+	 * Two of the session's own piles of ONE item on ONE tile, with different quantities. One leaves
+	 * with NO despawn event reaching us, which is the state FINDING R5 was about.
+	 *
+	 * On 3967e39 the poll asked "is an item of that id still on that tile?" once per RECORD, so both
+	 * records asked the SAME question, got PRESENT, and BOTH keys were kept. The recording then ran
+	 * past the moment the disclosure names. Counting releases exactly the one key whose pile is
+	 * gone, and the QUANTITY says which one.
+	 */
+	@Test
+	public void case62_thePerPollReleaseCountsPilesAndPicksTheOneWhoseQuantityIsGone()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		FakeScene scene = withScene(p);
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 7L, 3200, 3400, 0, null, 100, 900, false);
+		FakePile seven = scene.lay("OURS7", 1931, 3200, 3400, 7L);
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 1_001L);
+		p.trackGroundDrop(1931, 9L, 3200, 3400, 0, null, 101, 900, false);
+		scene.lay("OURS9", 1931, 3200, 3400, 9L);
+		assertEquals("two own piles of one item on one tile", 2, p.dropSession.activePileCount());
+
+		// The pile of 7 physically leaves and NO despawn event reaches the plugin.
+		scene.remove(seven);
+		poll(p, 3);
+
+		// THE OUTCOME, asserted first. Keeping BOTH keys is the LATE direction FINDING R5 named: the
+		// recording runs on past the moment a pile the disclosure counts actually disappeared, and
+		// every one of those frames uploads. Releasing BOTH would be the EARLY direction.
+		assertEquals("FINDING R8: NOT LATE and NOT EARLY — exactly ONE key is released, because "
+				+ "exactly one of our two piles left the tile",
+			1, p.dropSession.activePileCount());
+		assertTrue("the session is still recording, because our other pile is still down",
+			p.dropSession.active());
+		assertFalse("NO EARLY STOP: the tail must not arm while a session pile is on the ground",
+			p.dropSession.stopPending());
+		assertTrue("a pile released without being observed to leave makes the session unprovable",
+			p.dropSession.unprovable());
+
+		// And it released the RIGHT one: the surviving record is the pile still physically down.
+		assertEquals("one record survives", 1, p.groundDropCount());
+		assertEquals("FINDING R8: and it is the pile of 9, which is still on the tile",
+			9L, groundDrops(p).iterator().next().qty);
+
+		// When the second pile goes too, the tail arms on the very next poll.
+		scene.piles.clear();
+		poll(p, 2);
+		assertEquals("both keys released", 0, p.dropSession.activePileCount());
+		assertTrue("NOT LATE: the tail arms one poll after the tile is clear",
+			p.dropSession.stopPending());
 	}
 }
