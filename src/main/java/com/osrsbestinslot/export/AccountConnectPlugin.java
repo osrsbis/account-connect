@@ -2062,7 +2062,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * A drop MERGED into a pile this session already has on the ground.
+	 * A drop MERGED into a pile that is already tracked on that tile. ADOPT the pile.
 	 *
 	 * FINDING F1 PATH A, and the reason the recorder used to run forever. Dropping a stackable onto
 	 * an existing stack of the same item on the same tile does not spawn a second ground item: the
@@ -2070,50 +2070,50 @@ public class AccountConnectPlugin extends Plugin
 	 * second pile here produced a second session key that no despawn could ever release, so the
 	 * tail never armed and only a logout stopped the recording.
 	 *
-	 * So no second pile is tracked. The drop's pending is resolved against the stack already live,
-	 * which keeps the session correct without inventing a pile the game does not have.
+	 * ROUND 5, FINDING B2 — WHY OWNERSHIP IS NOT PART OF THE MERGE DECISION. The caller used to look
+	 * for the pile with liveSessionPileAt, which required membership of the CURRENT session. That is
+	 * the right rule for ATTRIBUTION and the wrong rule for MERGE DETECTION: a merge is a fact about
+	 * the game's ground state, not about who owns the pile. Three ordinary routes put a tracked pile
+	 * on the tile that the session does not own, with no session ending at all:
+	 *
+	 *   1. ground tracking is gated on activityLogActive() and the session on dropProofEnabled(), so
+	 *      a pile tracked before the grant arrives is still on the ground, unowned, when it opens;
+	 *   2. the same, through the user's own upload switch going off and then back on;
+	 *   3. a late pile whose own pending already expired (PENDING_DROP_EXPIRY_MILLIS), which
+	 *      attachPileToDropSession refuses because pendingDropSeq is 0 by then.
+	 *
+	 * In every one of them the ownership test refused the pile, the caller minted a SECOND
+	 * DroppedGroundItem for ONE physical pile, the single despawn resolved to the OLDEST match
+	 * (the unowned entry), the session's key was never released and the recorder ran until a logout.
+	 *
+	 * So the pile is found regardless of ownership and ADOPTED into the running session: it takes
+	 * this session's id and this drop's sequence number, and the recorder holds exactly one key for
+	 * it. The one despawn the game fires then releases that one key. A pile the session ALREADY owns
+	 * needs no adoption, only the pending resolved against it, because its key already exists.
 	 */
-	void mergeDropIntoLiveSessionPile(DroppedGroundItem existing)
+	void adoptMergedPileIntoDropSession(DroppedGroundItem existing)
 	{
 		if (existing == null || !dropSession.active())
 		{
 			return;
 		}
+		String sid = pendingDropSessionId;
 		int seq = pendingDropSeq;
-		if (seq <= 0)
+		if (sid == null || seq <= 0)
 		{
 			return;
 		}
-		dropSession.pendingDropResolved(seq);
-		markDropMoment(DropCaptureRate.Event.PILE_SPAWN, System.currentTimeMillis());
-	}
-
-	/**
-	 * The live session pile at this exact item and tile, or null.
-	 *
-	 * Membership of the CURRENT session is required: a pile left over from a previous session must
-	 * not absorb this drop's pending, or the pending would be resolved by something no despawn in
-	 * this session will report.
-	 */
-	DroppedGroundItem liveSessionPileAt(int item, int x, int y, int plane)
-	{
-		String sid = dropSession.sessionId();
-		if (sid == null)
+		if (sid.equals(dropPileSession.get(existing)))
 		{
-			return null;
+			// Already ours: one pile, one key, and the pending is resolved by the pile already live.
+			dropSession.pendingDropResolved(seq);
+			markDropMoment(DropCaptureRate.Event.PILE_SPAWN, System.currentTimeMillis());
+			return;
 		}
-		synchronized (groundDrops)
-		{
-			for (DroppedGroundItem g : groundDrops)
-			{
-				if (g.item == item && g.x == x && g.y == y && g.plane == plane
-					&& sid.equals(dropPileSession.get(g)))
-				{
-					return g;
-				}
-			}
-		}
-		return null;
+		// Not ours yet. Adopt it through the same call the spawn path uses, so the pile gets this
+		// session's id, this drop's sequence and exactly ONE recorder key, and the pending is
+		// resolved by that key rather than left outstanding.
+		attachPileToDropSession(existing);
 	}
 
 	/**
@@ -5307,14 +5307,26 @@ public class AccountConnectPlugin extends Plugin
 	{
 		synchronized (groundDrops)
 		{
-			// A MERGED STACK IS ONE PILE. Dropping a stackable onto our own live pile of the same
-			// item on the same tile merges it in the game, and the client will fire exactly one
+			// A MERGED STACK IS ONE PILE. Dropping a stackable onto a live pile of the same item on
+			// the same tile merges it in the game, and the client will fire exactly one
 			// ItemDespawned for the result. Tracking a second DroppedGroundItem here made a second
 			// session key that no despawn could release (finding F1 path A).
-			DroppedGroundItem merged = quantityMerge ? liveSessionPileAt(item, x, y, plane) : null;
+			//
+			// FINDING B2: the lookup is ownership-AGNOSTIC on purpose, and it is findGroundDrop —
+			// the SAME resolver onItemDespawned uses. So the entry adopted here is exactly the entry
+			// that despawn will resolve to. Requiring session membership here is what let one
+			// physical pile become two tracked entries whenever the pile predated the session.
+			//
+			// STILL SCOPED TO A RUNNING SESSION. With no session there are no keys to strand, and
+			// two tracked records for one stack is the pre-existing behaviour the ground-removal
+			// arms pin: it makes the removal report cause `unknown` rather than fabricate an
+			// attribution. Widening the merge branch to the no-session case would change that, and
+			// it has nothing to do with this defect.
+			DroppedGroundItem merged =
+				quantityMerge && dropSession.active() ? findGroundDrop(item, x, y, plane) : null;
 			if (merged != null)
 			{
-				mergeDropIntoLiveSessionPile(merged);
+				adoptMergedPileIntoDropSession(merged);
 				return;
 			}
 			while (groundDrops.size() >= GROUND_TRACK_MAX)

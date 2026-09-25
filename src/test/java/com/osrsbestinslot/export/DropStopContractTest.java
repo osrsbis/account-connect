@@ -1675,4 +1675,203 @@ public class DropStopContractTest
 		p.setStoreToolsForTest(true);		// even with the shop grant already in hand
 		assertFalse("no policy response yet means no recording", p.dropProofEnabled());
 	}
+
+	// ================================================================
+	// CASES 33-36 — ROUND 5, FINDING B2: A STALE PILE WITH NO SESSION ENDING AT ALL
+	//
+	// THE DEFECT, AND WHY ROUND 4 DID NOT CLOSE IT. Round 4 shut the door where a WITHDRAWAL left
+	// an owned pile tracked but unowned. It did not address the commoner way a pile ends up in
+	// groundDrops with no session owner: a pile that was NEVER OWNED in the first place.
+	//
+	// Ground tracking is gated on activityLogActive() — a valid link token, nothing more. The drop
+	// session is gated on dropProofEnabled() — the token AND the upload switch AND the store-tools
+	// grant AND the rollout flag. The two gates are deliberately different widths, so a pile
+	// tracked while the narrow gate is shut and still physically on the ground when it opens is the
+	// same stale entry, arrived at with nothing ending.
+	//
+	// Then the harm is identical: liveSessionPileAt refused the unowned pile, trackGroundDrop
+	// minted a SECOND DroppedGroundItem for ONE physical pile, the single ItemDespawned resolved to
+	// the OLDEST match (the unowned entry), releasePileFromDropSession read seq -1 and told the
+	// recorder nothing, the session's key was never released and the recorder ran until a logout.
+	//
+	// THE FIX, AT THE CAUSE. liveSessionPileAt is right for ATTRIBUTION and wrong for MERGE
+	// DETECTION. The merge lookup is now findGroundDrop — ownership-agnostic, and the SAME resolver
+	// onItemDespawned uses — and the pile found is ADOPTED into the running session.
+	//
+	// EVERY ARM BELOW ASSERTS THE TAIL ARMS ON ITS OWN. forceTailDue writes stopAtMillis straight
+	// into the recorder, which is exactly what an immortal recorder cannot do for itself, so it is
+	// never called before the discriminating assertion. Case 36 is the same control case 23 is, on
+	// the tile where it is hardest.
+	// ================================================================
+
+	// ===== CASE 33 — the GRANT arrives after the pile is already on the tile =====
+
+	/**
+	 * The operator's own rollout path, and no gate moves against the player at all. A staff member
+	 * with the switch on and a token linked tracks a pile normally, because ground tracking never
+	 * asked about the grant. The grant then lands mid-scene.
+	 */
+	@Test
+	public void case33_aGrantArrivingAfterThePileIsAlreadyOnTheTileStillStops() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		// No grant yet. Ground tracking still runs: its gate is the link token, not the grant.
+		p.setDropProofRolloutForTest(false);
+		assertFalse("the narrow gate is shut", p.dropProofEnabled());
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the pile is tracked anyway", 1, p.groundDropCount());
+		assertFalse("and no session exists to own it", p.dropSession.active());
+		assertNull("so it is unowned", p.dropSessionForPile(onlyTrackedPile(p)));
+
+		// The grant lands. The pile is still physically on the ground.
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+
+		// The staff member drops the same stackable onto the same tile. The game MERGES it.
+		dropAction(p);
+		assertTrue("a session starts", p.dropSession.active());
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+
+		assertEquals("FINDING B2: one physical pile is ONE tracked entry", 1, p.groundDropCount());
+		assertEquals("and the session holds exactly ONE key for it",
+			1, p.dropSession.activePileCount());
+		assertEquals("with nothing left pending", 0, p.dropSession.pendingDropCount());
+
+		// The ONE despawn the game fires.
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+		assertTrue("NO IMMORTAL RECORDER: the single despawn MUST arm the tail on its own",
+			p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and the armed tail really ends it", p.dropSession.active());
+		assertFalse("and the screen is no longer captured", (Boolean) field(p, "dropCapturing"));
+	}
+
+	// ===== CASE 34 — the USER's own switch, off while the pile is tracked, then on =====
+
+	/**
+	 * The same defect with NO operator action at all. The user's upload switch is the only thing
+	 * that moves, and it moves in the direction that GRANTS. activityLogActive() does not read the
+	 * switch, so the pile is tracked throughout.
+	 */
+	@Test
+	public void case34_aUserSwitchOffThenOnOverAnAlreadyTrackedPileStillStops() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		r.config.upload = false;
+		assertFalse("the switch off shuts the narrow gate", p.dropProofEnabled());
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the pile is tracked with the switch off", 1, p.groundDropCount());
+		assertNull("and belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+
+		r.config.upload = true;
+		dropAction(p);
+		assertTrue(p.dropSession.active());
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
+
+		assertEquals("FINDING B2: still ONE tracked entry", 1, p.groundDropCount());
+		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
+
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+		assertTrue("NO IMMORTAL RECORDER on the user's own path either",
+			p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+	}
+
+	// ===== CASE 35 — a LATE pile, after its own pending expired, with no gate moving =====
+
+	/**
+	 * The grant is held the whole time and nothing is withdrawn or restored. A Drop click whose
+	 * pile spawns after its own pending expired (PENDING_DROP_EXPIRY_MILLIS — the destroy dialog, a
+	 * laggy spawn) is refused by attachPileToDropSession, because pendingDropSeq is 0 by then. So
+	 * the pile is tracked and unowned inside a LIVE session, which is the narrowest route of the
+	 * three and the one no gate can be blamed for.
+	 */
+	@Test
+	public void case35_aLatePileAfterItsPendingExpiredStillStops() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		forcePendingsExpired(p);
+		poll(p, 1);
+		assertTrue("the session is still running, in its tail", p.dropSession.active());
+		assertEquals("the pending expired, so nothing is outstanding",
+			0, p.dropSession.pendingDropCount());
+
+		// The pile finally lands. attachPileToDropSession refuses it: pendingDropSeq is 0.
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 120, 400, false);
+		assertEquals(1, p.groundDropCount());
+		assertNull("the late pile is unowned", p.dropSessionForPile(onlyTrackedPile(p)));
+		assertEquals("and the session holds no key for it", 0, p.dropSession.activePileCount());
+
+		// A second Drop onto the same tile. The game MERGES it into that same pile.
+		dropAction(p);
+		p.trackGroundDrop(995, 900L, 3200, 3400, 0, null, 130, 400, true);
+
+		assertEquals("FINDING B2: still ONE tracked entry", 1, p.groundDropCount());
+		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
+		assertEquals("with nothing pending", 0, p.dropSession.pendingDropCount());
+
+		despawnOldestTrackedPileAt(p, 995, 3200, 3400);
+		poll(p, 50);
+		assertTrue("NO IMMORTAL RECORDER after a late pile either", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("an expired pending can never be called COMPLETE",
+			"INTERRUPTED", manifest(p).get("outcome"));
+	}
+
+	// ===== CASE 36 — THE CONTROL, on the SAME tile: an unrelated pile still survives =====
+
+	/**
+	 * Case 23's property, moved onto the hardest tile. The merge lookup is now ownership-agnostic,
+	 * so a fix that read "any pile on this tile now belongs to the session" would pass cases 33-35
+	 * and quietly delete an unrelated pile's ground_removed evidence at teardown.
+	 *
+	 * The unrelated pile is a DIFFERENT ITEM on the SESSION'S OWN TILE, tracked before the session
+	 * starts. The session never drops that item, so nothing can merge into it, and the teardown
+	 * must leave it exactly where it is.
+	 */
+	@Test
+	public void case36_anUnrelatedPileOnTheSessionsOwnTileSurvivesTheTeardown() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		// A pile of a DIFFERENT item, on the tile the session will use, tracked with no session.
+		p.trackGroundDrop(4151, 1L, 3200, 3400, 0, null, 50, 400, false);
+		assertEquals(1, p.groundDropCount());
+		assertNull("it belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+
+		// The session runs on that same tile with its own stackable.
+		dropAction(p);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("two different items on one tile are two piles", 2, p.groundDropCount());
+		dropAction(p);
+		p.trackGroundDrop(995, 800L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("the merge adds no third entry", 2, p.groundDropCount());
+		assertEquals("and the session owns exactly one key", 1, p.dropSession.activePileCount());
+
+		// End the session through a withdrawal, which is the teardown path case 23 uses.
+		r.config.upload = false;
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+		assertEquals("the unrelated pile on the SAME tile MUST survive the teardown",
+			1, p.groundDropCount());
+		assertEquals("and it is the unrelated one", 4151, onlyTrackedPile(p).item);
+	}
 }
