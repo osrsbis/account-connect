@@ -2917,42 +2917,210 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt)
 	{
-			if (!uploadAllowed())
+		postStoreClipChunk(base, token, chunk, capturedAt, 0, false);
+	}
+
+	/**
+	 * Attempts for ONE store-clip chunk, the first included (finding F-A3, 2026-09-25).
+	 *
+	 * Before this, one failed POST lost the whole chunk silently: a 500/503 from a loaded server or
+	 * a dropped connection, logged only at debug. The rig lost three sell visits exactly this way
+	 * while the activity events of the same minutes were retried and arrived. So a chunk is retried
+	 * on a network failure, a 5xx or a 429, and never on another 4xx or a 200 refusal.
+	 */
+	static final int CLIP_CHUNK_ATTEMPTS = 5;
+
+	/**
+	 * Wait before retry 1..4. Sum 7 minutes; with the 90s call timeout on every attempt the worst
+	 * case window is about 14 minutes, and the chunk bytes are released at its end either way.
+	 * The first retry is short on purpose: the media collector joins a chunk into its visit only
+	 * when the server stores it within 120s of the visit's other chunks, so an early success keeps
+	 * the video in one piece. A later success is still stored, as its own short clip.
+	 */
+	static final long[] CLIP_CHUNK_RETRY_DELAYS_MS = {15_000L, 45_000L, 120_000L, 240_000L};
+
+	/**
+	 * A 429 Retry-After longer than this is not waited for: the chunk is given up instead. Retrying
+	 * early would ignore what the server asked for, and holding the bytes for up to an hour would
+	 * break the bounded retry window.
+	 */
+	static final long CLIP_RETRY_AFTER_MAX_MS = 240_000L;
+
+	/**
+	 * Total bytes of chunks waiting for a retry, across all visits. Two full visits. A chunk that
+	 * would push the total over this is given up rather than held, so a long server outage cannot
+	 * grow memory without bound. Same idea as the drop path's unacked byte budget.
+	 */
+	static final long CLIP_RETRY_BYTE_BUDGET = 2L * MAX_CLIP_BURST_BYTES;
+
+	/** Bytes currently held for a pending store-clip retry. Never above CLIP_RETRY_BYTE_BUDGET. */
+	final java.util.concurrent.atomic.AtomicLong clipRetryHeldBytes = new java.util.concurrent.atomic.AtomicLong();
+	/** Chunks the server stored. */
+	final java.util.concurrent.atomic.AtomicInteger clipChunksSent = new java.util.concurrent.atomic.AtomicInteger();
+	/** Chunks that will never be stored: attempts spent, not retryable, or no room to hold them. */
+	final java.util.concurrent.atomic.AtomicInteger clipChunksLost = new java.util.concurrent.atomic.AtomicInteger();
+
+	/** Run a store-clip retry after delayMs. A seam so tests can drive the ladder without waiting. */
+	void scheduleClipRetry(Runnable retry, long delayMs)
+	{
+		executor.schedule(retry, delayMs, TimeUnit.MILLISECONDS);
+	}
+
+	/**
+	 * One attempt for one chunk. `held` is true when this chunk's bytes are already counted in
+	 * clipRetryHeldBytes (every retry), so the count is released exactly once when the chunk ends.
+	 *
+	 * A RETRY RESENDS THE SAME BODY: the same frames and the same captured_at. The server does not
+	 * dedupe: every stored attempt is a new random directory and a new account_media row. That is
+	 * harmless for a real failure (a 5xx, a 429 or a refused connection stores no row), but when the
+	 * server stored the chunk and the reply was lost (a timeout after the insert), the retry stores a
+	 * second row. That second row carries the same (link_token, captured_at, frame_count, bytes), so
+	 * a consumer can recognise it. The plugin cannot tell the two cases apart from its side.
+	 */
+	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt,
+		int attempt, boolean held)
+	{
+		if (!uploadAllowed() || (attempt > 0 && !token.equals(currentLinkToken())))
+		{
+			// Uploads switched off, or a retry after the user linked a different token: this chunk
+			// was captured under the old token and must not be filed under the new one.
+			endStoreClipChunk(chunk, held, false, "upload no longer allowed for this token", attempt);
+			return;
+		}
+		Request request = new Request.Builder()
+			.url(base + "/store-frames-ingest")
+			.post(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS))
+			.build();
+
+		OkHttpClient uploadClient = okHttpClient.newBuilder()
+			.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+			.build();
+
+		uploadClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
 			{
-				return;		// upload switch off — send nothing
+				retryOrGiveUp(e == null ? "io" : String.valueOf(e.getMessage()), 0L);
 			}
-			Request request = new Request.Builder()
-				.url(base + "/store-frames-ingest")
-				.post(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS))
-				.build();
 
-			OkHttpClient uploadClient = okHttpClient.newBuilder()
-				.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-				.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-				.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-				.build();
-
-			uploadClient.newCall(request).enqueue(new Callback()
+			@Override
+			public void onResponse(Call call, Response response)
 			{
-				@Override
-				public void onFailure(Call call, IOException e)
+				try
 				{
-					log.debug("OSRS BiS store-clip burst upload failed", e);
+					int code = response.code();
+					if (response.isSuccessful())
+					{
+						// A 200 {"dropped":...} is a deliberate refusal (not staff, clips off).
+						// Retrying it is the error loop that 200 exists to prevent.
+						if (dropSegmentWasRefused(response))
+						{
+							endStoreClipChunk(chunk, held, false, null, attempt);
+							log.debug("OSRS BiS store-clip chunk refused by the server with a 200");
+							return;
+						}
+						endStoreClipChunk(chunk, held, true, null, attempt);
+						return;
+					}
+					if (code == 429)
+					{
+						Long ra = parseRetryAfterSeconds(response.header("Retry-After"));
+						retryOrGiveUp("http 429", ra == null ? 0L : ra * 1000L);
+					}
+					else if (code >= 500)
+					{
+						retryOrGiveUp("http " + code, 0L);
+					}
+					else
+					{
+						// Any other 4xx fails identically on every attempt.
+						endStoreClipChunk(chunk, held, false, "http " + code, attempt);
+					}
 				}
+				finally
+				{
+					response.close();
+				}
+			}
 
-				@Override
-				public void onResponse(Call call, Response response)
+			private void retryOrGiveUp(String why, long retryAfterMs)
+			{
+				if (attempt + 1 >= CLIP_CHUNK_ATTEMPTS)
 				{
-					try
-					{
-						log.debug("OSRS BiS store-clip burst upload response: {}", response.code());
-					}
-					finally
-					{
-						response.close();
-					}
+					endStoreClipChunk(chunk, held, false, why, attempt);
+					return;
 				}
-			});
+				if (retryAfterMs > CLIP_RETRY_AFTER_MAX_MS)
+				{
+					endStoreClipChunk(chunk, held, false, why + ", Retry-After " + (retryAfterMs / 1000L)
+						+ "s is longer than the retry window", attempt);
+					return;
+				}
+				if (!held && !reserveClipRetryBytes(chunkBytes(chunk)))
+				{
+					endStoreClipChunk(chunk, false, false, why + ", retry memory budget full", attempt);
+					return;
+				}
+				long delay = Math.max(CLIP_CHUNK_RETRY_DELAYS_MS[attempt], retryAfterMs);
+				scheduleClipRetry(() -> postStoreClipChunk(base, token, chunk, capturedAt, attempt + 1, true),
+					delay);
+			}
+		});
+	}
+
+	/** Add bytes to the retry total if they fit the budget. False (and nothing added) if not. */
+	boolean reserveClipRetryBytes(long bytes)
+	{
+		while (true)
+		{
+			long cur = clipRetryHeldBytes.get();
+			if (cur + bytes > CLIP_RETRY_BYTE_BUDGET)
+			{
+				return false;
+			}
+			if (clipRetryHeldBytes.compareAndSet(cur, cur + bytes))
+			{
+				return true;
+			}
+		}
+	}
+
+	static long chunkBytes(java.util.List<byte[]> chunk)
+	{
+		long n = 0;
+		for (byte[] b : chunk)
+		{
+			n += b == null ? 0 : b.length;
+		}
+		return n;
+	}
+
+	/**
+	 * The chunk is finished: stored, refused or lost. Releases its retry bytes (when held) and
+	 * counts it. `lossReason` non-null means lost, and that is logged at WARN: log only, never
+	 * chat text. A null reason with stored=false is a deliberate server refusal, not a loss.
+	 */
+	private void endStoreClipChunk(java.util.List<byte[]> chunk, boolean held, boolean stored,
+		String lossReason, int attempt)
+	{
+		if (held)
+		{
+			clipRetryHeldBytes.addAndGet(-chunkBytes(chunk));
+		}
+		if (stored)
+		{
+			clipChunksSent.incrementAndGet();
+			return;
+		}
+		if (lossReason != null)
+		{
+			clipChunksLost.incrementAndGet();
+			log.warn("OSRS BiS store-clip chunk ({} frames) lost after {} attempt(s): {}",
+				chunk.size(), attempt + 1, lossReason);
+		}
 	}
 
 	/**
