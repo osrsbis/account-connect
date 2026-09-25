@@ -146,6 +146,11 @@ public class DropSessionRecorder
 	public static final String REASON_PENDING_DROPS = "pending_drops_outstanding";
 	public static final String REASON_PENDING_EXPIRED = "pending_drop_expired";
 	public static final String REASON_PILE_ABANDONED = "pile_abandoned";
+	/**
+	 * A despawn at an item and tile where an OWNED and an UNOWNED real pile both matched. Which
+	 * physical pile went is unknowable, so the clip cannot be proven to cover the whole trade.
+	 */
+	public static final String REASON_AMBIGUOUS_DESPAWN = "ambiguous_despawn";
 	/** ROUND 5 backstop: the recorder held a key no tracked pile of this session could ever release. */
 	public static final String REASON_ORPHANED_STATE = "orphaned_session_state";
 	/** ROUND 5 backstop: the session hit MAX_SESSION_MILLIS. */
@@ -370,6 +375,33 @@ public class DropSessionRecorder
 		if (reason.equals(REASON_NONE))
 		{
 			reason = REASON_PILE_ABANDONED;
+		}
+		maybeArmStop(nowMillis);
+	}
+
+	/**
+	 * A despawn could not be attributed to a pile: an owned and an unowned real pile both matched.
+	 *
+	 * ROUND 7, FINDING R2. This is pileAbandoned's sibling, and the difference is the KEY. An
+	 * abandoned pile is one the caller has stopped tracking, so its key can never be released and
+	 * holding it would run the recorder forever. An ambiguous despawn is the opposite: our pile may
+	 * still be lying on the ground and its own despawn may still be coming, so releasing the key
+	 * here would stop the recording while the pile the clip exists to show is still there.
+	 *
+	 * The key is therefore KEPT and only the proof is given up. COMPLETE is out of reach from here,
+	 * and the session still ends by the later unambiguous despawn, by the orphaned-state invariant,
+	 * or by the hard cap.
+	 */
+	public void resolutionAmbiguous(long nowMillis)
+	{
+		if (sessionId == null)
+		{
+			return;
+		}
+		unprovable = true;
+		if (reason.equals(REASON_NONE))
+		{
+			reason = REASON_AMBIGUOUS_DESPAWN;
 		}
 		maybeArmStop(nowMillis);
 	}

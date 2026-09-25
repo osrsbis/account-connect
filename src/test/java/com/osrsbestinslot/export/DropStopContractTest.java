@@ -1056,20 +1056,17 @@ public class DropStopContractTest
 
 	/**
 	 * Drive the ONE ItemDespawned the game fires for a pile, exactly as onItemDespawned drives it:
-	 * resolve through findGroundDrop, remove that record, then tell the session.
+	 * resolve through resolveDespawnedGroundDrop, remove that record, then tell the session.
 	 *
-	 * Going through findGroundDrop rather than through a pile reference is the whole point. The
-	 * defect is that the resolver can pick the WRONG entry, and a test holding the right reference
-	 * would never see it.
+	 * Going through the RESOLVER rather than through a pile reference is the whole point. Both
+	 * findings live in the resolver — R1 was it picking a phantom, R2 was it picking our own pile
+	 * when another real one went — and a test holding the right reference would never see either.
 	 */
 	private static void despawnTrackedPileAt(AccountConnectPlugin p, int item, int x, int y)
 		throws Exception
 	{
-		Method find = AccountConnectPlugin.class.getDeclaredMethod(
-			"findGroundDrop", int.class, int.class, int.class, int.class);
-		find.setAccessible(true);
 		AccountConnectPlugin.DroppedGroundItem g =
-			(AccountConnectPlugin.DroppedGroundItem) find.invoke(p, item, x, y, 0);
+			p.resolveDespawnedGroundDrop(item, x, y, 0);
 		assertNotNull("the despawn must resolve to a tracked pile", g);
 		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
@@ -1077,6 +1074,39 @@ public class DropStopContractTest
 			q.remove(g);
 		}
 		release(p, g);
+	}
+
+	/**
+	 * The same despawn, but PUBLISHING the ground_removed row, which is what onItemDespawned does
+	 * for a pile with no live Take against it. Returns the record the resolver chose.
+	 */
+	private static AccountConnectPlugin.DroppedGroundItem despawnAndPublishAt(
+		AccountConnectPlugin p, int item, int x, int y, int tick) throws Exception
+	{
+		AccountConnectPlugin.DroppedGroundItem g =
+			p.resolveDespawnedGroundDrop(item, x, y, 0);
+		assertNotNull("the despawn must resolve to a tracked pile", g);
+		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		synchronized (q)
+		{
+			q.remove(g);
+		}
+		p.emitGroundRemoval(g, tick, false);	// this also releases the pile from the session
+		return g;
+	}
+
+	/** The last ground_removed row published, or null. */
+	private static Map<String, Object> lastRemoval(AccountConnectPlugin p)
+	{
+		Map<String, Object> last = null;
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if ("ground_removed".equals(e.get("type")))
+			{
+				last = e;
+			}
+		}
+		return last;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -2253,6 +2283,11 @@ public class DropStopContractTest
 		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
 		assertEquals("the session owns exactly one key", 1, p.dropSession.activePileCount());
 
+		// The resolver's own answer, read BEFORE the despawn consumes it, asserted after the
+		// outcome below. Held here because the record is gone once the despawn is driven.
+		AccountConnectPlugin.GroundDespawnMatch match =
+			p.matchDespawnedGroundDrop(995, 3200, 3400, 0);
+
 		// The customer takes it. The ONE despawn must resolve to the SESSION'S record, not the
 		// older phantom, or the key is never released.
 		despawnTrackedPileAt(p, 995, 3200, 3400);
@@ -2268,6 +2303,16 @@ public class DropStopContractTest
 		poll(p, 1);
 		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
 		assertFalse("and the screen is no longer captured", (Boolean) field(p, "dropCapturing"));
+
+		// ROUND 7. The same resolution, pinned at the resolver. The phantom is a merge SHADOW: one
+		// physical pile tracked twice, standing for no pile of its own, so it is NOT a rival and
+		// this choice is not ambiguous. A fix for R2 that treated it as one would strand this
+		// recorder again, which is R1 coming straight back.
+		assertNotNull(match.record);
+		assertEquals("the resolver must take the SESSION'S record, not the older phantom",
+			700L, match.record.qty);
+		assertFalse("FINDING R1 STAYS CLOSED: a phantom is not a second physical pile",
+			match.ambiguous);
 	}
 
 	// ===== CASE 42 — the phantom strands the session INSIDE one ordinary two-drop trade =====
@@ -2368,19 +2413,30 @@ public class DropStopContractTest
 		assertFalse(p.dropSession.active());
 	}
 
-	// ===== CASE 44 — THE OTHER SIDE: the NEWEST record is not the answer either =====
+	// ===== CASE 44 — TWO REAL PILES, THE SESSION'S THE OLDER ONE: still a refusal =====
 
 	/**
-	 * A resolver that simply preferred the NEWEST record would pass cases 41-43, because in all
-	 * three the session's record is also the newest. This arm makes the session's record the OLDER
-	 * one, so only "prefer the session's own" is green.
+	 * ROUND 7 REWROTE THIS ARM, and the rewrite is finding R2 itself.
 	 *
-	 * The route is case 35's, on an UNSTACKABLE, where two piles on one tile are two real piles: the
-	 * session's own pile spawns first, its pending then expires, and a second pile lands unowned
-	 * because attachPileToDropSession refuses it with pendingDropSeq at 0.
+	 * Round 6 wrote this case to kill a resolver that simply preferred the NEWEST record, and it
+	 * asserted that the despawn RELEASES the session's key. That assertion was wrong, and it is
+	 * exactly the defect R2 names: the route puts TWO REAL PILES of an unstackable on one tile, only
+	 * one of them the session's, so which pile the game just removed is unknowable. Releasing the
+	 * key there stops the recording while the session's own pile may still be lying on the ground.
+	 *
+	 * The route is unchanged, on purpose, so the two rounds can be compared line for line: the
+	 * session's own pile spawns first, a second Drop's pending expires, and its pile lands unowned
+	 * and NEWER because attachPileToDropSession refuses it with pendingDropSeq at 0.
+	 *
+	 * WHAT THIS COSTS. Round 6's anti-prefer-the-newest mutation no longer has a discriminating arm,
+	 * and it cannot have one: after the R2 fix the ONLY unowned record that does not make a despawn
+	 * ambiguous is a merge SHADOW, and a merge shadow can only be minted while no session owns a
+	 * record on that tile, so it is always the OLDER of the two. "Prefer the session's own" and
+	 * "prefer the newest" now differ only on states the plugin cannot reach. Case 41 pins the
+	 * resolver's answer directly instead, which is the stronger assertion of the two.
 	 */
 	@Test
-	public void case44_aNewerUnownedPileNeverAbsorbsTheSessionsOwnDespawn() throws Exception
+	public void case44_anOlderSessionPileAgainstANewerRealPileIsStillAmbiguous() throws Exception
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
@@ -2400,19 +2456,18 @@ public class DropStopContractTest
 		assertEquals("and the session still holds exactly one key",
 			1, p.dropSession.activePileCount());
 
-		// One despawn. It must resolve to the SESSION'S record, which is the OLDER of the two.
 		despawnTrackedPileAt(p, 1931, 3200, 3400);
 		poll(p, 50);
 
-		assertEquals("FINDING R1: the session's own key must be the one released",
-			0, p.dropSession.activePileCount());
-		assertTrue("so the tail MUST arm on its own", p.dropSession.stopPending());
-		assertEquals("the unowned record must be the one left behind", 1, p.groundDropCount());
-		assertNull("and it is the unowned one", p.dropSessionForPile(onlyTrackedPile(p)));
+		assertTrue("FINDING R2: the recording must still be running", p.dropSession.active());
+		assertFalse("NO EARLY STOP: the tail must not arm while the session's pile may be down",
+			p.dropSession.stopPending());
+		assertEquals("FINDING R2: the session's key is KEPT", 1, p.dropSession.activePileCount());
+		assertTrue("and the session can never be proven complete", p.dropSession.unprovable());
 
-		forceTailDue(p);
-		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertEquals("the record the resolver took is the one left gone", 1, p.groundDropCount());
+		assertNotNull("so what is left tracked is the session's own",
+			p.dropSessionForPile(onlyTrackedPile(p)));
 	}
 
 	// ===== CASE 45 — THE CONTROL: with no session, the OLDEST record still answers =====
@@ -2441,5 +2496,310 @@ public class DropStopContractTest
 			(AccountConnectPlugin.DroppedGroundItem) find.invoke(p, 995, 3200, 3400, 0);
 		assertNotNull(resolved);
 		assertEquals("with no session the OLDEST record answers, unchanged", 500L, resolved.qty);
+	}
+
+	// ================================================================
+	// CASES 46-50 — ROUND 7, FINDING R2: THE AMBIGUOUS DESPAWN
+	//
+	// Round 6 closed R1 by making the resolver prefer the running session's own record. On a tile
+	// holding TWO REAL PILES of the same UNSTACKABLE, only one of them the session's, that
+	// preference answered the despawn of the OTHER pile with OUR record. Three things went wrong at
+	// once: the session's key was released while its pile was still on the ground, the recording
+	// stopped five seconds later and the manifest said COMPLETE on a clip missing the collection,
+	// and the published row carried our session id, our sequence, our quantity and our time on
+	// ground for a pile that was never ours.
+	//
+	// WHICH PILE WENT IS UNKNOWABLE. The game reports an item id leaving a tile, not which of two
+	// identical piles it was. Round 5 guessed "the oldest" and round 6 guessed "ours". Both guess.
+	//
+	// THE FIX REFUSES. An owned and an unowned REAL record both matching is detected, the row falls
+	// back to the unowned record with NO session linkage, the session's key is KEPT because its pile
+	// may still be down, and the session is marked unprovable so COMPLETE is out of reach forever.
+	//
+	// A MERGE SHADOW IS NOT A RIVAL PILE, which is what keeps R1 closed. The R1 phantom is one
+	// physical pile tracked twice because the merge branch is scoped to a running session, so the
+	// second record was minted from a quantityMerge and stands for no pile of its own. Cases 41-43
+	// are the arms that fail if that distinction is dropped.
+	//
+	// THESE ARMS ASSERT THE OUTCOME FIRST: the recording is still running with a session pile still
+	// tracked, the outcome is never COMPLETE, and the row carries no session linkage. The
+	// bookkeeping assertions come after.
+	// ================================================================
+
+	/**
+	 * The route, in one helper: an unstackable pile lands before the grant, so it is REAL and
+	 * unowned, and the session then drops its own real pile of the same unstackable on that tile.
+	 */
+	private static void seedTwoRealUnstackablePiles(AccountConnectPlugin p) throws Exception
+	{
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		assertFalse("the pre-grant pile is laid down with no session running",
+			p.dropSession.active());
+
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200, 400, false);
+		assertEquals("two REAL piles of an unstackable are two records", 2, p.groundDropCount());
+		assertEquals("and the session owns exactly one of them", 1, p.dropSession.activePileCount());
+	}
+
+	// ===== CASE 46 — the recording MUST keep running while the session's pile is still down =====
+
+	/**
+	 * Ported from the review's ProbeSteal2. On 159aa8a the one despawn released the session's key,
+	 * the tail armed and the recording stopped five seconds later with the session's own pile still
+	 * physically on the ground.
+	 */
+	@Test
+	public void case46_anAmbiguousDespawnNeverStopsARecordingWhoseOwnPileIsStillDown()
+		throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		seedTwoRealUnstackablePiles(p);
+
+		// The customer takes ONE of the two piles. Which one is unknowable.
+		despawnTrackedPileAt(p, 1931, 3200, 3400);
+		poll(p, 50);
+
+		// THE OUTCOME, asserted first.
+		assertTrue("FINDING R2: the recording must still be running", p.dropSession.active());
+		assertTrue("and the screen must still be captured", (Boolean) field(p, "dropCapturing"));
+		assertFalse("NO EARLY STOP: the tail must NOT arm while a session pile is still tracked",
+			p.dropSession.stopPending());
+		assertEquals("because the session's key is KEPT: its pile may still be down",
+			1, p.dropSession.activePileCount());
+		assertTrue("and the caller still tracks a pile for this session",
+			p.dropSessionHoldsOwnedPile());
+
+		// The bookkeeping behind it.
+		assertTrue("FINDING R2: the session can never be proven complete from here",
+			p.dropSession.unprovable());
+		assertEquals("and it names the ambiguity",
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropSession.reason());
+		assertEquals("one real pile is left on the ground", 1, p.groundDropCount());
+		assertNotNull("and it is the session's own",
+			p.dropSessionForPile(onlyTrackedPile(p)));
+	}
+
+	// ===== CASE 47 — the manifest may never say COMPLETE on that session =====
+
+	/**
+	 * Ported from the review's ProbeManifest. The session ends on the SECOND despawn, which is no
+	 * longer ambiguous because only one record is left. It ends on its own tail, so nothing here
+	 * leans on a backstop, and the outcome must still be INTERRUPTED.
+	 */
+	@Test
+	public void case47_aSessionWithAnAmbiguousDespawnIsNeverCOMPLETE() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		seedTwoRealUnstackablePiles(p);
+
+		despawnTrackedPileAt(p, 1931, 3200, 3400);
+		poll(p, 5);
+		assertTrue("the recording is still running after the ambiguous take",
+			p.dropSession.active());
+
+		// The customer takes the second pile too. Only one record is left, so this one is certain.
+		despawnTrackedPileAt(p, 1931, 3200, 3400);
+		poll(p, 2);
+		assertEquals("the last key is released", 0, p.dropSession.activePileCount());
+		assertTrue("so the session ends on ITS OWN tail, not on a backstop",
+			p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse("and the recording really ends", p.dropSession.active());
+
+		Map<String, Object> m = manifest(p);
+		assertNotNull("the footage is still published", m);
+		assertEquals("FINDING R2: a session that could not tell which pile went is NOT complete",
+			"INTERRUPTED", m.get("outcome"));
+		assertEquals("and the manifest names why",
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, m.get("outcome_reason"));
+	}
+
+	// ===== CASE 48 — the published row carries NO fabricated attribution =====
+
+	/**
+	 * Ported from the review's ProbeAttrib. On 159aa8a the row for the OTHER player's pile carried
+	 * our drop_session_id, our drop_seq, our recorded qty and our ticks_on_ground.
+	 */
+	@Test
+	public void case48_anAmbiguousDespawnPublishesNoSessionLinkage() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		// Distinct recorded quantities, so the row names which record answered.
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 400, false);
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("two REAL piles", 2, p.groundDropCount());
+
+		AccountConnectPlugin.DroppedGroundItem chosen =
+			despawnAndPublishAt(p, 1931, 3200, 3400, 500);
+
+		Map<String, Object> row = lastRemoval(p);
+		assertNotNull(row);
+		assertNull("FINDING R2: no fabricated session linkage on an ambiguous removal",
+			row.get("drop_session_id"));
+		assertNull("and no fabricated drop sequence", row.get("drop_seq"));
+
+		// And the attribution itself went back to the pre-round-6 answer: the unowned record.
+		assertEquals("ATTRIBUTION falls back to the other pile's OWN record", 11L, chosen.qty);
+		assertNull("which belongs to no session", p.dropSessionForPile(chosen));
+		assertEquals("so the row reports that record's quantity", 11L, row.get("qty"));
+		assertEquals("and that record's time on the ground", 400, row.get("ticks_on_ground"));
+
+		// The recorder is untouched by the row: its pile may still be down.
+		assertTrue("the recording continues", p.dropSession.active());
+		assertEquals("holding its own key", 1, p.dropSession.activePileCount());
+	}
+
+	// ===== CASE 49 — the realistic five-plus-five trade =====
+
+	/**
+	 * Ported from the review's ProbeBulk. Five unstackables land before the grant, five after it,
+	 * and the customer takes all ten. On 159aa8a the recording stopped after the FIFTH take with
+	 * five piles still on the ground, and the manifest said COMPLETE drops=5.
+	 */
+	@Test
+	public void case49_aTenPileTradeKeepsRecordingUntilTheLastPileGoes() throws Exception
+	{
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+
+		p.setDropProofRolloutForTest(false);
+		for (int i = 0; i < 5; i++)
+		{
+			p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100 + i, 900, false);
+		}
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		for (int i = 0; i < 5; i++)
+		{
+			dropAction(p);
+			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L + i);
+			p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200 + i, 900, false);
+		}
+		assertEquals("ten REAL piles on one tile", 10, p.groundDropCount());
+		assertEquals("five of them the session's", 5, p.dropSession.activePileCount());
+
+		// The customer takes them one at a time.
+		for (int take = 1; take <= 10; take++)
+		{
+			despawnAndPublishAt(p, 1931, 3200, 3400, 300 + take);
+			poll(p, 2);
+			if (take < 10)
+			{
+				assertTrue("FINDING R2: take " + take + " of 10 must not end the recording while "
+						+ p.groundDropCount() + " piles are still on the ground",
+					p.dropSession.active());
+			}
+		}
+
+		// Only the tenth take, which empties the tile, may arm the tail.
+		assertEquals("every pile is gone", 0, p.groundDropCount());
+		assertEquals("and every key with it", 0, p.dropSession.activePileCount());
+		assertTrue("only now does the tail arm", p.dropSession.stopPending());
+		forceTailDue(p);
+		poll(p, 1);
+		assertFalse(p.dropSession.active());
+
+		Map<String, Object> m = manifest(p);
+		assertEquals("FINDING R2: a trade this ambiguous is never COMPLETE",
+			"INTERRUPTED", m.get("outcome"));
+		assertEquals("all five session drops are still counted", 5, m.get("drops"));
+
+		// THE ROWS. The first five takes each had an owned and an unowned real candidate, so each
+		// refuses to name a session. By the sixth take the five unowned piles are gone and only the
+		// session's own remain, so those removals ARE ours and keep their honest linkage. Refusing
+		// attribution where it is unknowable must not become refusing it everywhere.
+		java.util.List<Map<String, Object>> rows = new java.util.ArrayList<>();
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if ("ground_removed".equals(e.get("type")))
+			{
+				rows.add(e);
+			}
+		}
+		assertEquals("ten rows were published", 10, rows.size());
+		for (int i = 0; i < 5; i++)
+		{
+			assertNull("FINDING R2: row " + (i + 1) + " was ambiguous and must name no session",
+				rows.get(i).get("drop_session_id"));
+			assertNull("nor a drop sequence", rows.get(i).get("drop_seq"));
+		}
+		for (int i = 5; i < 10; i++)
+		{
+			assertNotNull("row " + (i + 1) + " had no rival pile left, so its linkage is honest",
+				rows.get(i).get("drop_session_id"));
+		}
+	}
+
+	// ===== CASE 50 — THE CONTROLS: a stackable merge and an unambiguous single-pile session =====
+
+	/**
+	 * Ported from the review's ProbeStackCtl, plus the plain happy path.
+	 *
+	 * Without these a fix that called EVERY despawn ambiguous would pass cases 46-49. A stackable
+	 * merges in the game, so one physical pile is one record and one key: there is no second pile
+	 * and nothing to be ambiguous about. And an ordinary single-pile session must still end on its
+	 * own tail with outcome COMPLETE.
+	 */
+	@Test
+	public void case50_aStackableMergeAndAPlainSessionAreNeverAmbiguous() throws Exception
+	{
+		// CONTROL A — a real unowned STACKABLE pile, then the session drops the same stackable on
+		// it. The game merges, so trackGroundDrop is called with quantityMerge=true and adopts.
+		Rig r = rig();
+		AccountConnectPlugin p = r.plugin;
+		p.setDropProofRolloutForTest(false);
+		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.setDropProofRolloutForTest(true);
+		p.onDropProofCapabilityChanged();
+		dropAction(p);
+		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
+		assertEquals("CONTROL: a stackable merge is ONE record", 1, p.groundDropCount());
+		assertEquals("and ONE key", 1, p.dropSession.activePileCount());
+
+		despawnAndPublishAt(p, 995, 3200, 3400, 500);
+		poll(p, 2);
+		assertEquals("CONTROL: the one despawn releases the key", 0, p.dropSession.activePileCount());
+		assertTrue("CONTROL: and the tail arms, because nothing was ambiguous",
+			p.dropSession.stopPending());
+		assertFalse("CONTROL: nothing marked this session unprovable", p.dropSession.unprovable());
+		assertNotNull("CONTROL: and the row keeps its honest session linkage",
+			lastRemoval(p).get("drop_session_id"));
+		forceTailDue(p);
+		poll(p, 1);
+		assertEquals("CONTROL: a merge-only session is still COMPLETE",
+			"COMPLETE", manifest(p).get("outcome"));
+
+		// CONTROL B — one unstackable pile, one session, nothing else on the tile.
+		Rig r2 = rig();
+		AccountConnectPlugin p2 = r2.plugin;
+		dropAction(p2);
+		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		despawnAndPublishAt(p2, 1931, 3200, 3400, 200);
+		poll(p2, 2);
+		assertTrue("CONTROL: an unambiguous single-pile session arms its own tail",
+			p2.dropSession.stopPending());
+		assertFalse("CONTROL: and is never marked unprovable", p2.dropSession.unprovable());
+		forceTailDue(p2);
+		poll(p2, 1);
+		assertFalse(p2.dropSession.active());
+		assertEquals("CONTROL: it ends COMPLETE", "COMPLETE", manifest(p2).get("outcome"));
+		assertNull("naming no reason", manifest(p2).get("outcome_reason"));
 	}
 }

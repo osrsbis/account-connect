@@ -1093,6 +1093,29 @@ public class AccountConnectPlugin extends Plugin
 		 * WEAKEN the verdict.
 		 */
 		volatile boolean parkedForLiveTake;
+		/**
+		 * Set when this record was minted for a drop the game reported as a MERGE into an existing
+		 * stack, so it is a SHADOW of a physical pile rather than a pile of its own.
+		 *
+		 * ROUND 7, FINDING R2. The merge branch in trackGroundDrop is scoped to a running session,
+		 * so with no session a stackable dropped twice onto one tile leaves two records for ONE
+		 * physical pile. The single despawn consumes one and the other lingers on a tile that is now
+		 * physically empty: the R1 phantom. A record carrying this flag is therefore known NOT to
+		 * stand for an independent pile, which is what lets the despawn resolver tell the R1 phantom
+		 * (one physical pile, two records) apart from the R2 case (two physical piles of an
+		 * unstackable, only one of them ours). Without the distinction, closing R2 re-opens R1.
+		 */
+		volatile boolean mergeShadow;
+		/**
+		 * Set at despawn time when an OWNED and an UNOWNED real record both matched this item and
+		 * tile, so which physical pile actually went is unknowable.
+		 *
+		 * ROUND 7, FINDING R2. The row this record publishes then carries NO drop_session_id and no
+		 * drop_seq, because a guess about which pile went is a fabricated attribution. Carried on
+		 * the record rather than passed as an argument so a PARKED removal, settled ticks later,
+		 * publishes the same refusal the despawn decided.
+		 */
+		volatile boolean attributionAmbiguous;
 
 		DroppedGroundItem(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 			int dropTick, int despawnTick)
@@ -5407,6 +5430,10 @@ public class AccountConnectPlugin extends Plugin
 			}
 			DroppedGroundItem g =
 				new DroppedGroundItem(item, qty, x, y, plane, location, dropTick, despawnTick);
+			// The game called this drop a MERGE and the merge branch above did not take it, so this
+			// record shadows a pile already on the tile rather than standing for one of its own.
+			// FINDING R2 needs that distinction; see DroppedGroundItem.mergeShadow.
+			g.mergeShadow = quantityMerge;
 			groundDrops.addLast(g);
 			attachPileToDropSession(g);
 		}
@@ -5468,6 +5495,109 @@ public class AccountConnectPlugin extends Plugin
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Resolve the ONE ItemDespawned the game fires at this item and tile, and say whether the
+	 * choice was a GUESS.
+	 *
+	 * ROUND 7, FINDING R2 — WHY THE DESPAWN PATH NEEDS ITS OWN RESOLVER. Round 6 made
+	 * findGroundDrop prefer the running session's own record, which closed R1. On a tile holding
+	 * TWO REAL PILES of the same UNSTACKABLE, only one of them the session's, that preference took
+	 * the despawn of the OTHER pile: the session's key was released while its pile was still on the
+	 * ground, the recording stopped early, and the manifest claimed COMPLETE on a clip missing the
+	 * collection. The row published for the other pile carried our session id, our sequence, our
+	 * quantity and our time on ground.
+	 *
+	 * WHICH PILE WENT IS UNKNOWABLE. The game tells us an item of that id left that tile. It does
+	 * not tell us which of two identical piles it was. Round 6 guessed "ours" and round 5 guessed
+	 * "the oldest", and both guesses are wrong half the time. So this method REFUSES: it reports the
+	 * choice as ambiguous and the callers then decline to claim anything.
+	 *
+	 *   ATTRIBUTION goes back to the pre-round-6 answer — the oldest UNOWNED record. That is the
+	 *   other pile's own record, so the published row is the honest one it always was, with no
+	 *   session linkage on it (see attributionAmbiguous).
+	 *
+	 *   THE RECORDER keeps its key. Our pile may still be lying there, so releasing the key would be
+	 *   the early stop all over again. The session is marked unprovable instead, which puts COMPLETE
+	 *   permanently out of reach, and it still ends: by the later despawn that is no longer
+	 *   ambiguous, by the orphaned-state invariant, or by the 30-minute cap.
+	 *
+	 * A MERGE SHADOW IS NOT A SECOND PILE, and that is what keeps R1 closed. The R1 phantom is one
+	 * physical pile tracked twice, because the merge branch is scoped to a running session: the
+	 * second record was minted from a quantityMerge and stands for nothing of its own. Treating it
+	 * as a rival pile here would make every R1 route ambiguous again and strand the recorder exactly
+	 * as round 3 measured. So only a NON-shadow unowned record can make a despawn ambiguous.
+	 */
+	static final class GroundDespawnMatch
+	{
+		final DroppedGroundItem record;
+		final boolean ambiguous;
+
+		GroundDespawnMatch(DroppedGroundItem record, boolean ambiguous)
+		{
+			this.record = record;
+			this.ambiguous = ambiguous;
+		}
+	}
+
+	/** Pure: picks the record and classifies the choice. Changes no state. */
+	GroundDespawnMatch matchDespawnedGroundDrop(int item, int x, int y, int plane)
+	{
+		String sid = dropSession.sessionId();
+		if (sid != null)
+		{
+			DroppedGroundItem owned = null;
+			DroppedGroundItem unownedReal = null;
+			synchronized (groundDrops)
+			{
+				// groundDrops is append-ordered, so the first match in each class is the oldest.
+				for (DroppedGroundItem g : groundDrops)
+				{
+					if (g.item != item || g.x != x || g.y != y || g.plane != plane)
+					{
+						continue;
+					}
+					if (sid.equals(dropPileSession.get(g)))
+					{
+						if (owned == null)
+						{
+							owned = g;
+						}
+					}
+					else if (!g.mergeShadow && unownedReal == null)
+					{
+						unownedReal = g;
+					}
+				}
+			}
+			if (owned != null && unownedReal != null)
+			{
+				return new GroundDespawnMatch(unownedReal, true);
+			}
+			if (owned != null)
+			{
+				return new GroundDespawnMatch(owned, false);
+			}
+		}
+		return new GroundDespawnMatch(findGroundDrop(item, x, y, plane), false);
+	}
+
+	/**
+	 * Resolve a despawn and APPLY the refusal when the choice was a guess. The one entry point the
+	 * despawn path uses, so nothing can resolve a despawn and forget to record the ambiguity.
+	 */
+	DroppedGroundItem resolveDespawnedGroundDrop(int item, int x, int y, int plane)
+	{
+		GroundDespawnMatch m = matchDespawnedGroundDrop(item, x, y, plane);
+		if (m.record != null && m.ambiguous)
+		{
+			// Carried on the RECORD, because a parked removal publishes its row ticks later and must
+			// publish the same refusal this despawn decided.
+			m.record.attributionAmbiguous = true;
+			dropSession.resolutionAmbiguous(System.currentTimeMillis());
+		}
+		return m.record;
 	}
 
 	void clearGroundDrops()
@@ -5849,7 +5979,11 @@ public class AccountConnectPlugin extends Plugin
 		// DROP-SESSION LINKAGE. Written on every removal of a session pile, whatever the cause, so a
 		// self-pickup and a despawn join the manifest exactly like an early removal does. A removal
 		// that carries no session id simply predates the feature or happened outside a session.
-		String dropSid = dropSessionForPile(g);
+		// FINDING R2. An AMBIGUOUS despawn resolved between two real piles of one item on one tile
+		// and could not know which went. Naming our session on that row would be a fabricated
+		// attribution, so the row carries no linkage at all. `cause` is left to the ordinary rules,
+		// which already answer `unknown` when the evidence does not support a claim.
+		String dropSid = g.attributionAmbiguous ? null : dropSessionForPile(g);
 		int dropSeq = dropSeqForPile(g);
 		if (dropSid != null)
 		{
@@ -5922,7 +6056,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		DroppedGroundItem g = findGroundDrop(
+		DroppedGroundItem g = resolveDespawnedGroundDrop(
 			event.getItem().getId(), tw.getX(), tw.getY(), tw.getPlane());
 		if (g == null)
 		{
