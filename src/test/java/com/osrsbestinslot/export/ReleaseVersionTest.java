@@ -27,15 +27,15 @@ import static org.junit.Assert.assertTrue;
  * The one number a human is guaranteed to quote in a release report is the one number nothing
  * verified.
  *
- * 0.7.13 is the SHIPPED version: the hub manifest `plugins/osrs-best-in-slot` pins commit
- * 56e0339, and that commit declares 0.7.13. So the rule is stated as a DIFFERENCE from the shipped
- * version rather than as an equality with a literal: this file does not have to be edited for
- * 0.7.15, it only has to be edited when the shipped baseline moves.
+ * 0.7.14 is the SHIPPED version: the hub manifest `plugins/osrs-best-in-slot` pins commit
+ * afb4721 (plugin-hub PR #17186, merged 2026-09-27), and that commit declares 0.7.14. So the rule is
+ * stated as a DIFFERENCE from the shipped version rather than as an equality with a literal: this file
+ * only has to be edited when the shipped baseline moves.
  */
 public class ReleaseVersionTest
 {
-	/** The version declared by 56e0339, the commit the Plugin Hub pins today. */
-	private static final String SHIPPED_VERSION = "0.7.13";
+	/** The version declared by afb4721, the commit the Plugin Hub pins today. */
+	private static final String SHIPPED_VERSION = "0.7.14";
 
 	private static String declaredVersion() throws IOException
 	{
