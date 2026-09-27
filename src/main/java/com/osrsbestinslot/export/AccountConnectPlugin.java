@@ -338,6 +338,9 @@ public class AccountConnectPlugin extends Plugin
 	protected void startUp()
 	{
 		removeOrphanedKeys();
+		// Started while already in the world: the GE slots were replayed before we were listening, so the
+		// next LOGGED_IN (a region load) is not a login and must not open a replay window.
+		geAwaitingLogin = client == null || client.getGameState() != GameState.LOGGED_IN;
 		if (overlayManager != null)
 		{
 			resetOverlay = new StoreResetOverlay(this);
@@ -598,6 +601,8 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Map<Integer, Integer> lastSellTickThisVisit = new java.util.HashMap<>();
 	/** Name of the NPC we were trading with when the shop opened. A buyer must be trading with the same NPC. */
 	String shopkeeperName;
+	/** The shopkeeper NPC itself (by index). with_shopkeeper compares identity, never the name: two NPCs can share a name. */
+	int shopkeeperIndex = -1;
 	/**
 	 * Nearby players AT THE MOMENT of the transaction, as opposed to across the whole visit.
 	 *
@@ -3956,6 +3961,7 @@ public class AccountConnectPlugin extends Plugin
 				defaultStockSoldThisVisit.clear();
 				lastSellTickThisVisit.clear();
 				shopkeeperName = null;
+				shopkeeperIndex = -1;
 				nearbyAtTx = null;
 				chestLooted = false;
 				lastChestEmitKey = null;
@@ -4538,6 +4544,7 @@ public class AccountConnectPlugin extends Plugin
 			defaultStockSoldThisVisit.clear();
 			lastSellTickThisVisit.clear();
 			shopkeeperName = currentShopkeeperName();
+			shopkeeperIndex = currentShopkeeperIndex();
 			nearbyAtTx = null;
 			accumulateShopNearby();		// seed with whoever is already standing here at open
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
@@ -5422,6 +5429,17 @@ public class AccountConnectPlugin extends Plugin
 		return t instanceof net.runelite.api.NPC && t.getName() != null ? Text.removeTags(t.getName()) : null;
 	}
 
+	/** Index of the NPC our character faces when the shop opens, or -1. */
+	int currentShopkeeperIndex()
+	{
+		if (client == null || client.getLocalPlayer() == null)
+		{
+			return -1;
+		}
+		Actor t = client.getLocalPlayer().getInteracting();
+		return t instanceof net.runelite.api.NPC ? ((net.runelite.api.NPC) t).getIndex() : -1;
+	}
+
 	/**
 	 * Same snapshot, and with {@code activity} each row also says what the player was doing: {@code anim}
 	 * (animation id, -1 idle) and {@code interacting_npc} when they face an NPC, plus {@code with_shopkeeper}
@@ -5474,7 +5492,10 @@ public class AccountConnectPlugin extends Plugin
 				{
 					String npc = Text.removeTags(t.getName());
 					m.put("interacting_npc", npc);
-					m.put("with_shopkeeper", shopkeeperName != null && shopkeeperName.equals(npc));
+					// The SAME NPC, by index. A second trader of the same shop (a shop assistant) reads false here
+					// but still shows its name in interacting_npc; a same-named NPC elsewhere never reads true.
+					m.put("with_shopkeeper", shopkeeperIndex >= 0
+						&& ((net.runelite.api.NPC) t).getIndex() == shopkeeperIndex);
 				}
 			}
 			out.add(m);
@@ -7816,6 +7837,14 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int slot = event.getSlot();
 		GrandExchangeOfferState state = offer.getState();
+		// The client clears every slot to EMPTY while hopping, logging in and at the login screen. That
+		// clear is not a collect and must not overwrite what the slot held (the RuneLite GE plugin skips
+		// it the same way). Only an EMPTY seen while logged in is a real collect.
+		if (state == GrandExchangeOfferState.EMPTY && client != null
+			&& client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
 		int tick = client == null ? 0 : client.getTickCount();
 		long acct = client == null ? -1L : client.getAccountHash();
 		if (acct != geAccountHash)
@@ -7873,9 +7902,13 @@ public class AccountConnectPlugin extends Plugin
 				break;
 			case BUYING:
 			case SELLING:
-				if (prev != state && (prev == GrandExchangeOfferState.EMPTY || (prev == null && nowOffer[1] == 0)))
+				if (prev != state && (prev == GrandExchangeOfferState.EMPTY || (prev == null && nowOffer[1] == 0)
+					|| prev == GrandExchangeOfferState.BOUGHT || prev == GrandExchangeOfferState.SOLD
+					|| prev == GrandExchangeOfferState.CANCELLED_BUY || prev == GrandExchangeOfferState.CANCELLED_SELL))
 				{
-					type = "ge_offer";		// EMPTY -> an active offer: just placed
+					// EMPTY -> an active offer: just placed. A finished slot that turns active again was
+					// collected unseen and re-used, so this is a new offer too.
+					type = "ge_offer";
 					lastGeProgressTick.put(slot, tick);
 				}
 				else if (prev != state)

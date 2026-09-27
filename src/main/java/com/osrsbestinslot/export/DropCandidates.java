@@ -236,8 +236,17 @@ public final class DropCandidates
 				inRange.add(p);
 			}
 		}
-		Collections.sort(inRange, (a, b) -> Integer.compare(
-			tileDistance(a.x, a.y, pileX, pileY), tileDistance(b.x, b.y, pileX, pileY)));
+		// Order for the cap: players ON the pile first, then grab casters (they can take it from range),
+		// then everyone else by distance; name breaks ties so the order is stable.
+		Collections.sort(inRange, (a, b) ->
+		{
+			int c = Integer.compare(capRank(a, pileX, pileY), capRank(b, pileX, pileY));
+			if (c == 0)
+			{
+				c = Integer.compare(tileDistance(a.x, a.y, pileX, pileY), tileDistance(b.x, b.y, pileX, pileY));
+			}
+			return c != 0 ? c : a.rsn.compareTo(b.rsn);
+		});
 		for (Observed p : inRange)
 		{
 			if (out.size() >= CANDIDATE_CAP)
@@ -257,6 +266,15 @@ public final class DropCandidates
 			out.add(m);
 		}
 		return out;
+	}
+
+	private static int capRank(Observed p, int pileX, int pileY)
+	{
+		if (tileDistance(p.x, p.y, pileX, pileY) == 0)
+		{
+			return 0;
+		}
+		return p.animation == TELEGRAB_CAST_ANIMATION ? 1 : 2;
 	}
 
 	/**

@@ -29,6 +29,7 @@ public class GeLifecycleTest
 	private AccountConnectPlugin p;
 	private Client client;
 	private int tick = 1000;
+	private GameState gameState = GameState.LOGGED_IN;
 
 	private void setUp() throws Exception
 	{
@@ -43,6 +44,7 @@ public class GeLifecycleTest
 		});
 		client = mock(Client.class);
 		when(client.getTickCount()).thenAnswer(i -> tick);
+		when(client.getGameState()).thenAnswer(i -> gameState);
 		inject("client", client);
 	}
 
@@ -168,6 +170,7 @@ public class GeLifecycleTest
 
 	private void gameState(GameState s)
 	{
+		gameState = s;
 		GameStateChanged gs = new GameStateChanged();
 		gs.setGameState(s);
 		p.onGameStateChanged(gs);
@@ -214,6 +217,65 @@ public class GeLifecycleTest
 		gameState(GameState.LOGGED_IN);
 		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);	// the other account's own old offer
 		assertEquals(java.util.Arrays.asList("ge_offer"), types());
+	}
+
+	/**
+	 * Review HIGH-1: the client clears every slot to EMPTY while hopping / logging in / at the login
+	 * screen. That clear is not a collect, and it must not erase the slot so the replay still sees
+	 * that the offer finished while away.
+	 */
+	@Test
+	public void theHopClearIsNotACollectAndAFinishWhileAwayIsKept() throws Exception
+	{
+		setUp();
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		gameState(GameState.HOPPING);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);		// the client's own clear
+		tick += 5;
+		gameState(GameState.LOGGED_IN);
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);
+		assertEquals(java.util.Arrays.asList("ge_offer", "ge_buy"), types());
+	}
+
+	@Test
+	public void theLogoutClearIsNotACollect() throws Exception
+	{
+		setUp();
+		offer(2, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(2, GrandExchangeOfferState.SELLING, 4151, 0, 1, 1_500_000, 0);
+		gameState(GameState.LOGIN_SCREEN);
+		for (int s = 0; s < 8; s++)
+		{
+			offer(s, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		}
+		assertEquals(java.util.Arrays.asList("ge_offer"), types());
+	}
+
+	/** Review LOW-2: a finished slot that turns active again (its collect unseen) is a new offer. */
+	@Test
+	public void aFinishedSlotReusedIsANewOffer() throws Exception
+	{
+		setUp();
+		offer(4, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);
+		tick += 50;
+		offer(4, GrandExchangeOfferState.SELLING, 4151, 0, 1, 1_500_000, 0);
+		assertEquals(java.util.Arrays.asList("ge_buy", "ge_offer"), types());
+	}
+
+	/** Review MED-2: started while already logged in, a region load is not a login replay. */
+	@Test
+	public void startedMidSessionTheFirstRegionLoadIsNotAReplay() throws Exception
+	{
+		setUp();
+		p.startUp();
+		offer(2, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(2, GrandExchangeOfferState.SELLING, 4151, 0, 5, 1_500_000, 0);
+		tick += 150;
+		gameState(GameState.LOADING);
+		gameState(GameState.LOGGED_IN);
+		offer(2, GrandExchangeOfferState.SELLING, 4151, 2, 5, 1_500_000, 3_000_000);
+		assertEquals(java.util.Arrays.asList("ge_offer", "ge_progress"), types());
 	}
 
 	@Test

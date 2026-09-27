@@ -157,6 +157,23 @@ public class RecipientMechanicsTest
 		assertEquals(7, c.get(0).get("dist"));
 	}
 
+	/** Review LOW-1: a crowd near the pile never pushes the grab caster or the player on the tile out. */
+	@Test
+	public void theCapKeepsThePlayerOnTheTileAndTheCaster()
+	{
+		List<DropCandidates.Observed> obs = new ArrayList<>();
+		for (int i = 0; i < 12; i++)
+		{
+			obs.add(new DropCandidates.Observed("Crowd" + i, PX + 1 + (i % 2), PY + 1, 0, 3, -1));
+		}
+		obs.add(new DropCandidates.Observed("Caster", PX + 7, PY, 0, 3, DropCandidates.TELEGRAB_CAST_ANIMATION));
+		obs.add(new DropCandidates.Observed("OnTile", PX, PY, 0, 3, -1));
+		List<Map<String, Object>> c = DropCandidates.candidatesAt(obs, PX, PY, 0);
+		assertEquals(8, c.size());
+		assertEquals("OnTile", c.get(0).get("rsn"));
+		assertEquals("Caster", c.get(1).get("rsn"));
+	}
+
 	@Test
 	public void aCasterBeyondGrabRangeIsNotACandidate()
 	{
@@ -296,10 +313,19 @@ public class RecipientMechanicsTest
 
 	// ---- item 2: general-store buyer mechanics ----
 
-	private static Player withNpc(Player pl, String npcName)
+	private static final java.util.Map<String, NPC> NPCS = new java.util.HashMap<>();
+
+	/** Face an NPC. Same key = the same NPC object and index; "Name#2" is another NPC with the same name. */
+	private static Player withNpc(Player pl, String key)
 	{
-		NPC n = mock(NPC.class);
-		when(n.getName()).thenReturn(npcName);
+		NPC n = NPCS.get(key);
+		if (n == null)
+		{
+			n = mock(NPC.class);
+			when(n.getName()).thenReturn(key.contains("#") ? key.substring(0, key.indexOf('#')) : key);
+			when(n.getIndex()).thenReturn(100 + NPCS.size());
+			NPCS.put(key, n);
+		}
 		when(pl.getInteracting()).thenReturn(n);
 		return pl;
 	}
@@ -330,7 +356,8 @@ public class RecipientMechanicsTest
 		Player buyer = withNpc(player("Buyer", 3218, 3415, -1), "Shop keeper");
 		Player banker = withNpc(player("Other", 3220, 3416, 832), "Banker");
 		Player idle = player("Idle", 3216, 3418, -1);
-		Client c = client(me, 205, buyer, banker, idle);
+		Player elsewhere = withNpc(player("SameName", 3219, 3418, -1), "Shop keeper#2");
+		Client c = client(me, 205, buyer, banker, idle, elsewhere);
 		inject(p, "client", c);
 		inject(p, "serverClipsDisabled", true);	// no clip recorder in a unit test
 		p.handleActivityWidgetLoaded(net.runelite.api.gameval.InterfaceID.SHOPMAIN);
@@ -351,7 +378,7 @@ public class RecipientMechanicsTest
 		assertEquals("Shop keeper", ev.get("shopkeeper"));
 		assertEquals(2, ev.get("ticks_since_sell"));
 		List<Map<String, Object>> cs = cands(ev);
-		assertEquals(3, cs.size());
+		assertEquals(4, cs.size());
 		Map<String, Map<String, Object>> by = new java.util.HashMap<>();
 		for (Map<String, Object> m : cs)
 		{
@@ -364,6 +391,9 @@ public class RecipientMechanicsTest
 		assertEquals(false, by.get("Other").get("with_shopkeeper"));
 		assertEquals(832, by.get("Other").get("anim"));
 		assertFalse("a player facing nothing has no NPC key", by.get("Idle").containsKey("interacting_npc"));
+		assertEquals("a same-named but different NPC is not our shopkeeper", false,
+			by.get("SameName").get("with_shopkeeper"));
+		assertEquals("Shop keeper", by.get("SameName").get("interacting_npc"));
 	}
 
 	@Test
