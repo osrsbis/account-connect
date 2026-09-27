@@ -6016,21 +6016,28 @@ public class AccountConnectPlugin extends Plugin
 		synchronized (invDeltaPendings)
 		{
 			p = null;
-			for (InvDeltaPending c : invDeltaPendings)
+			java.util.Iterator<InvDeltaPending> it = invDeltaPendings.iterator();
+			while (it.hasNext())
 			{
-				if ("drop".equals(c.base) && c.item == spawnedItemId)
+				InvDeltaPending c = it.next();
+				if (!"drop".equals(c.base) || c.item != spawnedItemId)
 				{
-					p = c;
-					break;
+					continue;
 				}
+				if (currentTick - c.tick > DROP_PENDING_MAX_TICKS)
+				{
+					// Stale — the click this pending belonged to is long over. Discard it and keep looking:
+					// returning here left a NEWER armed drop of the same item without its spawn, while the
+					// pile was already tracked, so a ground_removed row appeared with no drop row (theft
+					// investigation M5, event 40325).
+					it.remove();
+					continue;
+				}
+				p = c;
+				break;
 			}
 			if (p == null)
 			{
-				return;
-			}
-			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
-			{
-				invDeltaPendings.remove(p);	// stale — the click this pending belonged to is long over
 				return;
 			}
 			if (p.spawnX < 0 && tileX >= 0 && tileY >= 0 && tilePlane >= 0)	// first confirming spawn wins

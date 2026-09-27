@@ -320,6 +320,55 @@ public class OffBookEventsTest
 		assertEquals(301, plugin.pendingEvents.get(0).get("world"));
 	}
 
+	/**
+	 * Theft investigation M5 (event 40325): a stale armed drop of the same item sat ahead of a fresh one.
+	 * The spawn found the stale one first, discarded it and stopped, so the fresh drop never got its spawn
+	 * and no drop row was written, while the pile was tracked and later produced a ground_removed row.
+	 */
+	@Test
+	public void aStaleDropOfTheSameItemDoesNotSwallowTheFreshDrop() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
+		AccountConnectPlugin.InvDeltaPending fresh =
+			new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
+		appendPending(plugin, fresh);
+		plugin.resolveDropPendingOnGroundSpawn(995, 0, 0L, 41);	// the fresh drop's spawn, loss visible
+		assertEquals("the fresh drop is emitted", 1, plugin.pendingEvents.size());
+		assertEquals("drop", plugin.pendingEvents.get(0).get("type"));
+		assertEquals(100L, plugin.pendingEvents.get(0).get("qty"));
+		assertNull("both pendings are gone: stale discarded, fresh consumed", invDeltaPending(plugin));
+	}
+
+	/** Same, spawn first: the fresh drop records the corroboration and emits when the loss lands. */
+	@Test
+	public void aStaleDropDoesNotSwallowTheFreshDropWhenTheSpawnArrivesFirst() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
+		AccountConnectPlugin.InvDeltaPending fresh =
+			new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
+		appendPending(plugin, fresh);
+		plugin.resolveDropPendingOnGroundSpawn(995, 0, 100L, 41);	// spawn before the loss
+		assertEquals(41, fresh.spawnCorroboratedTick);
+		plugin.resolveInvDeltaPending(0L, 0L, 42);
+		assertEquals(1, plugin.pendingEvents.size());
+		assertEquals("drop", plugin.pendingEvents.get(0).get("type"));
+	}
+
+	private static void appendPending(AccountConnectPlugin plugin, AccountConnectPlugin.InvDeltaPending p)
+		throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		f.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		java.util.Deque<AccountConnectPlugin.InvDeltaPending> d =
+			(java.util.Deque<AccountConnectPlugin.InvDeltaPending>) f.get(plugin);
+		d.addLast(p);
+	}
+
 	/** Player at 3200,3200 plane 0 on the given world; at the spawn the inventory holds invAtSpawn of item 560. */
 	private static AccountConnectPlugin spawnRig(int world, int invAtSpawn) throws Exception
 	{
