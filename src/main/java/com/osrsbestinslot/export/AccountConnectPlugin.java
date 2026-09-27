@@ -485,6 +485,20 @@ public class AccountConnectPlugin extends Plugin
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
 	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
+	/** Last seen offer per GE slot {item, qty_sold, qty_total, price, spent}, so a collect (slot -> EMPTY) still names what it held. */
+	private final Map<Integer, int[]> lastGeOffer = new java.util.HashMap<>();
+	/** Tick of the last ge_progress row per slot. A big offer fills in many steps; one row per minute per slot is enough. */
+	private final Map<Integer, Integer> lastGeProgressTick = new java.util.HashMap<>();
+	/** Tick of the last LOGGED_IN. The client replays every slot right after login; that replay is a baseline, not activity. */
+	int geLoginTick = Integer.MIN_VALUE / 2;
+	/** Set when the account leaves the world (login screen, hop, relog, disconnect); the next LOGGED_IN is a real login. */
+	boolean geAwaitingLogin = true;
+	/** Account the remembered GE slots belong to. */
+	private long geAccountHash = -1L;
+	/** Ticks after LOGGED_IN during which GE slot replays only set the baseline (the RuneLite GE plugin uses 2). */
+	static final int GE_LOGIN_BURST_TICKS = 2;
+	/** Minimum ticks between two ge_progress rows for one slot (100 ticks = 1 minute). */
+	static final int GE_PROGRESS_MIN_TICKS = 100;
 	/** Shop interface (SHOPMAIN 300) open — so a Buy/Sell menu click is a general-store transaction. */
 	private volatile boolean shopOpen;
 
@@ -580,6 +594,10 @@ public class AccountConnectPlugin extends Plugin
 	 * 2026-09-27: Pot 6->5 after every sale), which is not a customer.
 	 */
 	private final java.util.Set<Integer> defaultStockSoldThisVisit = new java.util.HashSet<>();
+	/** Client tick of our most recent sell of each item this visit, so a store_taken can say how soon after it came. */
+	private final java.util.Map<Integer, Integer> lastSellTickThisVisit = new java.util.HashMap<>();
+	/** Name of the NPC we were trading with when the shop opened. A buyer must be trading with the same NPC. */
+	String shopkeeperName;
 	/**
 	 * Nearby players AT THE MOMENT of the transaction, as opposed to across the whole visit.
 	 *
@@ -752,6 +770,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	static final int REMOVAL_RESOLVE_MAX_TICKS = INV_DELTA_PENDING_MAX_TICKS + 1;
 	private final java.util.Deque<DroppedGroundItem> groundDrops = new java.util.ArrayDeque<>();
+	/**
+	 * Telekinetic Grab sightings aimed at the tile of a pile we track. Only tracked tiles are kept, one
+	 * row per projectile or impact, pruned to the attribution window and capped, so a busy scene of
+	 * casters cannot grow it. Read once per removal to flag a grab from range.
+	 */
+	final java.util.List<DropCandidates.TelegrabSighting> telegrabSightings = new ArrayList<>();
+	static final int TELEGRAB_SIGHTING_CAP = 16;
+	/** Projectiles already recorded. ProjectileMoved fires every client cycle for one projectile. */
+	private final java.util.Set<Object> telegrabProjectilesSeen =
+		java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 	/**
 	 * Removals seen but NOT yet finalized, because a local Take could still explain them.
 	 *
@@ -1222,7 +1250,7 @@ public class AccountConnectPlugin extends Plugin
 	// and the review verdict was "it doesn't feel like a clip, its absolutely lagging". 30fps is 33ms,
 	// which is motion. There is no rate above this worth having: the client does not render faster.
 	//
-	// Paying for it: 30fps x 12s = 360 frames, and 360 frames only fits the 12MB burst cap at a smaller
+	// Paying for it: 30fps x 12s = 360 frames, and 360 frames only fitted the old 12MB burst cap at a smaller
 	// frame. Measured on a real captured frame: 768px/q0.70 = 45KB (16.2MB — over), 704px/q0.55 = 30KB
 	// (10.8MB — fits). The 704px/q0.55 frame was checked for LEGIBILITY, not just size: shop item text
 	// and chat remain readable, which is the property MAX_FRAME_WIDTH exists to protect.
@@ -1237,7 +1265,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int MAX_CLIP_FRAMES = CLIP_FPS * CLIP_SECONDS;	// per-visit frame budget = 360 frames
 	// Task-0 legibility verdict (PRD): 768px keeps store text readable at the server stitch size.
 	// (Plan body text says 640px; 768 is the ratified Task-0 override.) Lowered 768 -> 704 on 2026-09-02
-	// to pay for 30fps: 360 frames only fits the 12MB burst cap at ~30KB/frame. 704 was chosen over 640
+	// to pay for 30fps: 360 frames only fitted the old 12MB burst cap at ~30KB/frame. 704 was chosen over 640
 	// because it was CHECKED for legibility — shop item text and chat still read at 704/q0.55, and store
 	// text is the thing being proven. Below 704 that stops being true, so this is a floor, not a knob.
 	static final int MAX_FRAME_WIDTH = 704;
@@ -1245,11 +1273,12 @@ public class AccountConnectPlugin extends Plugin
 	// newest suffix that fits both the frame-count cap and this total-bytes cap.
 	//
 	// ⚠ MAX_CLIP_BURST_BYTES bounds the WHOLE VISIT here, not one POST. Since the upload is chunked
-	// (CLIP_CHUNK_FRAMES), the server's 12MB per-request limit is never the binding constraint — a
-	// 100-frame chunk at ~30KB is ~3MB. This stays at 12MB as the visit budget: it caps what one shop
-	// visit can ever cost in memory and upload, and is what MAX_CLIP_FRAMES is sized against.
+	// (CLIP_CHUNK_FRAMES), the server's per-request limit is never the binding constraint — a
+	// 40-frame chunk at ~45KB is ~1.8MB. The visit budget is 16 MiB (owner decision PIO-014, 2026-09-27,
+	// was 12MB): a 360-frame visit at ~44KB/frame (~15.8MB) now keeps every frame at the current quality.
+	// It caps what one shop visit can ever cost in memory and upload.
 	static final int MAX_CLIP_FRAME_BYTES = 1_000_000;		// 1MB per frame
-	static final int MAX_CLIP_BURST_BYTES = 12_000_000;		// 12MB per VISIT (all chunks together)
+	static final int MAX_CLIP_BURST_BYTES = 16 * 1024 * 1024;	// 16 MiB per VISIT (all chunks together)
 
 	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
 	 *  (it can never force it ON — that stays a local opt-in, mirroring serverScreenshotsDisabled). */
@@ -2616,7 +2645,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			WorldPoint loc = p.getWorldLocation();
 			out.add(new DropCandidates.Observed(Text.removeTags(p.getName()),
-				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel()));
+				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel(), p.getAnimation()));
 		}
 		return out;
 	}
@@ -2970,7 +2999,7 @@ public class AccountConnectPlugin extends Plugin
 	static final long CLIP_RETRY_AFTER_MAX_MS = 240_000L;
 
 	/**
-	 * Total bytes of chunks waiting for a retry, across all visits. Two full visits. A chunk that
+	 * Total bytes of chunks waiting for a retry, across all visits. Two full visits (2 x 16 MiB = 32 MiB). A chunk that
 	 * would push the total over this is given up rather than held, so a long server outage cannot
 	 * grow memory without bound. Same idea as the drop path's unacked byte budget.
 	 */
@@ -3903,6 +3932,7 @@ public class AccountConnectPlugin extends Plugin
 			case LOGGING_IN:
 				clogObtained.clear();
 				clogSeen = false;
+				geAwaitingLogin = true;	// the next LOGGED_IN replays the GE slots
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
 				endBankSession(false);	// a bank left open across a hop/relog: incomplete, never diffed against another account
@@ -3924,6 +3954,8 @@ public class AccountConnectPlugin extends Plugin
 				storeProbeItem = 0;
 				soldThisVisit.clear();
 				defaultStockSoldThisVisit.clear();
+				lastSellTickThisVisit.clear();
+				shopkeeperName = null;
 				nearbyAtTx = null;
 				chestLooted = false;
 				lastChestEmitKey = null;
@@ -3931,6 +3963,7 @@ public class AccountConnectPlugin extends Plugin
 			case CONNECTION_LOST:
 				clogObtained.clear();
 				clogSeen = false;
+				geAwaitingLogin = true;
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
 				endBankSession(false);	// a bank open at disconnect: incomplete, never diffed against the next session
@@ -3954,6 +3987,7 @@ public class AccountConnectPlugin extends Plugin
 				break;
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
+				geAwaitingLogin = true;
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
@@ -3983,6 +4017,13 @@ public class AccountConnectPlugin extends Plugin
 				{
 					lastWorld = client.getWorld();
 				}
+				// Only a real login or hop replays the GE slots. LOGGED_IN also follows every scene LOADING, and a
+				// fill landing right after a region change must not be swallowed as a replay.
+				if (client != null && geAwaitingLogin)
+				{
+					geLoginTick = client.getTickCount();
+				}
+				geAwaitingLogin = false;
 				break;
 			default:
 				break;
@@ -4495,6 +4536,8 @@ public class AccountConnectPlugin extends Plugin
 			storeProbeItem = 0;		// and with no probe until the first item is sold
 			soldThisVisit.clear();
 			defaultStockSoldThisVisit.clear();
+			lastSellTickThisVisit.clear();
+			shopkeeperName = currentShopkeeperName();
 			nearbyAtTx = null;
 			accumulateShopNearby();		// seed with whoever is already standing here at open
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
@@ -5196,6 +5239,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				defaultStockSoldThisVisit.add(item);	// the shop already stocked it before we sold: default stock
 			}
+			lastSellTickThisVisit.put(item, tick);
 			if (storeProbeItem == 0)
 			{
 				// FIRST sell of the visit = the junk probe. Only its disappearance moves the reset
@@ -5361,6 +5405,32 @@ public class AccountConnectPlugin extends Plugin
 	/** Snapshot up to {@code cap} nearest OTHER players right now: {rsn, dx, dy, dist, cb}, nearest first. */
 	List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
 	{
+		return nearbyPlayersSnapshot(cap, false);
+	}
+
+	/**
+	 * The name of the NPC our own character is interacting with, or null. Read when the shop opens: the
+	 * Trade click faces the shopkeeper, so this names the shop's owner for the buyer check.
+	 */
+	String currentShopkeeperName()
+	{
+		if (client == null || client.getLocalPlayer() == null)
+		{
+			return null;
+		}
+		Actor t = client.getLocalPlayer().getInteracting();
+		return t instanceof net.runelite.api.NPC && t.getName() != null ? Text.removeTags(t.getName()) : null;
+	}
+
+	/**
+	 * Same snapshot, and with {@code activity} each row also says what the player was doing: {@code anim}
+	 * (animation id, -1 idle) and {@code interacting_npc} when they face an NPC, plus {@code with_shopkeeper}
+	 * when that NPC is the shopkeeper we are trading with. Another player's shop screen is never visible,
+	 * so this is the closest mechanical sign that they are trading with the same shop. Player targets are
+	 * not named.
+	 */
+	List<Map<String, Object>> nearbyPlayersSnapshot(int cap, boolean activity)
+	{
 		List<Map<String, Object>> out = new ArrayList<>();
 		if (client == null)
 		{
@@ -5396,6 +5466,17 @@ public class AccountConnectPlugin extends Plugin
 			m.put("dy", loc.getY() - me.getY());
 			m.put("dist", loc.distanceTo(me));
 			m.put("cb", p.getCombatLevel());
+			if (activity)
+			{
+				m.put("anim", p.getAnimation());
+				Actor t = p.getInteracting();
+				if (t instanceof net.runelite.api.NPC && t.getName() != null)
+				{
+					String npc = Text.removeTags(t.getName());
+					m.put("interacting_npc", npc);
+					m.put("with_shopkeeper", shopkeeperName != null && shopkeeperName.equals(npc));
+				}
+			}
 			out.add(m);
 		}
 		return out;
@@ -5691,14 +5772,25 @@ public class AccountConnectPlugin extends Plugin
 			f.put("qty", before - after);
 			f.put("stock_before", before);
 			f.put("stock_after", after);
-			List<Map<String, Object>> present = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
+			// Every other player in the shop area, each with what they were doing, so the reader can keep
+			// only the mechanically plausible buyers (facing the same shopkeeper) and name one if one remains.
+			List<Map<String, Object>> present = nearbyPlayersSnapshot(NEARBY_FIELD_CAP, true);
 			if (!present.isEmpty())
 			{
 				f.put("taken_by_candidates", present);
 			}
+			if (shopkeeperName != null)
+			{
+				f.put("shopkeeper", shopkeeperName);
+			}
 			if (client != null)
 			{
 				f.put("world", client.getWorld());
+				Integer soldAt = lastSellTickThisVisit.get(item);
+				if (soldAt != null && client.getTickCount() >= soldAt)
+				{
+					f.put("ticks_since_sell", client.getTickCount() - soldAt);
+				}
 			}
 			emitEvent("store_taken", f);
 			markStoreClipMoment();
@@ -6709,6 +6801,112 @@ public class AccountConnectPlugin extends Plugin
 		{
 			groundDrops.clear();
 		}
+		synchronized (telegrabSightings)
+		{
+			telegrabSightings.clear();
+		}
+	}
+
+	/** True when a pile we track (live or parked for a Take) lies on this tile. */
+	boolean isTrackedPileTile(int x, int y, int plane)
+	{
+		synchronized (groundDrops)
+		{
+			for (DroppedGroundItem g : groundDrops)
+			{
+				if (g.x == x && g.y == y && g.plane == plane)
+				{
+					return true;
+				}
+			}
+		}
+		synchronized (pendingRemovals)
+		{
+			for (DroppedGroundItem g : pendingRemovals.keySet())
+			{
+				if (g.x == x && g.y == y && g.plane == plane)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Record one Telekinetic Grab sighting when it targets a tracked pile's tile. Prunes rows older than
+	 * the attribution window and keeps at most TELEGRAB_SIGHTING_CAP (oldest dropped).
+	 */
+	void recordTelegrabSighting(DropCandidates.TelegrabSighting s)
+	{
+		if (s == null || !isTrackedPileTile(s.x, s.y, s.plane))
+		{
+			return;
+		}
+		synchronized (telegrabSightings)
+		{
+			telegrabSightings.removeIf(o -> s.tick - o.tick > DropCandidates.TELEGRAB_WINDOW_TICKS || o.tick > s.tick);
+			telegrabSightings.add(s);
+			while (telegrabSightings.size() > TELEGRAB_SIGHTING_CAP)
+			{
+				telegrabSightings.remove(0);
+			}
+		}
+	}
+
+	/**
+	 * A Telekinetic Grab projectile in flight. Recorded once per projectile, with its caster, when it
+	 * targets the tile of a pile we track. Other projectiles return on the first id compare.
+	 */
+	@Subscribe
+	public void onProjectileMoved(net.runelite.api.events.ProjectileMoved event)
+	{
+		if (client == null || event == null || event.getProjectile() == null
+			|| event.getProjectile().getId() != DropCandidates.TELEGRAB_PROJECTILE)
+		{
+			return;
+		}
+		net.runelite.api.Projectile pr = event.getProjectile();
+		if (!telegrabProjectilesSeen.add(pr))
+		{
+			return;
+		}
+		WorldPoint target = pr.getTargetPoint();
+		if (target == null && event.getPosition() != null)
+		{
+			target = WorldPoint.fromLocal(client, event.getPosition());
+		}
+		if (target == null)
+		{
+			return;
+		}
+		Actor src = pr.getSourceActor();
+		boolean self = src != null && src == client.getLocalPlayer();
+		String caster = src == null || src.getName() == null ? null : Text.removeTags(src.getName());
+		WorldPoint from = src != null && src.getWorldLocation() != null ? src.getWorldLocation() : pr.getSourcePoint();
+		recordTelegrabSighting(new DropCandidates.TelegrabSighting(target.getX(), target.getY(), target.getPlane(),
+			client.getTickCount(), "projectile", self ? null : caster, self,
+			from == null ? target.getX() : from.getX(), from == null ? target.getY() : from.getY()));
+	}
+
+	/** A Telekinetic Grab impact graphic. It carries no caster, only the tile. */
+	@Subscribe
+	public void onGraphicsObjectCreated(net.runelite.api.events.GraphicsObjectCreated event)
+	{
+		if (client == null || event == null || event.getGraphicsObject() == null
+			|| event.getGraphicsObject().getId() != DropCandidates.TELEGRAB_IMPACT
+			|| event.getGraphicsObject().getLocation() == null)
+		{
+			return;
+		}
+		net.runelite.api.GraphicsObject go = event.getGraphicsObject();
+		WorldPoint wp = WorldPoint.fromLocal(client, go.getLocation());
+		if (wp == null)
+		{
+			return;
+		}
+		recordTelegrabSighting(new DropCandidates.TelegrabSighting(wp.getX(), wp.getY(), go.getLevel(),
+			client.getTickCount(), "impact", null, false, wp.getX(), wp.getY()));
 	}
 
 	int groundDropCount()
@@ -7108,6 +7306,21 @@ public class AccountConnectPlugin extends Plugin
 		tile.put("y", g.y);
 		tile.put("plane", g.plane);
 		fields.put("tile", tile);
+		// A Telekinetic Grab aimed at THIS tile just before it went. A grab takes the pile from range, so
+		// a player standing on the tile may be a bystander; the reader must know. Absent when none seen.
+		// Not on a self-pickup: our own Take already explains the removal.
+		if (!"self_pickup".equals(cause))
+		{
+			Map<String, Object> grab;
+			synchronized (telegrabSightings)
+			{
+				grab = DropCandidates.telegrabAt(telegrabSightings, g.x, g.y, g.plane, currentTick);
+			}
+			if (grab != null)
+			{
+				fields.put("telegrab", grab);
+			}
+		}
 		// Who was standing here when an early removal happened. The pickup itself runs in another
 		// player's client, so this is EVIDENCE, never an answer: it goes out under the same
 		// `taken_by_candidates` inference field the store handoff uses, for the server-side resolver
@@ -7129,7 +7342,7 @@ public class AccountConnectPlugin extends Plugin
 			// Resolve ONLY on exactly one player standing on the pile's tile. Two on it is
 			// AMBIGUOUS, an empty tile is UNKNOWN, and neither ever names anybody. The Take itself
 			// happens in the other client and nothing in our stream proves it.
-			String resolved = DropCandidates.resolveCounterparty(present);
+			String resolved = fields.containsKey("telegrab") ? null : DropCandidates.resolveCounterparty(present);
 			String status = DropCandidates.statusFor(present, resolved);
 			fields.put("counterparty_status", status);
 			if (resolved != null)
@@ -7587,8 +7800,11 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * GE buys/sells as discrete events — emit once per terminal-state transition (BOUGHT / SOLD /
-	 * CANCELLED), not on every partial-fill tick. Own-account GE only.
+	 * GE offer lifecycle, own account only, one row per real state step:
+	 * ge_offer (a new offer placed), ge_progress (a partial fill, at most one per slot per minute),
+	 * ge_buy / ge_sell / ge_cancel (terminal, as before) and ge_collect (the slot emptied, with what it held).
+	 * The client replays every slot right after login; that replay only sets the baseline, so an old
+	 * uncollected offer is never reported again as new activity.
 	 */
 	@Subscribe
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
@@ -7600,33 +7816,135 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int slot = event.getSlot();
 		GrandExchangeOfferState state = offer.getState();
+		int tick = client == null ? 0 : client.getTickCount();
+		long acct = client == null ? -1L : client.getAccountHash();
+		if (acct != geAccountHash)
+		{
+			// GE slots belong to one account. Another account's remembered slot must never make this one's
+			// replay look like an offer that finished while away.
+			lastGeState.clear();
+			lastGeOffer.clear();
+			lastGeProgressTick.clear();
+			geAccountHash = acct;
+		}
+		boolean loginReplay = client != null && tick - geLoginTick <= GE_LOGIN_BURST_TICKS;
 		GrandExchangeOfferState prev = lastGeState.put(slot, state);
-		if (state == prev)
+		int[] prevOffer = lastGeOffer.get(slot);
+		int[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
+			offer.getPrice(), offer.getSpent()};
+		if (state == GrandExchangeOfferState.EMPTY)
+		{
+			lastGeOffer.remove(slot);
+			lastGeProgressTick.remove(slot);
+		}
+		else
+		{
+			lastGeOffer.put(slot, nowOffer);
+		}
+		if (state == null)
 		{
 			return;
 		}
-		String type;
+		if (loginReplay)
+		{
+			// Baseline only, with one exception: an offer we saw active before the hop/relog that finished
+			// while we were away (same item, now BOUGHT/SOLD/CANCELLED) is a real completion and still reported.
+			boolean finishedWhileAway = prevOffer != null && prevOffer[0] == nowOffer[0]
+				&& (prev == GrandExchangeOfferState.BUYING || prev == GrandExchangeOfferState.SELLING)
+				&& state != GrandExchangeOfferState.BUYING && state != GrandExchangeOfferState.SELLING
+				&& state != GrandExchangeOfferState.EMPTY;
+			if (!finishedWhileAway)
+			{
+				return;
+			}
+		}
+		String type = null;
 		switch (state)
 		{
 			case BOUGHT:
-				type = "ge_buy";
+				type = state == prev ? null : "ge_buy";
 				break;
 			case SOLD:
-				type = "ge_sell";
+				type = state == prev ? null : "ge_sell";
 				break;
 			case CANCELLED_BUY:
 			case CANCELLED_SELL:
-				type = "ge_cancel";
+				type = state == prev ? null : "ge_cancel";
+				break;
+			case BUYING:
+			case SELLING:
+				if (prev != state && (prev == GrandExchangeOfferState.EMPTY || (prev == null && nowOffer[1] == 0)))
+				{
+					type = "ge_offer";		// EMPTY -> an active offer: just placed
+					lastGeProgressTick.put(slot, tick);
+				}
+				else if (prev != state)
+				{
+					// An offer first seen part-filled (the plugin started mid-offer): report the fill, not a new offer.
+					type = "ge_progress";
+					lastGeProgressTick.put(slot, tick);
+				}
+				else if (prevOffer != null && nowOffer[1] > prevOffer[1])
+				{
+					Integer last = lastGeProgressTick.get(slot);
+					if (last == null || tick - last >= GE_PROGRESS_MIN_TICKS || tick < last)
+					{
+						type = "ge_progress";
+						lastGeProgressTick.put(slot, tick);
+					}
+					else
+					{
+						// Rate-limited: keep the older fill as the baseline so the next row still shows the change.
+						lastGeOffer.put(slot, prevOffer);
+					}
+				}
+				break;
+			case EMPTY:
+				if (prev != null && prev != GrandExchangeOfferState.EMPTY && prevOffer != null)
+				{
+					type = "ge_collect";	// the slot was cleared: the items or coins were collected
+				}
 				break;
 			default:
-				return; // BUYING / SELLING / EMPTY — not a terminal event
+				break;
 		}
+		if (type == null)
+		{
+			return;
+		}
+		int[] o = "ge_collect".equals(type) ? prevOffer : nowOffer;
 		Map<String, Object> fields = new LinkedHashMap<>();
-		fields.put("item", offer.getItemId());
-		fields.put("qty", offer.getQuantitySold());
-		fields.put("price", offer.getPrice());
-		fields.put("gp", offer.getSpent());
+		fields.put("item", o[0]);
+		fields.put("qty", o[1]);
+		fields.put("price", o[3]);
+		fields.put("gp", o[4]);
+		fields.put("qty_total", o[2]);
+		fields.put("slot", slot);
+		fields.put("state", "ge_collect".equals(type) ? String.valueOf(prev) : state.name());
+		fields.put("side", geSide("ge_collect".equals(type) ? prev : state));
 		emitEvent(type, fields);
+	}
+
+	/** "buy" or "sell" for an offer state; null for EMPTY. */
+	static String geSide(GrandExchangeOfferState s)
+	{
+		if (s == null)
+		{
+			return null;
+		}
+		switch (s)
+		{
+			case BUYING:
+			case BOUGHT:
+			case CANCELLED_BUY:
+				return "buy";
+			case SELLING:
+			case SOLD:
+			case CANCELLED_SELL:
+				return "sell";
+			default:
+				return null;
+		}
 	}
 
 	/**
@@ -7827,7 +8145,7 @@ public class AccountConnectPlugin extends Plugin
 			writer.setOutput(ios);
 			javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
 			param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
-			// 0.55, lowered from 0.70 on 2026-09-02 to fit 360 frames (30fps x 12s) in the 12MB burst
+			// 0.55, lowered from 0.70 on 2026-09-02 to fit 360 frames (30fps x 12s) in the then 12MB burst
 			// cap: 30KB/frame at 704px vs 45KB at 768px/0.70. Legibility was re-checked at this setting,
 			// not assumed — a clip nobody can read is not evidence however smooth it is.
 			param.setCompressionQuality(0.55f);

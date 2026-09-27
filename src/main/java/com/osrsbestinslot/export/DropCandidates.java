@@ -47,8 +47,14 @@ public final class DropCandidates
 	 */
 	public static final int CANDIDATE_RANGE_TILES = 3;
 
-	/** Cap on recorded candidates for one pile. A crowded tile cannot make the row unbounded. */
-	public static final int CANDIDATE_CAP = 12;
+	/**
+	 * Cap on recorded candidates for one pile. A crowded tile cannot make the row unbounded. Nearest
+	 * first, so the players that matter are never the ones cut.
+	 */
+	public static final int CANDIDATE_CAP = 8;
+
+	/** Animation id when the client reports none (the game's own idle value). */
+	public static final int NO_ANIMATION = -1;
 
 	/** One observed player, in world tiles. Deliberately a plain value type, not a RuneLite Player. */
 	public static final class Observed
@@ -58,15 +64,136 @@ public final class DropCandidates
 		public final int y;
 		public final int plane;
 		public final int combatLevel;
+		/** The animation the player was playing at the moment of observation, or NO_ANIMATION. */
+		public final int animation;
 
 		public Observed(String rsn, int x, int y, int plane, int combatLevel)
+		{
+			this(rsn, x, y, plane, combatLevel, NO_ANIMATION);
+		}
+
+		public Observed(String rsn, int x, int y, int plane, int combatLevel, int animation)
 		{
 			this.rsn = rsn;
 			this.x = x;
 			this.y = y;
 			this.plane = plane;
 			this.combatLevel = combatLevel;
+			this.animation = animation;
 		}
+	}
+
+	/**
+	 * One sighting of a Telekinetic Grab aimed at a tile: the travelling projectile (which names its
+	 * caster) or the impact graphic on the tile (which does not). A grab takes a pile from up to ten
+	 * tiles away, so a player standing on the tile when it vanished may be an innocent bystander.
+	 */
+	public static final class TelegrabSighting
+	{
+		public final int x;
+		public final int y;
+		public final int plane;
+		public final int tick;
+		/** "projectile" or "impact". */
+		public final String via;
+		/** Caster name, only known from a projectile. Null otherwise. */
+		public final String caster;
+		/** True when the caster is our own character. */
+		public final boolean casterSelf;
+		public final int casterX;
+		public final int casterY;
+
+		public TelegrabSighting(int x, int y, int plane, int tick, String via,
+			String caster, boolean casterSelf, int casterX, int casterY)
+		{
+			this.x = x;
+			this.y = y;
+			this.plane = plane;
+			this.tick = tick;
+			this.via = via;
+			this.caster = caster;
+			this.casterSelf = casterSelf;
+			this.casterX = casterX;
+			this.casterY = casterY;
+		}
+	}
+
+	/**
+	 * How many ticks before a pile vanished a grab aimed at its tile still counts. The projectile flies
+	 * for a few ticks before the item leaves the ground; ten covers the longest cast range with margin
+	 * and keeps an old, unrelated grab on the same tile out.
+	 */
+	public static final int TELEGRAB_WINDOW_TICKS = 10;
+
+	/** Telekinetic Grab reaches about ten tiles; a caster further out cannot have taken the pile. */
+	public static final int TELEGRAB_RANGE_TILES = 10;
+
+	/** The player animation of a Telekinetic Grab cast (gameval AnimationID.HUMAN_CASTTELEGRAB). */
+	public static final int TELEGRAB_CAST_ANIMATION = 723;
+
+	/** The travelling grab projectile (gameval SpotanimID.TELEGRAB_TRAVEL). */
+	public static final int TELEGRAB_PROJECTILE = 143;
+
+	/** The grab's impact graphic on the item's tile (gameval SpotanimID.TELEGRAB_IMPACT). */
+	public static final int TELEGRAB_IMPACT = 144;
+
+	/**
+	 * The Telekinetic Grab evidence for one pile, or null when no grab aimed at this exact tile was seen
+	 * in the window before the removal. A named caster comes from the most recent projectile.
+	 */
+	public static Map<String, Object> telegrabAt(List<TelegrabSighting> sightings,
+		int pileX, int pileY, int pilePlane, int removalTick)
+	{
+		if (sightings == null)
+		{
+			return null;
+		}
+		TelegrabSighting latest = null;
+		TelegrabSighting named = null;
+		java.util.Set<String> via = new java.util.TreeSet<>();
+		for (TelegrabSighting s : sightings)
+		{
+			if (s == null || s.x != pileX || s.y != pileY || s.plane != pilePlane)
+			{
+				continue;
+			}
+			int age = removalTick - s.tick;
+			if (age < 0 || age > TELEGRAB_WINDOW_TICKS)
+			{
+				continue;
+			}
+			via.add(s.via);
+			if (latest == null || s.tick >= latest.tick)
+			{
+				latest = s;
+			}
+			if ((s.caster != null || s.casterSelf) && (named == null || s.tick >= named.tick))
+			{
+				named = s;
+			}
+		}
+		if (latest == null)
+		{
+			return null;
+		}
+		Map<String, Object> m = new LinkedHashMap<>();
+		m.put("via", new ArrayList<>(via));
+		m.put("ticks_before", removalTick - latest.tick);
+		if (named != null)
+		{
+			if (named.casterSelf)
+			{
+				m.put("caster_self", true);
+			}
+			else
+			{
+				m.put("caster", named.caster);
+				m.put("caster_dx", named.casterX - pileX);
+				m.put("caster_dy", named.casterY - pileY);
+				m.put("caster_dist", tileDistance(named.casterX, named.casterY, pileX, pileY));
+			}
+		}
+		return m;
 	}
 
 	/**
@@ -100,7 +227,11 @@ public final class DropCandidates
 			{
 				continue;
 			}
-			if (tileDistance(p.x, p.y, pileX, pileY) <= CANDIDATE_RANGE_TILES)
+			int d = tileDistance(p.x, p.y, pileX, pileY);
+			// The mechanically relevant area is not one fixed ring: a player further out who is casting
+			// Telekinetic Grab can take the pile from range, so that player is a candidate too.
+			if (d <= CANDIDATE_RANGE_TILES
+				|| (d <= TELEGRAB_RANGE_TILES && p.animation == TELEGRAB_CAST_ANIMATION))
 			{
 				inRange.add(p);
 			}
@@ -120,6 +251,9 @@ public final class DropCandidates
 			m.put("dy", p.y - pileY);
 			m.put("dist", tileDistance(p.x, p.y, pileX, pileY));
 			m.put("cb", p.combatLevel);
+			// What the player was DOING when the pile vanished. A floor pickup plays one animation and a
+			// grab cast another, so a reader can rule out a bystander who was doing something else.
+			m.put("anim", p.animation);
 			out.add(m);
 		}
 		return out;

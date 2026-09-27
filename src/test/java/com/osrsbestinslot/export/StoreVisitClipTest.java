@@ -171,6 +171,35 @@ public class StoreVisitClipTest
 	}
 
 	/** The byte cap binds too: frames larger than the measured mean still keep every sale. */
+	/**
+	 * PIO-014: the GS video budget is 16 MiB. A full 360-frame visit at 44 KB/frame (~15.8 MB, the
+	 * current quality at a busy scene) keeps every frame, both in the visit selector and in the final
+	 * upload selection. Under the old 12MB budget about a quarter of these frames were cut.
+	 */
+	@Test
+	public void aFullVisitAt44KbPerFrameKeepsAll360Frames()
+	{
+		StoreVisitClip v = visit();
+		long[] sales = {2_000L, 5_000L, 8_000L, 11_000L};	// windows cover the whole 12 s
+		int next = 0;
+		int offered = 0;
+		for (long t = 0; offered < AccountConnectPlugin.MAX_CLIP_FRAMES; t += FRAME_MS)
+		{
+			while (next < sales.length && sales[next] <= t)
+			{
+				v.onMoment(sales[next++]);
+			}
+			v.offer(new byte[44_000], t);
+			offered++;
+		}
+		StoreVisitClip.Snapshot s = v.snapshot();
+		assertEquals("every frame of a 360-frame visit at 44 KB is kept", 360, s.frames.size());
+		assertWithinBudget(v, s);
+		assertEquals(360, AccountConnectPlugin.selectStoreClipFrames(s.frames, AccountConnectPlugin.MAX_CLIP_FRAMES,
+			AccountConnectPlugin.MAX_CLIP_FRAME_BYTES, AccountConnectPlugin.MAX_CLIP_BURST_BYTES).size());
+		assertEquals("the retry budget is two visits (32 MiB)", 32L * 1024 * 1024, AccountConnectPlugin.CLIP_RETRY_BYTE_BUDGET);
+	}
+
 	@Test
 	public void theByteCapIsRespectedWithLargeFrames()
 	{
@@ -184,11 +213,11 @@ public class StoreVisitClipTest
 			{
 				v.onMoment(sales[next++]);
 			}
-			v.offer(new byte[100_000], t);	// 100KB: the byte cap (12MB = 120 frames) binds first
+			v.offer(new byte[100_000], t);	// 100KB: the byte cap (16 MiB = 167 frames) binds first
 		}
 		StoreVisitClip.Snapshot s = v.snapshot();
-		assertTrue("12MB cap", v.byteSize() <= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
-		assertTrue("bytes cap bound the frame count", s.frames.size() <= 120);
+		assertTrue("16 MiB cap", v.byteSize() <= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		assertTrue("bytes cap bound the frame count", s.frames.size() <= 167);
 		for (long sale : sales)
 		{
 			assertSaleVisible(s, sale, 3);

@@ -133,7 +133,7 @@ public class StoreClipCaptureTest
 		// raised, this arm goes red — which is the point: the frame size and the frame count are one
 		// budget, and changing one without the other silently truncates the start of every visit.
 		// This is the VISIT budget (memory + total upload), not a per-request limit.
-		assertTrue("fps x seconds at ~30KB/frame (704px q0.55) must fit the 12MB visit budget",
+		assertTrue("fps x seconds at ~30KB/frame (704px q0.55) must fit the 16 MiB visit budget",
 			(long) AccountConnectPlugin.MAX_CLIP_FRAMES * 30 * 1024
 				<= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
 		assertEquals("frame width must stay at the legibility floor that the byte budget assumes",

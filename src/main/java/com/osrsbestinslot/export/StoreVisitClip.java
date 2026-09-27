@@ -14,7 +14,7 @@
  *     after it, so frames that are not kept are HELD in a short pre-roll until they expire;
  *   * one frame every BASELINE_PERIOD_MILLIS in between, so the gaps are not blank.
  *
- * THE BUDGET. The same numbers the ring had: maxFrames (360) and maxBytes (12MB) for the WHOLE
+ * THE BUDGET. maxFrames (360) and maxBytes (16 MiB since PIO-014; the ring had 12MB) for the WHOLE
  * visit. That keeps a visit at the same number of 40-frame chunks, so it spends the same share of
  * the server's per-token burst rate limit as before. When a new frame would exceed the budget, one
  * frame is evicted from the LARGEST group (start, each moment, baseline). Groups therefore shrink

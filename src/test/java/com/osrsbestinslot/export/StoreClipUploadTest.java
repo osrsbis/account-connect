@@ -32,7 +32,7 @@ import static org.junit.Assert.assertTrue;
  * Unit tests for the store delivery-proof burst UPLOAD path (Task B3) — no live client needed.
  * Covers: JPEG encode (SOI + ImageIO round-trip), the multipart burst builder (frame_count field
  * exactly equals the attached frames[] parts), the per-frame cap filter, the newest-suffix (tail)
- * truncation at the 12MB burst cap, the mandatory no-transaction privacy discard (US-08), and one
+ * truncation at the 16 MiB burst cap, the mandatory no-transaction privacy discard (US-08), and one
  * happy-path POST through a local JDK HttpServer stub proving submitStoreClipUpload targets the real
  * /store-frames-ingest route with the real constants. Live-client wiring is covered by the manual plan.
  */
@@ -144,13 +144,13 @@ public class StoreClipUploadTest
 	}
 
 	// (d) truncation keeps the NEWEST suffix (the chronological tail) — the shop-close / sale frames are
-	// the actual evidence; walking oldest-first would drop them. 15 frames of 1MB each exceed the 12MB
-	// burst cap; exactly the last 12 (indices 3..14) must survive, in order.
+	// the actual evidence; walking oldest-first would drop them. 20 frames of 1MB each exceed the 16 MiB
+	// burst cap; exactly the last 16 (indices 4..19) must survive, in order.
 	@Test
 	public void truncationKeepsNewestSuffix() throws Exception
 	{
 		List<byte[]> encoded = new ArrayList<>();
-		for (int i = 0; i < 15; i++)
+		for (int i = 0; i < 20; i++)
 		{
 			encoded.add(sized(1_000_000, i));			// each == per-frame cap, allowed
 		}
@@ -158,13 +158,13 @@ public class StoreClipUploadTest
 			encoded, AccountConnectPlugin.MAX_CLIP_FRAMES,
 			AccountConnectPlugin.MAX_CLIP_FRAME_BYTES, AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
 
-		assertEquals("12MB cap must keep exactly 12 x 1MB frames", 12, kept.size());
-		assertEquals("kept set must start at the tail (index 3)", 3, kept.get(0)[0]);
-		assertEquals("kept set must end at the newest (index 14)", 14, kept.get(11)[0]);
+		assertEquals("16 MiB cap must keep exactly 16 x 1MB frames", 16, kept.size());
+		assertEquals("kept set must start at the tail (index 4)", 4, kept.get(0)[0]);
+		assertEquals("kept set must end at the newest (index 19)", 19, kept.get(15)[0]);
 		// prove strict chronological order across the kept suffix
 		for (int i = 0; i < kept.size(); i++)
 		{
-			assertEquals("kept order broken at " + i, 3 + i, kept.get(i)[0]);
+			assertEquals("kept order broken at " + i, 4 + i, kept.get(i)[0]);
 		}
 	}
 
