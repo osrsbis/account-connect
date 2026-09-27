@@ -5650,6 +5650,20 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Milliseconds from {@code nowMs} to the NEAREST shop cycle tick of an observed anchor, or null when no
+	 * phase is known (or the clock went backwards). Pure and static so it is testable without a client.
+	 */
+	static Long msFromResetCycle(long anchorMs, long nowMs)
+	{
+		if (anchorMs <= 0 || nowMs < anchorMs)
+		{
+			return null;
+		}
+		long r = (nowMs - anchorMs) % STORE_RESET_PERIOD_MS;
+		return Math.min(r, STORE_RESET_PERIOD_MS - r);
+	}
+
 	/** How far a gap may sit from one full period and still count as the cycle. */
 	static final long PERIOD_TOLERANCE_MS = 3_000L;
 
@@ -5718,6 +5732,9 @@ public class AccountConnectPlugin extends Plugin
 		}
 		traceShopStock(now);
 		long nowMs = System.currentTimeMillis();
+		// The shop cycle phase as it was BEFORE this change. Player-added stock decays on the cycle tick, so a
+		// store_taken that lands on it may be the shop, not a buyer. Read before the anchors below move it.
+		long cycleAnchorBefore = storeResetAnchorMs;
 
 		// ANCHOR 1 — THE ITEM WE SOLD VANISHING. This is the event the user actually watches, and it
 		// is the strongest signal available: a junk item the shop does NOT natively stock is sold in,
@@ -5803,6 +5820,15 @@ public class AccountConnectPlugin extends Plugin
 			if (shopkeeperName != null)
 			{
 				f.put("shopkeeper", shopkeeperName);
+			}
+			// Distance in ms to the nearest shop cycle tick, when the phase was known before this change. Near 0
+			// = the fall landed on the cycle, where player-added stock decays by itself (measured live
+			// 2026-09-27: a sold log fell to 0 exactly 60.0 s after the previous one with no buyer).
+			// Absent = phase unknown, so the reader cannot tell a decay from a buy by timing.
+			Long msFromCycle = msFromResetCycle(cycleAnchorBefore, nowMs);
+			if (msFromCycle != null)
+			{
+				f.put("ms_from_reset_cycle", msFromCycle);
 			}
 			if (client != null)
 			{

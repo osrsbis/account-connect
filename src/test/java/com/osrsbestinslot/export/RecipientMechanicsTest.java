@@ -396,6 +396,57 @@ public class RecipientMechanicsTest
 		assertEquals("Shop keeper", by.get("SameName").get("interacting_npc"));
 	}
 
+	/**
+	 * Found on the rig 2026-09-27: a sold log decays to 0 on the shop's own 60 s cycle with no buyer, and
+	 * that fall is a store_taken like a real buy. When the phase is known, the row says how far the fall
+	 * was from the cycle tick, so reporting can tell a decay (about 0) from a buy (anywhere else).
+	 */
+	@Test
+	public void storeTakenSaysHowFarItWasFromTheShopCycle() throws Exception
+	{
+		AccountConnectPlugin p = plugin();
+		Player me = player("Staff", 3217, 3415, -1);
+		inject(p, "client", client(me, 10));
+		inject(p, "soldThisVisit", new java.util.LinkedHashSet<>(Arrays.asList(1511)));
+		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
+		base.put(1511, 1);
+		inject(p, "shopStock", base);
+		long now = System.currentTimeMillis();
+		inject(p, "storeResetAnchorMs", now - 120_000L - 400L);	// two cycles and 0.4 s ago
+		p.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+			.findFirst().orElseThrow(AssertionError::new);
+		long ms = ((Number) ev.get("ms_from_reset_cycle")).longValue();
+		assertTrue("on the cycle: " + ms, ms >= 300 && ms < 2_000);
+	}
+
+	@Test
+	public void storeTakenOmitsTheCycleDistanceWhenThePhaseIsUnknown() throws Exception
+	{
+		AccountConnectPlugin p = plugin();
+		Player me = player("Staff", 3217, 3415, -1);
+		inject(p, "client", client(me, 10));
+		inject(p, "soldThisVisit", new java.util.LinkedHashSet<>(Arrays.asList(1511)));
+		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
+		base.put(1511, 1);
+		inject(p, "shopStock", base);
+		p.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+			.findFirst().orElseThrow(AssertionError::new);
+		assertFalse("the probe vanishing sets the phase only AFTER this row", ev.containsKey("ms_from_reset_cycle"));
+	}
+
+	@Test
+	public void msFromResetCycleIsTheNearestTick()
+	{
+		assertEquals(Long.valueOf(0L), AccountConnectPlugin.msFromResetCycle(1_000L, 61_000L));
+		assertEquals(Long.valueOf(5_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 66_000L));
+		assertEquals(Long.valueOf(5_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 56_000L));
+		assertEquals(Long.valueOf(30_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 31_000L));
+		assertNull(AccountConnectPlugin.msFromResetCycle(0L, 61_000L));
+		assertNull(AccountConnectPlugin.msFromResetCycle(61_000L, 1_000L));
+	}
+
 	@Test
 	public void aPlayerTargetIsNeverNamedOnAStoreRow() throws Exception
 	{
