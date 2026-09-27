@@ -413,6 +413,90 @@ public class StoreNearbyCaptureTest
 	}
 
 	/**
+	 * F-A1 (rig 2026-09-27): selling a Pot into Varrock GS (default stock 5) raised it to 6 and the shop
+	 * normalised it back to 5 within seconds. That emitted store_taken 6->5 with a bystander as candidate:
+	 * a false customer. The shop's own normalisation of default stock is not a buy-out.
+	 */
+	@Test
+	public void defaultStockNormalisationIsNotACustomer() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
+		plugin.onMenuOptionClicked(sellClick(1931));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));	// our sale lands
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}}));	// the shop normalises
+		assertEquals("no store_taken for default-stock normalisation", 0, storeTaken(plugin).size());
+	}
+
+	/** A real buy-out of a default-stock item (a fall of more than one) is still reported. */
+	@Test
+	public void aMultiItemBuyOutOfDefaultStockIsStillReported() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
+		plugin.onMenuOptionClicked(sellClick(1931));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 4}}));
+		assertEquals(1, storeTaken(plugin).size());
+		assertEquals(2, storeTaken(plugin).get(0).get("qty"));
+	}
+
+	/** Default stock bought out to ZERO is a buy-out, never normalisation. */
+	@Test
+	public void defaultStockTakenToZeroIsStillReported() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 1}});
+		plugin.onMenuOptionClicked(sellClick(1931));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// normalisation, suppressed
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));			// 1 -> 0: a buy-out
+		assertEquals(1, storeTaken(plugin).size());
+		assertEquals(0, storeTaken(plugin).get(0).get("stock_after"));
+	}
+
+	/** An item the shop does NOT stock (the delivery case) keeps its store_taken for a fall of one. */
+	@Test
+	public void aNonStockItemFallingByOneIsStillReported() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
+		plugin.onMenuOptionClicked(sellClick(20997));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
+		assertEquals(1, storeTaken(plugin).size());
+		assertEquals(20997, storeTaken(plugin).get(0).get("item"));
+	}
+
+	/** An open shop whose first container read is the given stock, with a bystander present. */
+	private AccountConnectPlugin shopVisit(int[][] stock) throws Exception
+	{
+		Player self = player("Seller", 3164, 3486, 90);
+		Player bystander = player("Bystander", 3164, 3486, 126);
+		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, bystander), 308, 200);
+		inject(plugin, "shopOpen", true);
+		plugin.handleShopStockChanged(shopWith(stock));		// baseline read at open
+		return plugin;
+	}
+
+	private static List<Map<String, Object>> storeTaken(AccountConnectPlugin plugin)
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		for (Map<String, Object> e : plugin.pendingEvents)
+		{
+			if ("store_taken".equals(e.get("type")))
+			{
+				out.add(e);
+			}
+		}
+		return out;
+	}
+
+	private static net.runelite.api.events.MenuOptionClicked sellClick(int itemId)
+	{
+		net.runelite.api.events.MenuOptionClicked e = mock(net.runelite.api.events.MenuOptionClicked.class);
+		when(e.getMenuOption()).thenReturn("Sell 1");
+		when(e.getItemId()).thenReturn(itemId);
+		return e;
+	}
+
+	/**
 	 * Build a shop container holding the given {itemId, qty} pairs.
 	 *
 	 * net.runelite.api.Item is FINAL, so Mockito cannot mock it — construct real ones. (The mock

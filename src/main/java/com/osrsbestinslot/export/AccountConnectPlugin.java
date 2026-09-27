@@ -565,6 +565,12 @@ public class AccountConnectPlugin extends Plugin
 	/** Items this visit's own sells put INTO the shop — only these are watched for a taker. */
 	private final java.util.Set<Integer> soldThisVisit = new java.util.LinkedHashSet<>();
 	/**
+	 * Of those, the items the shop already stocked when we sold (stock > 0 at the click): default stock.
+	 * The shop normalises default stock back down one at a time within seconds of a sale (F-A1, rig
+	 * 2026-09-27: Pot 6->5 after every sale), which is not a customer.
+	 */
+	private final java.util.Set<Integer> defaultStockSoldThisVisit = new java.util.HashSet<>();
+	/**
 	 * Nearby players AT THE MOMENT of the transaction, as opposed to across the whole visit.
 	 *
 	 * A visit-wide list answers "who was around at some point", which is a weaker claim than the one a
@@ -3906,6 +3912,7 @@ public class AccountConnectPlugin extends Plugin
 				lastStockChangeMs = 0;
 				storeProbeItem = 0;
 				soldThisVisit.clear();
+				defaultStockSoldThisVisit.clear();
 				nearbyAtTx = null;
 				chestLooted = false;
 				lastChestEmitKey = null;
@@ -4400,6 +4407,7 @@ public class AccountConnectPlugin extends Plugin
 			lastStockChangeMs = 0;
 			storeProbeItem = 0;		// and with no probe until the first item is sold
 			soldThisVisit.clear();
+			defaultStockSoldThisVisit.clear();
 			nearbyAtTx = null;
 			accumulateShopNearby();		// seed with whoever is already standing here at open
 			startStoreClipCapture();	// arm burst capture for this visit (no-op unless opt-in + server-allowed)
@@ -5096,6 +5104,10 @@ public class AccountConnectPlugin extends Plugin
 		if ("store_sell".equals(type))
 		{
 			soldThisVisit.add(item);	// watch this item's shop stock for a taker
+			if (shopStock.getOrDefault(item, 0) > 0)
+			{
+				defaultStockSoldThisVisit.add(item);	// the shop already stocked it: default stock
+			}
 			if (storeProbeItem == 0)
 			{
 				// FIRST sell of the visit = the junk probe. Only its disappearance moves the reset
@@ -5577,6 +5589,10 @@ public class AccountConnectPlugin extends Plugin
 				&& System.currentTimeMillis() - lastSelfBuyAtMs <= SELF_BUY_SUPPRESS_MS)
 			{
 				continue;	// WE bought it back — not a customer. See onMenuOptionClicked.
+			}
+			if (after > 0 && before - after == 1 && defaultStockSoldThisVisit.contains(item))
+			{
+				continue;	// F-A1: the shop normalising its own default stock, not a customer
 			}
 			Map<String, Object> f = new LinkedHashMap<>();
 			f.put("item", item);
