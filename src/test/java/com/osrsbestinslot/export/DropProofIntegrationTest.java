@@ -215,6 +215,50 @@ public class DropProofIntegrationTest
 		assertNull(ev2.get("counterparty_inferred"));
 	}
 
+	/**
+	 * Counterparty distance is measured from the PILE, not from our character. The staff member has walked
+	 * 10 tiles off; the customer stands on the pile. Player-centred measurement would drop the customer
+	 * (out of range) and could name a bystander next to us instead.
+	 */
+	@Test
+	public void theCounterpartyIsMeasuredFromThePileNotFromUs() throws Exception
+	{
+		AccountConnectPlugin p = plugin();
+		net.runelite.api.Client c = org.mockito.Mockito.mock(net.runelite.api.Client.class);
+		net.runelite.api.Player me = org.mockito.Mockito.mock(net.runelite.api.Player.class);
+		org.mockito.Mockito.when(me.getWorldLocation()).thenReturn(new net.runelite.api.coords.WorldPoint(3210, 3400, 0));
+		net.runelite.api.Player customer = player("Customer", 3200, 3400);
+		net.runelite.api.Player bystander = player("Bystander", 3210, 3400);	// standing on OUR tile
+		org.mockito.Mockito.when(c.getLocalPlayer()).thenReturn(me);
+		org.mockito.Mockito.when(c.getPlayers()).thenReturn(java.util.Arrays.asList(me, customer, bystander));
+		inject(p, "client", c);
+		dropAction(p);
+		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		attach(p, g);
+		p.emitGroundRemoval(g, 120, false);
+		Map<String, Object> ev = eventOfType(p, "ground_removed");
+		assertEquals("removed_early", ev.get("cause"));
+		assertEquals("the player on the pile is named", "Customer", ev.get("counterparty_inferred"));
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> cands = (List<Map<String, Object>>) ev.get("taken_by_candidates");
+		assertNotNull(cands);
+		assertEquals("Customer", cands.get(0).get("rsn"));
+		assertEquals("dist is from the pile", 0, cands.get(0).get("dist"));
+		for (Map<String, Object> m : cands)
+		{
+			assertFalse("a player 10 tiles from the pile is not a candidate", "Bystander".equals(m.get("rsn")));
+		}
+	}
+
+	private static net.runelite.api.Player player(String name, int x, int y)
+	{
+		net.runelite.api.Player pl = org.mockito.Mockito.mock(net.runelite.api.Player.class);
+		org.mockito.Mockito.when(pl.getName()).thenReturn(name);
+		org.mockito.Mockito.when(pl.getWorldLocation()).thenReturn(new net.runelite.api.coords.WorldPoint(x, y, 0));
+		org.mockito.Mockito.when(pl.getCombatLevel()).thenReturn(3);
+		return pl;
+	}
+
 	@Test
 	public void theDespawnTimerCauseSurvivesAndCarriesNoCandidates() throws Exception
 	{
