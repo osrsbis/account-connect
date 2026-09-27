@@ -224,14 +224,18 @@ public class AccountConnectPlugin extends Plugin
 	// 335-only title widget already gone). Root cause of the prod 0-counterparty / empty-received[] bug.
 	volatile boolean tradeMainOpen;
 
-	// Bank move capture: item-id -> qty snapshot of the bank taken when it OPENS; on close the bank is
-	// re-read and diffed to emit discrete bank_withdraw / bank_deposit events. Bank moves are internal
-	// (no trade / GE / store), so this diff is the ONLY event-plane record of what left or entered the
-	// bank — the snapshot plane carries only periodic full state, never the individual move. Own account.
+	// Bank move capture: item-id -> qty of the bank as LAST SEEN in this bank session (the open read, then
+	// every BANK container change). Each change is diffed against it and the movement is added to the GROSS
+	// per-item totals below, so a deposit and a withdraw of the same item inside one session both survive
+	// (a net open-vs-close diff cancelled them out). One bank_session event per session carries the totals.
+	// Bank moves are internal (no trade / GE / store), so this is the ONLY event-plane record of them. Own
+	// account. null = no bank session with a baseline is running.
 	private Map<Integer, Long> bankAtOpen;
+	private final Map<Integer, Long> bankGrossDeposited = new LinkedHashMap<>();
+	private final Map<Integer, Long> bankGrossWithdrawn = new LinkedHashMap<>();
 	// True while the bank is open but its container was empty or unloaded at open (the first open after a
 	// login can precede the bank contents). Diffing a real bank against that empty state would report the
-	// whole bank as bank_deposit, so no baseline is taken then. The first BANK container change while
+	// whole bank as deposited, so no baseline is taken then. The first BANK container change while
 	// this is set becomes the baseline, and the close diffs against it.
 	private boolean bankBaselinePending;
 
@@ -715,6 +719,8 @@ public class AccountConnectPlugin extends Plugin
 	 * pending rather than consuming someone else's.
 	 */
 	static final int INV_PENDING_MAX = 28;
+	/** bank_session: at most this many items per list; the rest are dropped and the row says truncated. */
+	static final int BANK_SESSION_ITEM_CAP = 50;
 	/** Own dropped piles still believed to be on the ground. Same bound as the inventory that fed them. */
 	static final int GROUND_TRACK_MAX = 28;
 	/**
@@ -3893,8 +3899,7 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
-				bankAtOpen = null;	// a bank left open across a hop/relog must not diff against another account
-				bankBaselinePending = false;
+				endBankSession(false);	// a bank left open across a hop/relog: incomplete, never diffed against another account
 				equipLast = null;	// re-baseline equipment on the next change so a relog emits no full-kit diff
 				flushXpGain();		// a hop ends the xp window: emit what accumulated, never drop it
 				xpFlushTicks = 0;
@@ -3922,8 +3927,7 @@ public class AccountConnectPlugin extends Plugin
 				clogSeen = false;
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
-				bankAtOpen = null;	// a bank open at disconnect must not diff against the next session
-				bankBaselinePending = false;
+				endBankSession(false);	// a bank open at disconnect: incomplete, never diffed against the next session
 				equipLast = null;	// re-baseline equipment on reconnect
 				flushXpGain();		// a disconnect ends the xp window: emit what accumulated, never drop it
 				xpFlushTicks = 0;
@@ -3945,8 +3949,7 @@ public class AccountConnectPlugin extends Plugin
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
-				bankAtOpen = null;	// a bank open at logout must not diff against the next session
-				bankBaselinePending = false;
+				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
 				xpFlushTicks = 0;
@@ -4293,6 +4296,8 @@ public class AccountConnectPlugin extends Plugin
 			// The bank is readable here — the same read forceSendSnapshot just used to set bank_synced.
 			Map<Integer, Long> b = new LinkedHashMap<>();
 			addContainerCounts(b, client.getItemContainer(InventoryID.BANK));
+			// A session still running here was never closed: end it as incomplete before starting fresh.
+			endBankSession(false);
 			// An empty or unloaded container is not a baseline: wait for the first bank contents instead.
 			bankAtOpen = b.isEmpty() ? null : b;
 			bankBaselinePending = b.isEmpty();
@@ -4305,24 +4310,66 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void handleBankContainerChanged(ItemContainer bank)
 	{
-		if (!bankBaselinePending)
+		if (bankBaselinePending)
 		{
+			Map<Integer, Long> b = new LinkedHashMap<>();
+			addContainerCounts(b, bank);
+			if (!b.isEmpty())
+			{
+				bankAtOpen = b;
+				bankBaselinePending = false;
+			}
 			return;
 		}
-		Map<Integer, Long> b = new LinkedHashMap<>();
-		addContainerCounts(b, bank);
-		if (!b.isEmpty())
-		{
-			bankAtOpen = b;
-			bankBaselinePending = false;
-		}
+		advanceBankSession(bank);
 	}
 
 	/**
-	 * Bank close: re-read the bank and diff it against the open-state snapshot, emitting discrete
-	 * bank_withdraw / bank_deposit events for the NET item movement of this bank session. Bank transfers
-	 * fire no trade / GE / store event, so this diff is the only event-plane record of what left or
-	 * entered the bank. Own account; same data class as the bank snapshot, which the hub already approved.
+	 * Add the movement from the last-seen bank to {@code bank} to the session's GROSS totals and make it
+	 * the last-seen state. A null or EMPTY read is skipped, never read as "everything was withdrawn": an
+	 * empty container is not evidence (the first-open rule above), and one transient empty read would
+	 * otherwise fabricate a whole-bank withdraw and a whole-bank deposit. Cost: emptying the bank of its
+	 * very last stack is not seen. Miss beats fabricate.
+	 */
+	private void advanceBankSession(ItemContainer bank)
+	{
+		Map<Integer, Long> before = bankAtOpen;
+		if (before == null || bank == null)
+		{
+			return;
+		}
+		Map<Integer, Long> now = new LinkedHashMap<>();
+		addContainerCounts(now, bank);
+		if (now.isEmpty())
+		{
+			return;
+		}
+		for (Map.Entry<Integer, Long> e : before.entrySet())
+		{
+			long delta = now.getOrDefault(e.getKey(), 0L) - e.getValue();
+			if (delta < 0)
+			{
+				bankGrossWithdrawn.merge(e.getKey(), -delta, Long::sum);
+			}
+			else if (delta > 0)
+			{
+				bankGrossDeposited.merge(e.getKey(), delta, Long::sum);
+			}
+		}
+		for (Map.Entry<Integer, Long> e : now.entrySet())
+		{
+			if (!before.containsKey(e.getKey()))
+			{
+				bankGrossDeposited.merge(e.getKey(), e.getValue(), Long::sum);
+			}
+		}
+		bankAtOpen = now;
+	}
+
+	/**
+	 * Bank close: fold in the final bank read, then emit ONE bank_session for the session. Bank transfers
+	 * fire no trade / GE / store event, so this is the only event-plane record of what left or entered the
+	 * bank. Own account; same data class as the bank snapshot, which the hub already approved.
 	 */
 	void handleBankWidgetClosed(int groupId)
 	{
@@ -4330,51 +4377,57 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		Map<Integer, Long> before = bankAtOpen;
+		if (client != null)
+		{
+			advanceBankSession(client.getItemContainer(InventoryID.BANK));
+		}
+		endBankSession(true);
+	}
+
+	/**
+	 * End the running bank session and emit its bank_session summary: GROSS deposited[] and withdrawn[]
+	 * per item, each capped at BANK_SESSION_ITEM_CAP (truncated:true when cut), and complete:false when
+	 * the session ended without a bank close (hop, logout, disconnect, a re-open). An incomplete row
+	 * carries only moves actually observed; nothing is inferred for the part we did not see. No row when
+	 * nothing moved, so an idle bank visit costs no event.
+	 */
+	private void endBankSession(boolean complete)
+	{
 		bankAtOpen = null;
 		bankBaselinePending = false;
-		if (before == null || !activityLogActive())
+		if ((bankGrossDeposited.isEmpty() && bankGrossWithdrawn.isEmpty()) || !activityLogActive())
 		{
+			bankGrossDeposited.clear();
+			bankGrossWithdrawn.clear();
 			return;
 		}
-		Map<Integer, Long> after = new LinkedHashMap<>();
-		addContainerCounts(after, client.getItemContainer(InventoryID.BANK));
+		boolean[] truncated = {false};
+		Map<String, Object> f = new LinkedHashMap<>();
+		f.put("deposited", cappedItemList(bankGrossDeposited, truncated));
+		f.put("withdrawn", cappedItemList(bankGrossWithdrawn, truncated));
+		f.put("complete", complete);
+		if (truncated[0])
+		{
+			f.put("truncated", true);
+		}
+		bankGrossDeposited.clear();
+		bankGrossWithdrawn.clear();
+		emitEvent("bank_session", f);
+	}
 
-		List<Map<String, Object>> withdrawn = new ArrayList<>();
-		List<Map<String, Object>> deposited = new ArrayList<>();
-		// items present at open: emit the signed delta (out = withdraw, in = deposit)
-		for (Map.Entry<Integer, Long> e : before.entrySet())
+	private List<Map<String, Object>> cappedItemList(Map<Integer, Long> totals, boolean[] truncated)
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		for (Map.Entry<Integer, Long> e : totals.entrySet())
 		{
-			long delta = after.getOrDefault(e.getKey(), 0L) - e.getValue();
-			if (delta < 0)
+			if (out.size() >= BANK_SESSION_ITEM_CAP)
 			{
-				withdrawn.add(itemMapLong(e.getKey(), -delta));
+				truncated[0] = true;
+				break;
 			}
-			else if (delta > 0)
-			{
-				deposited.add(itemMapLong(e.getKey(), delta));
-			}
+			out.add(itemMapLong(e.getKey(), e.getValue()));
 		}
-		// items that only appeared after open = pure deposits
-		for (Map.Entry<Integer, Long> e : after.entrySet())
-		{
-			if (!before.containsKey(e.getKey()))
-			{
-				deposited.add(itemMapLong(e.getKey(), e.getValue()));
-			}
-		}
-		if (!withdrawn.isEmpty())
-		{
-			Map<String, Object> f = new LinkedHashMap<>();
-			f.put("items", withdrawn);
-			emitEvent("bank_withdraw", f);
-		}
-		if (!deposited.isEmpty())
-		{
-			Map<String, Object> f = new LinkedHashMap<>();
-			f.put("items", deposited);
-			emitEvent("bank_deposit", f);
-		}
+		return out;
 	}
 
 	/**

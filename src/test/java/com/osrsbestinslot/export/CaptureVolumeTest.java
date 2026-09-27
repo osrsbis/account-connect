@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
  * and a 429 over it stops every event type for every user, so these events must stay coarse:
  * equip_change fires only when the SET of worn ids changes (never per ammo shot), xp_gain flushes at most
  * every 5 minutes plus once at session end, and the first bank open with an unloaded bank never reports
- * the whole bank as bank_deposit.
+ * the whole bank as deposited.
  */
 public class CaptureVolumeTest
 {
@@ -234,8 +234,7 @@ public class CaptureVolumeTest
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(full);
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, full));	// contents arrive = baseline only
 		p.handleBankWidgetClosed(BANK_GROUP);
-		assertEquals(0, ofType(p, "bank_deposit").size());
-		assertEquals(0, ofType(p, "bank_withdraw").size());
+		assertEquals("the first contents are a baseline, never a whole-bank deposit", 0, ofType(p, "bank_session").size());
 	}
 
 	@Test
@@ -252,14 +251,14 @@ public class CaptureVolumeTest
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, plusSharks));	// the real deposit
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(plusSharks);
 		p.handleBankWidgetClosed(BANK_GROUP);
-		List<Map<String, Object>> dep = ofType(p, "bank_deposit");
-		assertEquals(1, dep.size());
+		List<Map<String, Object>> sess = ofType(p, "bank_session");
+		assertEquals(1, sess.size());
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> items = (List<Map<String, Object>>) dep.get(0).get("items");
+		List<Map<String, Object>> items = (List<Map<String, Object>>) sess.get(0).get("deposited");
 		assertEquals("only the real deposit, never the whole bank", 1, items.size());
 		assertEquals(385, items.get(0).get("id"));
 		assertEquals(50L, items.get(0).get("qty"));
-		assertEquals(0, ofType(p, "bank_withdraw").size());
+		assertTrue(((List<?>) sess.get(0).get("withdrawn")).isEmpty());
 	}
 
 	@Test
