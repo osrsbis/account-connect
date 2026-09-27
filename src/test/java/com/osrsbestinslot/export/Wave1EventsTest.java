@@ -4,8 +4,10 @@ import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.WorldChanged;
 import org.junit.Test;
 
@@ -175,6 +177,111 @@ public class Wave1EventsTest
 		assertEquals("world_hop", e.get("type"));
 		assertEquals(302, e.get("from"));
 		assertEquals(330, e.get("to"));
+	}
+
+	/**
+	 * F-H1 (rig 2026-09-27): logging in to the world the login screen already had fires no WorldChanged,
+	 * so the first hop of the session was swallowed as if it were the login. LOGGED_IN seeds the world.
+	 */
+	@Test
+	public void firstHopAfterLoginToTheAlreadySelectedWorldIsLogged() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getWorld()).thenReturn(308);
+		p.onGameStateChanged(gameState(GameState.LOGIN_SCREEN));
+		p.onGameStateChanged(gameState(GameState.LOGGING_IN));
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));	// no WorldChanged: same world as the login screen
+		p.pendingEvents.clear();								// drop login/logout rows; only the hop is under test
+		when(c.getWorld()).thenReturn(301);
+		p.onWorldChanged(mock(WorldChanged.class));
+		assertEquals("first hop of the session is logged", 1, hops(p).size());
+		assertEquals(308, hops(p).get(0).get("from"));
+		assertEquals(301, hops(p).get(0).get("to"));
+	}
+
+	/** A LOGGED_IN after a hop must not re-seed: the hop row stays exactly one, with the right from/to. */
+	@Test
+	public void loggedInAfterAHopDoesNotDoubleOrLoseTheHop() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getWorld()).thenReturn(308);
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		p.pendingEvents.clear();
+		p.onGameStateChanged(gameState(GameState.HOPPING));
+		when(c.getWorld()).thenReturn(301);
+		p.onWorldChanged(mock(WorldChanged.class));
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		when(c.getWorld()).thenReturn(330);
+		p.onGameStateChanged(gameState(GameState.HOPPING));
+		p.onWorldChanged(mock(WorldChanged.class));
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		List<Map<String, Object>> h = hops(p);
+		assertEquals(2, h.size());
+		assertEquals(308, h.get(0).get("from"));
+		assertEquals(301, h.get(0).get("to"));
+		assertEquals(301, h.get(1).get("from"));
+		assertEquals(330, h.get(1).get("to"));
+	}
+
+	/**
+	 * If the hop's LOGGED_IN arrives after the client already reports the new world but BEFORE WorldChanged,
+	 * the seed must not overwrite the old world, or the hop reads as 301 -> 301 and is lost.
+	 */
+	@Test
+	public void loggedInBeforeWorldChangedOnAHopKeepsTheOldWorld() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getWorld()).thenReturn(308);
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		p.onGameStateChanged(gameState(GameState.HOPPING));
+		when(c.getWorld()).thenReturn(301);
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		p.onWorldChanged(mock(WorldChanged.class));
+		List<Map<String, Object>> h = hops(p);
+		assertEquals(1, h.size());
+		assertEquals(308, h.get(0).get("from"));
+		assertEquals(301, h.get(0).get("to"));
+	}
+
+	/** A login to a DIFFERENT world than the login screen had is still not a hop. */
+	@Test
+	public void loginToAnotherWorldIsStillNotAHop() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getWorld()).thenReturn(308);
+		p.onGameStateChanged(gameState(GameState.LOGIN_SCREEN));
+		when(c.getWorld()).thenReturn(420);
+		p.onWorldChanged(mock(WorldChanged.class));		// world picked on the login screen
+		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
+		assertTrue("no hop at login", hops(p).isEmpty());
+	}
+
+	private static GameStateChanged gameState(GameState s)
+	{
+		GameStateChanged e = new GameStateChanged();
+		e.setGameState(s);
+		return e;
+	}
+
+	private static List<Map<String, Object>> hops(AccountConnectPlugin p)
+	{
+		List<Map<String, Object>> out = new java.util.ArrayList<>();
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if ("world_hop".equals(e.get("type")))
+			{
+				out.add(e);
+			}
+		}
+		return out;
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

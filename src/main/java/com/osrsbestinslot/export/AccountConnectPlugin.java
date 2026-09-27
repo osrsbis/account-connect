@@ -3955,6 +3955,13 @@ public class AccountConnectPlugin extends Plugin
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
 				groundObservationUnreliable = false;
+				// A login to the world the login screen already had fires no WorldChanged, so lastWorld stayed 0
+				// and the FIRST hop of the session was read as the login and emitted nothing (F-H1). Seed it
+				// here. Only when unset: after a hop lastWorld already holds the world and must not be touched.
+				if (lastWorld == 0 && client != null)
+				{
+					lastWorld = client.getWorld();
+				}
 				break;
 			default:
 				break;
