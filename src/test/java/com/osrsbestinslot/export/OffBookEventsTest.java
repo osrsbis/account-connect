@@ -279,6 +279,80 @@ public class OffBookEventsTest
 		assertEquals("no corroboration recorded either", -1, p.spawnCorroboratedTick);
 	}
 
+	/**
+	 * Drop row completeness (0.7.15): the drop row carries the PILE's exact tile (not the player's) and the
+	 * world, so a staff card can locate it even when no ground_removed row follows.
+	 */
+	@Test
+	public void dropRowCarriesThePileTileAndWorld() throws Exception
+	{
+		AccountConnectPlugin plugin = spawnRig(308, 0);
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tileAt(3201, 3199), ownItem(560)));
+		assertEquals(1, plugin.pendingEvents.size());
+		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("drop", e.get("type"));
+		@SuppressWarnings("unchecked")
+		Map<String, Object> tile = (Map<String, Object>) e.get("tile");
+		assertNotNull("drop row carries the tile", tile);
+		assertEquals("pile x, not the player's 3200", 3201, tile.get("x"));
+		assertEquals("pile y, not the player's 3200", 3199, tile.get("y"));
+		assertEquals(0, tile.get("plane"));
+		assertEquals(308, e.get("world"));
+		assertEquals(false, e.get("wilderness"));
+	}
+
+	/** Spawn BEFORE the inventory loss: the tile recorded at the spawn still reaches the drop row. */
+	@Test
+	public void dropRowCarriesTheTileWhenTheSpawnArrivesFirst() throws Exception
+	{
+		AccountConnectPlugin plugin = spawnRig(301, 1);
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tileAt(3199, 3200), ownItem(560)));
+		assertTrue("spawn first only corroborates", plugin.pendingEvents.isEmpty());
+		plugin.resolveInvDeltaPending(0L, 0L, 7);
+		assertEquals(1, plugin.pendingEvents.size());
+		@SuppressWarnings("unchecked")
+		Map<String, Object> tile = (Map<String, Object>) plugin.pendingEvents.get(0).get("tile");
+		assertNotNull(tile);
+		assertEquals(3199, tile.get("x"));
+		assertEquals(3200, tile.get("y"));
+		assertEquals(301, plugin.pendingEvents.get(0).get("world"));
+	}
+
+	/** Player at 3200,3200 plane 0 on the given world; at the spawn the inventory holds invAtSpawn of item 560. */
+	private static AccountConnectPlugin spawnRig(int world, int invAtSpawn) throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		Player player = mock(Player.class);
+		ItemContainer inv = container(560, invAtSpawn);
+		when(client.getLocalPlayer()).thenReturn(player);
+		when(player.getWorldLocation()).thenReturn(new WorldPoint(3200, 3200, 0));
+		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
+		when(client.getTickCount()).thenReturn(6);
+		when(client.getWorld()).thenReturn(world);
+		inject(plugin, "client", client);
+		return plugin;
+	}
+
+	private static net.runelite.api.TileItem ownItem(int id)
+	{
+		net.runelite.api.TileItem it = mock(net.runelite.api.TileItem.class);
+		when(it.getId()).thenReturn(id);
+		when(it.getQuantity()).thenReturn(1);
+		when(it.getOwnership()).thenReturn(net.runelite.api.TileItem.OWNERSHIP_SELF);
+		return it;
+	}
+
+	private static net.runelite.api.Tile tileAt(int x, int y)
+	{
+		net.runelite.api.Tile tile = mock(net.runelite.api.Tile.class);
+		when(tile.getWorldLocation()).thenReturn(new WorldPoint(x, y, 0));
+		return tile;
+	}
+
 	/** Distance guard: a matching spawn far from the player is someone else's item, never ours. */
 	@Test
 	public void groundSpawnFarAwayIsIgnored() throws Exception

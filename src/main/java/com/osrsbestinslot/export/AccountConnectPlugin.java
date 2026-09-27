@@ -1108,6 +1108,11 @@ public class AccountConnectPlugin extends Plugin
 		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
 		// first records itself; the second completes the emit. -1 = no corroboration yet.
 		volatile int spawnCorroboratedTick = -1;
+		// drop only: the WORLD tile the confirming ground spawn landed on, so the drop row carries the pile's
+		// exact tile itself. -1 = the spawn came with no tile (a test overload), and the row then omits it.
+		volatile int spawnX = -1;
+		volatile int spawnY = -1;
+		volatile int spawnPlane = -1;
 		/**
 		 * pickup only: the WORLD tile of the ground pile this Take was clicked on, or -1 when the
 		 * client did not give us one. Item id alone cannot tell two piles of the same item apart,
@@ -5970,6 +5975,13 @@ public class AccountConnectPlugin extends Plugin
 
 	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew)
 	{
+		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, stackGrew, -1, -1, -1);
+	}
+
+	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew,
+		int tileX, int tileY, int tilePlane)
+	{
 		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew)
 		{
 			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
@@ -6004,6 +6016,12 @@ public class AccountConnectPlugin extends Plugin
 			{
 				invDeltaPendings.remove(p);	// stale — the click this pending belonged to is long over
 				return;
+			}
+			if (p.spawnX < 0 && tileX >= 0 && tileY >= 0 && tilePlane >= 0)	// first confirming spawn wins
+			{
+				p.spawnX = tileX;
+				p.spawnY = tileY;
+				p.spawnPlane = tilePlane;
 			}
 			long staleDelta = p.beforeCount - invCountAfter;
 			if (staleDelta <= 0)
@@ -6061,6 +6079,22 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("location", p.location);
 		}
 		fields.put("wilderness", p.wilderness != null && p.wilderness);
+		// The pile's exact tile and the world, on the drop row itself, in the same {x,y,plane} shape the
+		// ground_removed row uses. Before this only the removal row carried the tile, so a drop whose
+		// removal was never seen (out of scene, logout) could not be located at all.
+		if (p.spawnX >= 0)
+		{
+			Map<String, Object> tile = new LinkedHashMap<>();
+			tile.put("x", p.spawnX);
+			tile.put("y", p.spawnY);
+			tile.put("plane", p.spawnPlane);
+			fields.put("tile", tile);
+		}
+		int world = client == null ? 0 : client.getWorld();
+		if (world > 0)
+		{
+			fields.put("world", world);
+		}
 		// SESSION LINKAGE on the drop row itself. drop_seq is what lets the manifest join one drop
 		// to one removal when a session drops the same item, same quantity, onto the same tile twice
 		// — which is the ordinary shape of a drop trade, not an edge case.
@@ -6107,7 +6141,8 @@ public class AccountConnectPlugin extends Plugin
 			trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
 				currentLocation(), tick, it.getDespawnTime(), quantityMerge);
 		}
-		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew);
+		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew,
+			tw.getX(), tw.getY(), tw.getPlane());
 	}
 
 	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
