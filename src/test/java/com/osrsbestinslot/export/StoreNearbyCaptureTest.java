@@ -464,6 +464,37 @@ public class StoreNearbyCaptureTest
 		assertEquals(20997, storeTaken(plugin).get(0).get("item"));
 	}
 
+	/**
+	 * Review H1: a multi-unit delivery of an item the shop does not stock. Our SECOND sell sees stock 1 (our
+	 * own first unit); that must not make the item look like default stock and hide a customer's buy.
+	 */
+	@Test
+	public void ourOwnEarlierSellNeverMakesADeliveryLookLikeDefaultStock() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
+		plugin.onMenuOptionClicked(sellClick(20997));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
+		plugin.onMenuOptionClicked(sellClick(20997));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));	// a customer buys one
+		assertEquals(1, storeTaken(plugin).size());
+		assertEquals(1, storeTaken(plugin).get(0).get("stock_after"));
+	}
+
+	/** Default stock bought to zero, then we sell more in: a fall of one of OUR units is reported. */
+	@Test
+	public void afterNativeStockIsGoneOurNewUnitsAreWatchedAgain() throws Exception
+	{
+		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 1}});
+		plugin.onMenuOptionClicked(sellClick(1931));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
+		plugin.handleShopStockChanged(shopWith(new int[][]{}));				// bought out to 0 (reported)
+		plugin.onMenuOptionClicked(sellClick(1931));
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));	// we sell 2 in
+		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// a customer takes one
+		assertEquals(2, storeTaken(plugin).size());
+	}
+
 	/** An open shop whose first container read is the given stock, with a bystander present. */
 	private AccountConnectPlugin shopVisit(int[][] stock) throws Exception
 	{

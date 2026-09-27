@@ -369,6 +369,25 @@ public class OffBookEventsTest
 		d.addLast(p);
 	}
 
+	/**
+	 * Review M3: an earlier stray own spawn of the same item (outside the corroboration window) must not
+	 * lend its tile to the drop that a later spawn actually confirms.
+	 */
+	@Test
+	public void theDropTileIsThePileThatConfirmedIt() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		plugin.resolveDropPendingOnGroundSpawn(560, 1, 1L, 6, true, 3201, 3201, 0);	// stray, no loss yet
+		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 10, true, 3200, 3200, 0);	// the real one, loss visible
+		assertEquals(1, plugin.pendingEvents.size());
+		@SuppressWarnings("unchecked")
+		Map<String, Object> tile = (Map<String, Object>) plugin.pendingEvents.get(0).get("tile");
+		assertEquals(3200, tile.get("x"));
+		assertEquals(3200, tile.get("y"));
+	}
+
 	/** Player at 3200,3200 plane 0 on the given world; at the spawn the inventory holds invAtSpawn of item 560. */
 	private static AccountConnectPlugin spawnRig(int world, int invAtSpawn) throws Exception
 	{

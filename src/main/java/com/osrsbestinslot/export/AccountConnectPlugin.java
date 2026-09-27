@@ -385,6 +385,12 @@ public class AccountConnectPlugin extends Plugin
 		// not clear a plugin's infoboxes for it.
 		storeResetAnchorMs = 0;
 		removeResetTimer();
+		// A disabled plugin sees no GameStateChanged, so a bank session left here could later be diffed
+		// against another account's bank. Discard it without a row.
+		bankAtOpen = null;
+		bankBaselinePending = false;
+		bankGrossDeposited.clear();
+		bankGrossWithdrawn.clear();
 	}
 
 	/**
@@ -4296,7 +4302,9 @@ public class AccountConnectPlugin extends Plugin
 			// The bank is readable here — the same read forceSendSnapshot just used to set bank_synced.
 			Map<Integer, Long> b = new LinkedHashMap<>();
 			addContainerCounts(b, client.getItemContainer(InventoryID.BANK));
-			// A session still running here was never closed: end it as incomplete before starting fresh.
+			// A session still running here was never closed: fold in this read (moves since the last change)
+			// and end it as incomplete before starting fresh.
+			advanceBankSession(client.getItemContainer(InventoryID.BANK));
 			endBankSession(false);
 			// An empty or unloaded container is not a baseline: wait for the first bank contents instead.
 			bankAtOpen = b.isEmpty() ? null : b;
@@ -4373,8 +4381,22 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void handleBankWidgetClosed(int groupId)
 	{
+		handleBankWidgetClosed(groupId, false);
+	}
+
+	/**
+	 * @param unload true when the client tore the bank down for a hop or logout rather than the player
+	 *               closing it: the session is incomplete and the bank read during teardown is not used.
+	 */
+	void handleBankWidgetClosed(int groupId, boolean unload)
+	{
 		if (groupId != BANK_GROUP_ID)
 		{
+			return;
+		}
+		if (unload)
+		{
+			endBankSession(false);
 			return;
 		}
 		if (client != null)
@@ -4731,7 +4753,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		handleTradeWidgetClosed(event.getGroupId());
-		handleBankWidgetClosed(event.getGroupId());
+		handleBankWidgetClosed(event.getGroupId(), event.isUnload());
 		if (event.getGroupId() == SHOP_GROUP_ID)
 		{
 			shopOpen = false;
@@ -5156,10 +5178,11 @@ public class AccountConnectPlugin extends Plugin
 		nearbyAtTx = nearbyPlayersSnapshot(NEARBY_FIELD_CAP);
 		if ("store_sell".equals(type))
 		{
-			soldThisVisit.add(item);	// watch this item's shop stock for a taker
-			if (shopStock.getOrDefault(item, 0) > 0)
+			// Default stock is judged ONCE, at our FIRST sell of this item this visit: after that the shop
+			// stock includes units we put in ourselves, which must never make our delivery look native.
+			if (soldThisVisit.add(item) && shopStock.getOrDefault(item, 0) > 0)
 			{
-				defaultStockSoldThisVisit.add(item);	// the shop already stocked it: default stock
+				defaultStockSoldThisVisit.add(item);	// the shop already stocked it before we sold: default stock
 			}
 			if (storeProbeItem == 0)
 			{
@@ -5647,6 +5670,10 @@ public class AccountConnectPlugin extends Plugin
 			{
 				continue;	// F-A1: the shop normalising its own default stock, not a customer
 			}
+			if (after == 0)
+			{
+				defaultStockSoldThisVisit.remove(item);	// native stock is gone: anything sold in later is ours
+			}
 			Map<String, Object> f = new LinkedHashMap<>();
 			f.put("item", item);
 			f.put("qty", before - after);
@@ -6093,7 +6120,9 @@ public class AccountConnectPlugin extends Plugin
 			{
 				return;
 			}
-			if (p.spawnX < 0 && tileX >= 0 && tileY >= 0 && tilePlane >= 0)	// first confirming spawn wins
+			// The tile follows the spawn that corroborates (overwritten with spawnCorroboratedTick) or completes
+			// the drop, so the row names the pile that actually confirmed it, never an earlier stray spawn.
+			if (tileX >= 0 && tileY >= 0 && tilePlane >= 0)
 			{
 				p.spawnX = tileX;
 				p.spawnY = tileY;

@@ -222,6 +222,46 @@ public class BankMoveCaptureTest
 		assertEquals(false, r.sessions().get(0).get("complete"));
 	}
 
+	/** Review M2: the client tearing the bank down for a hop/logout (unload) is incomplete, not a close. */
+	@Test
+	public void anUnloadCloseIsIncompleteAndDoesNotReadTheTeardownBank() throws Exception
+	{
+		Rig r = rig();
+		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
+		r.change(containerOf(new int[]{995, 1000}));
+		ItemContainer teardown = containerOf(new int[]{995, 5});
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(teardown);
+		r.plugin.handleBankWidgetClosed(BANK_GROUP, true);
+		assertEquals(1, r.sessions().size());
+		assertEquals(false, r.sessions().get(0).get("complete"));
+		assertNull("the teardown read is not diffed", list(r.sessions().get(0), "withdrawn").get(995));
+	}
+
+	/** Review M1: a disabled plugin keeps no bank session that a later account's bank could be diffed against. */
+	@Test
+	public void shutDownDiscardsTheBankSessionWithoutARow() throws Exception
+	{
+		Rig r = rig();
+		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
+		r.change(containerOf(new int[]{995, 1000}));
+		r.plugin.shutDown();
+		r.change(containerOf(new int[]{4151, 1}));		// another account's bank, after re-enable
+		r.open(containerOf(new int[]{4151, 1}));
+		r.close();
+		assertTrue("nothing emitted, nothing mixed", r.sessions().isEmpty());
+	}
+
+	/** Review L1: moves between the last change and a re-open are kept in the incomplete row. */
+	@Test
+	public void aReopenKeepsMovesSeenOnlyInTheReopenRead() throws Exception
+	{
+		Rig r = rig();
+		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
+		r.open(containerOf(new int[]{995, 1000}));	// 303 left before the re-open, no change event seen
+		assertEquals(1, r.sessions().size());
+		assertEquals(Long.valueOf(1), list(r.sessions().get(0), "withdrawn").get(303));
+	}
+
 	// ---- budget, shape and prior behaviour ----
 
 	@Test
