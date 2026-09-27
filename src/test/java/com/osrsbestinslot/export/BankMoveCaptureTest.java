@@ -222,19 +222,42 @@ public class BankMoveCaptureTest
 		assertEquals(false, r.sessions().get(0).get("complete"));
 	}
 
-	/** Review M2: the client tearing the bank down for a hop/logout (unload) is incomplete, not a close. */
+	/** Review M2: a bank close while the client is hopping/logging out is incomplete, not a close. */
 	@Test
-	public void anUnloadCloseIsIncompleteAndDoesNotReadTheTeardownBank() throws Exception
+	public void aCloseDuringAHopIsIncompleteAndDoesNotReadTheTeardownBank() throws Exception
 	{
 		Rig r = rig();
 		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
 		r.change(containerOf(new int[]{995, 1000}));
 		ItemContainer teardown = containerOf(new int[]{995, 5});
 		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(teardown);
-		r.plugin.handleBankWidgetClosed(BANK_GROUP, true);
+		when(r.client.getGameState()).thenReturn(GameState.HOPPING);
+		r.plugin.onWidgetClosed(widgetClosed(true));
 		assertEquals(1, r.sessions().size());
 		assertEquals(false, r.sessions().get(0).get("complete"));
 		assertNull("the teardown read is not diffed", list(r.sessions().get(0), "withdrawn").get(995));
+	}
+
+	/**
+	 * Rig 2026-09-27: an ordinary X-button bank close arrives as WidgetClosed(unload=true). While logged in
+	 * that is a normal, COMPLETE close.
+	 */
+	@Test
+	public void anOrdinaryCloseWithUnloadTrueIsComplete() throws Exception
+	{
+		Rig r = rig();
+		r.open(containerOf(new int[]{995, 1000}, new int[]{1511, 1}));
+		r.change(containerOf(new int[]{995, 1000}, new int[]{1511, 2}));
+		r.change(containerOf(new int[]{995, 1000}, new int[]{1511, 1}));
+		when(r.client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		r.plugin.onWidgetClosed(widgetClosed(true));
+		assertEquals(1, r.sessions().size());
+		assertEquals(true, r.sessions().get(0).get("complete"));
+	}
+
+	private static net.runelite.api.events.WidgetClosed widgetClosed(boolean unload)
+	{
+		return new net.runelite.api.events.WidgetClosed(BANK_GROUP, 0, unload);
 	}
 
 	/** Review M1: a disabled plugin keeps no bank session that a later account's bank could be diffed against. */

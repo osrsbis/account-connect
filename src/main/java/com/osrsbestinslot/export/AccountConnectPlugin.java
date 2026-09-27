@@ -4385,6 +4385,18 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * True when a bank close happens because the client is leaving the world (hop, logout, disconnect)
+	 * rather than the player closing it. NOT WidgetClosed.isUnload(): the rig (2026-09-27, 0.7.15 @ 1af4d7f)
+	 * showed an ordinary X-button bank close arrives with unload=true, which marked every visit incomplete.
+	 */
+	private boolean bankCloseIsTeardown()
+	{
+		GameState s = client == null ? null : client.getGameState();
+		return s == GameState.HOPPING || s == GameState.LOGIN_SCREEN || s == GameState.CONNECTION_LOST
+			|| s == GameState.LOGGING_IN;
+	}
+
+	/**
 	 * @param unload true when the client tore the bank down for a hop or logout rather than the player
 	 *               closing it: the session is incomplete and the bank read during teardown is not used.
 	 */
@@ -4753,7 +4765,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		handleTradeWidgetClosed(event.getGroupId());
-		handleBankWidgetClosed(event.getGroupId(), event.isUnload());
+		handleBankWidgetClosed(event.getGroupId(), bankCloseIsTeardown());
 		if (event.getGroupId() == SHOP_GROUP_ID)
 		{
 			shopOpen = false;
