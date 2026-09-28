@@ -383,6 +383,7 @@ public class AccountConnectPlugin extends Plugin
 		lastGeState.clear();
 		lastGeOffer.clear();
 		lastGeProgressTick.clear();
+		geUnkeyed.clear();	// the current slots supersede anything held from before the plugin was enabled
 		geAccountHash = client.getAccountHash();
 		for (int slot = 0; slot < offers.length; slot++)
 		{
@@ -437,7 +438,16 @@ public class AccountConnectPlugin extends Plugin
 		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
 		// not clear a plugin's infoboxes for it.
 		storeResetAnchorMs = 0;
-		clearResetPhaseEvidence();
+		// The phase history is client-thread state that a running shop handler may be iterating, and shutDown
+		// runs on the Swing thread. Clear it on the client thread, like the GE seed.
+		if (clientThread != null)
+		{
+			clientThread.invoke(this::clearResetPhaseEvidence);
+		}
+		else
+		{
+			clearResetPhaseEvidence();
+		}
 		removeResetTimer();
 		// A disabled plugin sees no GameStateChanged, so a bank session left here could later be diffed
 		// against another account's bank. Discard it without a row.
@@ -711,6 +721,14 @@ public class AccountConnectPlugin extends Plugin
 	private int evidencePhaseSupport;
 	/** Cycle index (from evidencePhaseMs) of the last change that raised the support, so one cycle counts once. */
 	private long evidencePhaseLastCycle;
+	/** Wall-clock ms of our own last store_sell or store_buy click this visit; 0 = none. */
+	private long lastOwnStoreClickMs;
+	/**
+	 * A change this soon after our own store click never supports the evidence phase. Our sells land at a
+	 * time the seller picks from the countdown, and a waiting buyer takes the item a tick or two later, so
+	 * both sit at a fixed offset from the cycle and would line up like a real tick.
+	 */
+	static final long OWN_ACTION_QUIET_MS = 10_000L;
 	/** Recent container change times (ms), oldest first, bounded by count and age. */
 	private final java.util.ArrayDeque<Long> resetPhaseObs = new java.util.ArrayDeque<>();
 	/** Changes on distinct cycles needed before a phase is evidence. Two can be a coincidence. */
@@ -4047,6 +4065,7 @@ public class AccountConnectPlugin extends Plugin
 				soldThisVisit.clear();
 				defaultStockSoldThisVisit.clear();
 				lastSellTickThisVisit.clear();
+				lastOwnStoreClickMs = 0;
 				shopkeeperName = null;
 				shopkeeperIndex = -1;
 				nearbyAtTx = null;
@@ -4081,6 +4100,7 @@ public class AccountConnectPlugin extends Plugin
 			case LOGIN_SCREEN:
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				geAwaitingLogin = true;
+				geUnkeyed.clear();	// held -1 GE events belong to the login that just ended
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
@@ -4265,6 +4285,10 @@ public class AccountConnectPlugin extends Plugin
 		if (shopOpen && activityLogActive())
 		{
 			accumulateShopNearby();		// build the receiver-candidate set across the whole shop visit
+		}
+		if (!geUnkeyed.isEmpty() && client != null && client.getGameState() == GameState.LOGGED_IN)
+		{
+			resolveUnkeyedGe(client.getAccountHash());	// GE events held at hash -1: judge once the account is known
 		}
 		if (activityLogActive())
 		{
@@ -4631,6 +4655,7 @@ public class AccountConnectPlugin extends Plugin
 			soldThisVisit.clear();
 			defaultStockSoldThisVisit.clear();
 			lastSellTickThisVisit.clear();
+			lastOwnStoreClickMs = 0;
 			shopkeeperName = currentShopkeeperName();
 			shopkeeperIndex = currentShopkeeperIndex();
 			nearbyAtTx = null;
@@ -5297,6 +5322,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		lastOwnStoreClickMs = nowMs();	// the shop changes that follow our own click never support the cycle phase
 		if ("store_buy".equals(type))
 		{
 			// OUR OWN BUY-BACK. The seller's own procedure has an explicit emergency step — if the
@@ -5906,6 +5932,44 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * May this container change support the evidence phase? Only a change the shop made by itself on its
+	 * cycle may: player-added stock decaying by one. So ALL of these must hold, read against the stock as it
+	 * was before the change:
+	 * (1) an item we sold this visit that is not the shop's own default stock fell by exactly one unit;
+	 * (2) no item rose (a rise is our own sell, another seller, or a restock landing);
+	 * (3) it is more than OWN_ACTION_QUIET_MS after our own last store click this visit (our sells, our
+	 *     buy-backs and a buyer waiting for our sell all sit at a fixed offset from the countdown).
+	 * Everything else (buys by others, normalisation of native stock, our own actions) never counts.
+	 */
+	private boolean isShopMadeDecay(Map<Integer, Integer> now, long nowMs)
+	{
+		if (lastOwnStoreClickMs > 0 && nowMs - lastOwnStoreClickMs <= OWN_ACTION_QUIET_MS)
+		{
+			return false;
+		}
+		for (Map.Entry<Integer, Integer> e : now.entrySet())
+		{
+			if (e.getValue() > shopStock.getOrDefault(e.getKey(), 0))
+			{
+				return false;
+			}
+		}
+		for (Integer item : soldThisVisit)
+		{
+			if (item == null || defaultStockSoldThisVisit.contains(item))
+			{
+				continue;
+			}
+			int before = shopStock.getOrDefault(item, 0);
+			if (before > 0 && before - now.getOrDefault(item, 0) == 1)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** Forget the evidence phase. Called wherever the countdown anchor is dropped. */
 	private void clearResetPhaseEvidence()
 	{
@@ -6036,7 +6100,10 @@ public class AccountConnectPlugin extends Plugin
 				showResetTimer();
 			}
 			lastStockChangeMs = nowMs;
-			registerResetPhaseObservation(nowMs);
+			if (isShopMadeDecay(now, nowMs))
+			{
+				registerResetPhaseObservation(nowMs);
+			}
 		}
 		for (Integer item : soldThisVisit)
 		{
@@ -8129,18 +8196,25 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int tick = client == null ? 0 : client.getTickCount();
 		long acct = client == null ? -1L : client.getAccountHash();
+		long[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
+			offer.getPrice(), offer.getSpent()};
 		if (client != null && acct == -1L)
 		{
-			// The account is not known yet (before login the hash is -1). Such an event can neither be judged
-			// nor be allowed to re-key the slots: that would wipe the baseline and every offer that finished
-			// while away. Skip it like the transient EMPTY above.
+			// The account is not known yet (before login the hash is -1). The event cannot be judged now, and it
+			// must not re-key or clear the slots. It may still be the only replay of an offer that finished while
+			// away, so hold it (latest per slot, no state change) until the account is known.
+			if (geUnkeyed.containsKey(slot) || geUnkeyed.size() < GE_SLOT_COUNT)
+			{
+				geUnkeyed.put(slot, new Object[]{state, nowOffer});
+			}
 			return;
 		}
+		resolveUnkeyedGe(acct);
 		if (acct != geAccountHash)
 		{
 			// GE slots belong to one account. Another account's remembered slot must never make this one's
-			// replay look like an offer that finished while away. The -1 guard above means a stored -1 can only
-			// be the empty start or an unkeyed seed, so only a real account's slots are ever lost here.
+			// replay look like an offer that finished while away. Events with hash -1 never reach here, so a
+			// stored -1 can only be the empty start or an unkeyed seed.
 			lastGeState.clear();
 			lastGeOffer.clear();
 			lastGeProgressTick.clear();
@@ -8155,10 +8229,57 @@ public class AccountConnectPlugin extends Plugin
 		boolean loginReplay = client != null
 			&& ((geAwaitingLogin && client.getGameState() != GameState.LOGGED_IN)
 				|| tick - geLoginTick <= GE_LOGIN_BURST_TICKS);
+		judgeGeOffer(slot, state, nowOffer, loginReplay, tick);
+	}
+
+	/** GE slots held while the account hash was -1: slot -> {state, offer tuple}. Client-thread only. */
+	private final java.util.TreeMap<Integer, Object[]> geUnkeyed = new java.util.TreeMap<>();
+	/** The client has 8 GE slots; the unkeyed buffer never holds more. */
+	static final int GE_SLOT_COUNT = 8;
+
+	/**
+	 * Settle the GE events held while the account hash was -1, now that the hash is known. Same account as
+	 * the stored slots (a hop or relog): judge them in slot order as a login replay, so an offer that
+	 * finished while away is reported once. Another account (or none stored): drop the old slots and take
+	 * the held events as the new baseline, emitting nothing.
+	 */
+	void resolveUnkeyedGe(long acct)
+	{
+		if (geUnkeyed.isEmpty() || acct == -1L)
+		{
+			return;
+		}
+		java.util.List<Map.Entry<Integer, Object[]>> held = new ArrayList<>(geUnkeyed.entrySet());
+		geUnkeyed.clear();
+		int tick = client == null ? 0 : client.getTickCount();
+		if (acct == geAccountHash)
+		{
+			for (Map.Entry<Integer, Object[]> e : held)
+			{
+				judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0], (long[]) e.getValue()[1], true, tick);
+			}
+			return;
+		}
+		lastGeState.clear();
+		lastGeOffer.clear();
+		lastGeProgressTick.clear();
+		geAccountHash = acct;
+		for (Map.Entry<Integer, Object[]> e : held)
+		{
+			GrandExchangeOfferState s = (GrandExchangeOfferState) e.getValue()[0];
+			lastGeState.put(e.getKey(), s);
+			if (s != null && s != GrandExchangeOfferState.EMPTY)
+			{
+				lastGeOffer.put(e.getKey(), (long[]) e.getValue()[1]);
+			}
+		}
+	}
+
+	/** Judge one GE slot state against the stored slot and emit at most one row. */
+	private void judgeGeOffer(int slot, GrandExchangeOfferState state, long[] nowOffer, boolean loginReplay, int tick)
+	{
 		GrandExchangeOfferState prev = lastGeState.put(slot, state);
 		long[] prevOffer = lastGeOffer.get(slot);
-		long[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
-			offer.getPrice(), offer.getSpent()};
 		if (state == GrandExchangeOfferState.EMPTY)
 		{
 			lastGeOffer.remove(slot);

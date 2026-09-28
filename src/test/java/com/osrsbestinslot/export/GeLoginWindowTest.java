@@ -212,13 +212,95 @@ public class GeLoginWindowTest
 		assertEquals(Arrays.asList("ge_offer", "ge_buy"), types());
 	}
 
+	private void gameTick()
+	{
+		p.onGameTick(new net.runelite.api.events.GameTick());
+	}
+
 	/**
-	 * A -1 event must not write slot state either. Here it would record a BOUGHT for slot 1 under the old
-	 * account's key, so the real BOUGHT replay that follows would look like a repeat and the finish would
-	 * be lost.
+	 * Review r1 MEDIUM-1: a real client replays each slot ONCE. If that single replay carries hash -1 it is
+	 * the only report of an offer that finished while away. It is held, then judged as a replay of the same
+	 * account once the hash is known: exactly one ge_buy, and the later collect names what was bought.
 	 */
 	@Test
-	public void anEventWithNoAccountHashDoesNotOverwriteASlot() throws Exception
+	public void aSingleReplayWithNoAccountHashStillReportsTheFinishOnce() throws Exception
+	{
+		setUp(GameState.LOGGED_IN);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		state(GameState.HOPPING);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);		// the client's own clear
+		hash = -1L;
+		state(GameState.LOGGING_IN);
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);	// the only replay, hash -1
+		tick += 3;
+		state(GameState.LOADING);
+		hash = A;
+		tick += 2;
+		state(GameState.LOGGED_IN);
+		gameTick();
+		tick += 1;
+		gameTick();
+		assertEquals(Arrays.asList("ge_offer", "ge_buy"), types());
+		assertEquals(10, ge().get(1).get("qty"));
+		assertEquals(2500L, ge().get(1).get("gp"));
+
+		tick += 20;
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		assertEquals(Arrays.asList("ge_offer", "ge_buy", "ge_collect"), types());
+		Map<String, Object> c = ge().get(2);
+		assertEquals("BOUGHT", c.get("state"));
+		assertEquals(10, c.get("qty"));
+		assertEquals(2500L, c.get("gp"));
+	}
+
+	/** The held event is also settled by the next GE event that carries the real hash (before any tick). */
+	@Test
+	public void theNextKnownHashEventSettlesTheHeldReplayFirst() throws Exception
+	{
+		setUp(GameState.LOGGED_IN);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		offer(2, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(2, GrandExchangeOfferState.SELLING, 4151, 0, 1, 1_500_000, 0);
+		state(GameState.HOPPING);
+		hash = -1L;
+		state(GameState.LOGGING_IN);
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);
+		hash = A;
+		offer(2, GrandExchangeOfferState.SOLD, 4151, 1, 1, 1_500_000, 1_500_000);
+		assertEquals(Arrays.asList("ge_offer", "ge_offer", "ge_buy", "ge_sell"), types());
+	}
+
+	/** A -> logout -> B, with B's replay at hash -1: B's slots are the new baseline and A's offer is never reported. */
+	@Test
+	public void anotherAccountsReplayAtNoHashIsABaselineAndNeverReportsTheOldOffer() throws Exception
+	{
+		setUp(GameState.LOGGED_IN);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		state(GameState.LOGIN_SCREEN);
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		hash = -1L;
+		state(GameState.LOGGING_IN);
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);	// B's own old offer, same item
+		offer(3, GrandExchangeOfferState.SELLING, 4151, 0, 1, 1_500_000, 0);
+		hash = B;
+		tick += 5;
+		state(GameState.LOGGED_IN);
+		gameTick();
+		assertEquals("B's held replay is a baseline", Arrays.asList("ge_offer"), types());
+
+		tick += 20;
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);		// B collects its own old buy
+		offer(3, GrandExchangeOfferState.SOLD, 4151, 1, 1, 1_500_000, 1_500_000);
+		assertEquals(Arrays.asList("ge_offer", "ge_collect", "ge_sell"), types());
+		assertEquals("the collect names B's slot, from B's baseline", "BOUGHT", ge().get(1).get("state"));
+	}
+
+	/** Held events never outlive the login that produced them. */
+	@Test
+	public void theLoginScreenDropsHeldEvents() throws Exception
 	{
 		setUp(GameState.LOGGED_IN);
 		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
@@ -226,12 +308,14 @@ public class GeLoginWindowTest
 		state(GameState.HOPPING);
 		hash = -1L;
 		state(GameState.LOGGING_IN);
-		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);	// account not known: skipped
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);
+		state(GameState.LOGIN_SCREEN);		// the login failed or was cancelled
 		hash = A;
 		tick += 5;
+		state(GameState.LOGGING_IN);
 		state(GameState.LOGGED_IN);
-		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2500);	// the same finish, account known
-		assertEquals(Arrays.asList("ge_offer", "ge_buy"), types());
+		gameTick();
+		assertEquals(Arrays.asList("ge_offer"), types());
 	}
 
 	// ---- (e) enabled while logged in ----
