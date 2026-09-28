@@ -368,6 +368,16 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * shutDown's clear of client-thread state: the phase history, and GE events held at hash -1. A held event
+	 * that survived a disable could become the next account's baseline after a re-enable at the login screen.
+	 */
+	void clearClientThreadStateOnShutdown()
+	{
+		clearResetPhaseEvidence();
+		geUnkeyed.clear();
+	}
+
+	/**
 	 * Take the current GE slots as the baseline, without emitting anything. Runs on the client thread.
 	 * If the account hash is still -1, the seed is keyed to -1 and the first event with a real hash clears
 	 * it (the account-change rule), so an unkeyed seed is never trusted.
@@ -442,11 +452,11 @@ public class AccountConnectPlugin extends Plugin
 		// runs on the Swing thread. Clear it on the client thread, like the GE seed.
 		if (clientThread != null)
 		{
-			clientThread.invoke(this::clearResetPhaseEvidence);
+			clientThread.invoke(this::clearClientThreadStateOnShutdown);
 		}
 		else
 		{
-			clearResetPhaseEvidence();
+			clearClientThreadStateOnShutdown();
 		}
 		removeResetTimer();
 		// A disabled plugin sees no GameStateChanged, so a bank session left here could later be diffed
@@ -723,18 +733,20 @@ public class AccountConnectPlugin extends Plugin
 	private long evidencePhaseLastCycle;
 	/** Wall-clock ms of our own last store_sell or store_buy click this visit; 0 = none. */
 	private long lastOwnStoreClickMs;
-	/**
-	 * A change this soon after our own store click never supports the evidence phase. Our sells land at a
-	 * time the seller picks from the countdown, and a waiting buyer takes the item a tick or two later, so
-	 * both sit at a fixed offset from the cycle and would line up like a real tick.
-	 */
-	static final long OWN_ACTION_QUIET_MS = 10_000L;
 	/** Recent container change times (ms), oldest first, bounded by count and age. */
 	private final java.util.ArrayDeque<Long> resetPhaseObs = new java.util.ArrayDeque<>();
 	/** Changes on distinct cycles needed before a phase is evidence. Two can be a coincidence. */
 	static final int RESET_PHASE_MIN_OBS = 3;
 	/** How far a gap may sit from a whole number of periods: just over one game tick. */
 	static final long PHASE_ALIGN_TOL_MS = 700L;
+	/**
+	 * A change this soon after our own store click never supports the evidence phase: one full period plus
+	 * the tolerance. Our sells land at a time the seller picks from the countdown, and anything that follows
+	 * them (a buyer reacting after any delay, or the sold unit's own first decay, which comes within one
+	 * period) sits at a fixed offset from our click, not from the cycle. Only a fall with a full quiet period
+	 * behind it (the 2nd and later decay steps of a stack, or a quiet visit) can be the shop's own tick.
+	 */
+	static final long OWN_ACTION_QUIET_MS = STORE_RESET_PERIOD_MS + PHASE_ALIGN_TOL_MS;
 	/** History bounds: at most this many change times, none older than RESET_PHASE_WINDOW_PERIODS periods. */
 	static final int RESET_PHASE_HISTORY = 32;
 	static final int RESET_PHASE_WINDOW_PERIODS = 5;
@@ -5938,8 +5950,8 @@ public class AccountConnectPlugin extends Plugin
 	 * was before the change:
 	 * (1) an item we sold this visit that is not the shop's own default stock fell by exactly one unit;
 	 * (2) no item rose (a rise is our own sell, another seller, or a restock landing);
-	 * (3) it is more than OWN_ACTION_QUIET_MS after our own last store click this visit (our sells, our
-	 *     buy-backs and a buyer waiting for our sell all sit at a fixed offset from the countdown).
+	 * (3) it is more than OWN_ACTION_QUIET_MS (one period plus tolerance) after our own last store click this
+	 *     visit (our sells, our buy-backs and a buyer reacting to our sell all sit at a fixed offset from it).
 	 * Everything else (buys by others, normalisation of native stock, our own actions) never counts.
 	 */
 	private boolean isShopMadeDecay(Map<Integer, Integer> now, long nowMs)

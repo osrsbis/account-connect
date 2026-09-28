@@ -298,6 +298,36 @@ public class GeLoginWindowTest
 		assertEquals("the collect names B's slot, from B's baseline", "BOUGHT", ge().get(1).get("state"));
 	}
 
+	/**
+	 * Review r2 LOW-1: a held -1 event of account A must not survive a plugin disable. Disabled during a hop
+	 * with slot 5 held, enabled again at the login screen (no LOGIN_SCREEN event is seen), then B logs in:
+	 * B's slot 5 has no baseline from A, so B's new offer there is a ge_offer.
+	 */
+	@Test
+	public void aHeldEventDoesNotSurviveAPluginDisable() throws Exception
+	{
+		setUp(GameState.LOGGED_IN);
+		offer(5, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(5, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		state(GameState.HOPPING);
+		hash = -1L;
+		state(GameState.LOGGING_IN);
+		offer(5, GrandExchangeOfferState.BUYING, 560, 3, 10, 250, 750);	// held at -1
+		p.shutDown();
+		gameState = GameState.LOGIN_SCREEN;
+		p.startUp();							// re-enabled at the login screen
+		hash = B;
+		tick += 5;
+		state(GameState.LOGGING_IN);
+		state(GameState.LOGGED_IN);
+		gameTick();
+		tick += 20;
+		offer(5, GrandExchangeOfferState.BUYING, 1511, 0, 100, 5, 0);	// B places a new offer in slot 5
+		assertEquals("A's held slot never becomes B's baseline",
+			Arrays.asList("ge_offer", "ge_offer"), types());
+		assertEquals(1511, ge().get(1).get("item"));
+	}
+
 	/** Held events never outlive the login that produced them. */
 	@Test
 	public void theLoginScreenDropsHeldEvents() throws Exception

@@ -190,8 +190,9 @@ public class StoreResetPhaseEvidenceTest
 	}
 
 	/**
-	 * Native stock falling by one, well outside the quiet window, every minute: it is the shop normalising
-	 * its own goods (defaultStockSoldThisVisit), never player-added decay.
+	 * Native stock falling by one every minute, long after our only click (outside the quiet window): the
+	 * item is the shop's own default stock (defaultStockSoldThisVisit), so its falls are never player-added
+	 * decay, whoever or whatever causes them.
 	 */
 	@Test
 	public void defaultStockFallsNeverCount() throws Exception
@@ -202,13 +203,13 @@ public class StoreResetPhaseEvidenceTest
 		base.put(999, 3);
 		inject("shopStock", base);
 		inject("soldThisVisit", new java.util.LinkedHashSet<>(java.util.Collections.singletonList(999)));
+		click(T0 - 2 * P, "Sell 1", 1931);					// our only click: marks 1931 as default stock
+		stock(T0 - 2 * P + 600L, new int[][]{{1931, 6}, {999, 3}});
 		for (int k = 0; k < 5; k++)
 		{
-			click(T0 + k * P - 20_000L, "Sell 1", 1931);
-			stock(T0 + k * P - 19_400L, new int[][]{{1931, 6}, {999, 3}});
-			stock(T0 + k * P, new int[][]{{1931, 5}, {999, 3}});		// the one-unit fall lands 20 s later, every minute
+			stock(T0 + k * P, new int[][]{{1931, 5 - k}, {999, 3}});		// one native unit gone every minute
 		}
-		stock(T0 + 5 * P + 20_000L, new int[][]{{1931, 5}, {999, 2}});
+		stock(T0 + 4 * P + 20_000L, new int[][]{{1931, 1}, {999, 2}});
 		assertEquals("the final buy of 999 is judged", 999, last().get("item"));
 		for (Map<String, Object> e : taken())
 		{
@@ -260,25 +261,90 @@ public class StoreResetPhaseEvidenceTest
 		}
 	}
 
-	/** A clean decay chain of our own junk, with no action of ours within 10 s, still confirms at 3. */
+	/**
+	 * POSITIVE CONTROL (review r2). A stack of 5 Logs sold in ONE action, no further clicks, decaying
+	 * 5->4->3->2->1->0 on the 60 s cycle. The first decay lands within one period of our click, so it never
+	 * counts (it could be a reaction to our sell). Decays 2, 3 and 4 have a full quiet period behind them and
+	 * confirm the phase at the 4th decay (support 3). The 5th raises the support to 4, and a later off-cycle
+	 * buy carries the right distance.
+	 */
 	@Test
-	public void aCleanDecayChainAfterAQuietSellStillConfirmsAtThree() throws Exception
+	public void aStackOfFiveSoldInOneActionConfirmsAtTheFourthDecay() throws Exception
 	{
 		setUp();
 		inject("shopStock", new java.util.LinkedHashMap<Integer, Integer>(java.util.Collections.singletonMap(999, 3)));
 		inject("soldThisVisit", new java.util.LinkedHashSet<>(java.util.Collections.singletonList(999)));
-		click(T0 - 30_000L, "Sell 3", 1511);
-		stock(T0 - 29_400L, new int[][]{{1511, 3}, {999, 3}});			// our sell lands (a rise): not evidence
-		stock(T0, new int[][]{{1511, 2}, {999, 3}});
-		stock(T0 + P, new int[][]{{1511, 1}, {999, 3}});
-		stock(T0 + 2 * P, new int[][]{{999, 3}});
+		click(T0 - 30_000L, "Sell 5", 1511);
+		stock(T0 - 29_400L, new int[][]{{1511, 5}, {999, 3}});			// our sell lands (a rise): not evidence
+		stock(T0, new int[][]{{1511, 4}, {999, 3}});				// decay 1: 30 s after our click
+		stock(T0 + P, new int[][]{{1511, 3}, {999, 3}});			// decay 2
+		stock(T0 + 2 * P, new int[][]{{1511, 2}, {999, 3}});			// decay 3
 		for (Map<String, Object> e : taken())
 		{
-			assertFalse(e.containsKey("ms_from_reset_cycle"));
+			assertFalse("three decays, one within a period of our sell: not confirmed yet: " + e,
+				e.containsKey("ms_from_reset_cycle"));
 		}
-		stock(T0 + 2 * P + 30_000L, new int[][]{{999, 2}});
-		assertEquals(30_000L, ((Number) last().get("ms_from_reset_cycle")).longValue());
+		stock(T0 + 3 * P, new int[][]{{1511, 1}, {999, 3}});			// decay 4: confirms, judged before it
+		assertFalse("the confirming change never judges itself", last().containsKey("ms_from_reset_cycle"));
+		stock(T0 + 4 * P + 200L, new int[][]{{999, 3}});			// decay 5, on the tick
+		assertEquals(200L, ((Number) last().get("ms_from_reset_cycle")).longValue());
 		assertEquals(3, ((Number) last().get("reset_cycle_obs")).intValue());
+		stock(T0 + 4 * P + 30_000L, new int[][]{{999, 2}});			// a buy, off the cycle
+		assertEquals(30_000L, ((Number) last().get("ms_from_reset_cycle")).longValue());
+		assertEquals(4, ((Number) last().get("reset_cycle_obs")).intValue());
+		assertNoFalsePhase(T0);
+	}
+
+	/**
+	 * Review r2 MEDIUM-1, the reviewer's exact sequence. We sell one item right after each tick (+1.2 s click,
+	 * +1.8 s landing) and a buyer takes it 10.8-11.4 s after our click, three cycles running; the last item
+	 * decays on the true tick. Buyer falls tied to our click must never become the phase: no row may carry a
+	 * distance, and above all the true decay must never read 12.6 s off.
+	 */
+	@Test
+	public void aBuyerJustOutsideTheOldTenSecondWindowNeverConfirms() throws Exception
+	{
+		buyerAtFixedDelayAfterOurSell(new long[]{10_800L, 10_800L, 11_400L, 10_800L});
+	}
+
+	@Test
+	public void aBuyerThirtySecondsAfterOurSellNeverConfirms() throws Exception
+	{
+		buyerAtFixedDelayAfterOurSell(new long[]{30_000L, 30_000L, 30_600L, 30_000L});
+	}
+
+	@Test
+	public void aBuyerFiftyNineSecondsAfterOurSellNeverConfirms() throws Exception
+	{
+		buyerAtFixedDelayAfterOurSell(new long[]{59_000L, 59_000L, 58_400L, 59_000L});
+	}
+
+	private void buyerAtFixedDelayAfterOurSell(long[] delay) throws Exception
+	{
+		setUp();
+		inject("shopStock", new java.util.LinkedHashMap<Integer, Integer>(java.util.Collections.singletonMap(999, 3)));
+		inject("soldThisVisit", new java.util.LinkedHashSet<Integer>());
+		click(T0 - 30_000L, "Sell 1", 1511);
+		stock(T0 - 29_400L, new int[][]{{999, 3}, {1511, 1}});
+		stock(T0, new int[][]{{999, 3}});					// the probe decays on the true tick
+		for (int k = 0; k < 4; k++)
+		{
+			int item = 201 + k;
+			long clickAt = T0 + k * P + 1_200L;
+			click(clickAt, "Sell 1", item);
+			stock(clickAt + 600L, new int[][]{{999, 3}, {item, 1}});
+			stock(clickAt + delay[k], new int[][]{{999, 3}});		// a buyer reacting to our sell
+		}
+		click(T0 + 4 * P + 1_200L, "Sell 1", 205);
+		stock(T0 + 4 * P + 1_800L, new int[][]{{999, 3}, {205, 1}});
+		stock(T0 + 5 * P, new int[][]{{999, 3}});				// 205 decays on the true tick
+		assertEquals(6, taken().size());
+		for (Map<String, Object> e : taken())
+		{
+			assertFalse("a fall within one period of our own sell is not a phase: " + e,
+				e.containsKey("ms_from_reset_cycle"));
+		}
+		assertNoFalsePhase(T0);
 	}
 
 	/**
