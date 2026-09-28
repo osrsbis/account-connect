@@ -226,8 +226,8 @@ public class EventLogTest
 		when(offer.getState()).thenReturn(GrandExchangeOfferState.BOUGHT);
 		when(offer.getItemId()).thenReturn(20997);
 		when(offer.getQuantitySold()).thenReturn(3);
-		when(offer.getPrice()).thenReturn(100);
-		when(offer.getSpent()).thenReturn(300);
+		when(offer.getPrice()).thenReturn(100L);
+		when(offer.getSpent()).thenReturn(300L);
 		GrandExchangeOfferChanged ev = mock(GrandExchangeOfferChanged.class);
 		when(ev.getOffer()).thenReturn(offer);
 		when(ev.getSlot()).thenReturn(2);

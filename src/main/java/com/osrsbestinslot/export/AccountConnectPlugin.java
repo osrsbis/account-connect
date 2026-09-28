@@ -489,7 +489,7 @@ public class AccountConnectPlugin extends Plugin
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
 	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
 	/** Last seen offer per GE slot {item, qty_sold, qty_total, price, spent}, so a collect (slot -> EMPTY) still names what it held. */
-	private final Map<Integer, int[]> lastGeOffer = new java.util.HashMap<>();
+	private final Map<Integer, long[]> lastGeOffer = new java.util.HashMap<>();
 	/** Tick of the last ge_progress row per slot. A big offer fills in many steps; one row per minute per slot is enough. */
 	private final Map<Integer, Integer> lastGeProgressTick = new java.util.HashMap<>();
 	/** Tick of the last LOGGED_IN. The client replays every slot right after login; that replay is a baseline, not activity. */
@@ -7884,8 +7884,8 @@ public class AccountConnectPlugin extends Plugin
 		}
 		boolean loginReplay = client != null && tick - geLoginTick <= GE_LOGIN_BURST_TICKS;
 		GrandExchangeOfferState prev = lastGeState.put(slot, state);
-		int[] prevOffer = lastGeOffer.get(slot);
-		int[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
+		long[] prevOffer = lastGeOffer.get(slot);
+		long[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
 			offer.getPrice(), offer.getSpent()};
 		if (state == GrandExchangeOfferState.EMPTY)
 		{
@@ -7971,13 +7971,13 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		int[] o = "ge_collect".equals(type) ? prevOffer : nowOffer;
+		long[] o = "ge_collect".equals(type) ? prevOffer : nowOffer;
 		Map<String, Object> fields = new LinkedHashMap<>();
-		fields.put("item", o[0]);
-		fields.put("qty", o[1]);
+		fields.put("item", (int) o[0]);
+		fields.put("qty", (int) o[1]);
 		fields.put("price", o[3]);
 		fields.put("gp", o[4]);
-		fields.put("qty_total", o[2]);
+		fields.put("qty_total", (int) o[2]);
 		fields.put("slot", slot);
 		fields.put("state", "ge_collect".equals(type) ? String.valueOf(prev) : state.name());
 		fields.put("side", geSide("ge_collect".equals(type) ? prev : state));

@@ -627,7 +627,7 @@ public class OffBookEventsTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ItemManager im = mock(ItemManager.class);
-		when(im.getItemPrice(anyInt())).thenReturn(1000);
+		when(im.getItemPrice(anyInt())).thenReturn(1000L);
 		inject(plugin, "itemManager", im);
 		Client client = mock(Client.class);
 		ItemContainer reward = container(20997, 1, 995, 250000); // tbow + coins
@@ -678,7 +678,7 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		ItemManager im = mock(ItemManager.class);
-		when(im.getItemPrice(anyInt())).thenReturn(2);
+		when(im.getItemPrice(anyInt())).thenReturn(2L);
 		inject(plugin, "itemManager", im);
 
 		Map<String, Object> snap = new LinkedHashMap<>();

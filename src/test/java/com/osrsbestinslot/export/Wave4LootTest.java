@@ -68,8 +68,8 @@ public class Wave4LootTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ItemManager im = mock(ItemManager.class);
-		when(im.getItemPrice(995)).thenReturn(1);
-		when(im.getItemPrice(560)).thenReturn(200);
+		when(im.getItemPrice(995)).thenReturn(1L);
+		when(im.getItemPrice(560)).thenReturn(200L);
 		inject(plugin, "itemManager", im);
 
 		plugin.emitLoot("Vorkath", "npc", Arrays.asList(new ItemStack(995, 5000), new ItemStack(560, 100)));

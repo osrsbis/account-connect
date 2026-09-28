@@ -380,7 +380,7 @@ public class UploadGatingTest
 		ItemContainer inv = mock(ItemContainer.class);
 		when(inv.getItems()).thenReturn(new Item[] {new Item(995, 1000)});
 		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
-		when(itemManager.getItemPrice(995)).thenReturn(1);
+		when(itemManager.getItemPrice(995)).thenReturn(1L);
 		setSkillXp(1000);
 
 		plugin.syncTask();
@@ -390,7 +390,7 @@ public class UploadGatingTest
 		// force captured_at to cross a second boundary and jitter the GE price (wealth) —
 		// both are excluded from the canonical hash, so no re-upload should occur.
 		Thread.sleep(1100);
-		when(itemManager.getItemPrice(995)).thenReturn(999);
+		when(itemManager.getItemPrice(995)).thenReturn(999L);
 
 		plugin.syncTask();
 		assertNull("captured_at/wealth-only differences must not trigger a re-upload",
