@@ -412,12 +412,37 @@ public class RecipientMechanicsTest
 		base.put(1511, 1);
 		inject(p, "shopStock", base);
 		long now = System.currentTimeMillis();
-		inject(p, "storeResetAnchorMs", now - 120_000L - 400L);	// two cycles and 0.4 s ago
+		// The evidence phase (confirmed by >= 3 aligned changes), not the countdown anchor.
+		inject(p, "evidencePhaseMs", now - 120_000L - 400L);	// two cycles and 0.4 s ago
+		inject(p, "evidencePhaseSupport", 3);
 		p.handleShopStockChanged(shop(1511, 0).c);
 		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
 			.findFirst().orElseThrow(AssertionError::new);
 		long ms = ((Number) ev.get("ms_from_reset_cycle")).longValue();
 		assertTrue("on the cycle: " + ms, ms >= 300 && ms < 2_000);
+		assertEquals(3, ((Number) ev.get("reset_cycle_obs")).intValue());
+	}
+
+	/**
+	 * The countdown anchor alone is NOT evidence: one probe vanishing (a buyer can cause it) or two changes one
+	 * period apart (chance can) set it, and a buy judged against it would read as a decay.
+	 */
+	@Test
+	public void theCountdownAnchorAloneNeverFeedsTheCycleDistance() throws Exception
+	{
+		AccountConnectPlugin p = plugin();
+		Player me = player("Staff", 3217, 3415, -1);
+		inject(p, "client", client(me, 10));
+		inject(p, "soldThisVisit", new java.util.LinkedHashSet<>(Arrays.asList(1511)));
+		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
+		base.put(1511, 1);
+		inject(p, "shopStock", base);
+		inject(p, "storeResetAnchorMs", System.currentTimeMillis() - 120_000L - 400L);
+		p.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+			.findFirst().orElseThrow(AssertionError::new);
+		assertFalse(ev.containsKey("ms_from_reset_cycle"));
+		assertFalse(ev.containsKey("reset_cycle_obs"));
 	}
 
 	@Test

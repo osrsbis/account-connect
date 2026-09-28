@@ -316,6 +316,9 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
+	@Inject
+	private net.runelite.client.callback.ClientThread clientThread;
+
 	static final String CONFIG_GROUP = "osrsbisexport";
 
 	@Provides
@@ -341,12 +344,59 @@ public class AccountConnectPlugin extends Plugin
 		// Started while already in the world: the GE slots were replayed before we were listening, so the
 		// next LOGGED_IN (a region load) is not a login and must not open a replay window.
 		geAwaitingLogin = client == null || client.getGameState() != GameState.LOGGED_IN;
+		if (!geAwaitingLogin)
+		{
+			// Enabled while in the world: no replay will come, so take the slots as they stand now as the
+			// baseline. The first real change is then judged against the truth, and the seed itself emits
+			// nothing. The GE maps are client-thread state, so seed there.
+			if (clientThread != null)
+			{
+				clientThread.invoke(this::seedGeBaseline);
+			}
+			else
+			{
+				seedGeBaseline();
+			}
+		}
 		if (overlayManager != null)
 		{
 			resetOverlay = new StoreResetOverlay(this);
 			overlayManager.add(resetOverlay);
 			nearbyOverlay = new StoreNearbyOverlay(this);
 			overlayManager.add(nearbyOverlay);
+		}
+	}
+
+	/**
+	 * Take the current GE slots as the baseline, without emitting anything. Runs on the client thread.
+	 * If the account hash is still -1, the seed is keyed to -1 and the first event with a real hash clears
+	 * it (the account-change rule), so an unkeyed seed is never trusted.
+	 */
+	void seedGeBaseline()
+	{
+		GrandExchangeOffer[] offers = client == null || client.getGameState() != GameState.LOGGED_IN
+			? null : client.getGrandExchangeOffers();
+		if (offers == null)
+		{
+			return;
+		}
+		lastGeState.clear();
+		lastGeOffer.clear();
+		lastGeProgressTick.clear();
+		geAccountHash = client.getAccountHash();
+		for (int slot = 0; slot < offers.length; slot++)
+		{
+			GrandExchangeOffer o = offers[slot];
+			if (o == null || o.getState() == null)
+			{
+				continue;
+			}
+			lastGeState.put(slot, o.getState());
+			if (o.getState() != GrandExchangeOfferState.EMPTY)
+			{
+				lastGeOffer.put(slot, new long[]{o.getItemId(), o.getQuantitySold(), o.getTotalQuantity(),
+					o.getPrice(), o.getSpent()});
+			}
 		}
 	}
 
@@ -387,6 +437,7 @@ public class AccountConnectPlugin extends Plugin
 		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
 		// not clear a plugin's infoboxes for it.
 		storeResetAnchorMs = 0;
+		clearResetPhaseEvidence();
 		removeResetTimer();
 		// A disabled plugin sees no GameStateChanged, so a bank session left here could later be diffed
 		// against another account's bank. Discard it without a row.
@@ -645,6 +696,40 @@ public class AccountConnectPlugin extends Plugin
 	private long storeResetAnchorMs;
 	/** When the shop container last changed at all. The anchor needs two observations, not one. */
 	private long lastStockChangeMs;
+	/**
+	 * EVIDENCE-GRADE cycle phase, kept apart from storeResetAnchorMs on purpose.
+	 *
+	 * The countdown anchor may move on one probe vanishing (a buyer can cause that) or on two changes one
+	 * period apart (a coincidence can cause that). A countdown can live with that; an evidence field that a
+	 * reader uses to tell a decay from a buy cannot. This phase is confirmed only by at least
+	 * RESET_PHASE_MIN_OBS container changes on distinct cycles that all sit whole periods apart (more when
+	 * the shop is busy, see requiredPhaseSupport), and it is the only phase store_taken reports.
+	 * 0 = not confirmed.
+	 */
+	private long evidencePhaseMs;
+	/** How many container changes support evidencePhaseMs (>= RESET_PHASE_MIN_OBS once confirmed). */
+	private int evidencePhaseSupport;
+	/** Cycle index (from evidencePhaseMs) of the last change that raised the support, so one cycle counts once. */
+	private long evidencePhaseLastCycle;
+	/** Recent container change times (ms), oldest first, bounded by count and age. */
+	private final java.util.ArrayDeque<Long> resetPhaseObs = new java.util.ArrayDeque<>();
+	/** Changes on distinct cycles needed before a phase is evidence. Two can be a coincidence. */
+	static final int RESET_PHASE_MIN_OBS = 3;
+	/** How far a gap may sit from a whole number of periods: just over one game tick. */
+	static final long PHASE_ALIGN_TOL_MS = 700L;
+	/** History bounds: at most this many change times, none older than RESET_PHASE_WINDOW_PERIODS periods. */
+	static final int RESET_PHASE_HISTORY = 32;
+	static final int RESET_PHASE_WINDOW_PERIODS = 5;
+	/**
+	 * Accepted chance that unrelated changes line up by luck. In a busy shop many changes sit in the history,
+	 * and three of them agree by chance far more often than one would guess (simulated: over half of
+	 * 10-minute visits with a change every 15 s). So the support needed grows with the history size, and is
+	 * never below RESET_PHASE_MIN_OBS. Busy shops then mostly report no phase: a missing field, never a
+	 * wrong one.
+	 */
+	static final double RESET_PHASE_FALSE_RATE = 0.01;
+	/** requiredPhaseSupport(n) for n = 0 .. RESET_PHASE_HISTORY, computed once. */
+	private static final int[] PHASE_SUPPORT_NEEDED = phaseSupportTable();
 	private static final int MAX_NEARBY_TRACKED = 64;	// bound the per-visit map
 	private static final int NEARBY_FIELD_CAP = 24;		// bound the emitted nearby[] list
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
@@ -3913,6 +3998,7 @@ public class AccountConnectPlugin extends Plugin
 		if (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST)
 		{
 			storeResetAnchorMs = 0;
+			clearResetPhaseEvidence();
 			removeResetTimer();
 		}
 		switch (event.getGameState())
@@ -3956,6 +4042,7 @@ public class AccountConnectPlugin extends Plugin
 				shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				storeResetAnchorMs = 0;	// phase is per-visit: never carry it across accounts
 				lastStockChangeMs = 0;
+				clearResetPhaseEvidence();
 				storeProbeItem = 0;
 				soldThisVisit.clear();
 				defaultStockSoldThisVisit.clear();
@@ -4539,6 +4626,7 @@ public class AccountConnectPlugin extends Plugin
 			shopStock.clear();		// baseline is taken from this visit's first container change
 			storeResetAnchorMs = 0;		// a new visit starts with the phase UNKNOWN
 			lastStockChangeMs = 0;
+			clearResetPhaseEvidence();
 			storeProbeItem = 0;		// and with no probe until the first item is sold
 			soldThisVisit.clear();
 			defaultStockSoldThisVisit.clear();
@@ -4824,6 +4912,7 @@ public class AccountConnectPlugin extends Plugin
 			// The reset phase is only valid while the shop is open — drop it rather than show a stale
 			// countdown on the next visit. Re-probing costs one junk item; a wrong number costs the item.
 			storeResetAnchorMs = 0;
+			clearResetPhaseEvidence();
 			removeResetTimer();
 		}
 	}
@@ -5664,6 +5753,168 @@ public class AccountConnectPlugin extends Plugin
 		return Math.min(r, STORE_RESET_PERIOD_MS - r);
 	}
 
+	/**
+	 * Do two change times sit a WHOLE number of periods apart (k >= 1), within tolMs? Two changes in the same
+	 * cycle (k = 0) never align: they are one observation of the cycle, not two. Pure and static.
+	 */
+	static boolean phaseAligned(long a, long b, long tolMs)
+	{
+		long gap = Math.abs(b - a);
+		long k = (gap + STORE_RESET_PERIOD_MS / 2) / STORE_RESET_PERIOD_MS;
+		return k >= 1 && Math.abs(gap - k * STORE_RESET_PERIOD_MS) <= tolMs;
+	}
+
+	/**
+	 * The largest set of change times in which EVERY pair is phaseAligned, found greedily from each start.
+	 * Returns {latest member, set size}, or null for no times. Greedy can miss a larger set, which only
+	 * makes confirmation rarer: it never invents one. Pure and static so the rule is testable.
+	 */
+	static long[] alignedPhase(long[] obs, long tolMs)
+	{
+		if (obs == null || obs.length == 0)
+		{
+			return null;
+		}
+		long[] best = null;
+		for (int i = 0; i < obs.length; i++)
+		{
+			List<Long> set = new ArrayList<>();
+			set.add(obs[i]);
+			for (int j = 0; j < obs.length; j++)
+			{
+				if (j == i)
+				{
+					continue;
+				}
+				boolean all = true;
+				for (long m : set)
+				{
+					if (!phaseAligned(m, obs[j], tolMs))
+					{
+						all = false;
+						break;
+					}
+				}
+				if (all)
+				{
+					set.add(obs[j]);
+				}
+			}
+			long latest = Long.MIN_VALUE;
+			for (long m : set)
+			{
+				latest = Math.max(latest, m);
+			}
+			if (best == null || set.size() > best[1])
+			{
+				best = new long[]{latest, set.size()};
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * Aligned changes needed before a history of n changes is evidence. Each other change lands inside the
+	 * tolerance of a given phase with chance q = 2 * tol / period, and there are 1 / q distinct phases, so the
+	 * chance that SOME phase gathers s of n by luck is at most (1 / q) * P(Binomial(n, q) >= s). Returns the
+	 * smallest s >= RESET_PHASE_MIN_OBS that keeps this at or below RESET_PHASE_FALSE_RATE, or n + 1 (never).
+	 * Pure and static so it is testable.
+	 */
+	static int requiredPhaseSupport(int n)
+	{
+		if (n >= 0 && n < PHASE_SUPPORT_NEEDED.length)
+		{
+			return PHASE_SUPPORT_NEEDED[n];
+		}
+		return computePhaseSupport(n);
+	}
+
+	private static int[] phaseSupportTable()
+	{
+		int[] t = new int[RESET_PHASE_HISTORY + 1];
+		for (int n = 0; n < t.length; n++)
+		{
+			t[n] = computePhaseSupport(n);
+		}
+		return t;
+	}
+
+	private static int computePhaseSupport(int n)
+	{
+		double q = 2.0 * PHASE_ALIGN_TOL_MS / STORE_RESET_PERIOD_MS;
+		for (int s = RESET_PHASE_MIN_OBS; s <= n; s++)
+		{
+			double tail = 0;
+			for (int k = s; k <= n; k++)
+			{
+				double c = 1;
+				for (int i = 0; i < k; i++)
+				{
+					c = c * (n - i) / (i + 1);
+				}
+				tail += c * Math.pow(q, k) * Math.pow(1 - q, n - k);
+			}
+			if (tail / q <= RESET_PHASE_FALSE_RATE)
+			{
+				return s;
+			}
+		}
+		return Math.max(n, RESET_PHASE_MIN_OBS - 1) + 1;
+	}
+
+	/**
+	 * Record one shop container change for the evidence phase. Before confirmation the bounded history is
+	 * searched for requiredPhaseSupport(history size) aligned changes (at least 3). After it, a change that lands on the confirmed phase
+	 * in a cycle not yet counted raises the support. Nothing here touches the countdown.
+	 */
+	private void registerResetPhaseObservation(long nowMs)
+	{
+		if (evidencePhaseMs > 0)
+		{
+			Long off = msFromResetCycle(evidencePhaseMs, nowMs);
+			long k = (nowMs - evidencePhaseMs + STORE_RESET_PERIOD_MS / 2) / STORE_RESET_PERIOD_MS;
+			if (off != null && off <= PHASE_ALIGN_TOL_MS && k > evidencePhaseLastCycle)
+			{
+				evidencePhaseSupport++;
+				evidencePhaseLastCycle = k;
+			}
+			return;
+		}
+		long oldest = nowMs - RESET_PHASE_WINDOW_PERIODS * STORE_RESET_PERIOD_MS;
+		while (!resetPhaseObs.isEmpty() && (resetPhaseObs.peekFirst() < oldest || resetPhaseObs.peekFirst() > nowMs))
+		{
+			resetPhaseObs.pollFirst();	// aged out, or a clock that went backwards
+		}
+		resetPhaseObs.addLast(nowMs);
+		while (resetPhaseObs.size() > RESET_PHASE_HISTORY)
+		{
+			resetPhaseObs.pollFirst();
+		}
+		long[] obs = new long[resetPhaseObs.size()];
+		int i = 0;
+		for (long t : resetPhaseObs)
+		{
+			obs[i++] = t;
+		}
+		long[] best = alignedPhase(obs, PHASE_ALIGN_TOL_MS);
+		if (best != null && best[1] >= requiredPhaseSupport(obs.length))
+		{
+			evidencePhaseMs = best[0];
+			evidencePhaseSupport = (int) best[1];
+			evidencePhaseLastCycle = 0;
+			resetPhaseObs.clear();
+		}
+	}
+
+	/** Forget the evidence phase. Called wherever the countdown anchor is dropped. */
+	private void clearResetPhaseEvidence()
+	{
+		evidencePhaseMs = 0;
+		evidencePhaseSupport = 0;
+		evidencePhaseLastCycle = 0;
+		resetPhaseObs.clear();
+	}
+
 	/** How far a gap may sit from one full period and still count as the cycle. */
 	static final long PERIOD_TOLERANCE_MS = 3_000L;
 
@@ -5731,10 +5982,12 @@ public class AccountConnectPlugin extends Plugin
 			}
 		}
 		traceShopStock(now);
-		long nowMs = System.currentTimeMillis();
-		// The shop cycle phase as it was BEFORE this change. Player-added stock decays on the cycle tick, so a
-		// store_taken that lands on it may be the shop, not a buyer. Read before the anchors below move it.
-		long cycleAnchorBefore = storeResetAnchorMs;
+		long nowMs = nowMs();
+		// The evidence phase as it was BEFORE this change. Player-added stock decays on the cycle tick, so a
+		// store_taken that lands on it may be the shop, not a buyer. The change being judged must never count
+		// toward its own phase, so read it before this change is registered below.
+		long evidencePhaseBefore = evidencePhaseMs;
+		int evidenceSupportBefore = evidencePhaseSupport;
 
 		// ANCHOR 1 — THE ITEM WE SOLD VANISHING. This is the event the user actually watches, and it
 		// is the strongest signal available: a junk item the shop does NOT natively stock is sold in,
@@ -5783,6 +6036,7 @@ public class AccountConnectPlugin extends Plugin
 				showResetTimer();
 			}
 			lastStockChangeMs = nowMs;
+			registerResetPhaseObservation(nowMs);
 		}
 		for (Integer item : soldThisVisit)
 		{
@@ -5821,14 +6075,16 @@ public class AccountConnectPlugin extends Plugin
 			{
 				f.put("shopkeeper", shopkeeperName);
 			}
-			// Distance in ms to the nearest shop cycle tick, when the phase was known before this change. Near 0
-			// = the fall landed on the cycle, where player-added stock decays by itself (measured live
-			// 2026-09-27: a sold log fell to 0 exactly 60.0 s after the previous one with no buyer).
-			// Absent = phase unknown, so the reader cannot tell a decay from a buy by timing.
-			Long msFromCycle = msFromResetCycle(cycleAnchorBefore, nowMs);
+			// Distance in ms to the nearest shop cycle tick, when the EVIDENCE phase was confirmed before this
+			// change. Near 0 = the fall landed on the cycle, where player-added stock decays by itself (measured
+			// live 2026-09-27: a sold log fell to 0 exactly 60.0 s after the previous one with no buyer).
+			// reset_cycle_obs = how many changes support that phase. Both absent = phase not confirmed, so the
+			// reader cannot tell a decay from a buy by timing. The countdown anchor is never used here.
+			Long msFromCycle = msFromResetCycle(evidencePhaseBefore, nowMs);
 			if (msFromCycle != null)
 			{
 				f.put("ms_from_reset_cycle", msFromCycle);
+				f.put("reset_cycle_obs", evidenceSupportBefore);
 			}
 			if (client != null)
 			{
@@ -7873,16 +8129,32 @@ public class AccountConnectPlugin extends Plugin
 		}
 		int tick = client == null ? 0 : client.getTickCount();
 		long acct = client == null ? -1L : client.getAccountHash();
+		if (client != null && acct == -1L)
+		{
+			// The account is not known yet (before login the hash is -1). Such an event can neither be judged
+			// nor be allowed to re-key the slots: that would wipe the baseline and every offer that finished
+			// while away. Skip it like the transient EMPTY above.
+			return;
+		}
 		if (acct != geAccountHash)
 		{
 			// GE slots belong to one account. Another account's remembered slot must never make this one's
-			// replay look like an offer that finished while away.
+			// replay look like an offer that finished while away. The -1 guard above means a stored -1 can only
+			// be the empty start or an unkeyed seed, so only a real account's slots are ever lost here.
 			lastGeState.clear();
 			lastGeOffer.clear();
 			lastGeProgressTick.clear();
 			geAccountHash = acct;
 		}
-		boolean loginReplay = client != null && tick - geLoginTick <= GE_LOGIN_BURST_TICKS;
+		// An identical re-send of a slot (same state, same offer) emits nothing through the rules below: an
+		// unchanged terminal state, an active offer with no new fill and a repeated EMPTY all yield no row.
+		// A replay is every slot event from leaving the world until LOGGED_IN (the RuneLite GE plugin opens its
+		// window at LOGGING_IN / HOPPING / CONNECTION_LOST), plus GE_LOGIN_BURST_TICKS after LOGGED_IN.
+		// geAwaitingLogin is set on leaving the world and cleared by the LOGGED_IN handler. It is read only while
+		// the client is not LOGGED_IN, so a flag left stale can never swallow live activity in the world.
+		boolean loginReplay = client != null
+			&& ((geAwaitingLogin && client.getGameState() != GameState.LOGGED_IN)
+				|| tick - geLoginTick <= GE_LOGIN_BURST_TICKS);
 		GrandExchangeOfferState prev = lastGeState.put(slot, state);
 		long[] prevOffer = lastGeOffer.get(slot);
 		long[] nowOffer = {offer.getItemId(), offer.getQuantitySold(), offer.getTotalQuantity(),
