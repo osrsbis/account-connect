@@ -27,6 +27,7 @@ import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -465,6 +466,7 @@ public class AccountConnectPlugin extends Plugin
 		bankBaselinePending = false;
 		bankGrossDeposited.clear();
 		bankGrossWithdrawn.clear();
+		closeSpool();	// rows stay on disk; the next process recovers them under the same identity
 	}
 
 	/**
@@ -537,6 +539,9 @@ public class AccountConnectPlugin extends Plugin
 	private static final int MAX_PENDING_EVENTS = 500;
 	/** Internal-only queue binding. Removed before POST; never sent to the server. */
 	private static final String EVENT_TOKEN_FP = "__delivery_token_fp";
+	/** Server ingest limits: at most 100 events and under 256 KiB of UTF-8 per request. */
+	static final int EVENT_BATCH_MAX_EVENTS = 100;
+	static final long EVENT_BATCH_MAX_BYTES = 256L * 1024L;
 	// Cumulative capture-health counters for this plugin process. They intentionally live outside
 	// pendingEvents so the health record can ride in ordinary snapshots without recursively generating
 	// another event. Restart loss remains a separate, explicitly planned durability problem.
@@ -1655,6 +1660,17 @@ public class AccountConnectPlugin extends Plugin
 	public void onConfigChanged(ConfigChanged event)
 	{
 		enforceDropSessionTokenIdentity();
+		syncSpoolState();	// a cleared or changed token purges the old identity's durable spool
+		if (event != null && CONFIG_GROUP.equals(event.getGroup()) && "linkToken".equals(event.getKey())
+			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
+		{
+			spoolOnTokenChangedWithoutAccount();
+		}
+	}
+
+	private static String trimmed(String s)
+	{
+		return s == null ? "" : s.trim();
 	}
 
 	/**
@@ -3708,13 +3724,17 @@ public class AccountConnectPlugin extends Plugin
 		{
 			ev.putAll(fields);
 		}
+		// Generated ONCE, before either queue sees the event, so a retry and a replay carry the same id.
+		String eventId = EventSpool.newEventId();
+		ev.put("event_id", eventId);
 		healthEventsQueued.incrementAndGet();
+		spoolOnEmit(type, ev, eventId);
 		synchronized (pendingEvents)
 		{
 			pendingEvents.add(ev);
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
-				pendingEvents.remove(0);
+				spoolReleaseFromMemory(pendingEvents.remove(0));
 				healthEventsLost.incrementAndGet();
 			}
 		}
@@ -3772,6 +3792,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			activeRsn = rsn;
 			activeHash = hash;
+			syncSpoolState();	// an account change purges the previous account's durable spool
 			sessionActive = true;
 			sessionStartMillis = System.currentTimeMillis();
 			emitEvent("login", loginFields());
@@ -3942,7 +3963,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			batch = new ArrayList<>();
 			java.util.Iterator<Map<String, Object>> it = pendingEvents.iterator();
-			while (it.hasNext())
+			while (it.hasNext() && batch.size() < EVENT_BATCH_MAX_EVENTS)
 			{
 				Map<String, Object> ev = it.next();
 				Object bound = ev.get(EVENT_TOKEN_FP);
@@ -3953,6 +3974,7 @@ public class AccountConnectPlugin extends Plugin
 				else
 				{
 					healthEventsLost.incrementAndGet();
+					spoolReleaseFromMemory(ev);
 				}
 				it.remove();
 			}
@@ -3975,22 +3997,34 @@ public class AccountConnectPlugin extends Plugin
 		// user fixed the typo; without this guard 0.7.4 would stay silently dead until restart.
 		try
 		{
-			List<Map<String, Object>> wireBatch = new ArrayList<>(batch.size());
+			// Encode and MEASURE before sending: the server refuses a body of 256 KiB or more, so the
+			// batch is cut at the last event that keeps it under the limit, and the rest goes back to
+			// the FRONT of the buffer for the next flush, in order. A single event that is too large
+			// on its own is still sent alone, exactly as before.
+			List<String> encoded = new ArrayList<>(batch.size());
 			for (Map<String, Object> queued : batch)
 			{
 				Map<String, Object> wire = new LinkedHashMap<>(queued);
 				wire.remove(EVENT_TOKEN_FP);
-				wireBatch.add(wire);
+				encoded.add(gson.toJson(wire));
 			}
-			Map<String, Object> body = new LinkedHashMap<>();
-			body.put("token", token);
-			body.put("events", wireBatch);
+			int kept = fitEventBatch(gson.toJson(token), encoded);
+			if (kept < batch.size())
+			{
+				List<Map<String, Object>> overflow = new ArrayList<>(batch.subList(kept, batch.size()));
+				batch = new ArrayList<>(batch.subList(0, kept));
+				synchronized (pendingEvents)
+				{
+					pendingEvents.addAll(0, overflow);
+				}
+			}
+			String body = eventBatchBody(gson.toJson(token), encoded.subList(0, kept));
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 			Request request = new Request.Builder()
 				.url(base + "/event-ingest")
-				.post(RequestBody.create(JSON, gson.toJson(body)))
+				.post(RequestBody.create(JSON, body))
 				.build();
-			okHttpClient.newCall(request).enqueue(buildEventCallback(batch));
+			okHttpClient.newCall(request).enqueue(buildEventCallback(batch, token));
 		}
 		catch (Throwable t)
 		{
@@ -4002,7 +4036,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** The delivery callback, extracted so the dispatch window above can be guarded as one block. */
-	private Callback buildEventCallback(final List<Map<String, Object>> batch)
+	private Callback buildEventCallback(final List<Map<String, Object>> batch, final String sentToken)
 	{
 		return new Callback()
 		{
@@ -4020,11 +4054,19 @@ public class AccountConnectPlugin extends Plugin
 				{
 					if (response.isSuccessful())
 					{
+						// Durable rows are settled ONLY by their own event_id in `results`. The memory
+						// copy is done either way, exactly as before; an unacked durable row stays on
+						// disk and becomes eligible for the paced replay.
+						spoolOnMemoryBatchDone(batch, sentToken, readBody(response), response.code());
 						healthEventsSent.addAndGet(batch.size());
 						healthLastEventUploadMs.set(System.currentTimeMillis());
 						eventPostInFlight = false;
 						eventRetryBackoffMs = 0;	// delivered — reset the ladder
 						eventRetryBackoffUntilMs = 0L;
+						if (!pendingEvents.isEmpty())
+						{
+							scheduleCoalescedFlush();	// the rest of a split batch goes now, not at the next tick
+						}
 						return;
 					}
 					// Non-2xx: the server did NOT take these events. A 4xx other than 429 is not
@@ -4054,6 +4096,9 @@ public class AccountConnectPlugin extends Plugin
 						log.debug("OSRS BiS event sync HTTP {} — dropping {} events (not retryable)",
 							code, batch.size());
 						healthEventsLost.addAndGet(batch.size());
+						// 403 = the link is revoked: the identity's spool is purged. Any other 4xx:
+						// the durable copies go to terminal quarantine, metadata only, never retried.
+						spoolOnMemoryBatchDone(batch, sentToken, null, code);
 						eventPostInFlight = false;
 					}
 				}
@@ -4082,7 +4127,7 @@ public class AccountConnectPlugin extends Plugin
 			pendingEvents.addAll(0, batch);
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
-				pendingEvents.remove(0);
+				spoolReleaseFromMemory(pendingEvents.remove(0));
 				healthEventsLost.incrementAndGet();
 			}
 		}
@@ -4102,6 +4147,959 @@ public class AccountConnectPlugin extends Plugin
 	long nowMs()
 	{
 		return System.currentTimeMillis();
+	}
+
+	// =====================================================================================================
+	// DURABLE EVENT SPOOL (staff only). See EventSpool for the file format.
+	//
+	// GATE. Active only when the server sent X-Event-Spool: on for the CURRENT token, uploadAllowed() holds
+	// and the account hash is real. Otherwise every event takes exactly the memory-only path above, and no
+	// file or directory is ever created. A public client never receives the header, so it never writes.
+	//
+	// SERVER ACK CONTRACT ASSUMED (the server side is built separately):
+	//   request : unchanged body {token, events:[...]}, every event carries a top-level "event_id"
+	//             (32 lower-case hex, generated once at emit). At most 100 events and < 256 KiB per request.
+	//   2xx     : {"ok":true,"results":[{"event_id":"<hex>","status":"stored"|"duplicate"|"filtered"},...]}
+	//             A durable row is deleted ONLY when its own event_id is listed with one of those statuses.
+	//             No `results` array (today's {"ok":true,"stored":N}), an unknown status, a malformed entry
+	//             or an id missing from the list deletes NOTHING: the row stays and replay backs off.
+	//             "filtered" is terminal and counted as a loss (spool_filtered_total).
+	//   429/5xx/network : keep, back off (Retry-After honoured); replay stops on the first 429.
+	//   403     : the link is revoked; this identity's spool is purged.
+	//   other 4xx: the batch's rows go to terminal quarantine as metadata only and are never retried.
+	//
+	// PURGE TRIGGERS, exactly: token clear or change, account change, 403 revocation, X-Event-Spool: off.
+	// An operator pause (X-Uploads-Enabled: false) only holds replay; nothing is purged.
+	//
+	// THREADING. Every file operation runs on ONE dedicated single-thread executor, never the client
+	// thread and never the shared upload executor. An event_id is owned by the memory path while it sits
+	// in pendingEvents or in a memory POST; only after that is it eligible for the paced replay, so the
+	// same id is never in flight twice in one process.
+	// =====================================================================================================
+
+	/** Exact event types that may reach disk. Everything else stays memory-only. */
+	static final java.util.Set<String> SPOOL_ALLOWLIST = java.util.Collections.unmodifiableSet(new java.util.HashSet<>(
+		java.util.Arrays.asList("trade", "ge_offer", "ge_progress", "ge_buy", "ge_sell", "ge_cancel", "ge_collect",
+			"store_buy", "store_sell", "store_taken", "drop", "pickup", "ground_removed", "bank_session", "login",
+			"logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death")));
+	static final long SPOOL_REPLAY_MIN_GAP_MS = 5_000L;
+	private static final java.util.Set<String> SPOOL_TERMINAL_STATUSES = java.util.Collections.unmodifiableSet(
+		new java.util.HashSet<>(java.util.Arrays.asList("stored", "duplicate", "filtered")));
+	private static final Pattern EVENT_ID_HEX = Pattern.compile("^[0-9a-f]{32}$");
+
+	private final Object spoolStateLock = new Object();
+	/** The token the server granted the spool for; null = off. */
+	private volatile String spoolGrantToken;
+	/** The identity key that is active right now, or null. */
+	private volatile String spoolIdentity;
+	/** The last valid (token, account) this process saw, so a change can purge what it left behind. */
+	private String spoolLastToken;
+	private String spoolLastAccount;
+	volatile boolean spoolReplayPaused;
+	volatile long spoolReplayNotBeforeMs;
+	volatile long spoolReplayBackoffUntilMs;
+	volatile long spoolReplayBackoffMs;
+	volatile boolean spoolReplayInFlight;
+	private volatile java.nio.file.Path spoolDataRootOverride;
+	private volatile java.util.concurrent.ExecutorService spoolExec;
+	/** event_id -> identity, for spooled events the memory path still owns. */
+	private final Map<String, String> spoolMemoryOwned = new java.util.concurrent.ConcurrentHashMap<>();
+	private final EventSpool.Counters spoolCounters = new EventSpool.Counters();
+	private volatile int spoolPendingSnapshot;
+	private volatile long spoolBytesSnapshot;
+	private volatile long spoolOldestSnapshotMs = -1L;
+
+	// Writer-thread state. Touched only on spoolExec.
+	private EventSpool spool;
+	private String spoolInstanceIdentity;
+	private boolean spoolDead;
+	private final java.util.Set<String> spoolRetired = new java.util.HashSet<>();
+	private final java.util.Set<String> spoolReplayIds = new java.util.HashSet<>();
+
+	private java.nio.file.Path spoolDataRoot()
+	{
+		java.nio.file.Path o = spoolDataRootOverride;
+		return o != null ? o : net.runelite.client.RuneLite.PLUGIN_DATA;
+	}
+
+	private java.nio.file.Path spoolRoot()
+	{
+		return spoolDataRoot().resolve("osrsbis").resolve("spool");
+	}
+
+	private static boolean validSpoolAccount(String account)
+	{
+		return account != null && !account.isEmpty() && !"-1".equals(account);
+	}
+
+	private java.util.concurrent.ExecutorService spoolExecutor()
+	{
+		java.util.concurrent.ExecutorService e = spoolExec;
+		if (e == null)
+		{
+			synchronized (spoolStateLock)
+			{
+				if (spoolExec == null)
+				{
+					spoolExec = java.util.concurrent.Executors.newSingleThreadExecutor(r ->
+					{
+						Thread t = new Thread(r, "osrsbis-event-spool");
+						t.setDaemon(true);
+						return t;
+					});
+				}
+				e = spoolExec;
+			}
+		}
+		return e;
+	}
+
+	/** Run one spool operation on the writer thread. A failure is logged and never escapes. */
+	private void onSpoolThread(Runnable op)
+	{
+		try
+		{
+			spoolExecutor().execute(() ->
+			{
+				if (spoolDead)
+				{
+					return;
+				}
+				try
+				{
+					op.run();
+				}
+				catch (Throwable t)
+				{
+					log.debug("OSRS BiS event spool operation failed", t);
+				}
+				finally
+				{
+					refreshSpoolSnapshot();
+				}
+			});
+		}
+		catch (java.util.concurrent.RejectedExecutionException e)
+		{
+			log.debug("OSRS BiS event spool executor is closed", e);
+		}
+	}
+
+	/**
+	 * Recompute which identity is active and purge whatever a token or account change left behind.
+	 * Safe from any thread. Never creates a file by itself.
+	 */
+	void syncSpoolState()
+	{
+		String token = uploadAllowed() ? currentLinkToken() : null;
+		String account = activeHash;
+		String purge = null;
+		String activate = null;
+		synchronized (spoolStateLock)
+		{
+			if (spoolGrantToken != null && !spoolGrantToken.equals(token))
+			{
+				spoolGrantToken = null;	// a grant belongs to one token only
+			}
+			if (spoolLastToken != null)
+			{
+				boolean tokenChanged = !spoolLastToken.equals(token);
+				boolean accountChanged = validSpoolAccount(account) && !spoolLastAccount.equals(account);
+				if (tokenChanged || accountChanged)
+				{
+					purge = EventSpool.identityKey(spoolLastToken, spoolLastAccount);
+					spoolLastToken = null;
+					spoolLastAccount = null;
+				}
+			}
+			if (token != null && validSpoolAccount(account))
+			{
+				spoolLastToken = token;
+				spoolLastAccount = account;
+			}
+			String now = token != null && token.equals(spoolGrantToken) && validSpoolAccount(account)
+				? EventSpool.identityKey(token, account) : null;
+			if (now != null && !now.equals(spoolIdentity))
+			{
+				activate = now;
+			}
+			spoolIdentity = now;
+		}
+		if (purge != null)
+		{
+			final String id = purge;
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id));
+		}
+		if (activate != null)
+		{
+			final String id = activate;
+			onSpoolThread(() ->
+			{
+				try
+				{
+					ensureSpoolInstance(id);
+				}
+				catch (IOException e)
+				{
+					log.debug("OSRS BiS event spool could not be opened", e);
+				}
+			});
+		}
+	}
+
+	/**
+	 * The link token changed or was cleared. syncSpoolState purges the identity this process knew, but a
+	 * change made at the login screen, before any account was seen, knows no identity. The pointer names
+	 * the last granted identity on this OS user; under the changed token it can never be the current one,
+	 * so it is purged now rather than left for a grant that may never come. Creates nothing.
+	 */
+	private void spoolOnTokenChangedWithoutAccount()
+	{
+		final java.nio.file.Path root = spoolRoot();
+		if (!Files.isDirectory(root))
+		{
+			return;
+		}
+		onSpoolThread(() ->
+		{
+			String named = EventSpool.readPointer(root);
+			if (named != null && !named.equals(spoolIdentity))
+			{
+				purgeIdentityOnSpoolThread(named);
+			}
+		});
+	}
+
+	/** X-Event-Spool for sentToken. On grants the spool; off revokes it and purges this identity. */
+	private void setSpoolGrant(String sentToken, boolean on)
+	{
+		if (on)
+		{
+			synchronized (spoolStateLock)
+			{
+				spoolGrantToken = sentToken;
+			}
+			syncSpoolState();
+			return;
+		}
+		spoolRevoke(sentToken);
+	}
+
+	/** The server answered 403 for this token: the link is revoked. */
+	void spoolOnRevoked(String sentToken)
+	{
+		if (sentToken != null && sentToken.equals(currentLinkToken()))
+		{
+			spoolRevoke(sentToken);
+		}
+	}
+
+	private void spoolRevoke(String token)
+	{
+		String account = activeHash;
+		synchronized (spoolStateLock)
+		{
+			spoolGrantToken = null;
+			spoolIdentity = null;
+		}
+		if (token != null && validSpoolAccount(account))
+		{
+			final String id = EventSpool.identityKey(token, account);
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id));
+		}
+	}
+
+	/**
+	 * Writer thread. Make `id` the open identity. At the first grant for an identity: purge the identity the
+	 * pointer names if it is a different one, BEFORE anything of this identity is replayed; age out foreign
+	 * shards by record time; recover this identity's abandoned shards; then point the pointer here.
+	 */
+	private boolean ensureSpoolInstance(String id) throws IOException
+	{
+		if (!id.equals(spoolIdentity) || spoolRetired.contains(id))
+		{
+			return false;
+		}
+		if (spool != null && id.equals(spoolInstanceIdentity))
+		{
+			return true;
+		}
+		if (spool != null)
+		{
+			spool.close();
+			spool = null;
+			spoolInstanceIdentity = null;
+		}
+		java.nio.file.Path root = spoolRoot();
+		String previous = EventSpool.readPointer(root);
+		if (previous != null && !previous.equals(id))
+		{
+			purgeIdentityOnSpoolThread(previous);
+		}
+		EventSpool.sweepAged(root, System::currentTimeMillis, EventSpool.MAX_AGE_MS, spoolCounters);
+		java.nio.file.Path dir = root.resolve(id);
+		spool = new EventSpool(spoolDataRoot(), dir, System::currentTimeMillis, EventSpool.ATOMIC,
+			EventSpool.Limits.DEFAULT, spoolCounters);
+		spoolInstanceIdentity = id;
+		if (Files.isDirectory(dir))
+		{
+			spool.recover();
+		}
+		if (Files.isDirectory(root))
+		{
+			EventSpool.writePointer(spoolDataRoot(), root, id, System.currentTimeMillis());
+		}
+		return true;
+	}
+
+	/** Writer thread. Close our own instance if it is this identity, then purge the directory. */
+	private void purgeIdentityOnSpoolThread(String id)
+	{
+		try
+		{
+			if (spool != null && id.equals(spoolInstanceIdentity))
+			{
+				spool.closeAndDeleteOwn();
+				spool = null;
+				spoolInstanceIdentity = null;
+			}
+			spoolMemoryOwned.values().removeIf(id::equals);
+			java.nio.file.Path root = spoolRoot();
+			java.nio.file.Path dir = root.resolve(id);
+			boolean existed = Files.isDirectory(dir);
+			EventSpool.purgeIdentityDir(dir, System::currentTimeMillis);
+			EventSpool.deletePointerIf(root, id);
+			if (existed)
+			{
+				spoolCounters.purged.incrementAndGet();
+			}
+		}
+		catch (IOException e)
+		{
+			log.debug("OSRS BiS event spool purge failed", e);
+		}
+	}
+
+	/**
+	 * Writer thread. Our identity directory carries a purge marker: another process purged it while we held
+	 * the shard. Stop, delete our own shard, finish the purge, and leave the spool path for this identity.
+	 */
+	private boolean retireIfMarked() throws IOException
+	{
+		if (spool == null || !spool.purgeRequested())
+		{
+			return false;
+		}
+		String id = spoolInstanceIdentity;
+		java.nio.file.Path dir = spool.dir();
+		spool.closeAndDeleteOwn();
+		spool = null;
+		spoolInstanceIdentity = null;
+		spoolRetired.add(id);
+		spoolMemoryOwned.values().removeIf(id::equals);
+		EventSpool.purgeIdentityDir(dir, System::currentTimeMillis);
+		return true;
+	}
+
+	/** emitEventBound hook: durably append an allowlisted event while the spool is active. */
+	private void spoolOnEmit(String type, Map<String, Object> ev, String eventId)
+	{
+		if (!SPOOL_ALLOWLIST.contains(type) || spoolGrantToken == null)
+		{
+			return;
+		}
+		syncSpoolState();
+		final String id = spoolIdentity;
+		if (id == null)
+		{
+			return;
+		}
+		Map<String, Object> wire = new LinkedHashMap<>(ev);
+		wire.remove(EVENT_TOKEN_FP);	// identity is the shard, never a field
+		final String json = gson.toJson(wire);
+		final long created = System.currentTimeMillis();
+		spoolMemoryOwned.put(eventId, id);
+		onSpoolThread(() ->
+		{
+			try
+			{
+				if (!ensureSpoolInstance(id) || retireIfMarked())
+				{
+					spoolMemoryOwned.remove(eventId);
+					return;
+				}
+				boolean existed = Files.isDirectory(spoolRoot());
+				if (spool.append(eventId, type, created, json) && (!existed
+					|| !id.equals(EventSpool.readPointer(spoolRoot()))))
+				{
+					EventSpool.writePointer(spoolDataRoot(), spoolRoot(), id, System.currentTimeMillis());
+				}
+			}
+			catch (IOException e)
+			{
+				spoolMemoryOwned.remove(eventId);
+				log.debug("OSRS BiS event spool append failed", e);
+			}
+		});
+	}
+
+	/** The memory path dropped this event (cap or identity change). Its durable row, if any, can replay. */
+	private void spoolReleaseFromMemory(Map<String, Object> ev)
+	{
+		Object id = ev == null ? null : ev.get("event_id");
+		if (id != null)
+		{
+			spoolMemoryOwned.remove(String.valueOf(id));
+		}
+	}
+
+	/** A memory POST finished with a final answer (not 429/5xx/network, which requeue in memory). */
+	private void spoolOnMemoryBatchDone(List<Map<String, Object>> batch, String sentToken, String body, int code)
+	{
+		final Map<String, String> spooled = new LinkedHashMap<>();
+		for (Map<String, Object> ev : batch)
+		{
+			Object raw = ev.get("event_id");
+			String eid = raw == null ? null : String.valueOf(raw);
+			String owner = eid == null ? null : spoolMemoryOwned.get(eid);
+			if (owner != null)
+			{
+				spooled.put(eid, owner);
+			}
+		}
+		if (code == 403)
+		{
+			spoolMemoryOwned.keySet().removeAll(spooled.keySet());
+			spoolOnRevoked(sentToken);
+			return;
+		}
+		if (spooled.isEmpty())
+		{
+			return;
+		}
+		onSpoolThread(() ->
+		{
+			spoolMemoryOwned.keySet().removeAll(spooled.keySet());
+			settleOnSpoolThread(spooled, code, body, -1L);
+		});
+	}
+
+	/** Read a response body for the ack, or null. Never throws. */
+	private static String readBody(Response response)
+	{
+		try
+		{
+			return response.body() == null ? null : response.body().string();
+		}
+		catch (IOException | RuntimeException e)
+		{
+			return null;
+		}
+	}
+
+	/**
+	 * Per-id ack: event_id -> status, only for well-formed entries with a known terminal status. Null when the
+	 * body has no `results` ARRAY; then nothing may be deleted.
+	 */
+	static Map<String, String> parseSpoolResults(String body)
+	{
+		if (body == null)
+		{
+			return null;
+		}
+		try
+		{
+			com.google.gson.JsonElement root = new com.google.gson.JsonParser().parse(body);
+			if (!root.isJsonObject())
+			{
+				return null;
+			}
+			com.google.gson.JsonElement results = root.getAsJsonObject().get("results");
+			if (results == null || !results.isJsonArray())
+			{
+				return null;
+			}
+			Map<String, String> out = new LinkedHashMap<>();
+			for (com.google.gson.JsonElement e : results.getAsJsonArray())
+			{
+				if (!e.isJsonObject())
+				{
+					continue;
+				}
+				com.google.gson.JsonElement id = e.getAsJsonObject().get("event_id");
+				com.google.gson.JsonElement st = e.getAsJsonObject().get("status");
+				if (id == null || st == null || !id.isJsonPrimitive() || !st.isJsonPrimitive()
+					|| !id.getAsJsonPrimitive().isString() || !st.getAsJsonPrimitive().isString())
+				{
+					continue;
+				}
+				String eid = id.getAsString();
+				String status = st.getAsString();
+				if (EVENT_ID_HEX.matcher(eid).matches() && SPOOL_TERMINAL_STATUSES.contains(status))
+				{
+					out.put(eid, status);
+				}
+			}
+			return out;
+		}
+		catch (RuntimeException e)
+		{
+			return null;
+		}
+	}
+
+	/**
+	 * Writer thread. Settle the durable copies of one sent batch (ids -> identity they were written under).
+	 * Rows of an identity that is no longer open are not touched here; the purge already removed them.
+	 */
+	private void settleOnSpoolThread(Map<String, String> sent, int code, String body, long retryAfterMs)
+	{
+		if (spool == null)
+		{
+			return;
+		}
+		List<String> mine = new ArrayList<>();
+		for (Map.Entry<String, String> e : sent.entrySet())
+		{
+			if (e.getValue().equals(spoolInstanceIdentity) && spool.get(e.getKey()) != null)
+			{
+				mine.add(e.getKey());
+			}
+		}
+		if (mine.isEmpty())
+		{
+			return;
+		}
+		try
+		{
+			if (code >= 200 && code < 300)
+			{
+				Map<String, String> results = parseSpoolResults(body);
+				List<String> ack = new ArrayList<>();
+				int filtered = 0;
+				if (results != null)
+				{
+					for (String eid : mine)
+					{
+						String status = results.get(eid);
+						if (status != null)
+						{
+							ack.add(eid);
+							if ("filtered".equals(status))
+							{
+								filtered++;
+							}
+						}
+					}
+				}
+				int done = spool.ack(ack);
+				spoolCounters.acked.addAndGet(done);
+				spoolCounters.filtered.addAndGet(filtered);
+				if (done > 0)
+				{
+					spoolCounters.lastAckMs.set(System.currentTimeMillis());
+				}
+				int unacked = mine.size() - ack.size();
+				if (unacked > 0)
+				{
+					spoolCounters.unacked2xx.addAndGet(unacked);
+					armSpoolReplayBackoff(0L);
+				}
+				else
+				{
+					spoolReplayBackoffMs = 0L;	// every row of this batch is settled: reset the ladder
+					spoolReplayBackoffUntilMs = 0L;
+				}
+				spool.maybeCompact();
+			}
+			else if (code == 429 || code >= 500 || code < 0)
+			{
+				armSpoolReplayBackoff(retryAfterMs);
+			}
+			else if (code >= 400 && code != 403)
+			{
+				spool.quarantine(mine, code);
+			}
+		}
+		catch (IOException e)
+		{
+			log.debug("OSRS BiS event spool settle failed", e);
+		}
+	}
+
+	private void armSpoolReplayBackoff(long retryAfterMs)
+	{
+		long next = spoolReplayBackoffMs <= 0
+			? EVENT_RETRY_BASE_BACKOFF_MS
+			: Math.min(spoolReplayBackoffMs * 2, EVENT_RETRY_MAX_BACKOFF_MS);
+		if (retryAfterMs > 0)
+		{
+			next = Math.max(next, Math.min(retryAfterMs, EVENT_RETRY_MAX_BACKOFF_MS));
+		}
+		spoolReplayBackoffMs = next;
+		spoolReplayBackoffUntilMs = nowMs() + next;
+	}
+
+	/** Writer thread. Replay candidates: oldest first, recovered rows first, never an id something else owns. */
+	private List<EventSpool.Record> spoolReplayCandidates()
+	{
+		List<EventSpool.Record> out = new ArrayList<>();
+		if (spool == null)
+		{
+			return out;
+		}
+		for (EventSpool.Record r : spool.pending())
+		{
+			if (!spoolMemoryOwned.containsKey(r.eventId) && !spoolReplayIds.contains(r.eventId))
+			{
+				out.add(r);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * The paced replay, on the 5 s schedule. At most one request per SPOOL_REPLAY_MIN_GAP_MS, at most 100
+	 * events and under 256 KiB, none while a pause, a backoff or a previous replay is open.
+	 */
+	void replaySpoolTick()
+	{
+		if (spoolGrantToken == null)
+		{
+			return;
+		}
+		syncSpoolState();
+		final String id = spoolIdentity;
+		final String token = currentLinkToken();
+		if (id == null || spoolReplayPaused || spoolReplayInFlight)
+		{
+			return;
+		}
+		long now = nowMs();
+		if (now < spoolReplayNotBeforeMs || now < spoolReplayBackoffUntilMs)
+		{
+			return;
+		}
+		spoolReplayInFlight = true;
+		onSpoolThread(() ->
+		{
+			boolean sent = false;
+			try
+			{
+				sent = sendSpoolReplay(id, token);
+			}
+			finally
+			{
+				if (!sent)
+				{
+					spoolReplayInFlight = false;
+				}
+			}
+		});
+	}
+
+	/** Writer thread. Build and enqueue one replay request. True when a request is in flight. */
+	private boolean sendSpoolReplay(String id, String token)
+	{
+		try
+		{
+			if (!ensureSpoolInstance(id) || retireIfMarked())
+			{
+				return false;
+			}
+			spool.maybeCompact();
+			if (!id.equals(spoolIdentity) || !token.equals(currentLinkToken()) || spoolReplayPaused)
+			{
+				return false;
+			}
+			List<EventSpool.Record> candidates = spoolReplayCandidates();
+			if (candidates.isEmpty())
+			{
+				return false;
+			}
+			List<String> encoded = new ArrayList<>();
+			for (int i = 0; i < candidates.size() && i < EVENT_BATCH_MAX_EVENTS; i++)
+			{
+				encoded.add(candidates.get(i).eventJson);
+			}
+			String tokenJson = gson.toJson(token);
+			int kept = fitEventBatch(tokenJson, encoded);
+			final Map<String, String> sentIds = new LinkedHashMap<>();
+			for (int i = 0; i < kept; i++)
+			{
+				sentIds.put(candidates.get(i).eventId, id);
+			}
+			String body = eventBatchBody(tokenJson, encoded.subList(0, kept));
+			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			Request request = new Request.Builder()
+				.url(base + "/event-ingest")
+				.post(RequestBody.create(JSON, body))
+				.build();
+			spoolReplayIds.addAll(sentIds.keySet());
+			spoolReplayNotBeforeMs = nowMs() + SPOOL_REPLAY_MIN_GAP_MS;
+			spoolCounters.replayed.addAndGet(kept);
+			try
+			{
+				okHttpClient.newCall(request).enqueue(buildSpoolReplayCallback(sentIds, token));
+			}
+			catch (RuntimeException e)
+			{
+				spoolReplayIds.removeAll(sentIds.keySet());
+				armSpoolReplayBackoff(0L);
+				return false;
+			}
+			return true;
+		}
+		catch (IOException | RuntimeException e)
+		{
+			log.debug("OSRS BiS event spool replay could not be built", e);
+			return false;
+		}
+	}
+
+	private Callback buildSpoolReplayCallback(final Map<String, String> sentIds, final String sentToken)
+	{
+		return new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				finishReplay(sentIds, -1, null, 0L);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try
+				{
+					int code = response.code();
+					if (code == 403)
+					{
+						spoolOnRevoked(sentToken);
+						finishReplay(sentIds, code, null, 0L);
+						return;
+					}
+					long retryAfterMs = 0L;
+					if (code == 429)
+					{
+						Long ra = parseRetryAfterSeconds(response.header("Retry-After"));
+						retryAfterMs = ra == null ? 0L : ra * 1000L;
+					}
+					finishReplay(sentIds, code, response.isSuccessful() ? readBody(response) : null, retryAfterMs);
+				}
+				finally
+				{
+					response.close();
+				}
+			}
+		};
+	}
+
+	private void finishReplay(Map<String, String> sentIds, int code, String body, long retryAfterMs)
+	{
+		if (code == 429)
+		{
+			// Stop replay on the FIRST 429, before the writer thread even runs: the next tick must not send.
+			armSpoolReplayBackoff(retryAfterMs);
+		}
+		onSpoolThread(() ->
+		{
+			try
+			{
+				spoolReplayIds.removeAll(sentIds.keySet());
+				if (code != 429)
+				{
+					settleOnSpoolThread(sentIds, code, body, retryAfterMs);
+				}
+				if (code >= 200 && code < 300)
+				{
+					healthLastEventUploadMs.set(System.currentTimeMillis());
+				}
+			}
+			finally
+			{
+				spoolReplayInFlight = false;
+			}
+		});
+	}
+
+	/** How many of these encoded events fit in one request: at most 100 and under 256 KiB, at least one. */
+	static int fitEventBatch(String tokenJson, List<String> encoded)
+	{
+		long bytes = ("{\"token\":" + tokenJson + ",\"events\":[]}").getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+		int n = 0;
+		for (String e : encoded)
+		{
+			if (n >= EVENT_BATCH_MAX_EVENTS)
+			{
+				break;
+			}
+			long add = e.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + (n > 0 ? 1 : 0);
+			if (n > 0 && bytes + add >= EVENT_BATCH_MAX_BYTES)
+			{
+				break;
+			}
+			bytes += add;
+			n++;
+		}
+		return Math.max(n, Math.min(1, encoded.size()));
+	}
+
+	/** The request body, byte-identical to gson's encoding of {token, events}. */
+	static String eventBatchBody(String tokenJson, List<String> encoded)
+	{
+		StringBuilder sb = new StringBuilder("{\"token\":").append(tokenJson).append(",\"events\":[");
+		for (int i = 0; i < encoded.size(); i++)
+		{
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			sb.append(encoded.get(i));
+		}
+		return sb.append("]}").toString();
+	}
+
+	/** Writer thread: publish content-free numbers for the health block. */
+	private void refreshSpoolSnapshot()
+	{
+		EventSpool s = spool;
+		spoolPendingSnapshot = s == null ? 0 : s.pendingCount();
+		spoolBytesSnapshot = s == null ? 0L : s.pendingPayloadBytes();
+		spoolOldestSnapshotMs = s == null ? -1L : s.oldestCreatedMs();
+	}
+
+	private void addSpoolHealth(Map<String, Object> h)
+	{
+		h.put("spool_active", spoolIdentity != null);
+		h.put("spool_records_pending", spoolPendingSnapshot);
+		h.put("spool_bytes", spoolBytesSnapshot);
+		long oldest = spoolOldestSnapshotMs;
+		h.put("spool_oldest_age_s", oldest > 0 ? Math.max(0L, (System.currentTimeMillis() - oldest) / 1000L) : 0L);
+		h.put("spool_replayed_total", spoolCounters.replayed.get());
+		h.put("spool_acked_total", spoolCounters.acked.get());
+		h.put("spool_dropped_total", spoolCounters.dropped.get());
+		h.put("spool_corrupt_total", spoolCounters.corrupt.get());
+		h.put("spool_quarantined_total", spoolCounters.quarantined.get());
+		h.put("spool_filtered_total", spoolCounters.filtered.get());
+		h.put("spool_unacked_2xx_total", spoolCounters.unacked2xx.get());
+		h.put("spool_purged_total", spoolCounters.purged.get());
+		long ack = spoolCounters.lastAckMs.get();
+		if (ack > 0)
+		{
+			h.put("last_spool_ack_at", ack / 1000L);
+		}
+	}
+
+	/** shutDown: close the shard. Its rows stay on disk for the next process of the same identity. */
+	private void closeSpool()
+	{
+		// A re-enable is treated like a cold start: nothing is written or replayed until the server
+		// sends X-Event-Spool again for the configured token.
+		synchronized (spoolStateLock)
+		{
+			spoolGrantToken = null;
+			spoolIdentity = null;
+		}
+		if (spoolExec == null)
+		{
+			return;
+		}
+		onSpoolThread(() ->
+		{
+			if (spool != null)
+			{
+				spool.close();
+				spool = null;
+				spoolInstanceIdentity = null;
+			}
+		});
+	}
+
+	// ---- test hooks (same package only) ----
+
+	void setSpoolDataRootForTest(java.nio.file.Path root)
+	{
+		spoolDataRootOverride = root;
+	}
+
+	/** Simulate process death: drop the shard handle and lock, write nothing, do nothing ever again. */
+	void crashSpoolForTest() throws Exception
+	{
+		java.util.concurrent.ExecutorService e = spoolExec;
+		if (e == null || e.isShutdown())
+		{
+			spoolDead = true;
+			return;
+		}
+		e.submit(() ->
+		{
+			if (spool != null)
+			{
+				spool.crashForTest();
+				spool = null;
+			}
+			spoolDead = true;
+		}).get(5, TimeUnit.SECONDS);
+		e.shutdown();
+	}
+
+	void awaitSpoolIdleForTest() throws Exception
+	{
+		java.util.concurrent.ExecutorService e = spoolExec;
+		if (e != null && !e.isShutdown())
+		{
+			e.submit(() -> { }).get(5, TimeUnit.SECONDS);
+		}
+	}
+
+	private <T> T onSpoolThreadAndWait(java.util.concurrent.Callable<T> c, T empty) throws Exception
+	{
+		java.util.concurrent.ExecutorService e = spoolExec;
+		if (e == null || e.isShutdown())
+		{
+			return empty;
+		}
+		return e.submit(c).get(5, TimeUnit.SECONDS);
+	}
+
+	List<String> spoolPendingIdsForTest() throws Exception
+	{
+		return onSpoolThreadAndWait(() ->
+		{
+			List<String> out = new ArrayList<>();
+			if (spool != null)
+			{
+				for (EventSpool.Record r : spool.pending())
+				{
+					out.add(r.eventId);
+				}
+			}
+			return out;
+		}, new ArrayList<>());
+	}
+
+	List<String> spoolReplayCandidatesForTest() throws Exception
+	{
+		return onSpoolThreadAndWait(() ->
+		{
+			List<String> out = new ArrayList<>();
+			for (EventSpool.Record r : spoolReplayCandidates())
+			{
+				out.add(r.eventId);
+			}
+			return out;
+		}, new ArrayList<>());
+	}
+
+	java.nio.file.Path spoolShardFileForTest() throws Exception
+	{
+		return onSpoolThreadAndWait(() -> spool == null ? null : spool.shardFile(), null);
+	}
+
+	void recoverAbandonedShardsNow() throws Exception
+	{
+		onSpoolThreadAndWait(() -> spool == null ? 0 : spool.recover(), 0);
 	}
 
 	/**
@@ -4133,6 +5131,7 @@ public class AccountConnectPlugin extends Plugin
 	public void eventFlushTask()
 	{
 		flushEvents();
+		replaySpoolTick();
 	}
 
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
@@ -9173,6 +10172,7 @@ public class AccountConnectPlugin extends Plugin
 		if (eventAt > 0) h.put("last_event_upload_at", eventAt / 1000L);
 		if (mediaAt > 0) h.put("last_media_upload_at", mediaAt / 1000L);
 		if (snapshotAt > 0) h.put("last_snapshot_upload_at", snapshotAt / 1000L);
+		addSpoolHealth(h);
 		return h;
 	}
 
@@ -9587,7 +10587,11 @@ public class AccountConnectPlugin extends Plugin
 				try
 				{
 					int code = response.code();
-					applyServerPolicy(response);	// server dictates cadence / screenshot-disable per token
+					applyServerPolicy(response, token);	// server dictates cadence / screenshot-disable per token
+					if (code == 403)
+					{
+						spoolOnRevoked(token);	// a revoked link: its durable spool is purged
+					}
 					if (response.isSuccessful())
 					{
 						onUploadAccepted(hash);
@@ -9640,6 +10644,32 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void applyServerPolicy(Response response)
 	{
+		applyServerPolicy(response, currentLinkToken());
+	}
+
+	/**
+	 * sentToken is the token the request carried. The spool grant is applied only when it is still the
+	 * configured token, so a late response for an old token can never switch the new identity on.
+	 *   X-Event-Spool      "on"/"enabled"/"true"/"1" turns the durable event spool on for this token;
+	 *                      "off"/"disabled"/"false"/"0" turns it off and purges this identity's spool.
+	 *                      Absent or unparseable = unchanged; the default is off.
+	 */
+	void applyServerPolicy(Response response, String sentToken)
+	{
+		String eventSpool = response.header("X-Event-Spool");
+		if (eventSpool != null && sentToken != null && sentToken.equals(currentLinkToken()))
+		{
+			String v = eventSpool.trim().toLowerCase(java.util.Locale.ROOT);
+			if ("on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v))
+			{
+				setSpoolGrant(sentToken, true);
+			}
+			else if ("off".equals(v) || "disabled".equals(v) || "false".equals(v) || "0".equals(v))
+			{
+				setSpoolGrant(sentToken, false);
+			}
+		}
+
 		String screenshots = response.header("X-Screenshots");
 		if (screenshots != null)
 		{
@@ -9698,6 +10728,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			String v = uploadsEnabled.trim().toLowerCase(java.util.Locale.ROOT);
 			paused = "false".equals(v) || "0".equals(v) || "off".equals(v);
+			// An operator pause holds spool REPLAY only. Writes continue within bounds; nothing is purged.
+			spoolReplayPaused = paused;
 		}
 
 		String interval = response.header("X-Sync-Interval");
