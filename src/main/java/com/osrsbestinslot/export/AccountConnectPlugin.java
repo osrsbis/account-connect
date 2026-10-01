@@ -535,6 +535,22 @@ public class AccountConnectPlugin extends Plugin
 	final java.util.List<Map<String, Object>> pendingEvents =
 		java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 	private static final int MAX_PENDING_EVENTS = 500;
+	/** Internal-only queue binding. Removed before POST; never sent to the server. */
+	private static final String EVENT_TOKEN_FP = "__delivery_token_fp";
+	// Cumulative capture-health counters for this plugin process. They intentionally live outside
+	// pendingEvents so the health record can ride in ordinary snapshots without recursively generating
+	// another event. Restart loss remains a separate, explicitly planned durability problem.
+	private final long healthProcessStartedAtMs = System.currentTimeMillis();
+	private final java.util.concurrent.atomic.AtomicLong healthEventsQueued = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthEventsSent = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthEventsLost = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsSent = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsRefused = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsLost = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthDropFramesRejected = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthLastEventUploadMs = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthLastMediaUploadMs = new java.util.concurrent.atomic.AtomicLong();
+	private final java.util.concurrent.atomic.AtomicLong healthLastSnapshotUploadMs = new java.util.concurrent.atomic.AtomicLong();
 
 	/** Event-delivery retry state. Base equals the flush period, so the first retry is the next tick. */
 	private static final long EVENT_RETRY_BASE_BACKOFF_MS = 5_000L;
@@ -765,6 +781,9 @@ public class AccountConnectPlugin extends Plugin
 	/** Trade offer + counterparty captured at the confirm screen, emitted as a "trade" event on accept. */
 	private volatile List<Map<String, Object>> pendingTradeGiven;
 	private volatile String pendingCounterparty;
+	// Staff-only enrichment: exact-name combat level observed while the direct-trade window is open.
+	// Never guessed from hiscores or stale state; null means the named player was not uniquely visible.
+	private volatile Integer pendingCounterpartyCombatLevel;
 	// WAVE 1b: the counterparty's side (what WE receive), read from the confirm-screen YOU_WILL_RECEIVE widget
 	// at 334-load. pendingTradeReceived = structured [{id,qty}] if the widget exposes item children;
 	// pendingReceivedText = the raw "Blood rune x 100 ..." summary as a lossless fallback when it does not.
@@ -1449,6 +1468,45 @@ public class AccountConnectPlugin extends Plugin
 	/** Segments whose upload FAILED after every retry. A clip missing a segment must say so. */
 	private final java.util.concurrent.atomic.AtomicInteger dropSegmentsFailed =
 		new java.util.concurrent.atomic.AtomicInteger();
+
+	/** Per-session reconciliation that survives async segment callbacks and the next session starting. */
+	static final class DropSessionAudit
+	{
+		final String sessionId;
+		final String accountHash;
+		final String rsn;
+		final String tokenFingerprint;
+		final long startedAtMillis;
+		final java.util.concurrent.atomic.AtomicInteger dropEvents = new java.util.concurrent.atomic.AtomicInteger();
+		final java.util.concurrent.atomic.AtomicInteger removals = new java.util.concurrent.atomic.AtomicInteger();
+		final java.util.concurrent.atomic.AtomicInteger resolvedCounterparties = new java.util.concurrent.atomic.AtomicInteger();
+		final java.util.concurrent.ConcurrentHashMap<Integer, String> segmentResults = new java.util.concurrent.ConcurrentHashMap<>();
+		volatile DropFrameSegmenter segmenter;
+		volatile int declaredSegments = -1;
+		volatile int declaredDrops = -1;
+		volatile int frames;
+		volatile int framesRejected;
+		volatile boolean truncated;
+		volatile boolean recorderComplete;
+		volatile int localFailures;
+		volatile String recorderReason;
+		volatile long endedAtMillis;
+		volatile boolean closed;
+		volatile boolean finalEmitted;
+
+		DropSessionAudit(String sessionId, String accountHash, String rsn, String tokenFingerprint,
+			long startedAtMillis)
+		{
+			this.sessionId = sessionId;
+			this.accountHash = accountHash;
+			this.rsn = rsn;
+			this.tokenFingerprint = tokenFingerprint;
+			this.startedAtMillis = startedAtMillis;
+		}
+	}
+
+	private final java.util.concurrent.ConcurrentHashMap<String, DropSessionAudit> dropAudits =
+		new java.util.concurrent.ConcurrentHashMap<>();
 	/**
 	 * Live piles of the CURRENT session, keyed exactly as DropSessionRecorder keys them.
 	 *
@@ -1620,9 +1678,26 @@ public class AccountConnectPlugin extends Plugin
 		pendingDropSessionId = dropSession.sessionId();
 		if (!wasActive)
 		{
+			String auditHash = activeHash;
+			String auditRsn = activeRsn;
+			if (client != null)
+			{
+				if (auditHash == null)
+				{
+					auditHash = Long.toString(client.getAccountHash());
+				}
+				if (auditRsn == null && client.getLocalPlayer() != null)
+				{
+					auditRsn = client.getLocalPlayer().getName();
+				}
+			}
+			DropSessionAudit audit = new DropSessionAudit(pendingDropSessionId, auditHash, auditRsn,
+				currentEventTokenFingerprint(), now);
+			dropAudits.put(pendingDropSessionId, audit);
 			// Bind the identity BEFORE capture arms, so no frame can exist that is not attributable.
 			dropSessionToken = currentLinkToken();
 			startDropCapture();
+			audit.segmenter = dropSegmenter;
 		}
 		// A drop inside the tail is its own moment: it cancels the stop, so the clip must show it at
 		// full rate rather than at the baseline the tail had settled into.
@@ -1813,6 +1888,18 @@ public class AccountConnectPlugin extends Plugin
 		dropFramePending = false;
 		if (seg == null)
 		{
+			DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+			if (audit != null)
+			{
+				audit.declaredSegments = 0;
+				audit.declaredDrops = dropCount;
+				audit.recorderComplete = false;
+				audit.recorderReason = reason == null ? "segmenter_missing" : reason;
+				audit.localFailures++;
+				audit.endedAtMillis = System.currentTimeMillis();
+				audit.closed = true;
+				maybeEmitFinalDropManifest(sessionId);
+			}
 			dropSegmenter = null;
 			dropRate = null;
 			return;
@@ -1834,9 +1921,12 @@ public class AccountConnectPlugin extends Plugin
 		catch (RuntimeException e)
 		{
 			dropSegmentsFailed.incrementAndGet();
+			healthDropSegmentsLost.incrementAndGet();
+			noteDropAuditLocalFailure(sessionId);
 			log.debug("OSRS BiS drop tail segment failed to submit", e);
 		}
 		emitDropSessionManifest(seg, outcome, sessionId, dropCount, startedAtMillis, reason);
+		closeDropAudit(seg, outcome, sessionId, dropCount, reason);
 		// Cleared AFTER the manifest: emitDropSessionManifest reads the rate controller's counts.
 		dropSegmenter = null;
 		DropCaptureRate done = dropRate;
@@ -1845,6 +1935,167 @@ public class AccountConnectPlugin extends Plugin
 		{
 			done.clear();
 		}
+	}
+
+	private void noteDropAuditEvent(String sessionId)
+	{
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit != null)
+		{
+			audit.dropEvents.incrementAndGet();
+		}
+	}
+
+	private void noteDropAuditRemoval(String sessionId, boolean resolvedCounterparty)
+	{
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit != null)
+		{
+			audit.removals.incrementAndGet();
+			if (resolvedCounterparty)
+			{
+				audit.resolvedCounterparties.incrementAndGet();
+			}
+		}
+	}
+
+	private void noteDropAuditLocalFailure(String sessionId)
+	{
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit != null)
+		{
+			audit.localFailures++;
+		}
+	}
+
+	private void settleDropAuditSegment(String sessionId, int segmentIndex, String result)
+	{
+		if (result == null)
+		{
+			return;
+		}
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit != null && audit.segmentResults.putIfAbsent(segmentIndex, result) != null)
+		{
+			return;
+		}
+		if ("uploaded".equals(result))
+		{
+			healthDropSegmentsSent.incrementAndGet();
+			healthLastMediaUploadMs.set(System.currentTimeMillis());
+		}
+		else if ("refused".equals(result))
+		{
+			healthDropSegmentsRefused.incrementAndGet();
+		}
+		else
+		{
+			healthDropSegmentsLost.incrementAndGet();
+		}
+		if (audit != null)
+		{
+			maybeEmitFinalDropManifest(sessionId);
+			// Consent-withdrawn audits deliberately emit no manifest, but remain as identity/segmenter
+			// tombstones until every already-submitted callback has settled. Remove only after that point.
+			if (audit.finalEmitted && audit.closed && audit.declaredSegments >= 0
+				&& audit.segmentResults.size() >= audit.declaredSegments)
+			{
+				dropAudits.remove(sessionId, audit);
+			}
+		}
+	}
+
+	private void closeDropAudit(DropFrameSegmenter seg, DropSessionRecorder.Outcome outcome,
+		String sessionId, int dropCount, String reason)
+	{
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit == null || seg == null)
+		{
+			return;
+		}
+		audit.declaredSegments = seg.segmentCount();
+		audit.declaredDrops = dropCount;
+		audit.frames = seg.acceptedFrames();
+		audit.framesRejected = seg.rejectedFrames();
+		audit.truncated = seg.truncated();
+		audit.recorderComplete = outcome == DropSessionRecorder.Outcome.COMPLETE;
+		audit.recorderReason = reason;
+		audit.endedAtMillis = System.currentTimeMillis();
+		audit.closed = true;
+		healthDropFramesRejected.addAndGet(audit.framesRejected);
+		maybeEmitFinalDropManifest(sessionId);
+	}
+
+	private void maybeEmitFinalDropManifest(String sessionId)
+	{
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		if (audit == null)
+		{
+			return;
+		}
+		Map<String, Object> fields;
+		synchronized (audit)
+		{
+			if (!audit.closed || audit.finalEmitted || audit.declaredSegments < 0
+				|| audit.segmentResults.size() < audit.declaredSegments)
+			{
+				return;
+			}
+			int uploaded = 0;
+			int refused = 0;
+			int failed = 0;
+			for (String result : audit.segmentResults.values())
+			{
+				if ("uploaded".equals(result)) uploaded++;
+				else if ("refused".equals(result)) refused++;
+				else failed++;
+			}
+			int missing = Math.max(0, audit.declaredSegments - uploaded);
+			boolean complete = audit.recorderComplete && !audit.truncated && audit.framesRejected == 0
+				&& audit.localFailures == 0 && audit.declaredSegments > 0 && uploaded == audit.declaredSegments
+				&& audit.dropEvents.get() == audit.declaredDrops;
+			fields = new LinkedHashMap<>();
+			fields.put("drop_session_id", audit.sessionId);
+			if (audit.accountHash != null) fields.put("account_hash", audit.accountHash);
+			if (audit.rsn != null) fields.put("rsn", audit.rsn);
+			fields.put("manifest_stage", "FINAL");
+			fields.put("proof_status", complete ? "COMPLETE" : "PARTIAL");
+			fields.put("session_outcome", audit.recorderComplete ? "COMPLETE" : "INTERRUPTED");
+			if (!audit.recorderComplete && audit.recorderReason != null && !audit.recorderReason.isEmpty())
+			{
+				fields.put("outcome_reason", audit.recorderReason);
+			}
+			fields.put("drops_declared", audit.declaredDrops);
+			fields.put("drop_events", audit.dropEvents.get());
+			fields.put("ground_removals", audit.removals.get());
+			fields.put("counterparties_resolved", audit.resolvedCounterparties.get());
+			fields.put("segments_declared", audit.declaredSegments);
+			fields.put("segments_uploaded", uploaded);
+			fields.put("segments_refused", refused);
+			fields.put("segments_failed", failed);
+			fields.put("missing_segments", missing);
+			fields.put("frames", audit.frames);
+			fields.put("frames_rejected", audit.framesRejected);
+			fields.put("local_failures", audit.localFailures);
+			fields.put("started_at", audit.startedAtMillis);
+			fields.put("ended_at", audit.endedAtMillis);
+			fields.put("finalized_at", System.currentTimeMillis());
+			fields.put("media_kind", DROP_MEDIA_KIND);
+			audit.finalEmitted = true;
+		}
+		if (audit.tokenFingerprint != null
+			&& audit.tokenFingerprint.equals(currentEventTokenFingerprint())
+			&& dropProofEnabled())
+		{
+			emitEventBound("drop_trade_clip_final", fields, audit.tokenFingerprint);
+		}
+		else
+		{
+			// Identity/grant changed after capture. Losing the final row is safer than publishing old
+			// evidence under a new identity or after the capture grant was withdrawn.
+			healthEventsLost.incrementAndGet();
+		}
+		dropAudits.remove(sessionId, audit);
 	}
 
 	/**
@@ -1862,6 +2113,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("drop_session_id", sessionId);
+		fields.put("manifest_stage", "PROVISIONAL");
 		// COMPLETE IS A CLAIM ABOUT EVIDENCE, so it is only written when the recorder proved it. The
 		// recorder refuses COMPLETE for a live pile, an outstanding pending drop, an expired
 		// pending, an abandoned pile and any external interrupt — see DropSessionRecorder.finish.
@@ -1949,30 +2201,26 @@ public class AccountConnectPlugin extends Plugin
 	 * The segment index and the session id travel as form fields, so reassembly is deterministic and
 	 * does not infer order from timestamps the way the store path must.
 	 */
-	/**
-	 * The server stored a segment. Release its bytes from the retry buffer.
-	 *
-	 * Called from the OkHttp callback thread, and the segmenter is synchronized, so this is safe.
-	 * It reads the field fresh: a session that has already ended has nulled it, and a late
-	 * acknowledgement for a finished session must not resurrect anything.
-	 */
-	private void acknowledgeDropSegment(int index)
+	private void finishDropSegment(DropFrameSegmenter.Segment segment, String sessionId, String result)
 	{
-		DropFrameSegmenter seg = dropSegmenter;
-		if (seg != null)
+		if (segment == null || result == null)
 		{
-			seg.segmentAcknowledged(index);
+			return;
 		}
-	}
-
-	/** A segment will never be stored. Release its bytes too, and count it as failed elsewhere. */
-	private void abandonDropSegment(int index)
-	{
-		DropFrameSegmenter seg = dropSegmenter;
-		if (seg != null)
+		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropFrameSegmenter owner = audit != null && audit.segmenter != null ? audit.segmenter : dropSegmenter;
+		boolean legacyCurrent = audit == null || !audit.closed;
+		if ("uploaded".equals(result))
 		{
-			seg.segmentAbandoned(index);
+			if (legacyCurrent) dropSegmentsSent.incrementAndGet();
+			if (owner != null) owner.segmentAcknowledged(segment.index);
 		}
+		else
+		{
+			if (legacyCurrent) dropSegmentsFailed.incrementAndGet();
+			if (owner != null) owner.segmentAbandoned(segment.index);
+		}
+		settleDropAuditSegment(sessionId, segment.index, result);
 	}
 
 	private void uploadDropSegment(DropFrameSegmenter.Segment segment, String sessionId)
@@ -1987,7 +2235,7 @@ public class AccountConnectPlugin extends Plugin
 		// capturing, which is exactly the truncation the change exists to remove.
 		if (!uploadAllowed() || segment.frames.isEmpty() || sessionId == null)
 		{
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "failed");
 			return;
 		}
 		// AND THE GRANT ITSELF. uploadAllowed() is the user's own switch plus a well-formed token,
@@ -1997,13 +2245,13 @@ public class AccountConnectPlugin extends Plugin
 		// "turn it off" does not.
 		if (!dropProofEnabled())
 		{
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
 		String token = config.linkToken() == null ? "" : config.linkToken().trim();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "failed");
 			return;
 		}
 		final String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
@@ -2012,11 +2260,18 @@ public class AccountConnectPlugin extends Plugin
 			// No executor means the segment cannot be sent at all. COUNT it rather than throwing:
 			// a throw here would propagate out of stopDropCapture and kill the manifest, so an
 			// upload fault would also erase the record of what was captured.
-			dropSegmentsFailed.incrementAndGet();
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "failed");
 			return;
 		}
-		executor.submit(() -> postDropSegment(base, token, segment, sessionId, 0));
+		try
+		{
+			executor.submit(() -> postDropSegment(base, token, segment, sessionId, 0));
+		}
+		catch (RuntimeException e)
+		{
+			finishDropSegment(segment, sessionId, "failed");
+			log.debug("OSRS BiS drop segment {} could not be scheduled", segment.index, e);
+		}
 	}
 
 	/** One attempt, re-enqueueing itself on failure up to DROP_SEGMENT_RETRIES. */
@@ -2027,7 +2282,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			// The user turned uploads off mid-session. Nothing more will be sent, so release the
 			// bytes rather than leaving them held for the rest of the session.
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
 		// THE GRANT ARM, and it belongs here rather than only at the entry point. A retry runs this
@@ -2043,7 +2298,7 @@ public class AccountConnectPlugin extends Plugin
 		// stored. Both components are self-consistent and the seam between them leaked.
 		if (!dropProofEnabled())
 		{
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
 		// THE OUTSTANDING RETRY ARM. This segment's bytes were captured while `token` was configured,
@@ -2053,11 +2308,13 @@ public class AccountConnectPlugin extends Plugin
 		// the segmenter refuses to produce a new one.
 		if (!token.equals(currentLinkToken()))
 		{
-			abandonDropSegment(segment.index);
+			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
-		Request request = new Request.Builder()
-			.url(base + "/store-frames-ingest")
+		try
+		{
+			Request request = new Request.Builder()
+				.url(base + "/store-frames-ingest")
 			.post(buildDropSegmentBody(segment, token, sessionId))
 			.build();
 		OkHttpClient uploadClient = okHttpClient.newBuilder()
@@ -2094,14 +2351,12 @@ public class AccountConnectPlugin extends Plugin
 						// segment is counted as failed, which is what it is.
 						if (dropSegmentWasRefused(response))
 						{
-							dropSegmentsFailed.incrementAndGet();
-							abandonDropSegment(segment.index);
+							finishDropSegment(segment, sessionId, "refused");
 							log.debug("OSRS BiS drop segment {} refused by the server with a 200",
 								segment.index);
 							return;
 						}
-						dropSegmentsSent.incrementAndGet();
-						acknowledgeDropSegment(segment.index);
+						finishDropSegment(segment, sessionId, "uploaded");
 						return;
 					}
 					// A 4xx other than 429 will fail identically forever, so it is not retried.
@@ -2137,8 +2392,7 @@ public class AccountConnectPlugin extends Plugin
 							log.debug("OSRS BiS drop segment {} got a 403: treating the grant as "
 								+ "withdrawn", segment.index);
 						}
-						dropSegmentsFailed.incrementAndGet();
-						abandonDropSegment(segment.index);
+						finishDropSegment(segment, sessionId, code == 403 ? "refused" : "failed");
 						log.debug("OSRS BiS drop segment {} rejected: {}", segment.index, code);
 					}
 				}
@@ -2152,15 +2406,28 @@ public class AccountConnectPlugin extends Plugin
 			{
 				if (attempt + 1 >= DROP_SEGMENT_RETRIES)
 				{
-					dropSegmentsFailed.incrementAndGet();
-					abandonDropSegment(segment.index);
+					finishDropSegment(segment, sessionId, "failed");
 					log.debug("OSRS BiS drop segment {} lost after {} attempts: {}",
 						segment.index, DROP_SEGMENT_RETRIES, why);
 					return;
 				}
-				executor.submit(() -> postDropSegment(base, token, segment, sessionId, attempt + 1));
+				try
+				{
+					executor.submit(() -> postDropSegment(base, token, segment, sessionId, attempt + 1));
+				}
+				catch (RuntimeException e)
+				{
+					finishDropSegment(segment, sessionId, "failed");
+					log.debug("OSRS BiS drop segment {} retry could not be scheduled", segment.index, e);
+				}
 			}
-		});
+			});
+		}
+		catch (RuntimeException e)
+		{
+			finishDropSegment(segment, sessionId, "failed");
+			log.debug("OSRS BiS drop segment {} could not build or enqueue request", segment.index, e);
+		}
 	}
 
 	/**
@@ -2689,6 +2956,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void discardDropSessionOnWithdrawnConsent()
 	{
+		String discardedSessionId = dropSession.sessionId();
+		DropSessionAudit discardedAudit = discardedSessionId == null ? null : dropAudits.get(discardedSessionId);
 		if (dropSession.active())
 		{
 			dropSession.interrupt();
@@ -2703,6 +2972,23 @@ public class AccountConnectPlugin extends Plugin
 		}
 		DropFrameSegmenter seg = dropSegmenter;
 		dropSegmenter = null;
+		if (discardedAudit != null)
+		{
+			synchronized (discardedAudit)
+			{
+				discardedAudit.segmenter = seg;
+				discardedAudit.declaredSegments = seg == null
+					? discardedAudit.segmentResults.size() : seg.segmentCount();
+				// Set the no-publish tombstone BEFORE closed. maybeEmitFinalDropManifest uses the same
+				// monitor, so no callback can observe closed=true while finalEmitted is still false.
+				discardedAudit.finalEmitted = true;
+				discardedAudit.closed = true;
+			}
+			if (discardedAudit.segmentResults.size() >= discardedAudit.declaredSegments)
+			{
+				dropAudits.remove(discardedSessionId, discardedAudit);
+			}
+		}
 		if (seg != null)
 		{
 			// discardAll, NOT clear. clear() empties only the segment being filled and leaves the
@@ -3285,6 +3571,7 @@ public class AccountConnectPlugin extends Plugin
 		if (stored)
 		{
 			clipChunksSent.incrementAndGet();
+			healthLastMediaUploadMs.set(System.currentTimeMillis());
 			return;
 		}
 		if (lossReason != null)
@@ -3378,6 +3665,12 @@ public class AccountConnectPlugin extends Plugin
 		return activityLogActive();
 	}
 
+	String currentEventTokenFingerprint()
+	{
+		String token = currentLinkToken();
+		return token.matches("^[a-f0-9]{32}$") ? sha256Hex("event-token:" + token) : null;
+	}
+
 	/**
 	 * Buffer one own-account activity event. No-op unless the activity log is active (token linked +
 	 * account not opted out). account_hash/rsn are the currently-tracked session's, stamped at emit time
@@ -3385,13 +3678,24 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void emitEvent(String type, Map<String, Object> fields)
 	{
-		if (!activityLogActive())
+		emitEventBound(type, fields, currentEventTokenFingerprint());
+	}
+
+	private void emitEventBound(String type, Map<String, Object> fields, String tokenFingerprint)
+	{
+		String liveFingerprint = currentEventTokenFingerprint();
+		if (tokenFingerprint == null || !tokenFingerprint.equals(liveFingerprint))
 		{
+			if (tokenFingerprint != null)
+			{
+				healthEventsLost.incrementAndGet();
+			}
 			return;
 		}
 		Map<String, Object> ev = new LinkedHashMap<>();
 		ev.put("type", type);
 		ev.put("ts", System.currentTimeMillis());
+		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		if (activeHash != null)
 		{
 			ev.put("account_hash", activeHash);
@@ -3404,12 +3708,14 @@ public class AccountConnectPlugin extends Plugin
 		{
 			ev.putAll(fields);
 		}
+		healthEventsQueued.incrementAndGet();
 		synchronized (pendingEvents)
 		{
 			pendingEvents.add(ev);
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
 				pendingEvents.remove(0);
+				healthEventsLost.incrementAndGet();
 			}
 		}
 		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
@@ -3611,6 +3917,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		String tokenFingerprint = sha256Hex("event-token:" + token);
 		if (nowMs() < eventRetryBackoffUntilMs)
 		{
 			return;	// backing off after a failure; the events stay buffered
@@ -3633,8 +3940,26 @@ public class AccountConnectPlugin extends Plugin
 			{
 				return;
 			}
-			batch = new ArrayList<>(pendingEvents);
-			pendingEvents.clear();
+			batch = new ArrayList<>();
+			java.util.Iterator<Map<String, Object>> it = pendingEvents.iterator();
+			while (it.hasNext())
+			{
+				Map<String, Object> ev = it.next();
+				Object bound = ev.get(EVENT_TOKEN_FP);
+				if (bound == null || tokenFingerprint.equals(bound))
+				{
+					batch.add(ev);
+				}
+				else
+				{
+					healthEventsLost.incrementAndGet();
+				}
+				it.remove();
+			}
+			if (batch.isEmpty())
+			{
+				return;
+			}
 			eventPostInFlight = true;
 		}
 		// Everything from here to enqueue() must be guarded. The batch has already left the buffer and
@@ -3650,9 +3975,16 @@ public class AccountConnectPlugin extends Plugin
 		// user fixed the typo; without this guard 0.7.4 would stay silently dead until restart.
 		try
 		{
+			List<Map<String, Object>> wireBatch = new ArrayList<>(batch.size());
+			for (Map<String, Object> queued : batch)
+			{
+				Map<String, Object> wire = new LinkedHashMap<>(queued);
+				wire.remove(EVENT_TOKEN_FP);
+				wireBatch.add(wire);
+			}
 			Map<String, Object> body = new LinkedHashMap<>();
 			body.put("token", token);
-			body.put("events", batch);
+			body.put("events", wireBatch);
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 			Request request = new Request.Builder()
 				.url(base + "/event-ingest")
@@ -3688,6 +4020,8 @@ public class AccountConnectPlugin extends Plugin
 				{
 					if (response.isSuccessful())
 					{
+						healthEventsSent.addAndGet(batch.size());
+						healthLastEventUploadMs.set(System.currentTimeMillis());
 						eventPostInFlight = false;
 						eventRetryBackoffMs = 0;	// delivered — reset the ladder
 						eventRetryBackoffUntilMs = 0L;
@@ -3719,6 +4053,7 @@ public class AccountConnectPlugin extends Plugin
 					{
 						log.debug("OSRS BiS event sync HTTP {} — dropping {} events (not retryable)",
 							code, batch.size());
+						healthEventsLost.addAndGet(batch.size());
 						eventPostInFlight = false;
 					}
 				}
@@ -3748,6 +4083,7 @@ public class AccountConnectPlugin extends Plugin
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
 				pendingEvents.remove(0);
+				healthEventsLost.incrementAndGet();
 			}
 		}
 		long next = eventRetryBackoffMs <= 0
@@ -3922,6 +4258,13 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> canonical = new LinkedHashMap<>(snapshot);
 		canonical.remove("captured_at");
 		canonical.remove("wealth");
+		Object src = canonical.get("source");
+		if (src instanceof Map)
+		{
+			Map<String, Object> stableSource = new LinkedHashMap<>((Map<String, Object>) src);
+			stableSource.remove("capture_health");
+			canonical.put("source", stableSource);
+		}
 		return sha256Hex(gson.toJson(canonical));
 	}
 
@@ -4693,6 +5036,7 @@ public class AccountConnectPlugin extends Plugin
 			// to a trade he was never in. Clearing at 335-open closes it at the only point that is
 			// guaranteed to run for every trade.
 			pendingCounterparty = null;
+			pendingCounterpartyCombatLevel = null;
 			pendingTradeReceived = null;
 			pendingReceivedText = null;
 			// Main trade screen open: begin polling the other player's side (readable here, gone by confirm).
@@ -4710,6 +5054,7 @@ public class AccountConnectPlugin extends Plugin
 			if (pendingCounterparty == null || pendingCounterparty.isEmpty())
 			{
 				pendingCounterparty = counterpartyName();
+				pendingCounterpartyCombatLevel = visibleCounterpartyCombatLevel(pendingCounterparty);
 			}
 			if (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
 			{
@@ -4747,7 +5092,16 @@ public class AccountConnectPlugin extends Plugin
 		String cp = counterpartyName();
 		if (cp != null && !cp.isEmpty())
 		{
+			if (pendingCounterparty == null || !cp.equalsIgnoreCase(pendingCounterparty))
+			{
+				pendingCounterpartyCombatLevel = null;
+			}
 			pendingCounterparty = cp;
+			Integer observedCombat = visibleCounterpartyCombatLevel(cp);
+			if (observedCombat != null)
+			{
+				pendingCounterpartyCombatLevel = observedCombat;
+			}
 		}
 	}
 
@@ -4902,6 +5256,61 @@ public class AccountConnectPlugin extends Plugin
 			return name.isEmpty() ? null : name;
 		}
 		return t.isEmpty() ? null : t;
+	}
+
+	/**
+	 * Staff-only direct-trade enrichment. The trade window proves the RSN; this only adds combat level
+	 * when exactly one currently visible Player has that exact RSN. No hiscore lookup, no stale cache and
+	 * no inference from equipment. Ordinary public clients never send this field because maxCapture is
+	 * server-granted and off by default.
+	 */
+	private static String normalizeRsnForMatch(String rsn)
+	{
+		if (rsn == null)
+		{
+			return "";
+		}
+		return Text.removeTags(rsn)
+			.replace('\u00A0', ' ')
+			.replace('_', ' ')
+			.trim()
+			.replaceAll(" +", " ")
+			.toLowerCase(java.util.Locale.ROOT);
+	}
+
+	Integer visibleCounterpartyCombatLevel(String rsn)
+	{
+		String wanted = normalizeRsnForMatch(rsn);
+		if (!maxCapture() || client == null || wanted.isEmpty())
+		{
+			return null;
+		}
+		List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return null;
+		}
+		Integer found = null;
+		int matches = 0;
+		for (Player p : players)
+		{
+			if (p == null || p == client.getLocalPlayer() || p.getName() == null)
+			{
+				continue;
+			}
+			String name = normalizeRsnForMatch(p.getName());
+			if (!wanted.equals(name))
+			{
+				continue;
+			}
+			matches++;
+			int level = p.getCombatLevel();
+			if (level > 0)
+			{
+				found = level;
+			}
+		}
+		return matches == 1 ? found : null;
 	}
 
 	void handleTradeWidgetLoaded(int groupId)
@@ -5271,14 +5680,34 @@ public class AccountConnectPlugin extends Plugin
 	 * WE receive (WAVE 1b — structured [{id,qty}] from the YOU_WILL_RECEIVE widget, or a raw received_text
 	 * summary fallback when that widget carries text rather than item sprites).
 	 */
+	void putWorldContext(Map<String, Object> fields)
+	{
+		if (fields == null || client == null)
+		{
+			return;
+		}
+		int world = client.getWorld();
+		if (world > 0)
+		{
+			fields.put("world", world);
+		}
+		java.util.Set<WorldType> types = client.getWorldType();
+		if (types != null)
+		{
+			fields.put("world_members", types.contains(WorldType.MEMBERS));
+		}
+	}
+
 	void emitTradeEvent()
 	{
 		List<Map<String, Object>> given = pendingTradeGiven;
 		String counterparty = pendingCounterparty;
+		Integer counterpartyCombatLevel = pendingCounterpartyCombatLevel;
 		List<Map<String, Object>> received = pendingTradeReceived;
 		String receivedText = pendingReceivedText;
 		pendingTradeGiven = null;
 		pendingCounterparty = null;
+		pendingCounterpartyCombatLevel = null;
 		pendingTradeReceived = null;
 		pendingReceivedText = null;
 		if (given == null)
@@ -5293,6 +5722,11 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("counterparty", counterparty);
 		}
+		if (counterpartyCombatLevel != null)
+		{
+			fields.put("counterparty_combat_level", counterpartyCombatLevel);
+		}
+		putWorldContext(fields);
 		// WAVE 1b: the received side. Always carry received[] (may be empty if the widget was text-only or not
 		// yet populated); attach received_text only when the structured read came back empty and text was found.
 		fields.put("received", received == null ? new ArrayList<>() : received);
@@ -6681,20 +7115,19 @@ public class AccountConnectPlugin extends Plugin
 			tile.put("plane", p.spawnPlane);
 			fields.put("tile", tile);
 		}
-		int world = client == null ? 0 : client.getWorld();
-		if (world > 0)
-		{
-			fields.put("world", world);
-		}
+		putWorldContext(fields);
 		// SESSION LINKAGE on the drop row itself. drop_seq is what lets the manifest join one drop
 		// to one removal when a session drops the same item, same quantity, onto the same tile twice
 		// — which is the ordinary shape of a drop trade, not an edge case.
+		String auditSessionId = null;
 		if (dropSession.active() && pendingDropSessionId != null)
 		{
-			fields.put("drop_session_id", pendingDropSessionId);
+			auditSessionId = pendingDropSessionId;
+			fields.put("drop_session_id", auditSessionId);
 			fields.put("drop_seq", pendingDropSeq);
 		}
 		emitEvent("drop", fields);
+		noteDropAuditEvent(auditSessionId);
 	}
 
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
@@ -7668,6 +8101,7 @@ public class AccountConnectPlugin extends Plugin
 		// which already answer `unknown` when the evidence does not support a claim.
 		String dropSid = g.attributionAmbiguous ? null : dropSessionForPile(g);
 		int dropSeq = dropSeqForPile(g);
+		boolean resolvedForAudit = false;
 		if (dropSid != null)
 		{
 			fields.put("drop_session_id", dropSid);
@@ -7729,6 +8163,7 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("counterparty_status", status);
 			if (resolved != null)
 			{
+				resolvedForAudit = true;
 				// `counterparty_inferred`, never `counterparty`. The trade path's `counterparty` is
 				// read from the trade window and IS the other party; this one is an inference from
 				// where somebody stood, and the field name has to keep those apart.
@@ -7742,6 +8177,7 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("counterparty_status", DropCandidates.STATUS_UNKNOWN);
 		}
 		emitEvent("ground_removed", fields);
+		noteDropAuditRemoval(dropSid, resolvedForAudit);
 		// Tell the session this pile is gone. When it is the last one, the 5-second tail arms.
 		releasePileFromDropSession(g);
 	}
@@ -8551,6 +8987,7 @@ public class AccountConnectPlugin extends Plugin
 		pendingTradeFrame.set(null);
 		pendingTradeGiven = null;	// activity-log trade capture — drop on decline/abandon/hop so it never leaks
 		pendingCounterparty = null;
+		pendingCounterpartyCombatLevel = null;
 		pendingTradeReceived = null;	// WAVE 1b: received side — drop with the rest so it never leaks across trades
 		pendingReceivedText = null;
 	}
@@ -8698,6 +9135,10 @@ public class AccountConnectPlugin extends Plugin
 			{
 				try
 				{
+					if (response.isSuccessful())
+					{
+						healthLastMediaUploadMs.set(System.currentTimeMillis());
+					}
 					log.debug("OSRS BiS trade screenshot upload response: {}", response.code());
 				}
 				finally
@@ -8706,6 +9147,33 @@ public class AccountConnectPlugin extends Plugin
 				}
 			}
 		});
+	}
+
+	Map<String, Object> captureHealthSnapshot()
+	{
+		Map<String, Object> h = new LinkedHashMap<>();
+		h.put("process_started_at", healthProcessStartedAtMs / 1000L);
+		h.put("events_queued_total", healthEventsQueued.get());
+		h.put("events_sent_total", healthEventsSent.get());
+		h.put("events_lost_total", healthEventsLost.get());
+		synchronized (pendingEvents)
+		{
+			h.put("events_pending", pendingEvents.size());
+		}
+		h.put("event_post_in_flight", eventPostInFlight);
+		h.put("drop_segments_uploaded_total", healthDropSegmentsSent.get());
+		h.put("drop_segments_refused_total", healthDropSegmentsRefused.get());
+		h.put("drop_segments_lost_total", healthDropSegmentsLost.get());
+		h.put("drop_frames_rejected_total", healthDropFramesRejected.get());
+		h.put("store_clip_chunks_uploaded_total", clipChunksSent.get());
+		h.put("store_clip_chunks_lost_total", clipChunksLost.get());
+		long eventAt = healthLastEventUploadMs.get();
+		long mediaAt = healthLastMediaUploadMs.get();
+		long snapshotAt = healthLastSnapshotUploadMs.get();
+		if (eventAt > 0) h.put("last_event_upload_at", eventAt / 1000L);
+		if (mediaAt > 0) h.put("last_media_upload_at", mediaAt / 1000L);
+		if (snapshotAt > 0) h.put("last_snapshot_upload_at", snapshotAt / 1000L);
+		return h;
 	}
 
 	private Map<String, Object> buildSnapshot()
@@ -8718,6 +9186,7 @@ public class AccountConnectPlugin extends Plugin
 		source.put("plugin", "osrsbis-export");
 		source.put("plugin_version", PLUGIN_VERSION);
 		source.put("client", "runelite");
+		source.put("capture_health", captureHealthSnapshot());
 		snap.put("source", source);
 
 		ItemContainer eqp = client.getItemContainer(InventoryID.EQUIPMENT);
@@ -9143,6 +9612,7 @@ public class AccountConnectPlugin extends Plugin
 	private void onUploadAccepted(String hash)
 	{
 		lastUploadedHash = hash;
+		healthLastSnapshotUploadMs.set(System.currentTimeMillis());
 		backoffUntilMillis = 0L;
 		nextBackoffMillis = BACKOFF_START_MILLIS;
 	}

@@ -2,6 +2,7 @@ package com.osrsbestinslot.export;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
@@ -132,6 +133,8 @@ public class RapidDropTest
 		Map<String, Object> e = plugin.pendingEvents.get(0);
 		assertEquals(5L, e.get("qty"));
 		assertEquals(true, e.get("wilderness"));
+		assertEquals(380, e.get("world"));
+		assertEquals(false, e.get("world_members"));
 		assertNotNull("location preserved", e.get("location"));
 	}
 
@@ -202,6 +205,8 @@ public class RapidDropTest
 		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
 		when(client.getVarbitValue(Varbits.IN_WILDERNESS)).thenReturn(1);
 		when(client.getTickCount()).thenReturn(100);
+		when(client.getWorld()).thenReturn(380);
+		when(client.getWorldType()).thenReturn(EnumSet.noneOf(net.runelite.api.WorldType.class));
 		when(client.getLocalPlayer()).thenReturn(player);
 		when(player.getWorldLocation()).thenReturn(new WorldPoint(3100, 3900, 0));
 		inject(plugin, "client", client);

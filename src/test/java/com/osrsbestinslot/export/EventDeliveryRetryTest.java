@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.google.gson.Gson;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +39,7 @@ import org.junit.Test;
 public class EventDeliveryRetryTest
 {
 	private static final String TOKEN = "0123456789abcdef0123456789abcdef";
+	private static final String OTHER_TOKEN = "fedcba9876543210fedcba9876543210";
 
 	private MockWebServer server;
 	private AccountConnectPlugin plugin;
@@ -109,6 +111,54 @@ public class EventDeliveryRetryTest
 	private void clearBackoff()
 	{
 		plugin.eventRetryBackoffUntilMs = 0L;
+	}
+
+	@Test
+	public void internalTokenBindingNeverAppearsOnTheWire() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(200));
+		plugin.emitEvent("trade", new LinkedHashMap<>());
+		plugin.flushEvents();
+		RecordedRequest req = server.takeRequest(3, TimeUnit.SECONDS);
+		assertNotNull(req);
+		String body = req.getBody().readUtf8();
+		assertTrue(body.contains("trade"));
+		assertTrue("internal delivery binding must never be uploaded", !body.contains("__delivery_token_fp"));
+	}
+
+	@Test
+	public void tokenSwitchDropsOldBoundEventsInsteadOfSendingThemUnderNewToken() throws Exception
+	{
+		plugin.emitEvent("trade", new LinkedHashMap<>());
+		assertEquals(1, buffered());
+
+		AccountConnectConfig switched = mock(AccountConnectConfig.class);
+		when(switched.linkToken()).thenReturn(OTHER_TOKEN);
+		when(switched.apiBaseUrl()).thenReturn(server.url("/api").toString().replaceAll("/+$", ""));
+		inject("config", switched);
+
+		plugin.flushEvents();
+		assertEquals(0, buffered());
+		assertNull("old-identity event must not POST under the new token", server.takeRequest(1, TimeUnit.SECONDS));
+		assertEquals(1L, plugin.captureHealthSnapshot().get("events_lost_total"));
+	}
+
+	@Test
+	public void staleBoundEventIsRejectedAtEmitBeforeItCanEnterTheQueue() throws Exception
+	{
+		String oldFingerprint = plugin.currentEventTokenFingerprint();
+		AccountConnectConfig switched = mock(AccountConnectConfig.class);
+		when(switched.linkToken()).thenReturn(OTHER_TOKEN);
+		when(switched.apiBaseUrl()).thenReturn(server.url("/api").toString().replaceAll("/+$", ""));
+		inject("config", switched);
+
+		Method emitBound = AccountConnectPlugin.class.getDeclaredMethod(
+			"emitEventBound", String.class, Map.class, String.class);
+		emitBound.setAccessible(true);
+		emitBound.invoke(plugin, "trade", new LinkedHashMap<>(), oldFingerprint);
+
+		assertEquals("stale callback must never enter the new identity queue", 0, buffered());
+		assertEquals(1L, plugin.captureHealthSnapshot().get("events_lost_total"));
 	}
 
 	// ---------------------------------------------------------------- 5xx

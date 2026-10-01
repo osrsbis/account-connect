@@ -4,7 +4,11 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
+import java.util.EnumSet;
 import net.runelite.api.Client;
+import net.runelite.api.Player;
+import net.runelite.api.WorldType;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.widgets.Widget;
 import org.junit.Test;
@@ -92,6 +96,78 @@ public class TradeOtherOfferCaptureTest
 		assertEquals(3, recv.get(0).get("qty"));
 		assertEquals(22486, recv.get(1).get("id"));
 		assertEquals("Snaauz", field(plugin, "pendingCounterparty"));
+	}
+
+	@Test
+	public void staffTradeAddsObservedCombatAndWorldContext() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "serverMaxCaptureEnabled", true);
+		Client client = mock(Client.class);
+		Player self = mock(Player.class);
+		Player customer = mock(Player.class);
+		when(client.getLocalPlayer()).thenReturn(self);
+		when(client.getPlayers()).thenReturn(Arrays.asList(self, customer));
+		when(customer.getName()).thenReturn("Level Three");
+		when(customer.getCombatLevel()).thenReturn(3);
+		Widget emptyGrid = gridOf();
+		Widget tradeTitle = titleOf("Trading With: Level Three");
+		when(client.getWidget(MAIN_OTHER_OFFER)).thenReturn(emptyGrid);
+		when(client.getWidget(TRADE_TITLE)).thenReturn(tradeTitle);
+		when(client.getWorld()).thenReturn(380);
+		when(client.getWorldType()).thenReturn(EnumSet.noneOf(WorldType.class));
+		inject(plugin, "client", client);
+
+		plugin.captureOtherOfferWhileMainOpen();
+		inject(plugin, "pendingTradeGiven", itemList(995, 50_000_000));
+		plugin.emitTradeEvent();
+
+		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		assertEquals("Level Three", ev.get("counterparty"));
+		assertEquals(3, ev.get("counterparty_combat_level"));
+		assertEquals(380, ev.get("world"));
+		assertEquals(false, ev.get("world_members"));
+	}
+
+	@Test
+	public void combatLevelMatchNormalizesNbspAndUnderscore() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		inject(plugin, "serverMaxCaptureEnabled", true);
+		Client client = mock(Client.class);
+		Player self = mock(Player.class);
+		Player customer = mock(Player.class);
+		when(client.getLocalPlayer()).thenReturn(self);
+		when(client.getPlayers()).thenReturn(Arrays.asList(self, customer));
+		when(customer.getName()).thenReturn("Space\u00A0Name");
+		when(customer.getCombatLevel()).thenReturn(77);
+		inject(plugin, "client", client);
+
+		assertEquals(Integer.valueOf(77), plugin.visibleCounterpartyCombatLevel("Space_Name"));
+	}
+
+	@Test
+	public void combatLevelIsNotAddedWithoutStaffGrant() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();
+		inject(plugin, "config", onConfig());
+		Client client = mock(Client.class);
+		Player self = mock(Player.class);
+		Player customer = mock(Player.class);
+		when(client.getLocalPlayer()).thenReturn(self);
+		when(client.getPlayers()).thenReturn(Arrays.asList(self, customer));
+		when(customer.getName()).thenReturn("Customer");
+		when(customer.getCombatLevel()).thenReturn(126);
+		Widget emptyGrid = gridOf();
+		Widget tradeTitle = titleOf("Trading With: Customer");
+		when(client.getWidget(MAIN_OTHER_OFFER)).thenReturn(emptyGrid);
+		when(client.getWidget(TRADE_TITLE)).thenReturn(tradeTitle);
+		inject(plugin, "client", client);
+
+		plugin.captureOtherOfferWhileMainOpen();
+		assertNull(field(plugin, "pendingCounterpartyCombatLevel"));
 	}
 
 	@Test

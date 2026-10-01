@@ -876,10 +876,10 @@ public class DropStopContractTest
 		assertNull(seg.flushRemainder());
 
 		// Route 3: THE RETRY ITSELF. A segment captured under token A, retried after the swap, must
-		// not reach the network. Driven straight at postDropSegment, because that is the only code
-		// an in-flight retry runs. The rig has no OkHttp client, so REACHING the network step throws
-		// a NullPointerException — which is what makes this a discriminating probe rather than a
-		// flag check. A mismatched token must return quietly; a matching one must reach the call.
+		// not reach request construction/network setup. Driven straight at postDropSegment, because that
+		// is the only code an in-flight retry runs. The probe reads the explicit terminal health result:
+		// a matching authorized attempt reaches setup and fails as LOST in this no-client rig, while an
+		// authority mismatch terminates as REFUSED before request construction.
 		DropFrameSegmenter.Segment old = takeOneSegment();
 		assertFalse("the guard must stop the old-token retry before any network work",
 			postDropSegmentReachedTheNetwork(p, TOKEN, old));
@@ -907,10 +907,8 @@ public class DropStopContractTest
 	}
 
 	/**
-	 * Run one upload attempt and report whether it got as far as the network.
-	 *
-	 * The rig injects no OkHttp client, so an attempt that reaches the call throws a
-	 * NullPointerException. That is the signal: true means the attempt was NOT stopped.
+	 * Run one upload attempt and report whether it got through the authority gates to request/network setup.
+	 * The rig has no OkHttp client, so a live path terminates as LOST; an authority block is REFUSED.
 	 */
 	private static boolean postDropSegmentReachedTheNetwork(AccountConnectPlugin p, String token,
 		DropFrameSegmenter.Segment segment) throws Exception
@@ -918,19 +916,31 @@ public class DropStopContractTest
 		Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
 			String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
 		m.setAccessible(true);
-		try
+		long lostBefore = ((Number) p.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		long refusedBefore = ((Number) p.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
+		m.invoke(p, "https://example.invalid", token, segment, "sid", 0);
+		long lostAfter = ((Number) p.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		long refusedAfter = ((Number) p.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
+		if (lostAfter > lostBefore)
 		{
-			m.invoke(p, "https://example.invalid", token, segment, "sid", 0);
-			return false;
+			return true; // passed every authority guard and reached request construction/network setup
 		}
-		catch (java.lang.reflect.InvocationTargetException e)
-		{
-			if (e.getCause() instanceof NullPointerException)
-			{
-				return true;
-			}
-			throw e;
-		}
+		assertTrue("a blocked attempt must terminate as an explicit refusal", refusedAfter > refusedBefore);
+		return false;
+	}
+
+	@Test
+	public void malformedDropUploadUrlSettlesAsExplicitFailure() throws Exception
+	{
+		Rig r = rig();
+		DropFrameSegmenter.Segment segment = takeOneSegment();
+		long before = ((Number) r.plugin.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+			String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
+		m.setAccessible(true);
+		m.invoke(r.plugin, ":// definitely not a URL", TOKEN, segment, "bad-url-session", 0);
+		long after = ((Number) r.plugin.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		assertEquals("malformed media URL must terminate the segment instead of stranding it", before + 1, after);
 	}
 
 	// ===== CASE 19 — no OLD manifest is emitted after the swap =====
