@@ -899,6 +899,133 @@ public class EventSpoolPluginTest
 			Collections.singletonList(oldest), p.spoolReplayCandidatesForTest());
 	}
 
+	// ------------------------------------------------------------------ round 2: ordering
+
+	@Test
+	public void anAllowlistedEventIsNotPostedUntilItsAppendAndForceComplete() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+		p.spoolBeforeAppendHookForTest = () ->
+		{
+			entered.countDown();
+			try
+			{
+				gate.await(5, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException ignored)
+			{
+			}
+		};
+		p.emitEvent("trade", fields("item", "Abyssal whip"));
+		assertTrue("the spool thread is inside the append", entered.await(3, TimeUnit.SECONDS));
+		String id = lastMemoryIds(p).get(0);
+
+		p.flushEvents();
+		Thread.sleep(300);
+		assertEquals("nothing may be POSTed before the row is durable", 0, bodies.size());
+		assertEquals("the event is still waiting in memory", Collections.singletonList(id), lastMemoryIds(p));
+
+		gate.countDown();
+		p.awaitSpoolIdleForTest();
+		assertEquals("durable now", Collections.singletonList(id), pendingIds(p));
+		flushAndWait(p, 1);
+		assertEquals(Collections.singletonList(id), idsIn(bodies.get(0)));
+		p.flushEvents();
+		Thread.sleep(200);
+		assertEquals("POSTed exactly once", 1, bodies.size());
+		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+	}
+
+	@Test
+	public void anAppendFailureReleasesTheEventToMemoryOnlyAndCountsIt() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		p.spoolBeforeAppendHookForTest = () ->
+		{
+			throw new java.io.UncheckedIOException(new java.io.IOException("disk full"));
+		};
+		emit(p, "trade");
+		String id = lastMemoryIds(p).get(0);
+		flushAndWait(p, 1);
+		assertEquals("the event still goes out, memory-only", Collections.singletonList(id), idsIn(bodies.get(0)));
+		assertTrue("nothing durable", pendingIds(p).isEmpty());
+		assertEquals(1L, p.captureHealthSnapshot().get("spool_append_failed_total"));
+		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+	}
+
+	@Test
+	public void theMemoryCapReleasesADurabilityPendingId() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+		p.spoolBeforeAppendHookForTest = () ->
+		{
+			try
+			{
+				gate.await(5, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException ignored)
+			{
+			}
+		};
+		for (int i = 0; i < 501; i++)
+		{
+			p.emitEvent("trade", fields("n", i));
+		}
+		assertEquals("the cap dropped one event and released its id", 500, p.spoolDurabilityPendingCountForTest());
+		gate.countDown();
+		p.awaitSpoolIdleForTest();
+		assertEquals("never a stuck id", 0, p.spoolDurabilityPendingCountForTest());
+	}
+
+	@Test
+	public void publicTokensNeverEnterTheDurabilityGate() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		p.emitEvent("trade", fields("item", "x"));
+		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+		flushAndWait(p, 1);
+		assertEquals(1, idsIn(bodies.get(0)).size());
+	}
+
+	@Test
+	public void thePointerIsDurableBeforeTheFirstSensitiveRowSoACrashRightAfterItStillPurges() throws Exception
+	{
+		AccountConnectPlugin a = plugin(TOKEN_A, "111");
+		grant(a);
+		List<String> pointerAtFirstAppend = new CopyOnWriteArrayList<>();
+		a.spoolBeforeAppendHookForTest = () -> pointerAtFirstAppend.add(String.valueOf(EventSpool.readPointer(spoolRoot())));
+		a.spoolAfterAppendHookForTest = () ->
+		{
+			throw new IllegalStateException("simulated process death right after the first durable append");
+		};
+		a.emitEvent("trade", fields("item", "Abyssal whip"));
+		a.awaitSpoolIdleForTest();
+		String aId = lastMemoryIds(a).get(0);
+		a.crashSpoolForTest();
+		Path aDir = identityDir(TOKEN_A, "111");
+		assertTrue("the row is on disk", Files.isDirectory(aDir));
+		assertEquals("the pointer named this identity before its first row was written",
+			Collections.singletonList(EventSpool.identityKey(TOKEN_A, "111")), pointerAtFirstAppend);
+
+		List<Boolean> aDirAtRequest = new CopyOnWriteArrayList<>();
+		onRequest.add(() -> aDirAtRequest.add(Files.exists(aDir)));
+		AccountConnectPlugin c = plugin(TOKEN_B, "222");	// A's token is not available anywhere
+		c.startUp();
+		grant(c);
+		assertFalse("A purged at C's first grant", Files.exists(aDir));
+		emit(c, "trade");
+		releaseToReplay(c);
+		replayAndWait(c, bodies.size() + 1);
+		assertFalse(aDirAtRequest.contains(Boolean.TRUE));
+		assertFalse("no A event_id ever reached the server", postedIds().contains(aId));
+	}
+
 	@Test
 	public void healthCarriesTheSpoolCounters() throws Exception
 	{
@@ -908,7 +1035,8 @@ public class EventSpoolPluginTest
 		Map<String, Object> h = p.captureHealthSnapshot();
 		for (String k : Arrays.asList("spool_active", "spool_records_pending", "spool_bytes", "spool_oldest_age_s",
 			"spool_replayed_total", "spool_acked_total", "spool_dropped_total", "spool_corrupt_total",
-			"spool_quarantined_total", "spool_filtered_total", "spool_unacked_2xx_total", "spool_purged_total"))
+			"spool_quarantined_total", "spool_filtered_total", "spool_unacked_2xx_total", "spool_purged_total",
+			"spool_append_failed_total"))
 		{
 			assertTrue(k, h.containsKey(k));
 		}

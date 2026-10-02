@@ -3966,6 +3966,13 @@ public class AccountConnectPlugin extends Plugin
 			while (it.hasNext() && batch.size() < EVENT_BATCH_MAX_EVENTS)
 			{
 				Map<String, Object> ev = it.next();
+				Object eid = ev.get("event_id");
+				if (eid != null && spoolDurabilityPending.containsKey(String.valueOf(eid)))
+				{
+					// Not durable yet: it stays in place and keeps its order. Nothing behind it may
+					// overtake it either, so the batch stops here.
+					break;
+				}
 				Object bound = ev.get(EVENT_TOKEN_FP);
 				if (bound == null || tokenFingerprint.equals(bound))
 				{
@@ -4204,6 +4211,11 @@ public class AccountConnectPlugin extends Plugin
 	private volatile java.util.concurrent.ExecutorService spoolExec;
 	/** event_id -> identity, for spooled events the memory path still owns. */
 	private final Map<String, String> spoolMemoryOwned = new java.util.concurrent.ConcurrentHashMap<>();
+	/** event_id -> identity, for allowlisted events whose durable append has not been forced yet. */
+	private final Map<String, String> spoolDurabilityPending = new java.util.concurrent.ConcurrentHashMap<>();
+	// Test-only hooks around the durable append, run on the spool thread. Always null in production.
+	volatile Runnable spoolBeforeAppendHookForTest;
+	volatile Runnable spoolAfterAppendHookForTest;
 	private final EventSpool.Counters spoolCounters = new EventSpool.Counters();
 	private volatile int spoolPendingSnapshot;
 	private volatile long spoolBytesSnapshot;
@@ -4255,7 +4267,7 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/** Run one spool operation on the writer thread. A failure is logged and never escapes. */
-	private void onSpoolThread(Runnable op)
+	private boolean onSpoolThread(Runnable op)
 	{
 		try
 		{
@@ -4282,7 +4294,9 @@ public class AccountConnectPlugin extends Plugin
 		catch (java.util.concurrent.RejectedExecutionException e)
 		{
 			log.debug("OSRS BiS event spool executor is closed", e);
+			return false;
 		}
+		return true;
 	}
 
 	/**
@@ -4464,6 +4478,7 @@ public class AccountConnectPlugin extends Plugin
 				spoolInstanceIdentity = null;
 			}
 			spoolMemoryOwned.values().removeIf(id::equals);
+			releaseDurabilityGatesOf(id);
 			java.nio.file.Path root = spoolRoot();
 			java.nio.file.Path dir = root.resolve(id);
 			boolean existed = Files.isDirectory(dir);
@@ -4497,6 +4512,7 @@ public class AccountConnectPlugin extends Plugin
 		spoolInstanceIdentity = null;
 		spoolRetired.add(id);
 		spoolMemoryOwned.values().removeIf(id::equals);
+		releaseDurabilityGatesOf(id);
 		EventSpool.purgeIdentityDir(dir, System::currentTimeMillis);
 		return true;
 	}
@@ -4519,28 +4535,77 @@ public class AccountConnectPlugin extends Plugin
 		final String json = gson.toJson(wire);
 		final long created = System.currentTimeMillis();
 		spoolMemoryOwned.put(eventId, id);
-		onSpoolThread(() ->
+		// FORCE BEFORE NETWORK. Until the append below has been forced, flushEvents leaves this event in
+		// pendingEvents (in place, in order) instead of POSTing it. Nothing here blocks the calling thread.
+		spoolDurabilityPending.put(eventId, id);
+		boolean queued = onSpoolThread(() ->
 		{
+			boolean durable = false;
 			try
 			{
-				if (!ensureSpoolInstance(id) || retireIfMarked())
+				if (ensureSpoolInstance(id) && !retireIfMarked())
 				{
-					spoolMemoryOwned.remove(eventId);
-					return;
-				}
-				boolean existed = Files.isDirectory(spoolRoot());
-				if (spool.append(eventId, type, created, json) && (!existed
-					|| !id.equals(EventSpool.readPointer(spoolRoot()))))
-				{
-					EventSpool.writePointer(spoolDataRoot(), spoolRoot(), id, System.currentTimeMillis());
+					// POINTER BEFORE SENSITIVE DATA: the hashed pointer (file and directory forced) names this
+					// identity before its first row exists, so a crash right after the append still lets the
+					// next process purge it without the token.
+					if (!id.equals(EventSpool.readPointer(spoolRoot())))
+					{
+						EventSpool.writePointer(spoolDataRoot(), spoolRoot(), id, System.currentTimeMillis());
+					}
+					Runnable before = spoolBeforeAppendHookForTest;
+					if (before != null)
+					{
+						before.run();
+					}
+					durable = spool.append(eventId, type, created, json);	// forced before it returns true
+					Runnable after = spoolAfterAppendHookForTest;
+					if (after != null)
+					{
+						after.run();
+					}
 				}
 			}
-			catch (IOException e)
+			catch (IOException | RuntimeException e)
 			{
-				spoolMemoryOwned.remove(eventId);
 				log.debug("OSRS BiS event spool append failed", e);
 			}
+			finally
+			{
+				releaseDurabilityGate(eventId, durable);
+			}
 		});
+		if (!queued)
+		{
+			releaseDurabilityGate(eventId, false);
+		}
+	}
+
+	/**
+	 * The durable append for this event finished. durable=false (failure, no instance, a purge marker, a
+	 * retired identity) falls back to today's memory-only behaviour and is counted. Either way the event is
+	 * flushable again, and a flush is scheduled so it is not left waiting for the next tick.
+	 */
+	private void releaseDurabilityGate(String eventId, boolean durable)
+	{
+		if (spoolDurabilityPending.remove(eventId) == null)
+		{
+			return;	// already released (memory cap, identity change, purge)
+		}
+		if (!durable)
+		{
+			spoolMemoryOwned.remove(eventId);
+			spoolCounters.appendFailed.incrementAndGet();
+		}
+		scheduleCoalescedFlush();
+	}
+
+	/** A purged or retired identity never leaves an event waiting on the durability gate. */
+	private void releaseDurabilityGatesOf(String identity)
+	{
+		if (spoolDurabilityPending.values().removeIf(identity::equals))
+		{
+			scheduleCoalescedFlush();
+		}
 	}
 
 	/** The memory path dropped this event (cap or identity change). Its durable row, if any, can replay. */
@@ -4550,6 +4615,7 @@ public class AccountConnectPlugin extends Plugin
 		if (id != null)
 		{
 			spoolMemoryOwned.remove(String.valueOf(id));
+			spoolDurabilityPending.remove(String.valueOf(id));	// a dropped event never holds the gate
 		}
 	}
 
@@ -4984,6 +5050,7 @@ public class AccountConnectPlugin extends Plugin
 		h.put("spool_filtered_total", spoolCounters.filtered.get());
 		h.put("spool_unacked_2xx_total", spoolCounters.unacked2xx.get());
 		h.put("spool_purged_total", spoolCounters.purged.get());
+		h.put("spool_append_failed_total", spoolCounters.appendFailed.get());
 		long ack = spoolCounters.lastAckMs.get();
 		if (ack > 0)
 		{
@@ -5021,6 +5088,11 @@ public class AccountConnectPlugin extends Plugin
 	void setSpoolDataRootForTest(java.nio.file.Path root)
 	{
 		spoolDataRootOverride = root;
+	}
+
+	int spoolDurabilityPendingCountForTest()
+	{
+		return spoolDurabilityPending.size();
 	}
 
 	/** Simulate process death: drop the shard handle and lock, write nothing, do nothing ever again. */

@@ -134,6 +134,7 @@ final class EventSpool
 		final AtomicLong acked = new AtomicLong();
 		final AtomicLong replayed = new AtomicLong();
 		final AtomicLong unacked2xx = new AtomicLong();
+		final AtomicLong appendFailed = new AtomicLong();
 		final AtomicLong lastAckMs = new AtomicLong();
 	}
 
@@ -850,6 +851,7 @@ final class EventSpool
 			Files.deleteIfExists(tmp);
 			throw e;
 		}
+		forceDir(root);	// the rename itself is durable before any row it covers is written
 	}
 
 	static String readPointer(Path root)
