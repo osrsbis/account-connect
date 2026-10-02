@@ -456,19 +456,147 @@ public class EventSpoolCodecTest
 		assertNotEquals(k, EventSpool.identityKey("fedcba9876543210fedcba9876543210", "12345"));
 	}
 
+	/**
+	 * Round 3 (F1) replaced the single v1 pointer with a bounded v2 INDEX of identity keys this install has
+	 * used, so a grant for one identity can still purge an older offline one. It holds only keys and times.
+	 */
 	@Test
-	public void pointerHoldsOnlyVersionIdentityAndTime() throws Exception
+	public void indexHoldsOnlyVersionIdentitiesAndTimesBoundedTo16() throws Exception
 	{
 		Path root = spoolRoot();
 		String k = EventSpool.identityKey(TOKEN, "12345");
 		EventSpool.writePointer(pluginData, root, k, T0);
 		assertEquals(k, EventSpool.readPointer(root));
+		assertEquals(Collections.singletonList(k), EventSpool.readIndex(root));
 		String text = new String(Files.readAllBytes(root.resolve(EventSpool.POINTER)), StandardCharsets.UTF_8);
-		assertEquals("{\"v\":1,\"identity\":\"" + k + "\",\"updated_ms\":" + T0 + "}", text);
+		assertEquals("{\"v\":2,\"identities\":[{\"identity\":\"" + k + "\",\"updated_ms\":" + T0 + "}]}", text);
+		EventSpool.writePointer(pluginData, root, k, T0 + 5);
+		assertEquals("an identity already indexed is not added twice", 1, EventSpool.readIndex(root).size());
+
+		List<String> added = new ArrayList<>();
+		for (int i = 0; i < 20; i++)
+		{
+			String other = EventSpool.identityKey(TOKEN, "acct" + i);
+			added.add(other);
+			EventSpool.writePointer(pluginData, root, other, T0 + i);
+		}
+		List<String> index = EventSpool.readIndex(root);
+		assertEquals("bounded", EventSpool.MAX_INDEX, index.size());
+		assertEquals(16, EventSpool.MAX_INDEX);
+		assertEquals("the oldest entries are dropped", added.subList(4, 20), index);
+		assertEquals("the latest identity", added.get(19), EventSpool.readPointer(root));
+
 		EventSpool.deletePointerIf(root, "ffffffffffffffffffffffffffffffff");
-		assertNotNull(EventSpool.readPointer(root));
-		EventSpool.deletePointerIf(root, k);
+		assertEquals(16, EventSpool.readIndex(root).size());
+		for (String a : added)
+		{
+			EventSpool.deletePointerIf(root, a);
+		}
 		assertNull(EventSpool.readPointer(root));
+		assertFalse("an empty index is deleted", Files.exists(root.resolve(EventSpool.POINTER)));
+	}
+
+	// ------------------------------------------------------------------ round 3
+
+	@Test
+	public void purgeIfIdleNeverTouchesALiveIdentityAndLeavesNoMarker() throws Exception
+	{
+		EventSpool live = open();
+		append(live, 1);
+		EventSpool dead = open();
+		append(dead, 2);
+		dead.crashForTest();
+
+		assertFalse("an identity with a live shard is not purged", EventSpool.purgeIfIdle(dir));
+		assertTrue(Files.exists(live.shardFile()));
+		assertTrue("all or nothing: no shard is deleted while one is live", Files.exists(dead.shardFile()));
+		assertFalse("and no marker is left", Files.exists(dir.resolve(EventSpool.MARKER)));
+
+		live.crashForTest();
+		assertTrue(EventSpool.purgeIfIdle(dir));
+		assertFalse(Files.exists(dir));
+	}
+
+	@Test
+	public void gracefulCloseInAMarkedDirectoryDeletesItsOwnShardAndFinishesThePurge() throws Exception
+	{
+		EventSpool a = open();
+		append(a, 1);
+		assertFalse(EventSpool.purgeIdentityDir(dir, clock::get));
+		assertTrue(Files.exists(dir.resolve(EventSpool.MARKER)));
+		a.close();
+		assertFalse("nothing of a marked identity is left after a graceful close", Files.exists(dir));
+	}
+
+	@Test
+	public void sweepFinishesAMarkedDirectoryWhoseShardsAreAllUnlockedAndKeepsOneWithALiveShard() throws Exception
+	{
+		EventSpool dead = open();
+		append(dead, 1);
+		dead.crashForTest();
+		writeMarker();
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		assertFalse("a marked directory with no live shard is finished by the sweep", Files.exists(dir));
+
+		EventSpool live = open();
+		append(live, 2);
+		writeMarker();
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		assertTrue(Files.exists(live.shardFile()));
+		assertTrue(Files.exists(dir.resolve(EventSpool.MARKER)));
+	}
+
+	@Test
+	public void compactionClosesTheShardHandleBeforeTheRenameAndReopensAfter() throws Exception
+	{
+		EventSpool[] holder = new EventSpool[1];
+		List<Boolean> openAtMove = new ArrayList<>();
+		EventSpool.Mover watching = (from, to) ->
+		{
+			openAtMove.add(holder[0].isOpen());
+			EventSpool.ATOMIC.move(from, to);
+		};
+		EventSpool a = open(watching, EventSpool.Limits.DEFAULT);
+		holder[0] = a;
+		append(a, 1);
+		append(a, 2);
+		a.ack(Collections.singletonList(id(1)));
+		assertTrue(a.compactNow());
+		assertEquals("no handle on the shard while it is replaced (Windows)", Collections.singletonList(false), openAtMove);
+		assertTrue("reopened after the rename", a.isOpen());
+		append(a, 3);
+		a.crashForTest();
+		assertEquals(Arrays.asList(id(2), id(3)), idsAfterRecover(open()));
+	}
+
+	@Test
+	public void aReopenFailureAfterCompactionFailsClosedIsCountedAndLosesNothing() throws Exception
+	{
+		EventSpool a = open();
+		append(a, 1);
+		append(a, 2);
+		a.ack(Collections.singletonList(id(1)));
+		a.setReopenerForTest(p -> { throw new IOException("reopen refused"); });
+		try
+		{
+			a.compactNow();
+			throw new AssertionError("a reopen failure must surface");
+		}
+		catch (IOException expected)
+		{
+			// fails closed
+		}
+		assertTrue(a.isFailed());
+		assertEquals(1L, a.counters().reopenFailed.get());
+		assertFalse("a failed shard takes no new rows", a.append(id(3), "trade", T0, json(id(3), "trade")));
+		a.crashForTest();
+		assertEquals("the compacted rows are recovered by the next instance", Collections.singletonList(id(2)),
+			idsAfterRecover(open()));
+	}
+
+	private void writeMarker() throws IOException
+	{
+		Files.write(dir.resolve(EventSpool.MARKER), ("{\"v\":1,\"requested_ms\":" + T0 + "}").getBytes(StandardCharsets.UTF_8));
 	}
 
 	@Test

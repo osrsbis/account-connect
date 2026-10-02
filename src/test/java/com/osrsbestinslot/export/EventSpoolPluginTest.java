@@ -834,7 +834,13 @@ public class EventSpoolPluginTest
 	}
 
 	@Test
-	public void purgeOfAnotherProcessIdentityLeavesItsLiveShardAndAMarkerThenThatWriterStops() throws Exception
+	/**
+	 * D3, restated under round 3 F1. A grant for ANOTHER identity never marks or purges a live identity (the
+	 * round-1 version of this test asserted the opposite and was rewritten). The marker now comes only from a
+	 * WITHDRAWAL of the identity itself (X-Event-Spool off / 403) in another process: the live shard survives the
+	 * purge, a marker appears, and the marked writer stops, deletes its own shard and leaves the spool path.
+	 */
+	public void withdrawalInAnotherProcessLeavesTheLiveShardAndAMarkerThenThatWriterStops() throws Exception
 	{
 		AccountConnectPlugin p1 = plugin(TOKEN_A, "111");
 		grant(p1);
@@ -844,9 +850,16 @@ public class EventSpoolPluginTest
 		Path live = p1.spoolShardFileForTest();
 		assertTrue(Files.exists(live));
 
-		AccountConnectPlugin p2 = plugin(TOKEN_B, "222");
-		p2.startUp();
+		AccountConnectPlugin other = plugin(TOKEN_B, "222");
+		other.startUp();
+		grant(other);
+		assertTrue("another identity's grant leaves a live identity alone", Files.exists(live));
+		assertFalse("and never marks it", Files.exists(pDir.resolve(EventSpool.MARKER)));
+
+		AccountConnectPlugin p2 = plugin(TOKEN_A, "111");
 		grant(p2);
+		p2.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p2.awaitSpoolIdleForTest();
 		assertTrue("a live shard is never deleted by another process", Files.exists(live));
 		assertTrue(Files.exists(pDir.resolve(EventSpool.MARKER)));
 
@@ -857,6 +870,7 @@ public class EventSpoolPluginTest
 		assertFalse(Files.exists(pDir));
 		emit(p1, "trade");
 		assertFalse("and leaves the spool path", Files.exists(pDir));
+		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
 	}
 
 	@Test
@@ -1024,6 +1038,203 @@ public class EventSpoolPluginTest
 		replayAndWait(c, bodies.size() + 1);
 		assertFalse(aDirAtRequest.contains(Boolean.TRUE));
 		assertFalse("no A event_id ever reached the server", postedIds().contains(aId));
+	}
+
+	// ------------------------------------------------------------------ round 3
+
+	@Test
+	public void twoLiveClientsOnTheSameTokenNeverPurgeOrMarkEachOtherAThenB() throws Exception
+	{
+		runTwoClients(TOKEN_A, "111", TOKEN_A, "222");
+	}
+
+	@Test
+	public void twoLiveClientsOnTheSameTokenNeverPurgeOrMarkEachOtherBThenA() throws Exception
+	{
+		runTwoClients(TOKEN_A, "222", TOKEN_A, "111");
+	}
+
+	@Test
+	public void twoLiveClientsOnDifferentTokensNeverPurgeOrMarkEachOther() throws Exception
+	{
+		runTwoClients(TOKEN_A, "111", TOKEN_B, "222");
+	}
+
+	private void runTwoClients(String t1, String a1, String t2, String a2) throws Exception
+	{
+		AccountConnectPlugin c1 = plugin(t1, a1);
+		grant(c1);
+		emit(c1, "trade");
+		releaseToReplay(c1);
+		String row1 = pendingIds(c1).get(0);
+
+		AccountConnectPlugin c2 = plugin(t2, a2);
+		c2.startUp();
+		grant(c2);
+		emit(c2, "trade");
+		releaseToReplay(c2);
+		String row2 = pendingIds(c2).get(0);
+
+		Path d1 = identityDir(t1, a1);
+		Path d2 = identityDir(t2, a2);
+		assertTrue("the first client's live identity survives the second grant", Files.isDirectory(d1));
+		assertFalse("no marker in a live identity", Files.exists(d1.resolve(EventSpool.MARKER)));
+		assertEquals("the durable-only row is not lost", Collections.singletonList(row1), pendingIds(c1));
+
+		// both keep appending; a grant refresh on either side must not touch the other
+		grant(c1);
+		emit(c1, "drop");
+		emit(c2, "drop");
+		assertFalse(Files.exists(d1.resolve(EventSpool.MARKER)));
+		assertFalse(Files.exists(d2.resolve(EventSpool.MARKER)));
+		assertEquals(2, pendingIds(c1).size());
+		assertEquals(2, pendingIds(c2).size());
+		assertEquals(true, c1.captureHealthSnapshot().get("spool_active"));
+		assertEquals(true, c2.captureHealthSnapshot().get("spool_active"));
+
+		// each replays only its own rows, under its own token
+		releaseToReplay(c1);
+		releaseToReplay(c2);
+		int before = bodies.size();
+		replayAndWait(c1, before + 1);
+		List<String> r1 = idsIn(bodies.get(before));
+		assertTrue(r1.contains(row1));
+		assertFalse(r1.contains(row2));
+		assertTrue(bodies.get(before).contains(t1));
+		waitFor(() -> pendingIds(c1).isEmpty(), "c1 acked");
+		replayAndWait(c2, before + 2);
+		List<String> r2 = idsIn(bodies.get(before + 1));
+		assertTrue(r2.contains(row2));
+		assertFalse(r2.contains(row1));
+		waitFor(() -> pendingIds(c2).isEmpty(), "c2 acked");
+
+		List<String> idx = EventSpool.readIndex(spoolRoot());
+		assertTrue("both identities stay indexed",
+			idx.contains(EventSpool.identityKey(t1, a1)) && idx.contains(EventSpool.identityKey(t2, a2)));
+
+		// once c1 is gone, a fresh process for c2's identity cleans c1 up (the offline purge still works)
+		emit(c1, "trade");
+		emit(c2, "trade");
+		String c2Row = pendingIds(c2).get(0);
+		c1.crashSpoolForTest();
+		c2.crashSpoolForTest();
+		AccountConnectPlugin c3 = plugin(t2, a2);
+		c3.startUp();
+		grant(c3);
+		assertFalse("an idle older identity is purged at the next grant", Files.exists(d1));
+		assertEquals("its own identity's rows are recovered", Collections.singletonList(c2Row), pendingIds(c3));
+	}
+
+	@Test
+	public void theIndexStillPurgesAnOlderOfflineIdentityAfterANewerOneWasRecorded() throws Exception
+	{
+		AccountConnectPlugin a = plugin(TOKEN_A, "111");
+		grant(a);
+		emit(a, "trade");
+		AccountConnectPlugin b = plugin(TOKEN_A, "222");
+		b.startUp();
+		grant(b);
+		emit(b, "trade");
+		Path aDir = identityDir(TOKEN_A, "111");
+		Path bDir = identityDir(TOKEN_A, "222");
+		assertTrue(Files.isDirectory(aDir));
+		a.crashSpoolForTest();
+		b.crashSpoolForTest();
+		assertEquals("the latest recorded identity is B", EventSpool.identityKey(TOKEN_A, "222"),
+			EventSpool.readPointer(spoolRoot()));
+
+		AccountConnectPlugin c = plugin(TOKEN_B, "333");	// neither A nor B's token is available
+		c.startUp();
+		grant(c);
+		assertFalse("the OLDER identity is still purged", Files.exists(aDir));
+		assertFalse(Files.exists(bDir));
+		assertEquals(Collections.singletonList(EventSpool.identityKey(TOKEN_B, "333")), EventSpool.readIndex(spoolRoot()));
+	}
+
+	@Test
+	public void markedWhileLiveThenGracefulCloseLeavesNothingOfThatIdentity() throws Exception
+	{
+		AccountConnectPlugin p1 = plugin(TOKEN_A, "111");
+		grant(p1);
+		emit(p1, "trade");
+		Path dir = identityDir(TOKEN_A, "111");
+		AccountConnectPlugin p2 = plugin(TOKEN_A, "111");
+		grant(p2);
+		emit(p2, "drop");
+		// p2 withdraws the identity (server says off) while p1 still holds its shard: p1 gets a marker.
+		p2.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p2.awaitSpoolIdleForTest();
+		assertTrue(Files.exists(dir.resolve(EventSpool.MARKER)));
+		p1.shutDown();
+		p1.awaitSpoolIdleForTest();
+		assertFalse("nothing of a withdrawn identity survives a graceful close", Files.exists(dir));
+		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
+	}
+
+	@Test
+	public void restartWithAMarkedDirectoryAndNoLiveShardFinishesThePurgeAndANewGrantWorks() throws Exception
+	{
+		AccountConnectPlugin p1 = plugin(TOKEN_A, "111");
+		grant(p1);
+		emit(p1, "trade");
+		Path dir = identityDir(TOKEN_A, "111");
+		Files.write(dir.resolve(EventSpool.MARKER), "{\"v\":1,\"requested_ms\":1}".getBytes(StandardCharsets.UTF_8));
+		p1.crashSpoolForTest();
+
+		AccountConnectPlugin p = plugin(TOKEN_A, "111");
+		p.startUp();
+		grant(p);
+		assertFalse("the old marked rows are not recovered", pendingIds(p).size() > 0);
+		emit(p, "trade");
+		assertEquals(1, pendingIds(p).size());
+		assertFalse(Files.exists(dir.resolve(EventSpool.MARKER)));
+		assertEquals(true, p.captureHealthSnapshot().get("spool_active"));
+	}
+
+	@Test
+	public void retirementByAMarkerTurnsSpoolActiveOffAndStopsWrites() throws Exception
+	{
+		AccountConnectPlugin p1 = plugin(TOKEN_A, "111");
+		grant(p1);
+		emit(p1, "trade");
+		Path dir = identityDir(TOKEN_A, "111");
+		Files.write(dir.resolve(EventSpool.MARKER), "{\"v\":1,\"requested_ms\":1}".getBytes(StandardCharsets.UTF_8));
+		emit(p1, "drop");	// the writer sees the marker and retires
+		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
+		assertFalse(Files.exists(dir));
+		emit(p1, "trade");
+		assertFalse("no write after retirement until a new grant", Files.exists(dir));
+	}
+
+	@Test
+	public void aReplayBatchBuiltBeforeATokenChangeIsNeverSentUnderTheNewToken() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		emit(p, "trade");
+		releaseToReplay(p);
+		String aId = pendingIds(p).get(0);
+		int before = bodies.size();
+		p.spoolReplayBeforeDispatchHookForTest = () ->
+		{
+			try
+			{
+				setToken(p, TOKEN_B);	// the token changes after the batch is built, before dispatch
+			}
+			catch (Exception e)
+			{
+				throw new IllegalStateException(e);
+			}
+		};
+		p.spoolReplayNotBeforeMs = 0L;
+		p.spoolReplayBackoffUntilMs = 0L;
+		p.replaySpoolTick();
+		p.awaitSpoolIdleForTest();
+		Thread.sleep(300);
+		p.spoolReplayBeforeDispatchHookForTest = null;
+		assertEquals("the old-identity batch is never dispatched", before, bodies.size());
+		assertFalse(postedIds().subList(Math.min(before, postedIds().size()), postedIds().size()).contains(aId));
+		assertFalse(p.spoolReplayInFlight);
 	}
 
 	@Test

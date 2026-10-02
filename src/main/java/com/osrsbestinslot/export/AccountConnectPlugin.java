@@ -4216,6 +4216,7 @@ public class AccountConnectPlugin extends Plugin
 	// Test-only hooks around the durable append, run on the spool thread. Always null in production.
 	volatile Runnable spoolBeforeAppendHookForTest;
 	volatile Runnable spoolAfterAppendHookForTest;
+	volatile Runnable spoolReplayBeforeDispatchHookForTest;
 	private final EventSpool.Counters spoolCounters = new EventSpool.Counters();
 	private volatile int spoolPendingSnapshot;
 	private volatile long spoolBytesSnapshot;
@@ -4225,7 +4226,6 @@ public class AccountConnectPlugin extends Plugin
 	private EventSpool spool;
 	private String spoolInstanceIdentity;
 	private boolean spoolDead;
-	private final java.util.Set<String> spoolRetired = new java.util.HashSet<>();
 	private final java.util.Set<String> spoolReplayIds = new java.util.HashSet<>();
 
 	private java.nio.file.Path spoolDataRoot()
@@ -4342,7 +4342,7 @@ public class AccountConnectPlugin extends Plugin
 		if (purge != null)
 		{
 			final String id = purge;
-			onSpoolThread(() -> purgeIdentityOnSpoolThread(id));
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, false));
 		}
 		if (activate != null)
 		{
@@ -4376,10 +4376,13 @@ public class AccountConnectPlugin extends Plugin
 		}
 		onSpoolThread(() ->
 		{
-			String named = EventSpool.readPointer(root);
-			if (named != null && !named.equals(spoolIdentity))
+			String current = spoolIdentity;
+			for (String named : EventSpool.readIndex(root))
 			{
-				purgeIdentityOnSpoolThread(named);
+				if (!named.equals(current))
+				{
+					purgeIdentityOnSpoolThread(named, false);
+				}
 			}
 		});
 	}
@@ -4419,22 +4422,23 @@ public class AccountConnectPlugin extends Plugin
 		if (token != null && validSpoolAccount(account))
 		{
 			final String id = EventSpool.identityKey(token, account);
-			onSpoolThread(() -> purgeIdentityOnSpoolThread(id));
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, true));
 		}
 	}
 
 	/**
-	 * Writer thread. Make `id` the open identity. At the first grant for an identity: purge the identity the
-	 * pointer names if it is a different one, BEFORE anything of this identity is replayed; age out foreign
-	 * shards by record time; recover this identity's abandoned shards; then point the pointer here.
+	 * Writer thread. Make `id` the open identity. At the first grant for an identity: purge every OTHER indexed
+	 * identity that has no live writer, BEFORE anything of this identity is replayed; age out foreign shards by
+	 * record time and finish marked directories; recover this identity's abandoned shards; then record it in
+	 * the index.
 	 */
 	private boolean ensureSpoolInstance(String id) throws IOException
 	{
-		if (!id.equals(spoolIdentity) || spoolRetired.contains(id))
+		if (!id.equals(spoolIdentity))
 		{
 			return false;
 		}
-		if (spool != null && id.equals(spoolInstanceIdentity))
+		if (spool != null && id.equals(spoolInstanceIdentity) && !spool.isFailed())
 		{
 			return true;
 		}
@@ -4445,13 +4449,17 @@ public class AccountConnectPlugin extends Plugin
 			spoolInstanceIdentity = null;
 		}
 		java.nio.file.Path root = spoolRoot();
-		String previous = EventSpool.readPointer(root);
-		if (previous != null && !previous.equals(id))
-		{
-			purgeIdentityOnSpoolThread(previous);
-		}
+		// Every OTHER identity this install has used is purged now, BEFORE anything of this identity is
+		// replayed, but ONLY when no live writer holds any of its shards. A second client running another
+		// identity on this OS user is never marked or purged; its entry stays in the index and is retried at
+		// the next grant or sweep, once that client is gone.
+		purgeIdleIndexedIdentitiesExcept(id);
 		EventSpool.sweepAged(root, System::currentTimeMillis, EventSpool.MAX_AGE_MS, spoolCounters);
 		java.nio.file.Path dir = root.resolve(id);
+		if (Files.exists(dir.resolve(EventSpool.MARKER)) && !EventSpool.purgeIfIdle(dir))
+		{
+			return false;	// a withdrawal of this identity is still being finished by a live writer
+		}
 		spool = new EventSpool(spoolDataRoot(), dir, System::currentTimeMillis, EventSpool.ATOMIC,
 			EventSpool.Limits.DEFAULT, spoolCounters);
 		spoolInstanceIdentity = id;
@@ -4466,8 +4474,27 @@ public class AccountConnectPlugin extends Plugin
 		return true;
 	}
 
-	/** Writer thread. Close our own instance if it is this identity, then purge the directory. */
-	private void purgeIdentityOnSpoolThread(String id)
+	/** Writer thread. Purge every indexed identity other than keep that has no live writer. */
+	private void purgeIdleIndexedIdentitiesExcept(String keep) throws IOException
+	{
+		java.nio.file.Path root = spoolRoot();
+		for (String other : EventSpool.readIndex(root))
+		{
+			if (!other.equals(keep))
+			{
+				purgeIdentityOnSpoolThread(other, false);
+			}
+		}
+	}
+
+	/**
+	 * Writer thread. Close our own instance if it is this identity (its shard is deleted), then purge the
+	 * directory. withdrawn=true is a server-side withdrawal of THIS identity (X-Event-Spool off, 403): a shard
+	 * another live process still holds gets a purge marker, so that writer stops too. withdrawn=false (a token
+	 * or account change, another identity becoming active) never marks or deletes a live identity: the
+	 * directory is purged only when every shard is free, and otherwise kept in the index for a later retry.
+	 */
+	private void purgeIdentityOnSpoolThread(String id, boolean withdrawn)
 	{
 		try
 		{
@@ -4482,9 +4509,15 @@ public class AccountConnectPlugin extends Plugin
 			java.nio.file.Path root = spoolRoot();
 			java.nio.file.Path dir = root.resolve(id);
 			boolean existed = Files.isDirectory(dir);
-			EventSpool.purgeIdentityDir(dir, System::currentTimeMillis);
-			EventSpool.deletePointerIf(root, id);
-			if (existed)
+			boolean gone = withdrawn
+				? EventSpool.purgeIdentityDir(dir, System::currentTimeMillis)
+				: EventSpool.purgeIfIdle(dir);
+			if (gone || withdrawn)
+			{
+				// A marked directory is finished by its writer or by the sweep; it need not stay indexed.
+				EventSpool.deletePointerIf(root, id);
+			}
+			if (existed && (gone || withdrawn))
 			{
 				spoolCounters.purged.incrementAndGet();
 			}
@@ -4496,8 +4529,9 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Writer thread. Our identity directory carries a purge marker: another process purged it while we held
-	 * the shard. Stop, delete our own shard, finish the purge, and leave the spool path for this identity.
+	 * Writer thread. Our identity directory carries a purge marker: the identity was withdrawn (X-Event-Spool
+	 * off or a 403) in another process while we held the shard. Stop, delete our own shard, finish the purge,
+	 * and drop our grant: nothing more is written until the server grants the spool again.
 	 */
 	private boolean retireIfMarked() throws IOException
 	{
@@ -4510,10 +4544,18 @@ public class AccountConnectPlugin extends Plugin
 		spool.closeAndDeleteOwn();
 		spool = null;
 		spoolInstanceIdentity = null;
-		spoolRetired.add(id);
+		synchronized (spoolStateLock)
+		{
+			if (id.equals(spoolIdentity))
+			{
+				spoolGrantToken = null;
+				spoolIdentity = null;
+			}
+		}
 		spoolMemoryOwned.values().removeIf(id::equals);
 		releaseDurabilityGatesOf(id);
-		EventSpool.purgeIdentityDir(dir, System::currentTimeMillis);
+		EventSpool.purgeIfIdle(dir);
+		EventSpool.deletePointerIf(spoolRoot(), id);
 		return true;
 	}
 
@@ -4864,6 +4906,16 @@ public class AccountConnectPlugin extends Plugin
 		});
 	}
 
+	/** Is the identity a replay batch was built for still the live one (token fingerprint and account)? */
+	private boolean replayIdentityStillCurrent(String id, String token)
+	{
+		String live = currentLinkToken();
+		String account = activeHash;
+		return token.equals(live) && sha256Hex("event-token:" + token).equals(currentEventTokenFingerprint())
+			&& validSpoolAccount(account) && id.equals(EventSpool.identityKey(live, account))
+			&& id.equals(spoolIdentity);
+	}
+
 	/** Writer thread. Build and enqueue one replay request. True when a request is in flight. */
 	private boolean sendSpoolReplay(String id, String token)
 	{
@@ -4901,6 +4953,17 @@ public class AccountConnectPlugin extends Plugin
 				.url(base + "/event-ingest")
 				.post(RequestBody.create(JSON, body))
 				.build();
+			Runnable beforeDispatch = spoolReplayBeforeDispatchHookForTest;
+			if (beforeDispatch != null)
+			{
+				beforeDispatch.run();
+			}
+			// FINAL IDENTITY CHECK, immediately before dispatch: a batch built under one token or account is
+			// never sent once either has changed, whatever happened while it was being built.
+			if (!replayIdentityStillCurrent(id, token))
+			{
+				return false;
+			}
 			spoolReplayIds.addAll(sentIds.keySet());
 			spoolReplayNotBeforeMs = nowMs() + SPOOL_REPLAY_MIN_GAP_MS;
 			spoolCounters.replayed.addAndGet(kept);
@@ -5051,6 +5114,7 @@ public class AccountConnectPlugin extends Plugin
 		h.put("spool_unacked_2xx_total", spoolCounters.unacked2xx.get());
 		h.put("spool_purged_total", spoolCounters.purged.get());
 		h.put("spool_append_failed_total", spoolCounters.appendFailed.get());
+		h.put("spool_reopen_failed_total", spoolCounters.reopenFailed.get());
 		long ack = spoolCounters.lastAckMs.get();
 		if (ack > 0)
 		{

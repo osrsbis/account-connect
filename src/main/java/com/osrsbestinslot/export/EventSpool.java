@@ -96,8 +96,12 @@ final class EventSpool
 	private static final Pattern END = Pattern.compile("^\\{\"v\":1,\"k\":\"end\",\"n\":(\\d{1,9})\\}$");
 	private static final Pattern ID_IN = Pattern.compile("\"([0-9a-f]{32})\"");
 	private static final Pattern SHARD_NAME = Pattern.compile("^shard-([0-9a-f]{16})\\.(spl|spl\\.next|lock|corrupt)$");
-	private static final Pattern POINTER_BODY = Pattern.compile(
-		"^\\{\"v\":1,\"identity\":\"([0-9a-f]{32})\",\"updated_ms\":\\d{1,19}\\}$");
+	private static final Pattern INDEX_BODY = Pattern.compile(
+		"^\\{\"v\":2,\"identities\":\\[(\\{\"identity\":\"[0-9a-f]{32}\",\"updated_ms\":\\d{1,19}\\}"
+			+ "(,\\{\"identity\":\"[0-9a-f]{32}\",\"updated_ms\":\\d{1,19}\\}){0,15})\\]\\}$");
+	private static final Pattern INDEX_ENTRY = Pattern.compile(
+		"\\{\"identity\":\"([0-9a-f]{32})\",\"updated_ms\":(\\d{1,19})\\}");
+	static final String INDEX_LOCK = "index.lock";
 
 	/** The compaction rename. Production is ATOMIC_MOVE only; there is no in-place fallback. */
 	interface Mover
@@ -135,6 +139,7 @@ final class EventSpool
 		final AtomicLong replayed = new AtomicLong();
 		final AtomicLong unacked2xx = new AtomicLong();
 		final AtomicLong appendFailed = new AtomicLong();
+		final AtomicLong reopenFailed = new AtomicLong();
 		final AtomicLong lastAckMs = new AtomicLong();
 	}
 
@@ -297,7 +302,7 @@ final class EventSpool
 	 */
 	boolean append(String eventId, String type, long createdMs, String eventJson) throws IOException
 	{
-		if (closed || purgeRequested())
+		if (closed || failed || purgeRequested())
 		{
 			return false;
 		}
@@ -463,23 +468,67 @@ final class EventSpool
 			counters.compactionFailed.incrementAndGet();
 			return false;
 		}
+		// Close OUR handle on the shard before it is replaced: Windows refuses to rename over a file that
+		// is open. The shard lock file stays held the whole time, so no other process can take the shard
+		// while no handle is open, and only this writer thread ever touches it.
+		ch.close();
+		ch = null;
+		boolean moved;
 		try
 		{
 			mover.move(next, shardFile());
+			moved = true;
 		}
 		catch (IOException e)
 		{
 			Files.deleteIfExists(next);
 			counters.compactionFailed.incrementAndGet();
+			moved = false;	// fail closed: the old generation stays exactly as it was
+		}
+		if (moved)
+		{
+			forceDir(dir);
+		}
+		try
+		{
+			ch = reopener.reopen(shardFile());
+		}
+		catch (IOException | RuntimeException e)
+		{
+			// The data is safe on disk (old or new generation), but this writer can no longer append.
+			// Fail closed: stop taking rows; the next process recovers the shard once our lock is gone.
+			failed = true;
+			counters.reopenFailed.incrementAndGet();
+			throw e instanceof IOException ? (IOException) e : new IOException(e);
+		}
+		if (!moved)
+		{
 			return false;
 		}
-		forceDir(dir);
-		ch.close();
-		ch = FileChannel.open(shardFile(), StandardOpenOption.READ, StandardOpenOption.WRITE);
 		fileBytes = ch.size();
 		overheadBytes = HEADER + frame(end).length;
 		liveFrameBytes = fileBytes - overheadBytes;
 		return true;
+	}
+
+	/** How the shard is reopened after a compaction. Production opens it read/write. */
+	interface Reopener
+	{
+		FileChannel reopen(Path shard) throws IOException;
+	}
+
+	private Reopener reopener = p -> FileChannel.open(p, StandardOpenOption.READ, StandardOpenOption.WRITE);
+	private boolean failed;
+
+	void setReopenerForTest(Reopener r)
+	{
+		reopener = r;
+	}
+
+	/** True once this writer can no longer append (a reopen failed). It takes no rows after that. */
+	boolean isFailed()
+	{
+		return failed;
 	}
 
 	// ------------------------------------------------------------------ recovery
@@ -588,17 +637,35 @@ final class EventSpool
 
 	// ------------------------------------------------------------------ shutdown + purge
 
-	/** Graceful close: rows stay on disk for the next process. */
+	/**
+	 * Graceful close: rows stay on disk for the next process. EXCEPT in a marked directory: the identity
+	 * was purged while we held the shard, so our shard is deleted too and, when no other live shard is
+	 * left, the purge is finished (marker and directory gone). Nothing of a purged identity survives a close.
+	 */
 	void close()
 	{
+		if (!closed && purgeRequested())
+		{
+			closeAndDeleteOwn();
+			try
+			{
+				purgeIfIdle(dir);
+			}
+			catch (IOException ignored)
+			{
+				// the sweep finishes it later
+			}
+			return;
+		}
 		closed = true;
 		closeQuietly();
 	}
 
-	/** Process death: drop channels and the lock, write nothing. */
+	/** Process death: drop channels and the lock, write nothing else. */
 	void crashForTest()
 	{
-		close();
+		closed = true;
+		closeQuietly();
 	}
 
 	/** Stop, and delete this process's own shard and lock. Other shards are not touched. */
@@ -705,6 +772,75 @@ final class EventSpool
 		}
 	}
 
+	/**
+	 * Purge an identity ONLY when no live writer holds any of its shards: all or nothing, and never a marker.
+	 * This is the purge used when ANOTHER identity becomes active (two clients on one OS user may each hold a
+	 * different identity, and neither may cost the other its rows). A live identity is left untouched and is
+	 * retried at the next grant or sweep. True when the directory is gone (or never existed).
+	 */
+	static boolean purgeIfIdle(Path dir) throws IOException
+	{
+		if (!Files.isDirectory(dir))
+		{
+			return true;
+		}
+		Locked rl = lock(dir.resolve(RECOVERY_LOCK));
+		if (rl == null)
+		{
+			return false;
+		}
+		List<Locked> held = new ArrayList<>();
+		boolean live = false;
+		try
+		{
+			for (String sid : shardIds(dir))
+			{
+				Locked sl = lockOther(dir, sid);
+				if (sl == null)
+				{
+					live = true;
+					break;
+				}
+				held.add(sl);
+			}
+			if (live)
+			{
+				for (Locked sl : held)
+				{
+					sl.close();
+				}
+				held.clear();
+				return false;
+			}
+			for (String sid : shardIds(dir))
+			{
+				Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl"));
+				Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl.next"));
+				Files.deleteIfExists(dir.resolve("shard-" + sid + ".corrupt"));
+			}
+			Files.deleteIfExists(dir.resolve(QUARANTINE));
+			Files.deleteIfExists(dir.resolve(QUARANTINE + ".next"));
+			Files.deleteIfExists(dir.resolve(MARKER));
+		}
+		finally
+		{
+			for (Locked sl : held)
+			{
+				sl.releaseAndDelete();
+			}
+			rl.releaseAndDelete();
+		}
+		try
+		{
+			Files.deleteIfExists(dir);
+			return true;
+		}
+		catch (java.nio.file.DirectoryNotEmptyException e)
+		{
+			return false;
+		}
+	}
+
 	private static void writeMarker(Path dir, long nowMs) throws IOException
 	{
 		Path m = dir.resolve(MARKER);
@@ -746,6 +882,13 @@ final class EventSpool
 		}
 		for (Path d : dirs)
 		{
+			// A marked directory is a purge someone could not finish because a shard was live. Finish it
+			// now if every shard is free; if one is still live, leave it to its writer.
+			if (Files.exists(d.resolve(MARKER)))
+			{
+				purgeIfIdle(d);
+				continue;
+			}
 			Locked rl = lock(d.resolve(RECOVERY_LOCK));
 			if (rl == null)
 			{
@@ -827,7 +970,17 @@ final class EventSpool
 
 	// ------------------------------------------------------------------ pointer
 
-	/** {"v":1,"identity":"<identityKey>","updated_ms":N} and nothing else. */
+	/**
+	 * THE INDEX (active.json, format v2): {"v":2,"identities":[{"identity":"<key>","updated_ms":N},...]}, the
+	 * identity keys this install has used, newest last, at most MAX_INDEX entries (oldest dropped). Only keys
+	 * and times: never a token, never an account hash in clear. Staff only: it is written only while a spool
+	 * grant is active. It lets a grant for one identity purge OTHER identities whose token is no longer known,
+	 * without ever forgetting an older one because a newer one was recorded (two live clients may each hold a
+	 * different identity). Read-modify-write happens under index.lock, because two processes may both write it.
+	 */
+	static final int MAX_INDEX = 16;
+
+	/** Record identity as the newest entry of the index; written + forced (file and directory). */
 	static void writePointer(Path pluginData, Path root, String identity, long nowMs) throws IOException
 	{
 		if (identity == null || !HEX32.matcher(identity).matches())
@@ -835,49 +988,133 @@ final class EventSpool
 			return;
 		}
 		createOwnerOnlyDirs(pluginData, root);
-		Path tmp = root.resolve(POINTER + ".next");
-		try (FileChannel c = open(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
+		updateIndex(root, idx ->
 		{
-			String body = "{\"v\":1,\"identity\":\"" + identity + "\",\"updated_ms\":" + nowMs + "}";
-			writeFully(c, ByteBuffer.wrap(body.getBytes(StandardCharsets.UTF_8)), 0L);
-			c.force(true);
-		}
-		try
-		{
-			Files.move(tmp, root.resolve(POINTER), StandardCopyOption.ATOMIC_MOVE);
-		}
-		catch (IOException e)
-		{
-			Files.deleteIfExists(tmp);
-			throw e;
-		}
-		forceDir(root);	// the rename itself is durable before any row it covers is written
+			idx.remove(identity);
+			idx.put(identity, nowMs);
+			while (idx.size() > MAX_INDEX)
+			{
+				idx.remove(idx.keySet().iterator().next());
+			}
+		});
 	}
 
+	/** The most recently recorded identity, or null. */
 	static String readPointer(Path root)
 	{
+		List<String> idx = readIndex(root);
+		return idx.isEmpty() ? null : idx.get(idx.size() - 1);
+	}
+
+	/** Every indexed identity, oldest first. Empty when absent or unreadable. */
+	static List<String> readIndex(Path root)
+	{
+		return new ArrayList<>(parseIndex(root).keySet());
+	}
+
+	/** Drop identity from the index; an index left empty is deleted. */
+	static void deletePointerIf(Path root, String identity) throws IOException
+	{
+		if (identity == null || !Files.isRegularFile(root.resolve(POINTER)) || !readIndex(root).contains(identity))
+		{
+			return;
+		}
+		updateIndex(root, idx -> idx.remove(identity));
+	}
+
+	private static LinkedHashMap<String, Long> parseIndex(Path root)
+	{
+		LinkedHashMap<String, Long> out = new LinkedHashMap<>();
 		Path p = root.resolve(POINTER);
 		if (!Files.isRegularFile(p))
 		{
-			return null;
+			return out;
 		}
 		try
 		{
 			String s = new String(Files.readAllBytes(p), StandardCharsets.UTF_8).trim();
-			Matcher m = POINTER_BODY.matcher(s);
-			return m.matches() ? m.group(1) : null;
+			if (!INDEX_BODY.matcher(s).matches())
+			{
+				return out;
+			}
+			Matcher m = INDEX_ENTRY.matcher(s);
+			while (m.find())
+			{
+				out.put(m.group(1), Long.parseLong(m.group(2)));
+			}
 		}
-		catch (IOException e)
+		catch (IOException | RuntimeException e)
 		{
-			return null;
+			out.clear();
 		}
+		return out;
 	}
 
-	static void deletePointerIf(Path root, String identity) throws IOException
+	private static void updateIndex(Path root, java.util.function.Consumer<LinkedHashMap<String, Long>> change) throws IOException
 	{
-		if (identity != null && identity.equals(readPointer(root)))
+		Locked il = null;
+		for (int i = 0; i < 200 && il == null; i++)
 		{
-			Files.deleteIfExists(root.resolve(POINTER));
+			il = lock(root.resolve(INDEX_LOCK));
+			if (il == null)
+			{
+				try
+				{
+					Thread.sleep(5);	// spool thread only; another process holds it for a few ms
+				}
+				catch (InterruptedException e)
+				{
+					Thread.currentThread().interrupt();
+					throw new IOException("index lock interrupted", e);
+				}
+			}
+		}
+		if (il == null)
+		{
+			throw new IOException("index lock unavailable");
+		}
+		try
+		{
+			LinkedHashMap<String, Long> idx = parseIndex(root);
+			change.accept(idx);
+			if (idx.isEmpty())
+			{
+				Files.deleteIfExists(root.resolve(POINTER));
+				forceDir(root);
+				return;
+			}
+			StringBuilder body = new StringBuilder("{\"v\":2,\"identities\":[");
+			boolean first = true;
+			for (Map.Entry<String, Long> e : idx.entrySet())
+			{
+				if (!first)
+				{
+					body.append(',');
+				}
+				first = false;
+				body.append("{\"identity\":\"").append(e.getKey()).append("\",\"updated_ms\":").append(e.getValue()).append('}');
+			}
+			body.append("]}");
+			Path tmp = root.resolve(POINTER + ".next");
+			try (FileChannel c = open(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
+			{
+				writeFully(c, ByteBuffer.wrap(body.toString().getBytes(StandardCharsets.UTF_8)), 0L);
+				c.force(true);
+			}
+			try
+			{
+				Files.move(tmp, root.resolve(POINTER), StandardCopyOption.ATOMIC_MOVE);
+			}
+			catch (IOException e)
+			{
+				Files.deleteIfExists(tmp);
+				throw e;
+			}
+			forceDir(root);	// the rename itself is durable before any row it covers is written
+		}
+		finally
+		{
+			il.releaseAndDelete();
 		}
 	}
 
