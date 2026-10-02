@@ -1237,6 +1237,191 @@ public class EventSpoolPluginTest
 		assertFalse(p.spoolReplayInFlight);
 	}
 
+	// ------------------------------------------------------------------ round 4
+
+	/** A mock of the final server: stored the first time an event_id is seen, duplicate after that. */
+	private final java.util.Map<String, Integer> serverStored = new java.util.concurrent.ConcurrentHashMap<>();
+
+	private MockResponse dedupingServer(String body)
+	{
+		JsonArray arr = new JsonArray();
+		for (String id : idsIn(body))
+		{
+			boolean first = serverStored.putIfAbsent(id, 1) == null;
+			arr.add(result(id, first ? "stored" : "duplicate"));
+		}
+		JsonObject o = new JsonObject();
+		o.addProperty("ok", true);
+		o.add("results", arr);
+		return new MockResponse().setResponseCode(200).setBody(o.toString());
+	}
+
+	@Test
+	public void aHungAppendCannotStallDeliveryAndTheLateRowIsResolvedAsADuplicate() throws Exception
+	{
+		fallback = this::dedupingServer;
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		p.durabilityGateMaxMs = 300L;
+		grant(p);
+		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch disk = new java.util.concurrent.CountDownLatch(1);
+		p.spoolBeforeAppendHookForTest = () ->
+		{
+			entered.countDown();
+			try
+			{
+				disk.await(10, TimeUnit.SECONDS);	// the disk write hangs
+			}
+			catch (InterruptedException ignored)
+			{
+			}
+		};
+		p.emitEvent("trade", fields("item", "Abyssal whip"));
+		assertTrue(entered.await(3, TimeUnit.SECONDS));
+		p.emitEvent("chat", fields("text", "behind the hung write"));	// memory-only, queued behind it
+		List<String> order = lastMemoryIds(p);
+		String hung = order.get(0);
+
+		p.flushEvents();
+		Thread.sleep(150);
+		assertEquals("before the bound, force-before-network still holds", 0, bodies.size());
+
+		Thread.sleep(300);	// past the bound
+		p.flushEvents();	// the spool thread is still hung: do not wait on it
+		waitFor(() -> bodies.size() >= 1 && !p.eventPostInFlight, "memory flush after the bound");
+		assertEquals("delivery resumes in order", order, idsIn(bodies.get(0)));
+		assertEquals(1L, p.captureHealthSnapshot().get("spool_gate_timeout_total"));
+
+		disk.countDown();	// the write completes late
+		p.spoolBeforeAppendHookForTest = null;
+		p.awaitSpoolIdleForTest();
+		assertEquals("the late row is durable with the SAME id", Collections.singletonList(hung), pendingIds(p));
+		assertEquals("the memory ack did not settle a row that was not durable when sent",
+			Collections.singletonList(hung), p.spoolReplayCandidatesForTest());
+
+		replayAndWait(p, 2);
+		assertEquals(Collections.singletonList(hung), idsIn(bodies.get(1)));
+		waitFor(() -> pendingIds(p).isEmpty(), "the duplicate ack deletes the late row");
+		assertEquals("one stored row total on the server", Integer.valueOf(1), serverStored.get(hung));
+		assertEquals("the server saw the hung id twice: stored once, then duplicate", 2,
+			postedIds().stream().filter(hung::equals).count());
+	}
+
+	@Test
+	public void aPurgeDecidedBeforeAReactivationNeverReleasesTheNewGenerationsGate() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "111");
+		grant(p);
+		java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+		java.util.concurrent.CountDownLatch firstIn = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch firstGo = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch secondIn = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch secondGo = new java.util.concurrent.CountDownLatch(1);
+		p.spoolBeforeAppendHookForTest = () ->
+		{
+			int n = calls.incrementAndGet();
+			try
+			{
+				if (n == 1)
+				{
+					firstIn.countDown();
+					firstGo.await(10, TimeUnit.SECONDS);
+				}
+				else if (n == 2)
+				{
+					secondIn.countDown();
+					secondGo.await(10, TimeUnit.SECONDS);
+				}
+			}
+			catch (InterruptedException ignored)
+			{
+			}
+		};
+		p.emitEvent("trade", fields("n", 0));	// X, old generation; the spool thread is now busy
+		assertTrue(firstIn.await(3, TimeUnit.SECONDS));
+
+		inject(p, "activeHash", "222");
+		p.syncSpoolState();						// X -> Y: "purge X" is queued behind the busy thread
+		inject(p, "activeHash", "111");
+		p.syncSpoolState();						// Y -> X: X is active again, a NEW generation
+		p.emitEvent("trade", fields("n", 1));	// X, new generation: gated until its own force
+		String fresh = lastMemoryIds(p).get(1);
+
+		firstGo.countDown();						// the old purge of X now runs, then the fresh append starts
+		assertTrue(secondIn.await(3, TimeUnit.SECONDS));
+		try
+		{
+			p.flushEvents();
+			Thread.sleep(300);
+			assertFalse("the old purge must not release the new generation's gate", postedIds().contains(fresh));
+			assertEquals(1, p.spoolDurabilityPendingCountForTest());
+		}
+		finally
+		{
+			secondGo.countDown();
+		}
+		p.awaitSpoolIdleForTest();
+		assertEquals("the fresh row is durable in the re-activated identity", Collections.singletonList(fresh),
+			pendingIds(p));
+	}
+
+	@Test
+	public void the48HourBoundIsEnforcedAtReplayTimeWithoutAnyAppendOrRecover() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		final long[] offset = {-(EventSpool.MAX_AGE_MS - 2_000L)};
+		p.wallClock = () -> System.currentTimeMillis() + offset[0];
+		grant(p);
+		emit(p, "trade");						// created 47 h 59 m 58 s "ago"
+		String old = lastMemoryIds(p).get(0);
+		offset[0] = 0L;
+		emit(p, "drop");						// fresh; this append still keeps the old row (not yet 48 h)
+		releaseToReplay(p);
+		List<String> both = pendingIds(p);
+		assertEquals(2, both.size());
+		String fresh = both.get(1);
+		long droppedBefore = (Long) p.captureHealthSnapshot().get("spool_dropped_total");
+
+		offset[0] = 3_000L;						// the old row crosses 48 h; no append, no recover
+		int before = bodies.size();
+		replayAndWait(p, before + 1);
+		assertEquals("only the fresh row replays", Collections.singletonList(fresh), idsIn(bodies.get(before)));
+		assertFalse("a row older than 48 h is never POSTed by replay", postedIds().subList(before, postedIds().size()).contains(old));
+		assertEquals(droppedBefore + 1, p.captureHealthSnapshot().get("spool_dropped_total"));
+		p.crashSpoolForTest();
+		AccountConnectPlugin q = plugin(TOKEN_A, "12345");
+		q.wallClock = () -> System.currentTimeMillis() - 1_000L;	// even a clock that is back inside the window
+		q.startUp();
+		grant(q);
+		assertFalse("the age-out is durable (tombstoned)", pendingIds(q).contains(old));
+	}
+
+	@Test
+	public void aReplayBatchThatCrossesTheAgeBoundBeforeDispatchIsNeverSent() throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		final long[] offset = {-(EventSpool.MAX_AGE_MS - 2_000L)};
+		p.wallClock = () -> System.currentTimeMillis() + offset[0];
+		grant(p);
+		emit(p, "trade");
+		releaseToReplay(p);
+		String old = pendingIds(p).get(0);
+		int before = bodies.size();
+		// The batch is built inside the window; the clock then passes 48 h before OkHttp dispatches it.
+		p.spoolReplayBeforeDispatchHookForTest = () -> offset[0] = 3_000L;
+		p.spoolReplayNotBeforeMs = 0L;
+		p.spoolReplayBackoffUntilMs = 0L;
+		p.replaySpoolTick();
+		waitFor(() -> !p.spoolReplayInFlight, "replay attempt settled");
+		p.awaitSpoolIdleForTest();
+		Thread.sleep(200);
+		assertEquals("a row past 48 h at dispatch is never on the wire", before, bodies.size());
+		assertEquals(1L, p.captureHealthSnapshot().get("spool_replay_aged_at_dispatch_total"));
+		p.spoolReplayBeforeDispatchHookForTest = null;
+		replayAndWaitNoRequest(p, before);
+		assertFalse("and the next tick ages it out durably", pendingIds(p).contains(old));
+	}
+
 	@Test
 	public void healthCarriesTheSpoolCounters() throws Exception
 	{
@@ -1247,7 +1432,7 @@ public class EventSpoolPluginTest
 		for (String k : Arrays.asList("spool_active", "spool_records_pending", "spool_bytes", "spool_oldest_age_s",
 			"spool_replayed_total", "spool_acked_total", "spool_dropped_total", "spool_corrupt_total",
 			"spool_quarantined_total", "spool_filtered_total", "spool_unacked_2xx_total", "spool_purged_total",
-			"spool_append_failed_total"))
+			"spool_append_failed_total", "spool_gate_timeout_total"))
 		{
 			assertTrue(k, h.containsKey(k));
 		}

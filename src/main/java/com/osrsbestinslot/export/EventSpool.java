@@ -140,6 +140,8 @@ final class EventSpool
 		final AtomicLong unacked2xx = new AtomicLong();
 		final AtomicLong appendFailed = new AtomicLong();
 		final AtomicLong reopenFailed = new AtomicLong();
+		final AtomicLong gateTimeout = new AtomicLong();
+		final AtomicLong replayAgedAtDispatch = new AtomicLong();
 		final AtomicLong lastAckMs = new AtomicLong();
 	}
 
@@ -1474,6 +1476,15 @@ final class EventSpool
 				payloadBytes -= r.payloadBytes;
 				liveFrameBytes -= frame(evPayload(r)).length;
 			}
+		}
+	}
+
+	/** Enforce the age, record and byte bounds now (durable tombstones, counted). The replay calls it first. */
+	void enforceBoundsNow() throws IOException
+	{
+		if (ch != null && !closed && !failed && !pending.isEmpty())
+		{
+			enforceBounds();
 		}
 	}
 

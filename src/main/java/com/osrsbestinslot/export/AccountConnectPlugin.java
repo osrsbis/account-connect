@@ -3967,7 +3967,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				Map<String, Object> ev = it.next();
 				Object eid = ev.get("event_id");
-				if (eid != null && spoolDurabilityPending.containsKey(String.valueOf(eid)))
+				if (eid != null && !durabilityGateOpen(String.valueOf(eid)))
 				{
 					// Not durable yet: it stays in place and keeps its order. Nothing behind it may
 					// overtake it either, so the batch stops here.
@@ -4209,10 +4209,92 @@ public class AccountConnectPlugin extends Plugin
 	volatile boolean spoolReplayInFlight;
 	private volatile java.nio.file.Path spoolDataRootOverride;
 	private volatile java.util.concurrent.ExecutorService spoolExec;
-	/** event_id -> identity, for spooled events the memory path still owns. */
-	private final Map<String, String> spoolMemoryOwned = new java.util.concurrent.ConcurrentHashMap<>();
-	/** event_id -> identity, for allowlisted events whose durable append has not been forced yet. */
-	private final Map<String, String> spoolDurabilityPending = new java.util.concurrent.ConcurrentHashMap<>();
+	/**
+	 * Which identity GENERATION a spooled event belongs to. The generation counts every change of the active
+	 * identity, so X -> Y -> X gives X a new generation: a purge decided for the old X releases only gates and
+	 * memory ownership of generations up to the one it was decided in, never the re-activated X's.
+	 */
+	private static final class SpoolTag
+	{
+		final String identity;
+		final long generation;
+		final long sinceNanos = System.nanoTime();
+		/** The durability gate timed out: the memory POST went out before the row was durable. */
+		volatile boolean gateTimedOut;
+
+		SpoolTag(String identity, long generation)
+		{
+			this.identity = identity;
+			this.generation = generation;
+		}
+
+		boolean coveredBy(String id, long maxGeneration)
+		{
+			return identity.equals(id) && generation <= maxGeneration;
+		}
+	}
+
+	/** event_id -> tag, for spooled events the memory path still owns. */
+	private final Map<String, SpoolTag> spoolMemoryOwned = new java.util.concurrent.ConcurrentHashMap<>();
+	/** event_id -> tag, for allowlisted events whose durable append has not been forced yet. */
+	private final Map<String, SpoolTag> spoolDurabilityPending = new java.util.concurrent.ConcurrentHashMap<>();
+	/** Incremented under spoolStateLock whenever spoolIdentity changes value. */
+	private long spoolGeneration;
+	/**
+	 * THE HUNG-DISK BOUND. A durability gate older than this is released: the event goes out memory-only
+	 * (spool_gate_timeout_total), in order, with the SAME event_id. If the append completes later, the row is
+	 * not settled by that memory POST; it replays and the server's per-id "duplicate" deletes it. Normal writes
+	 * (force well under this bound) keep force-before-network exactly.
+	 */
+	static final long DURABILITY_GATE_MAX_MS = 3_000L;
+	/**
+	 * THE HARD REPLAY BOUND, together with EventSpool.MAX_AGE_MS. A replay call is refused at DISPATCH time
+	 * (when OkHttp starts executing it, after any dispatcher queueing) if its oldest row is then older than
+	 * MAX_AGE_MS, and the whole call (connect, write, read) is cut off after this timeout. So no replay request
+	 * can still be in transit later than MAX_AGE_MS + SPOOL_REPLAY_CALL_TIMEOUT_MS after the created_ms (which
+	 * is never later than the event's ts) of any row it carries, measured on this client's wall clock.
+	 */
+	static final long SPOOL_REPLAY_CALL_TIMEOUT_MS = 30_000L;
+
+	/** Request tag: the oldest created_ms in a replay batch. */
+	private static final class SpoolReplayAge
+	{
+		final long oldestCreatedMs;
+
+		SpoolReplayAge(long oldestCreatedMs)
+		{
+			this.oldestCreatedMs = oldestCreatedMs;
+		}
+	}
+
+	private volatile OkHttpClient spoolReplayHttp;
+
+	/** The shared client plus the replay call timeout and the dispatch-time age check (same pool and dispatcher). */
+	private OkHttpClient spoolReplayHttp()
+	{
+		OkHttpClient c = spoolReplayHttp;
+		if (c == null)
+		{
+			c = okHttpClient.newBuilder()
+				.callTimeout(SPOOL_REPLAY_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+				.addInterceptor(chain ->
+				{
+					SpoolReplayAge age = chain.request().tag(SpoolReplayAge.class);
+					if (age != null && wallClock.getAsLong() - age.oldestCreatedMs > EventSpool.MAX_AGE_MS)
+					{
+						spoolCounters.replayAgedAtDispatch.incrementAndGet();
+						throw new IOException("spool replay batch passed the age bound before dispatch");
+					}
+					return chain.proceed(chain.request());
+				})
+				.build();
+			spoolReplayHttp = c;
+		}
+		return c;
+	}
+	volatile long durabilityGateMaxMs = DURABILITY_GATE_MAX_MS;
+	/** The spool's wall clock (created_ms, 48 h age). A field so tests can move time. */
+	volatile java.util.function.LongSupplier wallClock = System::currentTimeMillis;
 	// Test-only hooks around the durable append, run on the spool thread. Always null in production.
 	volatile Runnable spoolBeforeAppendHookForTest;
 	volatile Runnable spoolAfterAppendHookForTest;
@@ -4303,11 +4385,22 @@ public class AccountConnectPlugin extends Plugin
 	 * Recompute which identity is active and purge whatever a token or account change left behind.
 	 * Safe from any thread. Never creates a file by itself.
 	 */
+	/** Under spoolStateLock: set the active identity; a change of value starts a new generation. */
+	private void setSpoolIdentityLocked(String identity)
+	{
+		if (!java.util.Objects.equals(identity, spoolIdentity))
+		{
+			spoolGeneration++;
+		}
+		spoolIdentity = identity;
+	}
+
 	void syncSpoolState()
 	{
 		String token = uploadAllowed() ? currentLinkToken() : null;
 		String account = activeHash;
 		String purge = null;
+		long purgeGeneration = 0L;
 		String activate = null;
 		synchronized (spoolStateLock)
 		{
@@ -4322,6 +4415,7 @@ public class AccountConnectPlugin extends Plugin
 				if (tokenChanged || accountChanged)
 				{
 					purge = EventSpool.identityKey(spoolLastToken, spoolLastAccount);
+					purgeGeneration = spoolGeneration;
 					spoolLastToken = null;
 					spoolLastAccount = null;
 				}
@@ -4337,12 +4431,13 @@ public class AccountConnectPlugin extends Plugin
 			{
 				activate = now;
 			}
-			spoolIdentity = now;
+			setSpoolIdentityLocked(now);
 		}
 		if (purge != null)
 		{
 			final String id = purge;
-			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, false));
+			final long gen = purgeGeneration;
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, false, gen));
 		}
 		if (activate != null)
 		{
@@ -4376,12 +4471,18 @@ public class AccountConnectPlugin extends Plugin
 		}
 		onSpoolThread(() ->
 		{
-			String current = spoolIdentity;
+			String current;
+			long gen;
+			synchronized (spoolStateLock)
+			{
+				current = spoolIdentity;
+				gen = spoolGeneration;
+			}
 			for (String named : EventSpool.readIndex(root))
 			{
 				if (!named.equals(current))
 				{
-					purgeIdentityOnSpoolThread(named, false);
+					purgeIdentityOnSpoolThread(named, false, gen);
 				}
 			}
 		});
@@ -4414,15 +4515,17 @@ public class AccountConnectPlugin extends Plugin
 	private void spoolRevoke(String token)
 	{
 		String account = activeHash;
+		long gen;
 		synchronized (spoolStateLock)
 		{
 			spoolGrantToken = null;
-			spoolIdentity = null;
+			gen = spoolGeneration;
+			setSpoolIdentityLocked(null);
 		}
 		if (token != null && validSpoolAccount(account))
 		{
 			final String id = EventSpool.identityKey(token, account);
-			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, true));
+			onSpoolThread(() -> purgeIdentityOnSpoolThread(id, true, gen));
 		}
 	}
 
@@ -4454,13 +4557,13 @@ public class AccountConnectPlugin extends Plugin
 		// identity on this OS user is never marked or purged; its entry stays in the index and is retried at
 		// the next grant or sweep, once that client is gone.
 		purgeIdleIndexedIdentitiesExcept(id);
-		EventSpool.sweepAged(root, System::currentTimeMillis, EventSpool.MAX_AGE_MS, spoolCounters);
+		EventSpool.sweepAged(root, () -> wallClock.getAsLong(), EventSpool.MAX_AGE_MS, spoolCounters);
 		java.nio.file.Path dir = root.resolve(id);
 		if (Files.exists(dir.resolve(EventSpool.MARKER)) && !EventSpool.purgeIfIdle(dir))
 		{
 			return false;	// a withdrawal of this identity is still being finished by a live writer
 		}
-		spool = new EventSpool(spoolDataRoot(), dir, System::currentTimeMillis, EventSpool.ATOMIC,
+		spool = new EventSpool(spoolDataRoot(), dir, () -> wallClock.getAsLong(), EventSpool.ATOMIC,
 			EventSpool.Limits.DEFAULT, spoolCounters);
 		spoolInstanceIdentity = id;
 		if (Files.isDirectory(dir))
@@ -4469,7 +4572,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (Files.isDirectory(root))
 		{
-			EventSpool.writePointer(spoolDataRoot(), root, id, System.currentTimeMillis());
+			EventSpool.writePointer(spoolDataRoot(), root, id, wallClock.getAsLong());
 		}
 		return true;
 	}
@@ -4478,11 +4581,18 @@ public class AccountConnectPlugin extends Plugin
 	private void purgeIdleIndexedIdentitiesExcept(String keep) throws IOException
 	{
 		java.nio.file.Path root = spoolRoot();
+		String current;
+		long gen;
+		synchronized (spoolStateLock)
+		{
+			current = spoolIdentity;
+			gen = spoolGeneration;
+		}
 		for (String other : EventSpool.readIndex(root))
 		{
-			if (!other.equals(keep))
+			if (!other.equals(keep) && !other.equals(current))
 			{
-				purgeIdentityOnSpoolThread(other, false);
+				purgeIdentityOnSpoolThread(other, false, gen);
 			}
 		}
 	}
@@ -4494,7 +4604,7 @@ public class AccountConnectPlugin extends Plugin
 	 * or account change, another identity becoming active) never marks or deletes a live identity: the
 	 * directory is purged only when every shard is free, and otherwise kept in the index for a later retry.
 	 */
-	private void purgeIdentityOnSpoolThread(String id, boolean withdrawn)
+	private void purgeIdentityOnSpoolThread(String id, boolean withdrawn, long maxGeneration)
 	{
 		try
 		{
@@ -4504,13 +4614,13 @@ public class AccountConnectPlugin extends Plugin
 				spool = null;
 				spoolInstanceIdentity = null;
 			}
-			spoolMemoryOwned.values().removeIf(id::equals);
-			releaseDurabilityGatesOf(id);
+			spoolMemoryOwned.values().removeIf(t -> t.coveredBy(id, maxGeneration));
+			releaseDurabilityGatesOf(id, maxGeneration);
 			java.nio.file.Path root = spoolRoot();
 			java.nio.file.Path dir = root.resolve(id);
 			boolean existed = Files.isDirectory(dir);
 			boolean gone = withdrawn
-				? EventSpool.purgeIdentityDir(dir, System::currentTimeMillis)
+				? EventSpool.purgeIdentityDir(dir, () -> wallClock.getAsLong())
 				: EventSpool.purgeIfIdle(dir);
 			if (gone || withdrawn)
 			{
@@ -4544,16 +4654,18 @@ public class AccountConnectPlugin extends Plugin
 		spool.closeAndDeleteOwn();
 		spool = null;
 		spoolInstanceIdentity = null;
+		long gen;
 		synchronized (spoolStateLock)
 		{
+			gen = spoolGeneration;
 			if (id.equals(spoolIdentity))
 			{
 				spoolGrantToken = null;
-				spoolIdentity = null;
+				setSpoolIdentityLocked(null);
 			}
 		}
-		spoolMemoryOwned.values().removeIf(id::equals);
-		releaseDurabilityGatesOf(id);
+		spoolMemoryOwned.values().removeIf(t -> t.coveredBy(id, gen));
+		releaseDurabilityGatesOf(id, gen);
 		EventSpool.purgeIfIdle(dir);
 		EventSpool.deletePointerIf(spoolRoot(), id);
 		return true;
@@ -4567,7 +4679,13 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		syncSpoolState();
-		final String id = spoolIdentity;
+		final String id;
+		final SpoolTag tag;
+		synchronized (spoolStateLock)
+		{
+			id = spoolIdentity;
+			tag = id == null ? null : new SpoolTag(id, spoolGeneration);
+		}
 		if (id == null)
 		{
 			return;
@@ -4575,11 +4693,18 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> wire = new LinkedHashMap<>(ev);
 		wire.remove(EVENT_TOKEN_FP);	// identity is the shard, never a field
 		final String json = gson.toJson(wire);
-		final long created = System.currentTimeMillis();
-		spoolMemoryOwned.put(eventId, id);
+		long nowMs = wallClock.getAsLong();
+		Object ts = ev.get("ts");
+		final long created = ts instanceof Number ? Math.min(((Number) ts).longValue(), nowMs) : nowMs;
+		spoolMemoryOwned.put(eventId, tag);
 		// FORCE BEFORE NETWORK. Until the append below has been forced, flushEvents leaves this event in
 		// pendingEvents (in place, in order) instead of POSTing it. Nothing here blocks the calling thread.
-		spoolDurabilityPending.put(eventId, id);
+		// The gate is bounded by durabilityGateMaxMs, so a hung disk cannot stall delivery.
+		spoolDurabilityPending.put(eventId, tag);
+		if (executor != null)
+		{
+			executor.schedule(this::flushEvents, durabilityGateMaxMs + 50L, TimeUnit.MILLISECONDS);
+		}
 		boolean queued = onSpoolThread(() ->
 		{
 			boolean durable = false;
@@ -4592,7 +4717,7 @@ public class AccountConnectPlugin extends Plugin
 					// next process purge it without the token.
 					if (!id.equals(EventSpool.readPointer(spoolRoot())))
 					{
-						EventSpool.writePointer(spoolDataRoot(), spoolRoot(), id, System.currentTimeMillis());
+						EventSpool.writePointer(spoolDataRoot(), spoolRoot(), id, wallClock.getAsLong());
 					}
 					Runnable before = spoolBeforeAppendHookForTest;
 					if (before != null)
@@ -4641,13 +4766,39 @@ public class AccountConnectPlugin extends Plugin
 		scheduleCoalescedFlush();
 	}
 
-	/** A purged or retired identity never leaves an event waiting on the durability gate. */
-	private void releaseDurabilityGatesOf(String identity)
+	/**
+	 * A purged or retired identity never leaves an event waiting on the durability gate. Scoped to the
+	 * generations the purge was decided for: a re-activated identity's newer gates are not touched.
+	 */
+	private void releaseDurabilityGatesOf(String identity, long maxGeneration)
 	{
-		if (spoolDurabilityPending.values().removeIf(identity::equals))
+		if (spoolDurabilityPending.values().removeIf(t -> t.coveredBy(identity, maxGeneration)))
 		{
 			scheduleCoalescedFlush();
 		}
+	}
+
+	/**
+	 * flushEvents: may this event go out now? False while its durable append is pending and younger than the
+	 * bound. Past the bound the gate is released (counted, memory-only for this send, same event_id).
+	 */
+	private boolean durabilityGateOpen(String eventId)
+	{
+		SpoolTag t = spoolDurabilityPending.get(eventId);
+		if (t == null)
+		{
+			return true;
+		}
+		if (System.nanoTime() - t.sinceNanos < durabilityGateMaxMs * 1_000_000L)
+		{
+			return false;
+		}
+		if (spoolDurabilityPending.remove(eventId, t))
+		{
+			t.gateTimedOut = true;
+			spoolCounters.gateTimeout.incrementAndGet();
+		}
+		return true;
 	}
 
 	/** The memory path dropped this event (cap or identity change). Its durable row, if any, can replay. */
@@ -4665,30 +4816,40 @@ public class AccountConnectPlugin extends Plugin
 	private void spoolOnMemoryBatchDone(List<Map<String, Object>> batch, String sentToken, String body, int code)
 	{
 		final Map<String, String> spooled = new LinkedHashMap<>();
+		final List<String> owned = new ArrayList<>();
 		for (Map<String, Object> ev : batch)
 		{
 			Object raw = ev.get("event_id");
 			String eid = raw == null ? null : String.valueOf(raw);
-			String owner = eid == null ? null : spoolMemoryOwned.get(eid);
+			SpoolTag owner = eid == null ? null : spoolMemoryOwned.get(eid);
 			if (owner != null)
 			{
-				spooled.put(eid, owner);
+				owned.add(eid);
+				if (!owner.gateTimedOut)
+				{
+					spooled.put(eid, owner.identity);
+				}
+				// A timed-out id was sent BEFORE its row was durable, so this answer cannot settle that row:
+				// once durable it replays, and the server's per-id "duplicate" deletes it.
 			}
 		}
 		if (code == 403)
 		{
-			spoolMemoryOwned.keySet().removeAll(spooled.keySet());
+			spoolMemoryOwned.keySet().removeAll(owned);
 			spoolOnRevoked(sentToken);
 			return;
 		}
-		if (spooled.isEmpty())
+		if (owned.isEmpty())
 		{
 			return;
 		}
 		onSpoolThread(() ->
 		{
-			spoolMemoryOwned.keySet().removeAll(spooled.keySet());
-			settleOnSpoolThread(spooled, code, body, -1L);
+			spoolMemoryOwned.keySet().removeAll(owned);
+			if (!spooled.isEmpty())
+			{
+				settleOnSpoolThread(spooled, code, body, -1L);
+			}
 		});
 	}
 
@@ -4856,6 +5017,18 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return out;
 		}
+		// THE HARD AGE BOUND. Rows older than MAX_AGE_MS are tombstoned (durably, counted as dropped) HERE,
+		// on the writer thread, immediately before any candidate is exposed, so a quiet client with no append
+		// and no recovery still never replays a row older than 48 h.
+		try
+		{
+			spool.enforceBoundsNow();
+		}
+		catch (IOException e)
+		{
+			log.debug("OSRS BiS event spool age-out failed", e);
+			return out;	// fail closed: nothing replays if the age cannot be enforced
+		}
 		for (EventSpool.Record r : spool.pending())
 		{
 			if (!spoolMemoryOwned.containsKey(r.eventId) && !spoolReplayIds.contains(r.eventId))
@@ -4943,15 +5116,18 @@ public class AccountConnectPlugin extends Plugin
 			String tokenJson = gson.toJson(token);
 			int kept = fitEventBatch(tokenJson, encoded);
 			final Map<String, String> sentIds = new LinkedHashMap<>();
+			long oldestCreated = Long.MAX_VALUE;
 			for (int i = 0; i < kept; i++)
 			{
 				sentIds.put(candidates.get(i).eventId, id);
+				oldestCreated = Math.min(oldestCreated, candidates.get(i).createdMs);
 			}
 			String body = eventBatchBody(tokenJson, encoded.subList(0, kept));
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 			Request request = new Request.Builder()
 				.url(base + "/event-ingest")
 				.post(RequestBody.create(JSON, body))
+				.tag(SpoolReplayAge.class, new SpoolReplayAge(oldestCreated))
 				.build();
 			Runnable beforeDispatch = spoolReplayBeforeDispatchHookForTest;
 			if (beforeDispatch != null)
@@ -4969,7 +5145,7 @@ public class AccountConnectPlugin extends Plugin
 			spoolCounters.replayed.addAndGet(kept);
 			try
 			{
-				okHttpClient.newCall(request).enqueue(buildSpoolReplayCallback(sentIds, token));
+				spoolReplayHttp().newCall(request).enqueue(buildSpoolReplayCallback(sentIds, token));
 			}
 			catch (RuntimeException e)
 			{
@@ -5104,7 +5280,7 @@ public class AccountConnectPlugin extends Plugin
 		h.put("spool_records_pending", spoolPendingSnapshot);
 		h.put("spool_bytes", spoolBytesSnapshot);
 		long oldest = spoolOldestSnapshotMs;
-		h.put("spool_oldest_age_s", oldest > 0 ? Math.max(0L, (System.currentTimeMillis() - oldest) / 1000L) : 0L);
+		h.put("spool_oldest_age_s", oldest > 0 ? Math.max(0L, (wallClock.getAsLong() - oldest) / 1000L) : 0L);
 		h.put("spool_replayed_total", spoolCounters.replayed.get());
 		h.put("spool_acked_total", spoolCounters.acked.get());
 		h.put("spool_dropped_total", spoolCounters.dropped.get());
@@ -5115,6 +5291,8 @@ public class AccountConnectPlugin extends Plugin
 		h.put("spool_purged_total", spoolCounters.purged.get());
 		h.put("spool_append_failed_total", spoolCounters.appendFailed.get());
 		h.put("spool_reopen_failed_total", spoolCounters.reopenFailed.get());
+		h.put("spool_gate_timeout_total", spoolCounters.gateTimeout.get());
+		h.put("spool_replay_aged_at_dispatch_total", spoolCounters.replayAgedAtDispatch.get());
 		long ack = spoolCounters.lastAckMs.get();
 		if (ack > 0)
 		{
@@ -5130,7 +5308,7 @@ public class AccountConnectPlugin extends Plugin
 		synchronized (spoolStateLock)
 		{
 			spoolGrantToken = null;
-			spoolIdentity = null;
+			setSpoolIdentityLocked(null);
 		}
 		if (spoolExec == null)
 		{
