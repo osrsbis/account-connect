@@ -320,6 +320,9 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private net.runelite.client.callback.ClientThread clientThread;
 
+	@Inject
+	private net.runelite.client.input.MouseManager mouseManager;
+
 	static final String CONFIG_GROUP = "osrsbisexport";
 
 	@Provides
@@ -337,6 +340,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private StoreNearbyOverlay nearbyOverlay;
 	private StoreResetOverlay resetOverlay;
+	/** Staff Wilderness player panel. Separate from the store overlays: it has no store dependency. */
+	private WildernessPlayersOverlay wildernessOverlay;
 
 	@Override
 	protected void startUp()
@@ -365,6 +370,12 @@ public class AccountConnectPlugin extends Plugin
 			overlayManager.add(resetOverlay);
 			nearbyOverlay = new StoreNearbyOverlay(this);
 			overlayManager.add(nearbyOverlay);
+			wildernessOverlay = new WildernessPlayersOverlay(this);
+			overlayManager.add(wildernessOverlay);
+			if (mouseManager != null)
+			{
+				mouseManager.registerMouseWheelListener(wildernessOverlay);
+			}
 		}
 	}
 
@@ -442,8 +453,20 @@ public class AccountConnectPlugin extends Plugin
 		{
 			overlayManager.remove(resetOverlay);
 		}
+		if (wildernessOverlay != null)
+		{
+			if (overlayManager != null)
+			{
+				overlayManager.remove(wildernessOverlay);
+			}
+			if (mouseManager != null)
+			{
+				mouseManager.unregisterMouseWheelListener(wildernessOverlay);
+			}
+		}
 		nearbyOverlay = null;
 		resetOverlay = null;
+		wildernessOverlay = null;
 		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
 		interruptDropSession();		// a shutdown mid-session still publishes what was captured
 		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
@@ -1556,6 +1579,12 @@ public class AccountConnectPlugin extends Plugin
 	 * IT AUTHORIZES NOTHING. Whether a `drop_frames` upload is accepted is decided server-side by
 	 * the staff check on the token at /store-frames-ingest, which this flag never touches. Rollout
 	 * says WHICH granted clients record; authorization says whose recording the server keeps.
+	 *
+	 * ⚠ EXCEPT FOR THE WILDERNESS SURROUNDING SNAPSHOTS. dropProofEnabled() is ALSO the only gate on
+	 * `surrounding_at_drop` and `surrounding_at_trade`, and /event-ingest does NOT re-check staff for
+	 * event fields. For those two fields this flag IS the authorization, and it holds only because
+	 * the server sends X-Store-Tools and X-Drop-Proof to staff tokens alone. An operator `X-Clips: off`
+	 * on a staff token also switches both snapshots off.
 	 */
 	volatile boolean serverDropProofEnabled;
 
@@ -7047,6 +7076,10 @@ public class AccountConnectPlugin extends Plugin
 		{
 			fields.put("received_text", receivedText);
 		}
+		// Staff Wilderness trades only: who the client had loaded at "Accepted trade.". Sampled here, not at
+		// the confirm screen: players stay loaded at acceptance, and moving would have closed the trade.
+		// Presence only: `counterparty` above is the trade partner, these rows never change it.
+		attachSurroundingSnapshot(fields, "surrounding_at_trade");
 		emitEvent("trade", fields);
 	}
 
@@ -7287,6 +7320,158 @@ public class AccountConnectPlugin extends Plugin
 	List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
 	{
 		return nearbyPlayersSnapshot(cap, false);
+	}
+
+	// ---- WILDERNESS SURROUNDING PLAYERS (staff only) ----
+	//
+	// WHAT THIS CAN SEE, from the RuneLite 1.13.1 API itself. client.getPlayers() is the top-level world
+	// view's player set: every player the SERVER sent to this client, and nobody else. The minimap draws
+	// a zoom-dependent subset of it. So the honest label is "client_loaded": it is not a claim that nobody
+	// else was nearby. FLOOR IS UNKNOWN: Player.getWorldLocation() is built from the world view's plane
+	// (the viewer's), so another player's floor cannot be told apart; rows say plane_known:false and no
+	// row is ever dropped for its floor.
+	//
+	// PRESENCE IS EVIDENCE, NEVER ATTRIBUTION: nothing here names who took a pile or who received a trade.
+	// NAMES are the exact displayed names at that moment. No alias, history or identity link is made.
+	// ONLY CURRENT-AT-EVENT SNAPSHOTS are emitted. Nothing is accumulated across ticks.
+
+	/** Evidence label for {@link #surroundingPlayersNow}. Changing it changes what the rows claim. */
+	static final String SURROUNDING_OBSERVATION = "client_loaded";
+	/** Most rows one snapshot carries before the size budget is even considered. */
+	static final int SURROUNDING_ROW_CAP = 64;
+	/**
+	 * Largest encoded event the snapshot may grow to. The live /event-ingest skips an event whose fields
+	 * blob exceeds 8192 chars and still answers 200, so nothing would ever report the loss. 512 chars of
+	 * headroom under that.
+	 */
+	static final int SURROUNDING_EVENT_BUDGET = 7680;
+	/** Stand-in for the event_id that emitEventBound adds later: same length (32 hex), so it is measured. */
+	private static final String EVENT_ID_PLACEHOLDER = "00000000000000000000000000000000";
+
+	/** Is our character in the Wilderness right now? The same varbit drop.wilderness and death_kind use. */
+	boolean inWilderness()
+	{
+		return client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0;
+	}
+
+	/** The Wilderness panel: staff store-tools grant AND in the Wilderness. Draws only, sends nothing. */
+	boolean wildernessPanelEnabled()
+	{
+		return storeToolsEnabled() && inWilderness();
+	}
+
+	/**
+	 * Every other loaded player right now: {rsn, dx, dy, dist, cb}, nearest first, ties by name so the
+	 * order is deterministic. Uncapped; callers cap and say so. dist is 2D Chebyshev (floor unknown).
+	 */
+	List<Map<String, Object>> surroundingPlayersNow()
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return out;
+		}
+		for (Player p : players)
+		{
+			WorldPoint loc = p == null ? null : p.getWorldLocation();
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || loc == null)
+			{
+				continue;
+			}
+			int dx = loc.getX() - me.getX();
+			int dy = loc.getY() - me.getY();
+			Map<String, Object> m = new LinkedHashMap<>();
+			m.put("rsn", Text.removeTags(p.getName()));
+			m.put("dx", dx);
+			m.put("dy", dy);
+			m.put("dist", Math.max(Math.abs(dx), Math.abs(dy)));
+			m.put("cb", p.getCombatLevel());
+			out.add(m);
+		}
+		out.sort((a, b) ->
+		{
+			int c = Integer.compare((Integer) a.get("dist"), (Integer) b.get("dist"));
+			return c != 0 ? c : ((String) a.get("rsn")).compareTo((String) b.get("rsn"));
+		});
+		return out;
+	}
+
+	/**
+	 * Attach a current-at-event snapshot to {@code fields} under {@code key}, if the staff drop-proof grant
+	 * holds and we are in the Wilderness. Rows are the nearest first; the first {@link #SURROUNDING_ROW_CAP}
+	 * are kept, then rows drop from the far end until the whole event fits {@link #SURROUNDING_EVENT_BUDGET}.
+	 * The own-account row is never shrunk: with no room at all the block says so with zero rows.
+	 */
+	void attachSurroundingSnapshot(Map<String, Object> fields, String key)
+	{
+		if (!dropProofEnabled() || !inWilderness())
+		{
+			return;
+		}
+		Player self = client.getLocalPlayer();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null)
+		{
+			return;
+		}
+		List<Map<String, Object>> all = surroundingPlayersNow();
+		Map<String, Object> block = new LinkedHashMap<>();
+		block.put("observation", SURROUNDING_OBSERVATION);
+		block.put("plane_known", false);
+		block.put("wilderness", true);
+		block.put("anchor", java.util.Arrays.asList(me.getX(), me.getY(), me.getPlane()));
+		block.put("observed_count", all.size());
+		fields.put(key, fitSurrounding(fields, key, block, all));
+	}
+
+	/**
+	 * Fill {@code block} with as many of {@code rows} as fit. Deterministic: the same rows always give the
+	 * same output. Measures the event as the server will see it, event_id and context included.
+	 */
+	Map<String, Object> fitSurrounding(Map<String, Object> fields, String key, Map<String, Object> block,
+		List<Map<String, Object>> rows)
+	{
+		int n = Math.min(rows.size(), SURROUNDING_ROW_CAP);
+		String reason = n < rows.size() ? "row_cap" : null;
+		while (true)
+		{
+			List<Map<String, Object>> kept = new ArrayList<>(rows.subList(0, n));
+			block.put("emitted_count", n);
+			block.put("truncated", n < rows.size());
+			if (n < rows.size())
+			{
+				block.put("truncation_reason", reason);
+			}
+			else
+			{
+				block.remove("truncation_reason");
+			}
+			block.put("players", kept);
+			if (n == 0 || encodedEventLength(fields, key, block) <= SURROUNDING_EVENT_BUDGET)
+			{
+				return block;
+			}
+			// One row at a time from the far end, so the cut lands on the exact largest count that fits.
+			n--;
+			reason = "size_budget";
+		}
+	}
+
+	/** Length of the event as the server's fields blob will see it, with this block attached. */
+	private int encodedEventLength(Map<String, Object> fields, String key, Map<String, Object> block)
+	{
+		Map<String, Object> wire = new LinkedHashMap<>(fields);
+		wire.put(key, block);	// under its REAL key: the key's own length counts too
+		wire.put("event_id", EVENT_ID_PLACEHOLDER);
+		Gson g = gson != null ? gson : new Gson();
+		return g.toJson(wire).length();
 	}
 
 	/**
@@ -8438,6 +8623,12 @@ public class AccountConnectPlugin extends Plugin
 			auditSessionId = pendingDropSessionId;
 			fields.put("drop_session_id", auditSessionId);
 			fields.put("drop_seq", pendingDropSeq);
+		}
+		// Staff Wilderness drops only: who the client had loaded around us at this drop. The Wilderness
+		// flag is the one sampled at the Drop click, so the gate and the row agree.
+		if (p.wilderness != null && p.wilderness)
+		{
+			attachSurroundingSnapshot(fields, "surrounding_at_drop");
 		}
 		emitEvent("drop", fields);
 		noteDropAuditEvent(auditSessionId);
