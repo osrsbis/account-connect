@@ -64,6 +64,7 @@ public class SurroundingPlayersTest
 			when(client.getWorld()).thenReturn(301);
 			when(client.getTickCount()).thenReturn(100);
 			inject(plugin, "client", client);
+			inject(plugin, "gson", new Gson());
 			players.add(self);
 			plugin.setStoreToolsForTest(staff);
 			plugin.setDropProofRolloutForTest(staff);

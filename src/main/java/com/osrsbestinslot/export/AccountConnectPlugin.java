@@ -7470,8 +7470,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> wire = new LinkedHashMap<>(fields);
 		wire.put(key, block);	// under its REAL key: the key's own length counts too
 		wire.put("event_id", EVENT_ID_PLACEHOLDER);
-		Gson g = gson != null ? gson : new Gson();
-		return g.toJson(wire).length();
+		return gson.toJson(wire).length();
 	}
 
 	/**
