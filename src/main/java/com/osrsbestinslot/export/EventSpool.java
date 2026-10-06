@@ -1054,23 +1054,10 @@ final class EventSpool
 
 	private static void updateIndex(Path root, java.util.function.Consumer<LinkedHashMap<String, Long>> change) throws IOException
 	{
-		Locked il = null;
-		for (int i = 0; i < 200 && il == null; i++)
-		{
-			il = lock(root.resolve(INDEX_LOCK));
-			if (il == null)
-			{
-				try
-				{
-					Thread.sleep(5);	// spool thread only; another process holds it for a few ms
-				}
-				catch (InterruptedException e)
-				{
-					Thread.currentThread().interrupt();
-					throw new IOException("index lock interrupted", e);
-				}
-			}
-		}
+		// Never sleep or interrupt a RuneLite/plugin thread while waiting for another process. The
+		// spool is best-effort and the memory delivery path remains authoritative, so transient
+		// cross-process contention simply fails this spool operation and a later operation retries.
+		Locked il = lock(root.resolve(INDEX_LOCK));
 		if (il == null)
 		{
 			throw new IOException("index lock unavailable");
