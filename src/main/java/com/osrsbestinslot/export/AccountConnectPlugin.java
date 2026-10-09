@@ -320,9 +320,6 @@ public class AccountConnectPlugin extends Plugin
 	@Inject
 	private net.runelite.client.callback.ClientThread clientThread;
 
-	@Inject
-	private net.runelite.client.input.MouseManager mouseManager;
-
 	static final String CONFIG_GROUP = "osrsbisexport";
 
 	@Provides
@@ -340,8 +337,6 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private StoreNearbyOverlay nearbyOverlay;
 	private StoreResetOverlay resetOverlay;
-	/** Staff Wilderness player panel. Separate from the store overlays: it has no store dependency. */
-	private WildernessPlayersOverlay wildernessOverlay;
 
 	@Override
 	protected void startUp()
@@ -370,12 +365,6 @@ public class AccountConnectPlugin extends Plugin
 			overlayManager.add(resetOverlay);
 			nearbyOverlay = new StoreNearbyOverlay(this);
 			overlayManager.add(nearbyOverlay);
-			wildernessOverlay = new WildernessPlayersOverlay(this);
-			overlayManager.add(wildernessOverlay);
-			if (mouseManager != null)
-			{
-				mouseManager.registerMouseWheelListener(wildernessOverlay);
-			}
 		}
 	}
 
@@ -453,20 +442,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			overlayManager.remove(resetOverlay);
 		}
-		if (wildernessOverlay != null)
-		{
-			if (overlayManager != null)
-			{
-				overlayManager.remove(wildernessOverlay);
-			}
-			if (mouseManager != null)
-			{
-				mouseManager.unregisterMouseWheelListener(wildernessOverlay);
-			}
-		}
 		nearbyOverlay = null;
 		resetOverlay = null;
-		wildernessOverlay = null;
 		stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
 		interruptDropSession();		// a shutdown mid-session still publishes what was captured
 		// A countdown that outlives the plugin is a lie left on the user's screen — and RuneLite does
@@ -7352,12 +7329,6 @@ public class AccountConnectPlugin extends Plugin
 	boolean inWilderness()
 	{
 		return client != null && client.getVarbitValue(Varbits.IN_WILDERNESS) > 0;
-	}
-
-	/** The Wilderness panel: staff store-tools grant AND in the Wilderness. Draws only, sends nothing. */
-	boolean wildernessPanelEnabled()
-	{
-		return storeToolsEnabled() && inWilderness();
 	}
 
 	/**
