@@ -116,7 +116,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.16";
+	private static final String PLUGIN_VERSION = "0.7.17";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -10651,6 +10651,38 @@ public class AccountConnectPlugin extends Plugin
 		return h;
 	}
 
+	/** The account-type varbit (gameval VarbitID.IRONMAN, legacy Varbits.ACCOUNT_TYPE). */
+	static final int ACCOUNT_TYPE_VARBIT = net.runelite.api.gameval.VarbitID.IRONMAN;	// 1777
+
+	/**
+	 * Explicit map from the ACCOUNT_TYPE varbit to a stable name. Values 0-5 match the names of RuneLite's
+	 * net.runelite.api.vars.AccountType (deprecated, so it is not referenced at runtime; AccountTypeTest pins
+	 * the parity). 6 is unranked group ironman, which that enum lacks, so it gets its own name rather than
+	 * being folded into GROUP_IRONMAN. Any other value is UNKNOWN_<n>: never guessed, never NORMAL.
+	 */
+	static String accountTypeName(int varbit)
+	{
+		switch (varbit)
+		{
+			case 0:
+				return "NORMAL";
+			case 1:
+				return "IRONMAN";
+			case 2:
+				return "ULTIMATE_IRONMAN";
+			case 3:
+				return "HARDCORE_IRONMAN";
+			case 4:
+				return "GROUP_IRONMAN";
+			case 5:
+				return "HARDCORE_GROUP_IRONMAN";
+			case 6:
+				return "UNRANKED_GROUP_IRONMAN";
+			default:
+				return "UNKNOWN_" + varbit;
+		}
+	}
+
 	private Map<String, Object> buildSnapshot()
 	{
 		Map<String, Object> snap = new LinkedHashMap<>();
@@ -10673,7 +10705,11 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> account = new LinkedHashMap<>();
 		account.put("rsn", client.getLocalPlayer().getName());
 		account.put("account_hash", Long.toString(client.getAccountHash()));
-		account.put("account_type", RuneScapeProfileType.getCurrent(client).name());
+		// account_type is the IRON MODE (0.7.17). It used to be RuneScapeProfileType, which has no ironman
+		// variants, so every main-game account shipped STANDARD and the site's ironman arm never fired.
+		// profile_type keeps that old value (STANDARD/BETA/LEAGUE/...) under its own name.
+		account.put("account_type", accountTypeName(client.getVarbitValue(ACCOUNT_TYPE_VARBIT)));
+		account.put("profile_type", RuneScapeProfileType.getCurrent(client).name());
 		// Membership is NOT readable client-side on an f2p world (no varbit/varp exists for the
 		// account's subscription). Being on a members world DOES prove an active sub. So: true on a
 		// members world, null (unknown — never false) otherwise. current_world_members is the honest
