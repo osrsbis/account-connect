@@ -193,6 +193,47 @@ public class EventDeliveryRetryTest
 			2, server.getRequestCount());
 	}
 
+	/**
+	 * Bank-visit evidence rides the same retry path: a 503 (the server's answer when it cannot read the
+	 * bank-evidence grant) and a 429 both requeue the open, the chunk and the close together, and the
+	 * retry delivers all three exactly once, in order.
+	 */
+	@Test
+	public void bankVisitEventsSurvive503And429AndAreDeliveredOnceInOrder() throws Exception
+	{
+		server.enqueue(new MockResponse().setResponseCode(503));
+		server.enqueue(new MockResponse().setResponseCode(429).setHeader("Retry-After", "1"));
+		server.enqueue(new MockResponse().setResponseCode(200));
+
+		seed("bank_visit_open");
+		seed("bank_visit_manifest_chunk");
+		seed("bank_visit_close");
+		plugin.flushEvents();
+		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+		waitFor(() -> buffered() == 3, "bank visit batch requeued after 503");
+		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 503");
+
+		clearBackoff();
+		plugin.flushEvents();
+		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+		waitFor(() -> buffered() == 3, "bank visit batch requeued after 429");
+		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
+
+		clearBackoff();
+		plugin.flushEvents();
+		RecordedRequest ok = server.takeRequest(3, TimeUnit.SECONDS);
+		assertNotNull(ok);
+		String body = ok.getBody().readUtf8();
+		int open = body.indexOf("bank_visit_open");
+		int chunk = body.indexOf("bank_visit_manifest_chunk");
+		int close = body.indexOf("bank_visit_close");
+		assertTrue("all three in the delivered batch, in order", open >= 0 && open < chunk && chunk < close);
+		waitFor(() -> buffered() == 0, "buffer drained after 200");
+		plugin.flushEvents();
+		assertNull("delivered exactly once", server.takeRequest(1, TimeUnit.SECONDS));
+		assertEquals(3, server.getRequestCount());
+	}
+
 	// ---------------------------------------------------------------- 429
 
 	@Test
