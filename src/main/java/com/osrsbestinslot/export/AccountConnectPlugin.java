@@ -240,6 +240,16 @@ public class AccountConnectPlugin extends Plugin
 	// this is set becomes the baseline, and the close diffs against it.
 	private boolean bankBaselinePending;
 
+	// Bank-visit evidence (staff only, 0.7.17). One visit per BANKMAIN open: bank_visit_open, the item list at
+	// open and at close as bank_visit_manifest_chunk events, and bank_visit_close. Follows the server's
+	// bank-visit ingest contract. Only while the
+	// LAST snapshot response for the CURRENT token said X-Bank-Evidence: on, read once when the bank opens.
+	private volatile String bankEvidenceToken;
+	private String bankVisitId;	// null = no visit running
+	private long bankVisitOpenedMs;
+	private boolean bankVisitOpenSent;	// the open event is deferred until the first reliable bank read
+	private boolean bankVisitOpenRead;	// the item list at open was read (from a non-empty container)
+
 	// Equipment change capture: last-seen worn-item counts, diffed on each WORN-container change to emit
 	// equip_change {equipped[], unequipped[]}. Only a change in the SET of worn item ids emits: a quantity
 	// change of an item still worn (ammo spent on every attack) is not an equipment change and emits
@@ -4194,7 +4204,8 @@ public class AccountConnectPlugin extends Plugin
 	static final java.util.Set<String> SPOOL_ALLOWLIST = java.util.Collections.unmodifiableSet(new java.util.HashSet<>(
 		java.util.Arrays.asList("trade", "ge_offer", "ge_progress", "ge_buy", "ge_sell", "ge_cancel", "ge_collect",
 			"store_buy", "store_sell", "store_taken", "drop", "pickup", "ground_removed", "bank_session", "login",
-			"logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death")));
+			"logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death",
+			"bank_visit_open", "bank_visit_manifest_chunk", "bank_visit_close")));
 	static final long SPOOL_REPLAY_MIN_GAP_MS = 5_000L;
 	private static final java.util.Set<String> SPOOL_TERMINAL_STATUSES = java.util.Collections.unmodifiableSet(
 		new java.util.HashSet<>(java.util.Arrays.asList("stored", "duplicate", "filtered")));
@@ -5718,6 +5729,7 @@ public class AccountConnectPlugin extends Plugin
 				geAwaitingLogin = true;	// the next LOGGED_IN replays the GE slots
 				resetTradeState();	// a pending trade frame must never leak across accounts/sessions
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
+				closeBankVisit(teardownReason(event.getGameState()), null);
 				endBankSession(false);	// a bank left open across a hop/relog: incomplete, never diffed against another account
 				equipLast = null;	// re-baseline equipment on the next change so a relog emits no full-kit diff
 				flushXpGain();		// a hop ends the xp window: emit what accumulated, never drop it
@@ -5752,6 +5764,7 @@ public class AccountConnectPlugin extends Plugin
 				geAwaitingLogin = true;
 				resetTradeState();
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
+				closeBankVisit("disconnect", null);
 				endBankSession(false);	// a bank open at disconnect: incomplete, never diffed against the next session
 				equipLast = null;	// re-baseline equipment on reconnect
 				flushXpGain();		// a disconnect ends the xp window: emit what accumulated, never drop it
@@ -5776,6 +5789,7 @@ public class AccountConnectPlugin extends Plugin
 				geAwaitingLogin = true;
 				geUnkeyed.clear();	// held -1 GE events belong to the login that just ended
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
+				closeBankVisit("logout", null);
 				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
 				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
@@ -6141,6 +6155,7 @@ public class AccountConnectPlugin extends Plugin
 			// An empty or unloaded container is not a baseline: wait for the first bank contents instead.
 			bankAtOpen = b.isEmpty() ? null : b;
 			bankBaselinePending = b.isEmpty();
+			startBankVisit(b);
 		}
 	}
 
@@ -6158,6 +6173,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				bankAtOpen = b;
 				bankBaselinePending = false;
+				sendBankVisitOpen(b);
 			}
 			return;
 		}
@@ -6240,6 +6256,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (unload)
 		{
+			closeBankVisit(teardownReason(client == null ? null : client.getGameState()), null);
 			endBankSession(false);
 			return;
 		}
@@ -6247,6 +6264,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			advanceBankSession(client.getItemContainer(InventoryID.BANK));
 		}
+		closeBankVisit("closed", client == null ? null : client.getItemContainer(InventoryID.BANK));
 		endBankSession(true);
 	}
 
@@ -6257,6 +6275,194 @@ public class AccountConnectPlugin extends Plugin
 	 * carries only moves actually observed; nothing is inferred for the part we did not see. No row when
 	 * nothing moved, so an idle bank visit costs no event.
 	 */
+	/** The server granted bank-visit evidence to the configured token (newest snapshot response). */
+	boolean bankEvidenceEnabled()
+	{
+		String t = bankEvidenceToken;
+		return t != null && t.equals(currentLinkToken()) && uploadAllowed();
+	}
+
+	/**
+	 * A bank open. The grant is read ONCE here: a visit started without it sends nothing, and one started
+	 * with it is finished even if a later response withdraws the grant (the server then marks it
+	 * grant_revoked). A visit still running here was never closed: it is dropped without a close, and the
+	 * server marks it no_close when this newer open arrives.
+	 */
+	private void startBankVisit(Map<Integer, Long> atOpen)
+	{
+		bankVisitId = null;
+		if (!bankEvidenceEnabled())
+		{
+			return;
+		}
+		bankVisitId = EventSpool.newEventId();
+		bankVisitOpenedMs = System.currentTimeMillis();
+		bankVisitOpenSent = false;
+		bankVisitOpenRead = false;
+		if (!atOpen.isEmpty())
+		{
+			sendBankVisitOpen(atOpen);
+			return;
+		}
+		// An empty read is NOT claimed as an empty bank: the container can read empty before the bank
+		// contents arrive, and this build has no proven used-slot source to tell the two apart, so
+		// verified_empty is never sent. The open goes out now as unloaded_unknown; the
+		// phase:open chunks follow in the SAME visit at the first non-empty read, which the server records as
+		// open_basis first_read.
+		Map<String, Object> o = new LinkedHashMap<>();
+		o.put("visit_id", bankVisitId);
+		o.put("opened_at_ms", bankVisitOpenedMs);
+		o.put("bank_state", "unloaded_unknown");
+		o.put("plugin_version", PLUGIN_VERSION);
+		emitEvent("bank_visit_open", o);
+		bankVisitOpenSent = true;
+	}
+
+	/**
+	 * The item list at open, from the first reliable (non-empty) bank read. When the bank was readable at
+	 * open this also sends the loaded open event; when the open already went out as unloaded_unknown only
+	 * the phase:open chunks are sent, in the same visit.
+	 */
+	private void sendBankVisitOpen(Map<Integer, Long> read)
+	{
+		if (bankVisitId == null || bankVisitOpenRead)
+		{
+			return;
+		}
+		List<long[]> list = BankVisitManifest.canonical(read);
+		if (bankVisitOpenSent)
+		{
+			bankVisitOpenRead = true;
+			emitBankVisitChunks("open", list);
+			return;
+		}
+		Map<String, Object> f = new LinkedHashMap<>();
+		f.put("visit_id", bankVisitId);
+		f.put("opened_at_ms", bankVisitOpenedMs);
+		f.put("read_at_ms", System.currentTimeMillis());
+		f.put("bank_state", "loaded");
+		f.put("item_stacks", list.size());
+		f.put("manifest_sha256", BankVisitManifest.sha256(list));
+		f.put("plugin_version", PLUGIN_VERSION);
+		emitEvent("bank_visit_open", f);
+		bankVisitOpenSent = true;
+		bankVisitOpenRead = true;
+		emitBankVisitChunks("open", list);
+	}
+
+	/**
+	 * End the running visit. {@code bankAtClose} is the final bank read for a normal close, null for a
+	 * teardown (hop, logout, disconnect), whose read is not trusted. Must run BEFORE endBankSession, which
+	 * clears the gross move totals this close reports.
+	 */
+	private void closeBankVisit(String reason, ItemContainer bankAtClose)
+	{
+		if (bankVisitId == null)
+		{
+			return;
+		}
+		boolean normal = "closed".equals(reason);
+		Map<Integer, Long> end = new LinkedHashMap<>();
+		if (normal)
+		{
+			addContainerCounts(end, bankAtClose);
+		}
+		List<long[]> endList = BankVisitManifest.canonical(end);
+		List<long[]> dep = BankVisitManifest.canonical(bankGrossDeposited);
+		List<long[]> wd = BankVisitManifest.canonical(bankGrossWithdrawn);
+
+		Map<String, Object> f = new LinkedHashMap<>();
+		f.put("visit_id", bankVisitId);
+		f.put("closed_at_ms", System.currentTimeMillis());
+		f.put("close_reason", reason);
+		f.put("manifest_complete", bankVisitOpenRead);
+		// Moves are complete only for a normal close of a visit whose open list was read: the gross totals
+		// then cover every container change from that read to the close.
+		f.put("moves_complete", normal && bankVisitOpenRead);
+		f.put("deposited_sha256", BankVisitManifest.sha256(dep));
+		f.put("withdrawn_sha256", BankVisitManifest.sha256(wd));
+		boolean endRead = normal && !endList.isEmpty();	// an empty end read is not evidence of an empty bank
+		List<List<long[]>> endChunks = endRead ? chunksFor("close", endList) : java.util.Collections.emptyList();
+		if (endRead)
+		{
+			f.put("end_manifest_sha256", BankVisitManifest.sha256(endList));
+			f.put("end_chunks", endChunks.size());
+		}
+		Map<String, Object> inline = new LinkedHashMap<>(f);
+		inline.put("deposited", dep);
+		inline.put("withdrawn", wd);
+		boolean movesInline = encodedFieldsLength(inline) <= BankVisitManifest.FIELDS_BUDGET;
+		List<List<long[]>> depChunks = movesInline ? java.util.Collections.emptyList() : chunksFor("deposited", dep);
+		List<List<long[]>> wdChunks = movesInline ? java.util.Collections.emptyList() : chunksFor("withdrawn", wd);
+		if (!movesInline)
+		{
+			f.put("deposited_chunks", depChunks.size());
+			f.put("withdrawn_chunks", wdChunks.size());
+			f.put("moves_chunks", depChunks.size() + wdChunks.size());
+		}
+		String id = bankVisitId;
+		emitChunkList(id, "close", endList, endChunks);
+		emitChunkList(id, "deposited", dep, depChunks);
+		emitChunkList(id, "withdrawn", wd, wdChunks);
+		emitEvent("bank_visit_close", movesInline ? inline : f);
+		bankVisitId = null;
+	}
+
+	/** hop / logout / disconnect, from the game state a teardown happened in. */
+	static String teardownReason(GameState s)
+	{
+		if (s == GameState.HOPPING)
+		{
+			return "hop";
+		}
+		if (s == GameState.CONNECTION_LOST)
+		{
+			return "disconnect";
+		}
+		return "logout";
+	}
+
+	private void emitBankVisitChunks(String phase, List<long[]> list)
+	{
+		emitChunkList(bankVisitId, phase, list, chunksFor(phase, list));
+	}
+
+	private List<List<long[]>> chunksFor(String phase, List<long[]> list)
+	{
+		Map<String, Object> probe = new LinkedHashMap<>();
+		probe.put("visit_id", bankVisitId == null ? EVENT_ID_PLACEHOLDER : bankVisitId);
+		probe.put("phase", phase);
+		probe.put("chunk", 99_999);	// wider than any real chunk number, so every real chunk is measured short
+		probe.put("chunks", 99_999);
+		probe.put("manifest_sha256", BankVisitManifest.sha256(list));
+		probe.put("items", java.util.Collections.emptyList());
+		return BankVisitManifest.chunk(list, encodedFieldsLength(probe));
+	}
+
+	private void emitChunkList(String visitId, String phase, List<long[]> list, List<List<long[]>> chunks)
+	{
+		String sha = BankVisitManifest.sha256(list);
+		for (int i = 0; i < chunks.size(); i++)
+		{
+			Map<String, Object> c = new LinkedHashMap<>();
+			c.put("visit_id", visitId);
+			c.put("phase", phase);
+			c.put("chunk", i);
+			c.put("chunks", chunks.size());
+			c.put("manifest_sha256", sha);
+			c.put("items", chunks.get(i));
+			emitEvent("bank_visit_manifest_chunk", c);
+		}
+	}
+
+	/** Length of the event's fields as the server measures them, event_id included. */
+	private int encodedFieldsLength(Map<String, Object> fields)
+	{
+		Map<String, Object> wire = new LinkedHashMap<>(fields);
+		wire.put("event_id", EVENT_ID_PLACEHOLDER);
+		return gson.toJson(wire).length();
+	}
+
 	private void endBankSession(boolean complete)
 	{
 		bankAtOpen = null;
@@ -11179,6 +11385,16 @@ public class AccountConnectPlugin extends Plugin
 			{
 				setSpoolGrant(sentToken, false);
 			}
+		}
+
+		// X-Bank-Evidence: on grants bank-visit evidence to THIS token. Missing or anything else = off, so a
+		// grant lasts only while the newest snapshot response keeps sending it.
+		if (sentToken != null && sentToken.equals(currentLinkToken()))
+		{
+			String bank = response.header("X-Bank-Evidence");
+			String v = bank == null ? "" : bank.trim().toLowerCase(java.util.Locale.ROOT);
+			bankEvidenceToken = ("on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v))
+				? sentToken : null;
 		}
 
 		String screenshots = response.header("X-Screenshots");

@@ -370,7 +370,8 @@ public class EventSpoolPluginTest
 	{
 		assertEquals(new HashSet<>(Arrays.asList("trade", "ge_offer", "ge_progress", "ge_buy", "ge_sell", "ge_cancel",
 			"ge_collect", "store_buy", "store_sell", "store_taken", "drop", "pickup", "ground_removed", "bank_session",
-			"login", "logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death")),
+			"login", "logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death",
+			"bank_visit_open", "bank_visit_manifest_chunk", "bank_visit_close")),
 			AccountConnectPlugin.SPOOL_ALLOWLIST);
 
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
