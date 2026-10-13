@@ -476,6 +476,7 @@ public class AccountConnectPlugin extends Plugin
 		bankBaselinePending = false;
 		bankGrossDeposited.clear();
 		bankGrossWithdrawn.clear();
+		dropBankVisit();
 		closeSpool();	// rows stay on disk; the next process recovers them under the same identity
 	}
 
@@ -1681,6 +1682,9 @@ public class AccountConnectPlugin extends Plugin
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
 			spoolOnTokenChangedWithoutAccount();
+			// A visit belongs to the token that was granted at its open: never finish it under another one.
+			bankEvidenceToken = null;
+			dropBankVisit();
 		}
 	}
 
@@ -6406,6 +6410,17 @@ public class AccountConnectPlugin extends Plugin
 		emitChunkList(id, "withdrawn", wd, wdChunks);
 		emitEvent("bank_visit_close", movesInline ? inline : f);
 		bankVisitId = null;
+	}
+
+	/**
+	 * Forget the running visit WITHOUT a close: its state cannot be trusted any more (plugin disabled, token
+	 * changed). The server marks it no_close, which is honest; a close built from stale state would not be.
+	 */
+	private void dropBankVisit()
+	{
+		bankVisitId = null;
+		bankVisitOpenSent = false;
+		bankVisitOpenRead = false;
 	}
 
 	/** hop / logout / disconnect, from the game state a teardown happened in. */

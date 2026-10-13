@@ -402,6 +402,34 @@ public class BankVisitEvidenceTest
 		assertEquals(opens.get(1).get("visit_id"), r.of("bank_visit_close").get(0).get("visit_id"));
 	}
 
+	@Test
+	public void pluginShutdownDropsTheVisitWithoutAClose() throws Exception
+	{
+		Rig r = rig();
+		r.grant("on");
+		r.open(bank(new int[]{995, 10}));
+		r.p.shutDown();
+		r.p.handleBankWidgetClosed(BANK_GROUP);	// a close after re-enable must not finish the old visit
+		assertTrue(r.of("bank_visit_close").isEmpty());
+	}
+
+	@Test
+	public void tokenChangeDropsTheVisitAndTheGrant() throws Exception
+	{
+		Rig r = rig();
+		r.grant("on");
+		r.open(bank(new int[]{995, 10}));
+		net.runelite.client.events.ConfigChanged c = new net.runelite.client.events.ConfigChanged();
+		c.setGroup(AccountConnectPlugin.CONFIG_GROUP);
+		c.setKey("linkToken");
+		c.setOldValue(TOKEN);
+		c.setNewValue("ffffffffffffffffffffffffffffffff");
+		r.p.onConfigChanged(c);
+		r.close();
+		assertTrue(r.of("bank_visit_close").isEmpty());
+		assertFalse(r.p.bankEvidenceEnabled());
+	}
+
 	// ---- size limits ----
 
 	@Test
