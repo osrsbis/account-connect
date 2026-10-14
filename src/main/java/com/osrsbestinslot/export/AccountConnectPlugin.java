@@ -6450,7 +6450,7 @@ public class AccountConnectPlugin extends Plugin
 		probe.put("chunk", 99_999);	// wider than any real chunk number, so every real chunk is measured short
 		probe.put("chunks", 99_999);
 		probe.put("manifest_sha256", BankVisitManifest.sha256(list));
-		probe.put("items", java.util.Collections.emptyList());
+		probe.put("items", new ArrayList<>());	// not Collections.emptyList(): Gson cannot serialize it on Java 17+
 		return BankVisitManifest.chunk(list, encodedFieldsLength(probe));
 	}
 
