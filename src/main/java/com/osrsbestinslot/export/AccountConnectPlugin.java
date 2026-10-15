@@ -83,6 +83,7 @@ import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.events.PlayerLootReceived;
@@ -403,6 +404,8 @@ public class AccountConnectPlugin extends Plugin
 		}
 		lastGeState.clear();
 		lastGeOffer.clear();
+		geOfferKey.clear();
+		geOfferSeen.clear();
 		lastGeProgressTick.clear();
 		geUnkeyed.clear();	// the current slots supersede anything held from before the plugin was enabled
 		geAccountHash = client.getAccountHash();
@@ -418,6 +421,8 @@ public class AccountConnectPlugin extends Plugin
 			{
 				lastGeOffer.put(slot, new long[]{o.getItemId(), o.getQuantitySold(), o.getTotalQuantity(),
 					o.getPrice(), o.getSpent()});
+				geOfferKey.put(slot, EventSpool.newEventId());
+				geOfferSeen.put(slot, "baseline");
 			}
 		}
 	}
@@ -508,6 +513,23 @@ public class AccountConnectPlugin extends Plugin
 	 * Read from the X-Max-Capture response header on every accepted upload.
 	 */
 	volatile boolean serverMaxCaptureEnabled;
+	/**
+	 * GAME VARIABLES (broad capture, batch 1). Server-granted by X-Game-Vars: on, default OFF, no config item.
+	 * When on, the snapshot carries the player's own varp array (GameVarsCapture), from which the server decodes
+	 * quests, diaries, combat achievement tasks, Slayer, prayers, Sailing, farming and every other varbit. It is
+	 * a NEW data class, so the server must not grant it before the disclosure for it is published.
+	 */
+	volatile boolean serverGameVarsEnabled;
+	/**
+	 * FRESHNESS. When the client last saw each item container change (ItemContainerChanged), in ms. A container
+	 * the game loaded but never changed this session has no entry, and its block then says observed_at null,
+	 * never a made-up time. Lets the server tell a bank read this minute from one carried for hours.
+	 */
+	final Map<Integer, Long> containerObservedAtMs = new java.util.concurrent.ConcurrentHashMap<>();
+	/** Minimum seconds between two snapshots that carry game_vars (the block is excluded from the change hash). */
+	static final long GAME_VARS_MIN_INTERVAL_MS = 15L * 60L * 1000L;
+	private long lastGameVarsSentMs;
+	private String lastGameVarsSha;
 
 	/**
 	 * LOCAL TEST OVERRIDE for the store-tools gate.
@@ -560,6 +582,8 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.concurrent.atomic.AtomicLong healthEventsQueued = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsSent = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsLost = new java.util.concurrent.atomic.AtomicLong();
+	// Overflow drops by priority class (EventPriority). healthEventsLost still counts every lost row.
+	private final java.util.concurrent.atomic.AtomicLongArray healthOverflowByClass = new java.util.concurrent.atomic.AtomicLongArray(3);
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsSent = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsRefused = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsLost = new java.util.concurrent.atomic.AtomicLong();
@@ -577,6 +601,10 @@ public class AccountConnectPlugin extends Plugin
 	volatile long eventRetryBackoffUntilMs;
 	private volatile boolean sessionActive;
 	private volatile String activeRsn;
+	// RuneScapeProfileType of the session (STANDARD / BETA / SEASONAL / DEADMAN / ...), refreshed on every
+	// logged-in syncTask tick. Events from a non-STANDARD profile carry it, so League, beta and Deadman rows
+	// never mix with the main game's GE, loot or bank history under the same account hash.
+	private volatile String activeProfileType;
 	private volatile String activeHash;
 	private volatile long sessionStartMillis;
 	// WAVE 3: idle counters sampled on the last logged-in tick (syncTask), used to classify the logout reason.
@@ -591,6 +619,14 @@ public class AccountConnectPlugin extends Plugin
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
 	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
+	// OFFER IDENTITY. RuneLite gives a GE offer no id, so the plugin mints one: a random 32-hex offer_key when a
+	// slot starts a NEW offer (placed, or first seen already part-filled), carried on every later row of that
+	// slot until the slot is collected. It survives hops and relogs (the map is cleared only on account switch,
+	// plugin start and collect), so a completion that lands after a hop joins its own offer, and an identical
+	// re-list after a collect gets a NEW key. offer_seen says how the key began: "placed", "midway" (first seen
+	// part-filled) or "baseline" (already in the slot when the plugin started).
+	private final Map<Integer, String> geOfferKey = new java.util.HashMap<>();
+	private final Map<Integer, String> geOfferSeen = new java.util.HashMap<>();
 	/** Last seen offer per GE slot {item, qty_sold, qty_total, price, spent}, so a collect (slot -> EMPTY) still names what it held. */
 	private final Map<Integer, long[]> lastGeOffer = new java.util.HashMap<>();
 	/** Tick of the last ge_progress row per slot. A big offer fills in many steps; one row per minute per slot is enough. */
@@ -3712,6 +3748,21 @@ public class AccountConnectPlugin extends Plugin
 	 * account not opted out). account_hash/rsn are the currently-tracked session's, stamped at emit time
 	 * so a logout (player already null) still self-describes. Bounded to MAX_PENDING_EVENTS (drop oldest).
 	 */
+	/**
+	 * Overflow of the pending buffer: drop the oldest row of the LOWEST priority class present, not the oldest
+	 * row overall, so a long 429 run keeps GE, trade, store, death and session rows (EventPriority). Caller holds
+	 * the pendingEvents lock.
+	 */
+	private void evictOneForOverflow()
+	{
+		int i = EventPriority.evictIndex(pendingEvents);
+		Map<String, Object> gone = pendingEvents.remove(i < 0 ? 0 : i);
+		Object t = gone.get("type");
+		healthOverflowByClass.incrementAndGet(EventPriority.classOf(t == null ? null : String.valueOf(t)));
+		spoolReleaseFromMemory(gone);
+		healthEventsLost.incrementAndGet();
+	}
+
 	void emitEvent(String type, Map<String, Object> fields)
 	{
 		emitEventBound(type, fields, currentEventTokenFingerprint());
@@ -3740,6 +3791,11 @@ public class AccountConnectPlugin extends Plugin
 		{
 			ev.put("rsn", activeRsn);
 		}
+		String profile = activeProfileType;
+		if (profile != null && !"STANDARD".equals(profile))
+		{
+			ev.put("profile_type", profile);
+		}
 		if (fields != null)
 		{
 			ev.putAll(fields);
@@ -3754,8 +3810,7 @@ public class AccountConnectPlugin extends Plugin
 			pendingEvents.add(ev);
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
-				spoolReleaseFromMemory(pendingEvents.remove(0));
-				healthEventsLost.incrementAndGet();
+				evictOneForOverflow();
 			}
 		}
 		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
@@ -3860,6 +3915,51 @@ public class AccountConnectPlugin extends Plugin
 		long inv = wealth.get("inventory_gp") instanceof Number ? ((Number) wealth.get("inventory_gp")).longValue() : 0L;
 		long eqp = wealth.get("equipment_gp") instanceof Number ? ((Number) wealth.get("equipment_gp")).longValue() : 0L;
 		return inv + eqp;
+	}
+
+	/**
+	 * CLIENT CLOSE. Closing RuneLite while logged in used to lose the session end and every buffered event:
+	 * no logout row was emitted and nothing was flushed. Now the close emits a logout with reason
+	 * "client_close" and sends ONE final batch, and RuneLite waits for that request (ClientShutdown.waitFor,
+	 * which RuneLite bounds for every plugin) so the client does not exit before the POST is handed over.
+	 * Only the in-memory buffer is sent; the durable staff spool keeps its own rows for the next start.
+	 */
+	@Subscribe
+	public void onClientShutdown(ClientShutdown event)
+	{
+		if (client != null && client.getGameState() == GameState.LOGGED_IN)
+		{
+			trackLogout("client_close");
+		}
+		java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
+		finalFlushDone = done;
+		boolean sent = flushEventsNow();
+		if (!sent)
+		{
+			done.complete(null);
+		}
+		event.waitFor(done);
+	}
+
+	private void completeFinalFlush()
+	{
+		java.util.concurrent.CompletableFuture<Void> f = finalFlushDone;
+		if (f != null)
+		{
+			f.complete(null);
+		}
+	}
+
+	/** Completed by the event callback of the final close flush; null when no close is in progress. */
+	volatile java.util.concurrent.CompletableFuture<Void> finalFlushDone;
+
+	/** Close-time flush: ignores the retry backoff once, so a close during a 429 wait still tries to send. */
+	boolean flushEventsNow()
+	{
+		eventRetryBackoffUntilMs = 0L;
+		boolean before = eventPostInFlight;
+		flushEvents();
+		return !before && eventPostInFlight;
 	}
 
 	/** Emit a "logout" event (duration + classified reason) for the tracked account, if a session was active. */
@@ -4088,6 +4188,7 @@ public class AccountConnectPlugin extends Plugin
 						healthEventsSent.addAndGet(batch.size());
 						healthLastEventUploadMs.set(System.currentTimeMillis());
 						eventPostInFlight = false;
+						completeFinalFlush();
 						eventRetryBackoffMs = 0;	// delivered — reset the ladder
 						eventRetryBackoffUntilMs = 0L;
 						if (!pendingEvents.isEmpty())
@@ -4127,6 +4228,7 @@ public class AccountConnectPlugin extends Plugin
 						// the durable copies go to terminal quarantine, metadata only, never retried.
 						spoolOnMemoryBatchDone(batch, sentToken, null, code);
 						eventPostInFlight = false;
+						completeFinalFlush();
 					}
 				}
 				finally
@@ -4154,8 +4256,7 @@ public class AccountConnectPlugin extends Plugin
 			pendingEvents.addAll(0, batch);
 			while (pendingEvents.size() > MAX_PENDING_EVENTS)
 			{
-				spoolReleaseFromMemory(pendingEvents.remove(0));
-				healthEventsLost.incrementAndGet();
+				evictOneForOverflow();
 			}
 		}
 		long next = eventRetryBackoffMs <= 0
@@ -4168,6 +4269,7 @@ public class AccountConnectPlugin extends Plugin
 		eventRetryBackoffMs = next;
 		eventRetryBackoffUntilMs = nowMs() + next;
 		eventPostInFlight = false;
+		completeFinalFlush();
 	}
 
 	/** Wall clock, isolated so tests can drive the backoff without sleeping. */
@@ -5490,6 +5592,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			resolveDeathPendingViaLiveContainers();
 		}
+		activeProfileType = net.runelite.client.config.RuneScapeProfileType.getCurrent(client).name();
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
@@ -5510,6 +5613,15 @@ public class AccountConnectPlugin extends Plugin
 			// WAVE 2: bind the login server-side immediately. Send this snapshot now, bypassing the
 			// unchanged-hash gate AND the debounce, so login (and wealth-at-login) lands live even on a
 			// re-link to the same state — the "login drops on a fresh link" race. Still honors the 429 backoff.
+			lastSendMillis = now;
+			postSnapshot(token, snapshot, hash);
+			return;
+		}
+		if (hash.equals(lastUploadedHash) && snapshot.containsKey("game_vars"))
+		{
+			// game_vars is outside the change hash, so an idle player would never send it. gameVarsBlock
+			// returns it at most once per GAME_VARS_MIN_INTERVAL_MS after an accepted send, so this costs at
+			// most 4 extra requests an hour, and only for a granted client.
 			lastSendMillis = now;
 			postSnapshot(token, snapshot, hash);
 			return;
@@ -5592,6 +5704,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> canonical = new LinkedHashMap<>(snapshot);
 		canonical.remove("captured_at");
 		canonical.remove("wealth");
+		canonical.remove("game_vars");	// varps change constantly; game_vars rides on its own interval (gameVarsBlock)
 		Object src = canonical.get("source");
 		if (src instanceof Map)
 		{
@@ -5841,6 +5954,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
+		containerObservedAtMs.put(event.getContainerId(), System.currentTimeMillis());
 		handleTradeContainerChanged(event.getContainerId());
 		if (shopOpen && event.getContainerId() != INVENTORY_CONTAINER_ID)
 		{
@@ -10360,6 +10474,8 @@ public class AccountConnectPlugin extends Plugin
 			// stored -1 can only be the empty start or an unkeyed seed.
 			lastGeState.clear();
 			lastGeOffer.clear();
+			geOfferKey.clear();
+			geOfferSeen.clear();
 			lastGeProgressTick.clear();
 			geAccountHash = acct;
 		}
@@ -10405,6 +10521,8 @@ public class AccountConnectPlugin extends Plugin
 		}
 		lastGeState.clear();
 		lastGeOffer.clear();
+		geOfferKey.clear();
+		geOfferSeen.clear();
 		lastGeProgressTick.clear();
 		geAccountHash = acct;
 		for (Map.Entry<Integer, Object[]> e : held)
@@ -10508,6 +10626,20 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		long[] o = "ge_collect".equals(type) ? prevOffer : nowOffer;
+		if (!"ge_collect".equals(type) && ("ge_offer".equals(type) || !geOfferKey.containsKey(slot)
+			|| (prevOffer != null && (prevOffer[0] != nowOffer[0] || prevOffer[2] != nowOffer[2] || prevOffer[3] != nowOffer[3]))))
+		{
+			// A new offer: placed now, first seen part-filled, or the slot now holds a different offer.
+			geOfferKey.put(slot, EventSpool.newEventId());
+			geOfferSeen.put(slot, "ge_offer".equals(type) ? "placed" : "midway");
+		}
+		String offerKey = geOfferKey.get(slot);
+		String offerSeen = geOfferSeen.get(slot);
+		if ("ge_collect".equals(type))
+		{
+			geOfferKey.remove(slot);	// the offer is finished: the next offer in this slot gets a new key
+			geOfferSeen.remove(slot);
+		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("item", (int) o[0]);
 		fields.put("qty", (int) o[1]);
@@ -10517,6 +10649,11 @@ public class AccountConnectPlugin extends Plugin
 		fields.put("slot", slot);
 		fields.put("state", "ge_collect".equals(type) ? String.valueOf(prev) : state.name());
 		fields.put("side", geSide("ge_collect".equals(type) ? prev : state));
+		if (offerKey != null)
+		{
+			fields.put("offer_key", offerKey);
+			fields.put("offer_seen", offerSeen);
+		}
 		emitEvent(type, fields);
 	}
 
@@ -10851,6 +10988,9 @@ public class AccountConnectPlugin extends Plugin
 		h.put("events_queued_total", healthEventsQueued.get());
 		h.put("events_sent_total", healthEventsSent.get());
 		h.put("events_lost_total", healthEventsLost.get());
+		h.put("events_overflow_p0_total", healthOverflowByClass.get(EventPriority.P0));
+		h.put("events_overflow_p1_total", healthOverflowByClass.get(EventPriority.P1));
+		h.put("events_overflow_p2_total", healthOverflowByClass.get(EventPriority.P2));
 		synchronized (pendingEvents)
 		{
 			h.put("events_pending", pendingEvents.size());
@@ -10904,6 +11044,32 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * The game_vars block for this snapshot, or null. Null when not granted, before the player's skills have
+	 * loaded (a login snapshot can read all zeros: 6 of 3,003 production snapshots on 2026-10-15 had every skill
+	 * at level 0), or inside GAME_VARS_MIN_INTERVAL_MS of the last send of an UNCHANGED array. A changed array
+	 * is sent on the next snapshot after the interval; an unchanged one at most every interval.
+	 */
+	Map<String, Object> gameVarsBlock(long nowMs)
+	{
+		if (!serverGameVarsEnabled || client == null || client.getRealSkillLevel(Skill.HITPOINTS) <= 0)
+		{
+			return null;
+		}
+		if (lastGameVarsSentMs > 0 && nowMs - lastGameVarsSentMs < GAME_VARS_MIN_INTERVAL_MS)
+		{
+			return null;	// the interval runs from the last ACCEPTED snapshot that carried the block
+		}
+		Map<String, Object> gv = GameVarsCapture.encode(client.getVarps());
+		if (gv == null)
+		{
+			return null;
+		}
+		gv.put("observed_at", nowMs / 1000L);
+		gv.put("api", "runelite-varps");
+		return gv;
+	}
+
 	private Map<String, Object> buildSnapshot()
 	{
 		Map<String, Object> snap = new LinkedHashMap<>();
@@ -10948,6 +11114,13 @@ public class AccountConnectPlugin extends Plugin
 		flags.put("collog_synced", clogSeen);     // true once the player has opened the clog UI this session
 		flags.put("boss_kc_source", "none");      // deferred (no clean client field)
 		snap.put("capture_flags", flags);
+
+		// ---- game variables (server-granted, off by default) ----
+		Map<String, Object> gv = gameVarsBlock(System.currentTimeMillis());
+		if (gv != null)
+		{
+			snap.put("game_vars", gv);
+		}
 
 		// ---- skills (real skills only; OVERALL excluded) ----
 		Map<String, Object> skills = new LinkedHashMap<>();
@@ -11109,6 +11282,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> bankBlock = new LinkedHashMap<>();
 		bankBlock.put("items", bankSynced ? itemList(bank) : new ArrayList<>());
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
+		bankBlock.put("observed_at", bankSynced ? observedAtSeconds(BANK_CONTAINER_ID) : null);
 		snap.put("bank", bankBlock);
 
 		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
@@ -11270,6 +11444,13 @@ public class AccountConnectPlugin extends Plugin
 		return v;
 	}
 
+	/** Seconds of the last ItemContainerChanged for this container id, or null when none was seen. */
+	Long observedAtSeconds(int containerId)
+	{
+		Long ms = containerObservedAtMs.get(containerId);
+		return ms == null ? null : ms / 1000L;
+	}
+
 	/** Add a {items, value_gp} block for a container, but only when it is present (opened this session). */
 	void addContainerSnapshot(Map<String, Object> snap, String key, ItemContainer c)
 	{
@@ -11280,6 +11461,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> block = new LinkedHashMap<>();
 		block.put("items", itemList(c));
 		block.put("value_gp", containerValue(c));
+		block.put("observed_at", observedAtSeconds(c.getId()));
 		snap.put(key, block);
 	}
 
@@ -11327,6 +11509,12 @@ public class AccountConnectPlugin extends Plugin
 					if (response.isSuccessful())
 					{
 						onUploadAccepted(hash);
+						Object gv = snapshot.get("game_vars");
+						if (gv instanceof Map)
+						{
+							lastGameVarsSentMs = System.currentTimeMillis();
+							lastGameVarsSha = String.valueOf(((Map<?, ?>) gv).get("sha"));
+						}
 					}
 					else if (code == 429)
 					{
@@ -11441,6 +11629,13 @@ public class AccountConnectPlugin extends Plugin
 			{
 				clearFirehose();	// a revoked grant drops whatever is still buffered
 			}
+		}
+
+		String gameVars = response.header("X-Game-Vars");
+		if (gameVars != null)
+		{
+			String v = gameVars.trim().toLowerCase(java.util.Locale.ROOT);
+			serverGameVarsEnabled = "on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v);
 		}
 
 		String clips = response.header("X-Clips");

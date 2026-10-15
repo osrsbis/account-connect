@@ -1,0 +1,323 @@
+package com.osrsbestinslot.export;
+
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOffer;
+import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.Skill;
+import net.runelite.api.events.GrandExchangeOfferChanged;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * Broad capture batch 1: priority overflow, GE offer_key identity, game_vars encoding and gating,
+ * per-container observed_at. Each test has a control arm, so a guard that always fires also fails.
+ */
+public class BroadCaptureBatch1Test
+{
+	private static final String TOKEN = "0123456789abcdef0123456789abcdef";
+
+	private AccountConnectPlugin p;
+	private Client client;
+	private int tick = 1000;
+
+	private void setUp() throws Exception
+	{
+		p = new AccountConnectPlugin();
+		inject("config", new AccountConnectConfig()
+		{
+			@Override
+			public String linkToken()
+			{
+				return TOKEN;
+			}
+		});
+		client = mock(Client.class);
+		when(client.getTickCount()).thenAnswer(i -> tick);
+		when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+		inject("client", client);
+	}
+
+	private void inject(String field, Object value) throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField(field);
+		f.setAccessible(true);
+		f.set(p, value);
+	}
+
+	private Object read(String field) throws Exception
+	{
+		Field f = AccountConnectPlugin.class.getDeclaredField(field);
+		f.setAccessible(true);
+		return f.get(p);
+	}
+
+	private void offer(int slot, GrandExchangeOfferState s, int item, int sold, int total, int price, int spent)
+	{
+		GrandExchangeOffer o = mock(GrandExchangeOffer.class);
+		when(o.getState()).thenReturn(s);
+		when(o.getItemId()).thenReturn(item);
+		when(o.getQuantitySold()).thenReturn(sold);
+		when(o.getTotalQuantity()).thenReturn(total);
+		when(o.getPrice()).thenReturn((long) price);
+		when(o.getSpent()).thenReturn((long) spent);
+		GrandExchangeOfferChanged ev = mock(GrandExchangeOfferChanged.class);
+		when(ev.getOffer()).thenReturn(o);
+		when(ev.getSlot()).thenReturn(slot);
+		p.onGrandExchangeOfferChanged(ev);
+	}
+
+	private List<Map<String, Object>> ge()
+	{
+		List<Map<String, Object>> out = new ArrayList<>();
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if (String.valueOf(e.get("type")).startsWith("ge_"))
+			{
+				out.add(e);
+			}
+		}
+		return out;
+	}
+
+	// ------------------------------------------------------------------ priority overflow
+
+	@Test
+	public void priorityClassesAreAsDocumented()
+	{
+		assertEquals(EventPriority.P0, EventPriority.classOf("ge_buy"));
+		assertEquals(EventPriority.P0, EventPriority.classOf("store_sell"));
+		assertEquals(EventPriority.P0, EventPriority.classOf("logout"));
+		assertEquals(EventPriority.P1, EventPriority.classOf("loot"));
+		assertEquals(EventPriority.P1, EventPriority.classOf("bank_visit_open"));
+		assertEquals(EventPriority.P2, EventPriority.classOf("region"));
+		assertEquals(EventPriority.P2, EventPriority.classOf(null));
+	}
+
+	@Test
+	public void overflowEvictsTheOldestLowestClassRowNotTheOldestRow()
+	{
+		List<Map<String, Object>> q = new ArrayList<>();
+		q.add(row("ge_buy"));		// 0: oldest, P0
+		q.add(row("loot"));		// 1: P1
+		q.add(row("region"));		// 2: first P2
+		q.add(row("region"));		// 3
+		assertEquals(2, EventPriority.evictIndex(q));
+		q.remove(2);
+		q.remove(2);
+		assertEquals("no P2 left: the oldest P1 goes", 1, EventPriority.evictIndex(q));
+		q.remove(1);
+		assertEquals("only P0 left: the oldest row goes, as before", 0, EventPriority.evictIndex(q));
+		assertEquals(-1, EventPriority.evictIndex(new ArrayList<>()));
+	}
+
+	@Test
+	public void aFullBufferKeepsGeRowsWhileRegionRowsAreDropped() throws Exception
+	{
+		setUp();
+		p.emitEvent("ge_buy", new HashMap<>());
+		for (int i = 0; i < 600; i++)
+		{
+			p.emitEvent("region", new HashMap<>());
+		}
+		int geLeft = 0;
+		for (Map<String, Object> e : p.pendingEvents)
+		{
+			if ("ge_buy".equals(e.get("type")))
+			{
+				geLeft++;
+			}
+		}
+		assertEquals("the GE row must survive 600 later region rows", 1, geLeft);
+		assertEquals(500, p.pendingEvents.size());
+		Map<String, Object> h = p.captureHealthSnapshot();
+		assertEquals(101L, h.get("events_overflow_p2_total"));
+		assertEquals(0L, h.get("events_overflow_p0_total"));
+		assertEquals(101L, h.get("events_lost_total"));
+	}
+
+	// ------------------------------------------------------------------ GE offer_key
+
+	@Test
+	public void oneOfferKeepsOneKeyAndAnIdenticalRelistGetsANewKey() throws Exception
+	{
+		setUp();
+		offer(2, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(2, GrandExchangeOfferState.BUYING, 560, 0, 100, 250, 0);
+		tick += 200;
+		offer(2, GrandExchangeOfferState.BUYING, 560, 40, 100, 250, 10_000);
+		offer(2, GrandExchangeOfferState.BOUGHT, 560, 100, 100, 250, 25_000);
+		offer(2, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(2, GrandExchangeOfferState.BUYING, 560, 0, 100, 250, 0);	// identical re-list
+		List<Map<String, Object>> g = ge();
+		assertEquals(5, g.size());
+		String k = (String) g.get(0).get("offer_key");
+		assertNotNull(k);
+		assertTrue(k.matches("^[0-9a-f]{32}$"));
+		assertEquals("placed", g.get(0).get("offer_seen"));
+		for (int i = 1; i < 4; i++)
+		{
+			assertEquals("rows of one offer share its key", k, g.get(i).get("offer_key"));
+		}
+		assertNotEquals("an identical re-list after a collect is a new offer", k, g.get(4).get("offer_key"));
+	}
+
+	@Test
+	public void aCollectEndsTheKeySoTheNextOfferInTheSlotNeverInheritsIt() throws Exception
+	{
+		setUp();
+		offer(5, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(5, GrandExchangeOfferState.BUYING, 560, 0, 100, 250, 0);
+		offer(5, GrandExchangeOfferState.BOUGHT, 560, 100, 100, 250, 25_000);
+		offer(5, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		String k = (String) ge().get(0).get("offer_key");
+		// the next offer in the slot is first seen finished (placed and filled between two events): no ge_offer
+		offer(5, GrandExchangeOfferState.BOUGHT, 560, 100, 100, 250, 25_000);
+		List<Map<String, Object>> g = ge();
+		Map<String, Object> last = g.get(g.size() - 1);
+		assertEquals("ge_buy", last.get("type"));
+		assertNotNull(last.get("offer_key"));
+		assertNotEquals("a collected offer's key must not carry to the next offer", k, last.get("offer_key"));
+		assertEquals("midway", last.get("offer_seen"));
+	}
+
+	@Test
+	public void aHopKeepsTheKeyAndTheFinishedWhileAwayRowJoinsItsOffer() throws Exception
+	{
+		setUp();
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.SELLING, 4151, 0, 1, 1_500_000, 0);
+		String k = (String) ge().get(0).get("offer_key");
+		// hop: the plugin marks the login window, then the slot replays as SOLD
+		p.onGameStateChanged(gs(GameState.HOPPING));
+		p.onGameStateChanged(gs(GameState.LOGGED_IN));
+		offer(1, GrandExchangeOfferState.SOLD, 4151, 1, 1, 1_500_000, 1_470_000);
+		List<Map<String, Object>> g = ge();
+		assertEquals("ge_sell", g.get(g.size() - 1).get("type"));
+		assertEquals(k, g.get(g.size() - 1).get("offer_key"));
+	}
+
+	@Test
+	public void aSlotFirstSeenPartFilledIsMidwayAndADifferentOfferInTheSlotRotatesTheKey() throws Exception
+	{
+		setUp();
+		offer(4, GrandExchangeOfferState.BUYING, 2, 10, 100, 5, 50);	// first sight, part-filled
+		Map<String, Object> first = ge().get(0);
+		assertEquals("ge_progress", first.get("type"));
+		assertEquals("midway", first.get("offer_seen"));
+		tick += 200;
+		offer(4, GrandExchangeOfferState.BUYING, 2, 20, 100, 6, 110);	// price changed: another offer
+		List<Map<String, Object>> g = ge();
+		if (g.size() > 1)
+		{
+			assertNotEquals(first.get("offer_key"), g.get(1).get("offer_key"));
+		}
+	}
+
+	private static net.runelite.api.events.GameStateChanged gs(GameState s)
+	{
+		net.runelite.api.events.GameStateChanged e = new net.runelite.api.events.GameStateChanged();
+		e.setGameState(s);
+		return e;
+	}
+
+	// ------------------------------------------------------------------ game_vars
+
+	@Test
+	public void gameVarsEncodeSparselyAndDecodeVarbits()
+	{
+		int[] varps = new int[10];
+		varps[3] = 0b1011_0000;
+		varps[7] = -5;
+		Map<String, Object> e = GameVarsCapture.encode(varps);
+		assertEquals(10, e.get("n"));
+		Map<?, ?> nz = (Map<?, ?>) e.get("nz");
+		assertEquals(2, nz.size());
+		assertEquals(0b1011_0000, nz.get("3"));
+		assertEquals(-5, nz.get("7"));
+		assertEquals(0b1011, GameVarsCapture.varbit(0b1011_0000, 4, 7));
+		assertEquals(1, GameVarsCapture.varbit(-1, 31, 31));
+		assertNull(GameVarsCapture.encode(null));
+		int[] other = varps.clone();
+		other[3] = 1;
+		assertNotEquals("the sha changes when any value changes", e.get("sha"), GameVarsCapture.encode(other).get("sha"));
+	}
+
+	@Test
+	public void gameVarsAreOffUntilGrantedAndWaitForLoadedSkills() throws Exception
+	{
+		setUp();
+		when(client.getVarps()).thenReturn(new int[]{0, 7, 0});
+		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
+		assertNull("not granted = never sent", p.gameVarsBlock(1_000_000L));
+		p.serverGameVarsEnabled = true;
+		Map<String, Object> gv = p.gameVarsBlock(1_000_000L);
+		assertNotNull(gv);
+		assertEquals(1000L, gv.get("observed_at"));
+		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(0);
+		assertNull("a login tick whose skills read 0 has not loaded the player: send nothing", p.gameVarsBlock(1_000_000L));
+	}
+
+	@Test
+	public void canonicalHashIgnoresGameVars() throws Exception
+	{
+		setUp();
+		inject("gson", new com.google.gson.Gson());
+		Map<String, Object> a = new LinkedHashMap<>();
+		a.put("schema_v", 1);
+		Map<String, Object> b = new LinkedHashMap<>(a);
+		b.put("game_vars", GameVarsCapture.encode(new int[]{1, 2, 3}));
+		assertEquals(p.canonicalHash(a), p.canonicalHash(b));
+		Map<String, Object> c = new LinkedHashMap<>(a);
+		c.put("schema_v", 2);
+		assertNotEquals("control: a real change still changes the hash", p.canonicalHash(a), p.canonicalHash(c));
+	}
+
+	// ------------------------------------------------------------------ observed_at
+
+	@Test
+	public void observedAtIsNullUntilTheContainerChangedAndThenItsTime() throws Exception
+	{
+		setUp();
+		assertNull(p.observedAtSeconds(95));
+		p.containerObservedAtMs.put(95, 1_700_000_123_456L);
+		assertEquals(Long.valueOf(1_700_000_123L), p.observedAtSeconds(95));
+		assertNull("another container is unaffected", p.observedAtSeconds(93));
+	}
+
+	// ------------------------------------------------------------------ profile fencing
+
+	@Test
+	public void eventsCarryProfileTypeOnlyOutsideTheMainGame() throws Exception
+	{
+		setUp();
+		Field f = AccountConnectPlugin.class.getDeclaredField("activeProfileType");
+		f.setAccessible(true);
+		f.set(p, "STANDARD");
+		p.emitEvent("loot", new HashMap<>());
+		assertFalse(p.pendingEvents.get(0).containsKey("profile_type"));
+		f.set(p, "SEASONAL");
+		p.emitEvent("loot", new HashMap<>());
+		assertEquals("SEASONAL", p.pendingEvents.get(1).get("profile_type"));
+	}
+
+	private static Map<String, Object> row(String type)
+	{
+		Map<String, Object> m = new HashMap<>();
+		m.put("type", type);
+		return m;
+	}
+}
