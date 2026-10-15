@@ -21,7 +21,7 @@ The snapshot is tied to the link token you chose (not your real identity) and co
 - Quest states, achievement-diary and combat-achievement progress
 - Slayer points / current task
 - Worn equipment, inventory, and bank contents (bank only after you open it in-game)
-- Grand Exchange offers, rune pouch
+- Grand Exchange offers, displayed recent GE history (rollout-gated), rune pouch
 - Collection-log entries you have obtained (captured only while the collection-log interface is open)
 
 It does **not** read or send your password, email, payment details, or any Jagex-account
@@ -67,9 +67,11 @@ Observations are session-local and additive. `recent_signals` keeps the latest
 observation per kind/subject, at most 128, with `signals_evicted`; it is **not an
 exhaustive event stream** and repeated salvage lines must not be summed as loot.
 Collection slots are capped at 4096; repeated draws replace absolute quantities.
-`complete` is always false: a page render or quiet ticks do not establish a full
-log scan, and absent items never mean unowned. No automatic search/menu action is
-performed. The existing legacy `collection_log` block remains unchanged.
+Passive page renders remain incomplete. The capture-first follow-up below adds an
+own-log Search scan with explicit count verification. Missing items in a partial
+scan never mean unowned. The legacy collection block remains partial; unknown
+ownership now also rejects its slots, and explicit zero quantities never enter
+the legacy obtained-item set.
 
 Reads wait for an identified account, positive Hitpoints level, and two game
 ticks. A single cloned varp array supplies each structured snapshot. Missing,
@@ -191,3 +193,128 @@ migration, bytes per event, queue/spool size, ingestion capacity and retention
 need separate server-side verification at expected concurrency before rollout.
 Exact trade timestamps, individual execution prices, tax allocation and unseen
 remote offer history remain physically unobservable from this callback.
+
+
+## Capture-first recovery (local, inactive)
+
+This batch extends the existing **disabled `X-Account-Progress: on` rollout control**,
+not a user toggle. Both GE history and collection scanning use that token-bound
+grant, account/profile identity, two-tick login settlement and existing snapshot
+writer. Revocation strips the entire block from cached uploads. No server, Hub,
+release configuration or production writer is changed. Keep this grant disabled
+until the installation disclosure, ingestion and field checks below are approved.
+
+`account_progress.ge_history` contains:
+
+- `source: ge_history_widget_383_3`, `collector_session` (random per capture
+  lifecycle), `identity_scope: account_profile_collector_session`, `complete: false`,
+  `observations_evicted` and at most eight `observations`.
+- Each observation has `sequence`, `observed_at_ms` (first matching UI read),
+  `confirmed_at_ms` (second matching read) and ordered `rows`.
+- Each row has `row_index`, `item_id`, `quantity`, `side` (`buy`, `sell`, or
+  `unknown`), original `state_text` and `price_text`, `displayed_total_gp` and
+  `displayed_each_gp` where strictly parseable, `execution_time: unknown`, and
+  `price_semantics: displayed_values_tax_and_rounding_unresolved`.
+
+The six-child row layout is checked before capture. Hidden, null, partial and
+oversized layouts wait for recovery. Reads occur at most once per game tick;
+two matching reads are required, with at most one new observation per five ticks.
+Limits are 40 rows/window, 128 state-text characters and 512 price-text characters
+per row. Overflow/unsupported price text remains unknown; raw supported-length
+text survives. No multiplication, division, inferred tax or execution timestamp
+is introduced. UI time is wall-clock observation time, not a trade interval;
+clock adjustments may reverse the two observation timestamps.
+
+Unchanged history is suppressed across reopening in the same collector session.
+Identical rows remain distinct by position. An intervening changed window can
+produce another observation of a prior-looking window: there is no game trade ID.
+Backend retries deduplicate by account/profile plus `collector_session`/`sequence`;
+these observations MUST NOT be summed with each other or live GE deltas. Recovery
+is bounded recent UI evidence, not an exhaustive durable execution stream. Hops,
+relogs, account/mode/token changes and restart reset its session and buffer.
+
+`account_progress.collection_log` retains absolute `items` quantities and adds
+`observed_positive_item_count`, `scan_expected_obtained_count`,
+`scan_expected_total_count`, `scan_started_at_ms`, `scan_verified_at_ms`,
+`scan_status` and `completeness_basis`. On script 7797, a settled, positively
+identified own log with a visible Search widget may invoke exactly the collection
+Search action and script 2240. This is RuneLite's documented sole `menuAction`
+exception ([current rules, checked 2026-10-15](https://github.com/runelite/runelite/wiki/Rejected-or-Rolled-Back-Features#sensitive-apis)).
+No packet-permission override, general menu automation, chat input or extra button
+is used. API failure falls back to passive script-4100 observations.
+
+There is one attempt per open, at least 100 ticks between attempts, no automatic
+retry in that open, a 20-tick timeout, and a 4096-item ceiling. A scan starts with
+fresh item evidence. After three quiet ticks, **distinct positive-quantity items**
+must equal the game's obtained count, with unchanged, valid obtained/maximum
+counts from scan start. Only then is `complete: true` with
+`completeness_basis: own_search_scan_unique_count_matches_game`. This verifies
+obtained-item coverage, not every unowned item definition or historical acquisition.
+Explicit zero-quantity transmissions during the scan are retained without counting
+as obtained; absent items in incomplete scans remain unknown. Zero obtained can be
+verified only against a known positive game maximum. Slot/count changes invalidate
+completion. Early close, timeout, host/unknown ownership, old-client failure or
+missed setup during login settlement cannot claim completeness. Last verified
+scan timestamps describe observation time, never acquisition time. No adventure
+log is scanned; both legacy and new slot handlers require positive own ownership.
+
+Bank follow-up is deliberately deferred: the existing `bank_session` writer
+already accumulates gross differences, and `bank_visit_*` retains raw manifests.
+Those manifests are direct container observations; deposited/withdrawn directions
+are **inferences from bank deltas**, not authoritative inventory-transfer events.
+Closed-bank/deposit-box reconstruction needs separate reconciliation tests for
+notes, containers, delayed updates and account transitions. This batch adds no
+second bank writer and does not upgrade the existing inference to authority.
+
+Independent implementations were informed by these exact pinned BSD-2-Clause
+sources, not copied source or datasets:
+
+- Flipping Copilot `c8dbb5155c44156ed3050c50155b086c25815556`,
+  `rs/GeHistoryStateRS.java`: widget 383:3 and six-child row layout.
+- GIM Hub `890e250370e468dc96c47b95c4023953748a1af4`,
+  `CollectionLogManager.java`: setup/transmission scripts, count verification and
+  adventure-log guard; `items/ItemTransferQueue.java`: inferred container transfer
+  reconciliation, assessed and deferred here.
+- WikiSync `1ff4ea0653395b552844d658d3668815d82e0a79`,
+  `SyncButtonManager.java`: Search plus script 2240. No WikiSync button or extra
+  consent workflow is introduced.
+
+### Release disclosure and outstanding field gates
+
+One proposed installation disclosure, to be reviewed against the complete release:
+“This plugin sends linked game-account data to osrsbestinslot.com, a server not
+controlled or verified by RuneLite: account name/hash/type, world/location,
+skills and progress, own collection-log items and quantities, equipment,
+inventory, bank and other observed storage (including shared group storage),
+GE offers and displayed recent GE history, game settings and activity including
+GE/shop transactions, trades with counterparty names/items, loot, drops, pickups,
+alchemy, deaths, levels and session times. Delivery-proof trade screenshots and
+shop screen clips may contain chat and other players' names. Your IP address
+reaches the service. It does not receive your Jagex credentials.”
+This is a draft for the release owner, not a claim that the current Hub warning
+was updated. The currently approved link-token help text remains unchanged until release;
+no in-plugin consent screen or new toggle is added.
+
+Remaining real-account checks, using the existing authorized manually operated
+client and a local sink:
+
+1. Capture actual buy/sell, single/multiple quantity, tax, large-GP and unknown
+   format GE rows; verify text, IDs, quantities, unit/total display and row order
+   against the UI. Open briefly, reopen unchanged, reopen after a new trade and
+   change interfaces during rendering. Confirm no execution timestamp or double
+   credit to the live-offer ledger.
+2. Open own logs with zero, partial and many obtained entries; compare distinct
+   positives to the game total and verify full transmissions and timeout behavior.
+   Close early and reopen; manually view an adventure log and return to your own.
+   Confirm no host item ever enters either collection block. Test concurrent
+   installed collection plugins and the visible Search/reset behavior.
+3. Repeat on supported old/current clients, profile modes, hop/disconnect/relog,
+   account/token changes and disabled/revoked grants. Confirm fallback stays passive
+   when setup/widget/API support is missing and no observations cross identities.
+4. Replay actual payloads into a local backend candidate. Verify schema preservation,
+   null/omitted unknowns, session/sequence idempotency, history/live-offer separation,
+   request size and retention limits, and server grant disabled-by-default behavior.
+   At maximum text lengths GE history can occupy hundreds of KB; size/capacity
+   acceptance is a release gate, not inferred from passing plugin tests.
+
+These real-account and backend checks have not been performed in this worktree.

@@ -409,4 +409,156 @@ public class AccountProgressCaptureTest
         assertNull(p.progressBlock());
     }
 
+
+    private void searchable(int obtained)
+    {
+        vars[2943] = obtained; vars[2944] = 1600;
+        when(client.getWidget(net.runelite.api.gameval.InterfaceID.Collection.SEARCH_TOGGLE))
+            .thenReturn(mock(net.runelite.api.widgets.Widget.class));
+    }
+
+    @Test public void ownScanNeedsDistinctCountQuietPeriodAndStableTotals()
+    {
+        searchable(2);
+        capture.collectionSetup(client, 1000);
+        capture.collectionSlot(client, new Object[]{4100, 4151, 3}, 1);
+        capture.collectionSlot(client, new Object[]{4100, 4151, 3}, 1);
+        tick = 3; capture.poll(client, 4000);
+        assertEquals(false, block("collection_log").get("complete"));
+        capture.collectionSlot(client, new Object[]{4100, 11832, 1}, 4);
+        tick = 5; capture.poll(client, 6000);
+        assertEquals(false, block("collection_log").get("complete"));
+        tick = 6; capture.poll(client, 7000);
+        assertEquals(true, block("collection_log").get("complete"));
+        assertEquals(7000L, block("collection_log").get("scan_verified_at_ms"));
+        vars[2943] = 3; capture.poll(client, 8000);
+        vars[2943] = 2;
+        assertEquals(false, block("collection_log").get("complete"));
+    }
+
+    @Test public void scanKnownZeroAndExplicitZeroSlotsDifferFromUnknown()
+    {
+        searchable(0);
+        capture.collectionSetup(client, 1000);
+        capture.collectionSlot(client, new Object[]{4100, 4151, 0}, 1);
+        tick = 3; capture.poll(client, 4000);
+        assertEquals(true, block("collection_log").get("complete"));
+        assertEquals(0, ((Map<?, ?>) block("collection_log").get("items")).get(4151));
+        capture.reset(); vars[2944] = 0;
+        capture.collectionSetup(client, 5000);
+        tick = 6; capture.poll(client, 7000);
+        assertEquals(false, block("collection_log").get("complete"));
+    }
+
+    @Test public void timeoutCloseAndExceptionsNeverClaimComplete()
+    {
+        searchable(1); capture.collectionSetup(client, 1000);
+        tick = 21; capture.poll(client, 22000);
+        assertEquals("timeout", block("collection_log").get("scan_status"));
+        assertEquals(false, block("collection_log").get("complete"));
+        capture.reset(); capture.collectionSetup(client, 23000); capture.collectionClosed();
+        capture.collectionSlot(client, new Object[]{4100, 4151, 1}, 24);
+        tick = 25; capture.poll(client, 26000);
+        assertEquals(false, block("collection_log").get("complete"));
+        capture.reset();
+        doThrow(new IllegalStateException("unsupported script")).when(client).runScript(2240);
+        capture.collectionSetup(client, 27000);
+        assertEquals("unsupported_client", block("collection_log").get("scan_status"));
+    }
+
+    @Test public void scanOnlyOncePerOpenWithCooldownAndRejectsHostOrUnknown()
+    {
+        searchable(1);
+        vars[2049] = 1 << 11; capture.collectionSetup(client, 1);
+        verify(client, never()).runScript(anyInt());
+        vars[2049] = 0;
+        capture.collectionSetup(client, 2); capture.collectionSetup(client, 3);
+        capture.collectionClosed(); tick = 99; capture.collectionSetup(client, 4);
+        verify(client, times(1)).runScript(2240);
+        tick = 100; capture.collectionSetup(client, 5);
+        verify(client, times(2)).runScript(2240);
+        capture.reset(); when(client.getVarbit(12061)).thenReturn(null);
+        capture.collectionSetup(client, 6);
+        verify(client, times(2)).runScript(2240);
+    }
+
+    @Test public void realSetupHandlerIsGrantGatedAndHostSlotsCannotReachLegacy() throws Exception
+    {
+        AccountConnectPlugin p = plugin(); searchable(1);
+        ScriptPostFired setup = new ScriptPostFired(7797);
+        p.onScriptPostFired(setup);
+        verify(client, never()).runScript(2240);
+        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.progressBlock(); tick += 2;
+        p.onScriptPostFired(setup);
+        verify(client).menuAction(-1, net.runelite.api.gameval.InterfaceID.Collection.SEARCH_TOGGLE,
+            MenuAction.CC_OP, 1, -1, "Search", null);
+        verify(client).runScript(2240);
+        when(client.getVarbit(12061)).thenReturn(null);
+        ScriptEvent script = mock(ScriptEvent.class);
+        when(script.getArguments()).thenReturn(new Object[]{4100, 4151, 7});
+        ScriptPreFired slot = new ScriptPreFired(4100); slot.setScriptEvent(script);
+        p.onScriptPreFired(slot);
+        Field legacy = AccountConnectPlugin.class.getDeclaredField("clogObtained"); legacy.setAccessible(true);
+        assertTrue(((java.util.Set<?>) legacy.get(p)).isEmpty());
+        assertTrue(((Map<?, ?>) ((Map<?, ?>) p.progressBlock().get("collection_log")).get("items")).isEmpty());
+    }
+
+    @Test public void tickHandlerHistoryIsGatedAndCannotCrossAccountOrMode() throws Exception
+    {
+        AccountConnectPlugin p = plugin();
+        net.runelite.api.widgets.Widget list = mock(net.runelite.api.widgets.Widget.class);
+        net.runelite.api.widgets.Widget state = mock(net.runelite.api.widgets.Widget.class);
+        net.runelite.api.widgets.Widget item = mock(net.runelite.api.widgets.Widget.class);
+        net.runelite.api.widgets.Widget price = mock(net.runelite.api.widgets.Widget.class);
+        when(state.getText()).thenReturn("Bought"); when(item.getItemId()).thenReturn(4151);
+        when(item.getItemQuantity()).thenReturn(2); when(price.getText()).thenReturn("100 coins");
+        when(list.getDynamicChildren()).thenReturn(new net.runelite.api.widgets.Widget[]{null, null, state, null, item, price});
+        when(client.getWidget(383, 3)).thenReturn(list);
+        p.onGameTick(new GameTick());
+        verify(client, never()).getWidget(383, 3);
+        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.onGameTick(new GameTick()); tick += 2;
+        p.onGameTick(new GameTick()); tick++;
+        p.onGameTick(new GameTick());
+        Map<?, ?> history = (Map<?, ?>) p.progressBlock().get("ge_history");
+        assertEquals(1, ((java.util.List<?>) history.get("observations")).size());
+        String collector = (String) history.get("collector_session");
+        when(client.getAccountHash()).thenReturn(43L);
+        p.onGameTick(new GameTick()); tick += 2;
+        history = (Map<?, ?>) p.progressBlock().get("ge_history");
+        assertTrue(((java.util.List<?>) history.get("observations")).isEmpty());
+        assertNotEquals(collector, history.get("collector_session"));
+        when(client.getWorldType()).thenReturn(java.util.EnumSet.of(WorldType.SEASONAL));
+        assertNull(p.progressBlock()); tick += 2;
+        assertTrue(((java.util.List<?>) ((Map<?, ?>) p.progressBlock().get("ge_history")).get("observations")).isEmpty());
+        p.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
+        assertNull(p.progressBlock());
+    }
+
+    @Test public void automaticZeroTransmissionNeverPollutesLegacyObtainedSet() throws Exception
+    {
+        AccountConnectPlugin p = plugin(); searchable(0);
+        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.progressBlock(); tick += 2;
+        p.onScriptPostFired(new ScriptPostFired(7797));
+        ScriptEvent script = mock(ScriptEvent.class);
+        when(script.getArguments()).thenReturn(new Object[]{4100, 4151, 0});
+        ScriptPreFired slot = new ScriptPreFired(4100); slot.setScriptEvent(script);
+        p.onScriptPreFired(slot);
+        Field legacy = AccountConnectPlugin.class.getDeclaredField("clogObtained"); legacy.setAccessible(true);
+        assertTrue(((java.util.Set<?>) legacy.get(p)).isEmpty());
+        Map<?, ?> log = (Map<?, ?>) p.progressBlock().get("collection_log");
+        assertEquals(0, ((Map<?, ?>) log.get("items")).get(4151));
+    }
+
+    @Test public void changingCountsDuringScanCannotLaterResurrectCompleteness()
+    {
+        searchable(1); capture.collectionSetup(client, 1);
+        capture.collectionSlot(client, new Object[]{4100, 4151, 1}, 1);
+        tick = 1; vars[2943] = 2; capture.poll(client, 1000);
+        tick = 4; vars[2943] = 1; capture.poll(client, 4000);
+        assertEquals(false, block("collection_log").get("complete"));
+        assertEquals("counts_changed", block("collection_log").get("scan_status"));
+    }
 }

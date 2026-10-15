@@ -416,10 +416,17 @@ public class BroadCaptureBatch1Test
 	public void anotherPlayersCollectionLogInAHouseIsNeverStored() throws Exception
 	{
 		setUp();
-		when(client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN)).thenReturn(1);
+		int[] vars = new int[2050];
+		vars[2049] = 1 << 11;
+		when(client.getVarps()).thenReturn(vars);
+		net.runelite.api.VarbitComposition host = mock(net.runelite.api.VarbitComposition.class);
+		when(host.getIndex()).thenReturn(2049);
+		when(host.getLeastSignificantBit()).thenReturn(11);
+		when(host.getMostSignificantBit()).thenReturn(11);
+		when(client.getVarbit(12061)).thenReturn(host);
 		p.onScriptPreFired(clogDraw(11832));
 		assertTrue("a host's log must not enter this account", clog().isEmpty());
-		when(client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN)).thenReturn(0);
+		vars[2049] = 0;
 		p.onScriptPreFired(clogDraw(11832));
 		assertTrue("control: the player's own log is stored", clog().contains(11832));
 	}

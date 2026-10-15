@@ -73,6 +73,7 @@ import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPreFired;
+import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.PlayerDespawned;
 import net.runelite.api.events.PlayerSpawned;
 import net.runelite.api.events.StatChanged;
@@ -5816,6 +5817,15 @@ public class AccountConnectPlugin extends Plugin
 		lastBuiltHash = canonicalHash(snapshot);
 	}
 
+	@Subscribe
+	public void onScriptPostFired(ScriptPostFired event)
+	{
+		if (event.getScriptId() == 7797 && progressReady())
+		{
+			accountProgress.collectionSetup(client, System.currentTimeMillis());
+		}
+	}
+
 	/** Each obtained collection-log slot fires script 4100 (arg[1] = item id) as the clog UI renders. */
 	@Subscribe
 	public void onScriptPreFired(ScriptPreFired event)
@@ -5828,7 +5838,7 @@ public class AccountConnectPlugin extends Plugin
 		// through the same script, and the game sets COLLECTION_POH_HOST_BOOK_OPEN while it is open. Those
 		// items belong to someone else, so they are never added to this account (the guard every audited
 		// collection-log uploader uses: WikiSync, RuneProfile, DropTracker).
-		if (client != null && client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1)
+		if (client == null || !Integer.valueOf(0).equals(AccountProgressCapture.bit(client, client.getVarps(), 12061)))
 		{
 			return;
 		}
@@ -5837,7 +5847,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			accountProgress.collectionSlot(client, args, System.currentTimeMillis() / 1000L);
 		}
-		if (args != null && args.length > 1 && args[1] instanceof Integer && (Integer) args[1] > 0)
+		if (args != null && args.length > 2 && args[1] instanceof Integer && (Integer) args[1] > 0
+			&& args[2] instanceof Integer && (Integer) args[2] > 0)
 		{
 			clogObtained.add((Integer) args[1]);
 			clogSeen = true;
@@ -6129,7 +6140,10 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
-		progressReady();
+		if (progressReady())
+		{
+			accountProgress.poll(client, System.currentTimeMillis());
+		}
 		// Poll the other player's trade offer + name while the MAIN screen (335) is open — the only window
 		// they are readable (see captureOtherOfferWhileMainOpen). Tight-gated: the body runs only during an
 		// active trade with activity logging on; a cheap boolean check otherwise.
@@ -7051,6 +7065,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onWidgetClosed(WidgetClosed event)
 	{
+		if (event.getGroupId() == COLLECTION_LOG_GROUP_ID) accountProgress.collectionClosed();
 		handleTradeWidgetClosed(event.getGroupId());
 		handleBankWidgetClosed(event.getGroupId(), bankCloseIsTeardown());
 		if (event.getGroupId() == SHOP_GROUP_ID)

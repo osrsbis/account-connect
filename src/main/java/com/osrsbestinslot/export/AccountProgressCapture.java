@@ -10,11 +10,14 @@ import java.util.regex.Pattern;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Skill;
+import net.runelite.api.MenuAction;
+import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.api.VarbitComposition;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.util.Text;
 
-/** Own-account observations only. No persistence, UI operations, or third-party plugin dependencies. */
+/** Own-account observations only. No persistence or third-party plugin dependencies. Only the permitted collection Search action. */
 final class AccountProgressCapture
 {
     // Cache-generated gameval 1.13.1 IDs; numeric IDs avoid linking newer enum fields on older clients.
@@ -28,6 +31,12 @@ final class AccountProgressCapture
     private Long collectionObservedAt;
     private final Map<String, Map<String, Object>> signals = new LinkedHashMap<>();
     private int evicted;
+    private final GeHistoryCapture geHistory = new GeHistoryCapture();
+    private boolean scanActive, scanComplete, scanAttempted;
+    private int scanStartTick, lastSlotTick, nextScanTick;
+    private Integer scanObtained, scanTotal;
+    private Long scanStartedAt, scanVerifiedAt;
+    private String scanStatus = "not_scanned";
 
     void reset()
     {
@@ -36,6 +45,12 @@ final class AccountProgressCapture
         collectionObservedAt = null;
         signals.clear();
         evicted = 0;
+        geHistory.reset();
+        scanActive = scanComplete = scanAttempted = false;
+        nextScanTick = 0;
+        scanObtained = scanTotal = null;
+        scanStartedAt = scanVerifiedAt = null;
+        scanStatus = "not_scanned";
     }
 
     boolean ready(Client client, String token)
@@ -74,12 +89,107 @@ final class AccountProgressCapture
         }
         int id = (Integer) args[1];
         int quantity = (Integer) args[2];
-        if (id <= 0 || quantity <= 0 || (collectionItems.size() >= 4096 && !collectionItems.containsKey(id)))
+        if (id <= 0 || (quantity < 0 || (quantity == 0 && !scanActive)) || (collectionItems.size() >= 4096 && !collectionItems.containsKey(id)))
         {
             return;
         }
+        lastSlotTick = client.getTickCount();
+        if (!Objects.equals(collectionItems.get(id), quantity))
+        {
+            scanComplete = false;
+            if (!scanActive && scanVerifiedAt != null) scanStatus = "slots_changed";
+        }
         collectionItems.put(id, quantity); // absolute count, repeated draws never increment
         collectionObservedAt = now;
+    }
+
+    /** Called only after the existing grant and account-settlement gate, on the client thread. */
+    void collectionSetup(Client client, long now)
+    {
+        if (scanAttempted || client.getTickCount() < nextScanTick || !ownLog(client)) return;
+        Widget search = client.getWidget(InterfaceID.Collection.SEARCH_TOGGLE);
+        if (search == null || search.isHidden()) return;
+        scanAttempted = true; // set before synchronous scripts can re-enter
+        nextScanTick = client.getTickCount() + 100;
+        scanActive = true;
+        scanComplete = false;
+        scanStatus = "scanning";
+        scanStartTick = lastSlotTick = client.getTickCount();
+        scanStartedAt = now;
+        scanVerifiedAt = null;
+        scanObtained = varp(client.getVarps(), 2943);
+        scanTotal = varp(client.getVarps(), 2944);
+        collectionItems.clear();
+        collectionObservedAt = null;
+        try
+        {
+            // RuneLite's sole documented menuAction exception. Never enable packet-sending scripts.
+            client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
+            client.runScript(2240);
+        }
+        catch (RuntimeException | LinkageError ex)
+        {
+            scanActive = false;
+            scanStatus = "unsupported_client"; // passive script observations remain usable
+        }
+    }
+
+    void collectionClosed()
+    {
+        scanAttempted = false;
+        if (scanActive)
+        {
+            scanActive = false;
+            scanStatus = "closed_before_verification";
+        }
+    }
+
+    private boolean ownLog(Client client)
+    {
+        return Integer.valueOf(0).equals(bit(client, client.getVarps(), 12061));
+    }
+
+    void poll(Client client, long now)
+    {
+        geHistory.poll(client, now);
+        if (!ownLog(client))
+        {
+            scanActive = scanComplete = false;
+            scanStatus = "own_log_unverified";
+            return;
+        }
+        if ((scanComplete || scanActive) && (!Objects.equals(scanObtained, varp(client.getVarps(), 2943))
+            || !Objects.equals(scanTotal, varp(client.getVarps(), 2944))))
+        {
+            scanActive = scanComplete = false;
+            scanStatus = "counts_changed";
+        }
+        if (!scanActive) return;
+        int tick = client.getTickCount();
+        if (tick - scanStartTick > 20)
+        {
+            scanActive = false;
+            scanStatus = "timeout";
+            return;
+        }
+        if (tick - lastSlotTick < 3) return;
+        Integer obtained = varp(client.getVarps(), 2943), total = varp(client.getVarps(), 2944);
+        if (total != null && total > 0 && obtained != null && obtained >= 0 && obtained <= total
+            && Objects.equals(scanTotal, total) && Objects.equals(scanObtained, obtained)
+            && positiveCollectionCount() == obtained)
+        {
+            scanActive = false;
+            scanComplete = true;
+            scanStatus = "count_verified";
+            scanVerifiedAt = now;
+            if (collectionObservedAt == null) collectionObservedAt = now / 1000L;
+        }
+        // Mismatch is not completion; leave time for delayed transmissions until the timeout.
+    }
+
+    private long positiveCollectionCount()
+    {
+        return collectionItems.values().stream().filter(quantity -> quantity > 0).count();
     }
 
     void chat(String message, long now)
@@ -221,10 +331,20 @@ final class AccountProgressCapture
         log.put("observed_at", collectionObservedAt);
         log.put("observed_item_count", collectionObservedAt == null ? null : collectionItems.size());
         log.put("items", new TreeMap<>(collectionItems));
-        // Quiet ticks and matching counts are not proof of a full server transmission.
-        log.put("complete", false);
+        boolean verified = scanComplete && own && countsKnown
+            && Objects.equals(scanObtained, obtained) && Objects.equals(scanTotal, total)
+            && positiveCollectionCount() == obtained;
+        log.put("complete", verified);
+        log.put("completeness_basis", verified ? "own_search_scan_unique_count_matches_game" : "unverified");
+        log.put("scan_status", scanComplete && !verified ? "counts_changed" : scanStatus);
+        log.put("scan_expected_obtained_count", scanObtained);
+        log.put("scan_expected_total_count", scanTotal);
+        log.put("observed_positive_item_count", collectionObservedAt == null ? null : positiveCollectionCount());
+        log.put("scan_started_at_ms", scanStartedAt);
+        log.put("scan_verified_at_ms", scanVerifiedAt);
         log.put("source", "script_4100_observed_slots");
         out.put("collection_log", log);
+        out.put("ge_history", geHistory.snapshot());
         out.put("recent_signals", new ArrayList<>(signals.values()));
         out.put("signals_evicted", evicted);
         return out;
