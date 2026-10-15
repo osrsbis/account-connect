@@ -5817,6 +5817,14 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		// NOT ANOTHER PLAYER'S LOG. In a player-owned house the adventure log shows the HOST's collection log
+		// through the same script, and the game sets COLLECTION_POH_HOST_BOOK_OPEN while it is open. Those
+		// items belong to someone else, so they are never added to this account (the guard every audited
+		// collection-log uploader uses: WikiSync, RuneProfile, DropTracker).
+		if (client != null && client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1)
+		{
+			return;
+		}
 		Object[] args = event.getScriptEvent().getArguments();
 		if (args != null && args.length > 1 && args[1] instanceof Integer)
 		{
@@ -7315,6 +7323,52 @@ public class AccountConnectPlugin extends Plugin
 
 	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
 		"(?:kill|completion|chest|success|harvest) count is:? ?([\\d,]+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+	/**
+	 * Structured source of a count line: "Your [completion count for |subdued |completed ]<source>
+	 * [kill|harvest|completion|success|Total Ticket ][count ]is: N". The shape follows the parser in the
+	 * BSD-2-Clause plugin "Collection Log Popup Enhanced" (Copyright (c) 2026, SnakeSteak), written
+	 * independently here; only the line shape is shared. The colour markup is stripped first, both forms.
+	 */
+	static final java.util.regex.Pattern KC_SOURCE_RE = java.util.regex.Pattern.compile(
+		"Your (completion count for |subdued |completed )?(.+?) ((?:kill|harvest|completion|success|Total Ticket) )?(?:count )?is: ?([0-9,]+)",
+		java.util.regex.Pattern.CASE_INSENSITIVE);
+	static final java.util.regex.Pattern CHAT_MARKUP_RE = java.util.regex.Pattern.compile("<[^<>]*>|@[a-zA-Z0-9_]+@");
+
+	/** {source, kind, count} for a count line, or null. kind is the verb ("kill", "completion", ...) or "count". */
+	static Map<String, Object> parseKillCount(String text)
+	{
+		if (text == null)
+		{
+			return null;
+		}
+		String clean = CHAT_MARKUP_RE.matcher(text).replaceAll("");
+		java.util.regex.Matcher m = KC_SOURCE_RE.matcher(clean);
+		if (!m.find())
+		{
+			return null;
+		}
+		long count;
+		try
+		{
+			count = Long.parseLong(m.group(4).replace(",", ""));
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
+		String source = m.group(2).trim();
+		if (source.toLowerCase(java.util.Locale.ROOT).startsWith("the "))
+		{
+			source = source.substring(4);
+		}
+		String kind = m.group(3) != null ? m.group(3).trim().toLowerCase(java.util.Locale.ROOT)
+			: m.group(1) != null ? m.group(1).trim().toLowerCase(java.util.Locale.ROOT) : "count";
+		Map<String, Object> out = new LinkedHashMap<>();
+		out.put("source", source);
+		out.put("kind", kind);
+		out.put("count", count);
+		return out;
+	}
 
 	/**
 	 * Emit the two structured milestones parsed from a system chat line: kill_count and pet.
@@ -7340,6 +7394,12 @@ public class AccountConnectPlugin extends Plugin
 			catch (NumberFormatException ignored)
 			{
 				// leave count off when it does not parse; the text still carries the milestone
+			}
+			Map<String, Object> parsed = parseKillCount(text);
+			if (parsed != null)
+			{
+				f.put("source", parsed.get("source"));	// structured boss / activity name; text kept as the raw line
+				f.put("kind", parsed.get("kind"));
 			}
 			emitEvent("kill_count", f);
 		}

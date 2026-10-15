@@ -348,6 +348,55 @@ public class BroadCaptureBatch1Test
 		assertFalse(p.serverGameVarsEnabled);
 	}
 
+	// ------------------------------------------------------------------ batch 2a: KC + clog guard
+
+	@Test
+	public void killCountLinesParseToStructuredSources()
+	{
+		Map<String, Object> z = AccountConnectPlugin.parseKillCount("Your Zulrah kill count is: <col=ff0000>41</col>.");
+		assertEquals("Zulrah", z.get("source"));
+		assertEquals("kill", z.get("kind"));
+		assertEquals(41L, z.get("count"));
+		Map<String, Object> t = AccountConnectPlugin.parseKillCount("Your completed Tombs of Amascut count is: 1,204.");
+		assertEquals("Tombs of Amascut", t.get("source"));
+		assertEquals(1204L, t.get("count"));
+		Map<String, Object> b = AccountConnectPlugin.parseKillCount("Your Barrows chest count is: @mes_hl_red@73@mes_hl_red@.");
+		assertEquals("Barrows chest", b.get("source"));
+		assertEquals(73L, b.get("count"));
+		Map<String, Object> c = AccountConnectPlugin.parseKillCount("Your completion count for the Theatre of Blood is: 12.");
+		assertEquals("Theatre of Blood", c.get("source"));
+		assertEquals("completion count for", c.get("kind"));
+		assertNull("control: an unrelated line is not a count", AccountConnectPlugin.parseKillCount("You feel something weird sneaking into your backpack."));
+		assertNull(AccountConnectPlugin.parseKillCount(null));
+	}
+
+	@Test
+	public void anotherPlayersCollectionLogInAHouseIsNeverStored() throws Exception
+	{
+		setUp();
+		when(client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN)).thenReturn(1);
+		p.onScriptPreFired(clogDraw(11832));
+		assertTrue("a host's log must not enter this account", clog().isEmpty());
+		when(client.getVarbitValue(net.runelite.api.gameval.VarbitID.COLLECTION_POH_HOST_BOOK_OPEN)).thenReturn(0);
+		p.onScriptPreFired(clogDraw(11832));
+		assertTrue("control: the player's own log is stored", clog().contains(11832));
+	}
+
+	@SuppressWarnings("unchecked")
+	private java.util.Set<Integer> clog() throws Exception
+	{
+		return (java.util.Set<Integer>) read("clogObtained");
+	}
+
+	private static net.runelite.api.events.ScriptPreFired clogDraw(int itemId)
+	{
+		net.runelite.api.ScriptEvent se = mock(net.runelite.api.ScriptEvent.class);
+		when(se.getArguments()).thenReturn(new Object[]{0, itemId, 1});
+		net.runelite.api.events.ScriptPreFired e = new net.runelite.api.events.ScriptPreFired(4100);
+		e.setScriptEvent(se);
+		return e;
+	}
+
 	private static Map<String, Object> row(String type)
 	{
 		Map<String, Object> m = new HashMap<>();
