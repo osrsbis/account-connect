@@ -183,6 +183,29 @@ public class AccountConnectPlugin extends Plugin
 	private static final int BONDS_POUCH_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_POUCH;	// 536
 	private static final int BONDS_ESCROW_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_ESCROW;	// 534
 	private static final int QUIVER_AMMO_CONTAINER_ID = net.runelite.api.gameval.InventoryID.DIZANAS_QUIVER_AMMO; // 879
+	/** Snapshot key -> container id for the player's own storage (broad capture batch 1). Order is the wire order. */
+	static final Map<String, Integer> OWN_STORAGE_CONTAINERS;
+	static
+	{
+		Map<String, Integer> m = new LinkedHashMap<>();
+		m.put("seed_box", net.runelite.api.gameval.InventoryID.SEED_BOX);					// 573
+		m.put("tackle_box", net.runelite.api.gameval.InventoryID.TACKLE_BOX);				// 651
+		m.put("forestry_kit", net.runelite.api.gameval.InventoryID.FORESTRY_KIT);			// 814
+		m.put("huntsmans_kit", net.runelite.api.gameval.InventoryID.HUNTSMANS_KIT);			// 855
+		m.put("barbarian_knapsack", net.runelite.api.gameval.InventoryID.BARBARIAN_KNAPSACK);	// 1012
+		m.put("death_storage", net.runelite.api.gameval.InventoryID.DEATH_PERMANENT);		// 636
+		m.put("gravestone", net.runelite.api.gameval.InventoryID.GRAVESTONE);				// 525
+		m.put("poh_costume_room", net.runelite.api.gameval.InventoryID.POH_COSTUMES);		// 637
+		m.put("poh_menagerie", net.runelite.api.gameval.InventoryID.POH_MENAGERIE_PETS);	// 517
+		m.put("potion_storage_device", net.runelite.api.gameval.InventoryID.PREPOT_DEVICE_INV);	// 911
+		m.put("boat_1_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_1_CARGOHOLD);	// 963
+		m.put("boat_2_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_2_CARGOHOLD);	// 964
+		m.put("boat_3_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_3_CARGOHOLD);	// 965
+		m.put("boat_4_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_4_CARGOHOLD);	// 966
+		m.put("boat_5_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_5_CARGOHOLD);	// 967
+		m.put("trawling_net", net.runelite.api.gameval.InventoryID.SAILING_TRAWLING_NET);	// 968
+		OWN_STORAGE_CONTAINERS = java.util.Collections.unmodifiableMap(m);
+	}
 
 	// ---- chest / reward-interface loot (gap audit 2026-07-18): raids, Barrows, clues, Colosseum, Lunar,
 	// wildy loot chest. These NEVER fire LootManager (ServerNpcLoot) — RuneLite itself captures them only in
@@ -514,7 +537,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	volatile boolean serverMaxCaptureEnabled;
 	/**
-	 * GAME VARIABLES (broad capture, batch 1). Server-granted by X-Game-Vars: on, default OFF, no config item.
+	 * BROAD CAPTURE (batch 1). Server-granted by X-Broad-Capture: on, default OFF, no config item. It turns on
+	 * game_vars (below) and the own-storage container blocks (OWN_STORAGE_CONTAINERS).
 	 * When on, the snapshot carries the player's own varp array (GameVarsCapture), from which the server decodes
 	 * quests, diaries, combat achievement tasks, Slayer, prayers, Sailing, farming and every other varbit. It is
 	 * a NEW data class, so the server must not grant it before the disclosure for it is published.
@@ -11296,6 +11320,18 @@ public class AccountConnectPlugin extends Plugin
 		addContainerSnapshot(snap, "bonds_pouch", client.getItemContainer(BONDS_POUCH_CONTAINER_ID));
 		addContainerSnapshot(snap, "bonds_escrow", client.getItemContainer(BONDS_ESCROW_CONTAINER_ID));
 		addContainerSnapshot(snap, "quiver_ammo", client.getItemContainer(QUIVER_AMMO_CONTAINER_ID));
+		// Broad capture batch 1: the player's OWN storage containers that the game sends once opened or
+		// checked (ids from gameval, matched against runelite-api 1.13.1). Each block is present only once the
+		// game has sent that container this session, and carries observed_at. Group, trade, duel, Deadman loot
+		// and reward-chest containers are deliberately absent: they hold other players' items or are loot,
+		// which the loot events already cover.
+		if (serverGameVarsEnabled)
+		{
+			for (Map.Entry<String, Integer> c : OWN_STORAGE_CONTAINERS.entrySet())
+			{
+				addContainerSnapshot(snap, c.getKey(), client.getItemContainer(c.getValue()));
+			}
+		}
 
 		// ---- collection log: obtained item ids (partial until the player opens the clog tabs) ----
 		Map<String, Object> collog = new LinkedHashMap<>();
@@ -11631,7 +11667,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 		}
 
-		String gameVars = response.header("X-Game-Vars");
+		String gameVars = response.header("X-Broad-Capture");
 		if (gameVars != null)
 		{
 			String v = gameVars.trim().toLowerCase(java.util.Locale.ROOT);

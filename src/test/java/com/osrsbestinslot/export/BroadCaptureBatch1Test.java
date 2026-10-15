@@ -314,6 +314,40 @@ public class BroadCaptureBatch1Test
 		assertEquals("SEASONAL", p.pendingEvents.get(1).get("profile_type"));
 	}
 
+	@Test
+	public void ownStorageContainersAreGamevalIdsAndExcludeOtherPlayersContainers()
+	{
+		Map<String, Integer> m = AccountConnectPlugin.OWN_STORAGE_CONTAINERS;
+		assertEquals(16, m.size());
+		assertEquals(Integer.valueOf(573), m.get("seed_box"));
+		assertEquals(Integer.valueOf(636), m.get("death_storage"));
+		assertEquals(Integer.valueOf(963), m.get("boat_1_cargo"));
+		assertEquals(Integer.valueOf(968), m.get("trawling_net"));
+		// never another player's or a shared/loot container
+		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.TRADEOFFER));
+		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.INV_GROUP_TEMP));
+		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.DUELOFFER));
+		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV0));
+	}
+
+	@Test
+	public void broadCaptureHeaderGrantsAndRevokes() throws Exception
+	{
+		setUp();
+		okhttp3.Response on = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", "on").build();
+		p.applyServerPolicy(on, TOKEN);
+		assertTrue(p.serverGameVarsEnabled);
+		okhttp3.Response none = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").build();
+		p.applyServerPolicy(none, TOKEN);
+		assertTrue("an absent header leaves the grant unchanged", p.serverGameVarsEnabled);
+		okhttp3.Response off = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", "off").build();
+		p.applyServerPolicy(off, TOKEN);
+		assertFalse(p.serverGameVarsEnabled);
+	}
+
 	private static Map<String, Object> row(String type)
 	{
 		Map<String, Object> m = new HashMap<>();
