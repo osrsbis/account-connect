@@ -153,6 +153,30 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCRIPT_CLOG_DRAW = 4100;
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
+	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
+	private volatile String progressGrantToken;
+	private volatile long progressGrantEpoch;
+
+	boolean progressGranted()
+	{
+		String token = currentLinkToken();
+		return token != null && token.matches("[a-f0-9]{32}") && token.equals(progressGrantToken);
+	}
+
+	boolean progressReady()
+	{
+		if (!progressGranted())
+		{
+			accountProgress.reset();
+			return false;
+		}
+		return accountProgress.ready(client, currentLinkToken() + ":" + progressGrantEpoch);
+	}
+
+	Map<String, Object> progressBlock()
+	{
+		return progressReady() ? accountProgress.snapshot(client) : null;
+	}
 
 	// Trade-screenshot delivery proof (opt-in, see uploadTradeScreenshots): grab one frame when the
 	// trade CONFIRM screen (group 334) loads, buffer it, and upload it only on "Accepted trade.".
@@ -408,6 +432,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void clearClientThreadStateOnShutdown()
 	{
+		accountProgress.reset();	// disabled plugins miss hop/relog callbacks
 		clearResetPhaseEvidence();
 		geUnkeyed.clear();
 	}
@@ -1742,6 +1767,8 @@ public class AccountConnectPlugin extends Plugin
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
 			spoolOnTokenChangedWithoutAccount();
+			progressGrantToken = null;
+			progressGrantEpoch++;
 			// A visit belongs to the token that was granted at its open: never finish it under another one.
 			bankEvidenceToken = null;
 			dropBankVisit();
@@ -5825,8 +5852,12 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		Object[] args = event.getScriptEvent().getArguments();
-		if (args != null && args.length > 1 && args[1] instanceof Integer)
+		Object[] args = event.getScriptEvent() == null ? null : event.getScriptEvent().getArguments();
+		if (progressReady())
+		{
+			accountProgress.collectionSlot(client, args, System.currentTimeMillis() / 1000L);
+		}
+		if (args != null && args.length > 1 && args[1] instanceof Integer && (Integer) args[1] > 0)
 		{
 			clogObtained.add((Integer) args[1]);
 			clogSeen = true;
@@ -5838,6 +5869,10 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
+		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
+		{
+			accountProgress.reset();
+		}
 		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
 		// valid delivery proof if the visit had a buy/sell (upload=true only uploads when it did), else dropped.
 		if (clipCapturing
@@ -6113,6 +6148,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		progressReady();
 		// Poll the other player's trade offer + name while the MAIN screen (335) is open — the only window
 		// they are readable (see captureOtherOfferWhileMainOpen). Tight-gated: the body runs only during an
 		// active trade with activity logging on; a cheap boolean check otherwise.
@@ -7100,11 +7136,15 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		// Two SPECIFIC system lines are matched and emitted as their own structured events: a kill count
-		// and a pet drop. This is the narrow form the comment above allows. It is NOT the broad sweep:
+		// Specific system lines supply milestone events and, when separately granted,
+		// bounded own-account progress observations. This is the narrow form the comment above allows. It is NOT the broad sweep:
 		// no raw chat line is emitted, no other player's name is read, and no other channel is examined.
 		if (event.getType() == ChatMessageType.GAMEMESSAGE || event.getType() == ChatMessageType.SPAM)
 		{
+			if (progressReady())
+			{
+				accountProgress.chat(event.getMessage(), System.currentTimeMillis() / 1000L);
+			}
 			emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
 			return;
 		}
@@ -11206,6 +11246,12 @@ public class AccountConnectPlugin extends Plugin
 			snap.put("game_vars", gv);
 		}
 
+		Map<String, Object> progress = progressBlock();
+		if (progress != null)
+		{
+			snap.put("account_progress", progress);
+		}
+
 		// ---- skills (real skills only; OVERALL excluded) ----
 		Map<String, Object> skills = new LinkedHashMap<>();
 		for (Skill s : Skill.values())
@@ -11575,7 +11621,13 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
-		body.put("snapshot", snapshot);
+		// A cached logout snapshot may predate a grant revocation or token change.
+		Map<String, Object> permittedSnapshot = new LinkedHashMap<>(snapshot);
+		if (!progressGranted() || !token.equals(progressGrantToken))
+		{
+			permittedSnapshot.remove("account_progress");
+		}
+		body.put("snapshot", permittedSnapshot);
 
 		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 		Request request = new Request.Builder()
@@ -11672,6 +11724,22 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void applyServerPolicy(Response response, String sentToken)
 	{
+		// Separate batch2 disclosure gate: batch1's X-Broad-Capture does not grant these fields.
+		String progress = response.header("X-Account-Progress");
+		if (progress != null && sentToken != null && sentToken.equals(currentLinkToken()))
+		{
+			String grant = "on".equalsIgnoreCase(progress.trim()) && response.isSuccessful() ? sentToken : null;
+			if (!java.util.Objects.equals(grant, progressGrantToken))
+			{
+				progressGrantEpoch++;
+			}
+			progressGrantToken = grant;
+		}
+		if (response.code() == 403 && sentToken != null && sentToken.equals(progressGrantToken))
+		{
+			progressGrantToken = null;
+			progressGrantEpoch++;
+		}
 		String eventSpool = response.header("X-Event-Spool");
 		if (eventSpool != null && sentToken != null && sentToken.equals(currentLinkToken()))
 		{
