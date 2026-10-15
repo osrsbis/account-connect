@@ -32,6 +32,7 @@ final class AccountProgressCapture
     private final Map<String, Map<String, Object>> signals = new LinkedHashMap<>();
     private int evicted;
     private final GeHistoryCapture geHistory = new GeHistoryCapture();
+    final StorageRecoveryCapture storageRecovery = new StorageRecoveryCapture();
     private boolean scanActive, scanComplete, scanAttempted;
     private int scanStartTick, lastSlotTick, nextScanTick;
     private Integer scanObtained, scanTotal;
@@ -46,6 +47,7 @@ final class AccountProgressCapture
         signals.clear();
         evicted = 0;
         geHistory.reset();
+        storageRecovery.reset();
         scanActive = scanComplete = scanAttempted = false;
         nextScanTick = 0;
         scanObtained = scanTotal = null;
@@ -58,6 +60,7 @@ final class AccountProgressCapture
         // Region loads are not account transitions. Retain last-seen observations, but do not read.
         if (client != null && client.getGameState() == GameState.LOADING)
         {
+            storageRecovery.gap();
             return false;
         }
         if (client == null || client.getGameState() != GameState.LOGGED_IN
@@ -152,6 +155,7 @@ final class AccountProgressCapture
     void poll(Client client, long now)
     {
         geHistory.poll(client, now);
+        storageRecovery.poll(client, now);
         if (!ownLog(client))
         {
             scanActive = scanComplete = false;
@@ -345,6 +349,7 @@ final class AccountProgressCapture
         log.put("source", "script_4100_observed_slots");
         out.put("collection_log", log);
         out.put("ge_history", geHistory.snapshot());
+        out.put("storage_recovery", storageRecovery.snapshot(client));
         out.put("recent_signals", new ArrayList<>(signals.values()));
         out.put("signals_evicted", evicted);
         return out;

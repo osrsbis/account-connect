@@ -258,13 +258,11 @@ missed setup during login settlement cannot claim completeness. Last verified
 scan timestamps describe observation time, never acquisition time. No adventure
 log is scanned; both legacy and new slot handlers require positive own ownership.
 
-Bank follow-up is deliberately deferred: the existing `bank_session` writer
-already accumulates gross differences, and `bank_visit_*` retains raw manifests.
-Those manifests are direct container observations; deposited/withdrawn directions
-are **inferences from bank deltas**, not authoritative inventory-transfer events.
-Closed-bank/deposit-box reconstruction needs separate reconciliation tests for
-notes, containers, delayed updates and account transitions. This batch adds no
-second bank writer and does not upgrade the existing inference to authority.
+Bank recovery is now implemented by the bounded, inactive storage batch below.
+Legacy `bank_session` and `bank_visit_*` remain unchanged: their deposited/withdrawn
+directions are inferences from container differences, not authoritative transfer
+transactions. Recovery observations are an additional evidence source and MUST
+NOT be added to those legacy totals.
 
 Independent implementations were informed by these exact pinned BSD-2-Clause
 sources, not copied source or datasets:
@@ -318,3 +316,88 @@ client and a local sink:
    acceptance is a release gate, not inferred from passing plugin tests.
 
 These real-account and backend checks have not been performed in this worktree.
+
+## Bank recovery and plank sack (local, inactive)
+
+`account_progress.storage_recovery.schema_v: 1` uses the existing token-bound
+`X-Account-Progress: on` grant. Keep it OFF until the single installation disclosure,
+backend storage, mixed-client ingestion and capacity/rollout are accepted. No new
+consent screen, settings, server change or release is included.
+
+- `bank` and `inventory`: raw item-ID quantity maps, `last_seen_ms`,
+  `full_or_partial: partial`, `source: item_container_changed`, `uncertain`.
+  These retain observed container slots, not a protocol-proven complete account
+  inventory. Bank reads require its visible widget and a nonempty callback;
+  closing it, loading, rejected reads and closed-bank updates mark a gap. Empty
+  bank updates remain uncertain (including genuinely withdrawing the final stack).
+  Snapshot polling never refreshes these callback timestamps. No inferred deposit
+  changes these observations or the legacy sticky bank/wealth baseline.
+- `observations`: at most 64 rows, monotonic `sequence`, `collector_session`,
+  `observations_evicted`, account hash, profile type, world, time and source.
+  `bank_baseline` credits no delta. Later `bank_observed_delta.delta` contains signed
+  raw item-count differences and `from_observed_at_ms`/`across_gap`.
+  `authoritative_container_difference` describes the two observed states only;
+  `transfer_attribution: unknown` deliberately does not assert a deposit, withdrawal
+  or individual transfer time. Across-gap changes cannot recover gross movement.
+- `deposit_box_recovery`: only fixed Deposit-1/5/10/All operations on verified
+  deposit-box widget 192:24. A click arms evidence, never changes bank contents.
+  At two ticks, a fresh inventory callback must contain exactly the expected
+  single raw item loss; the result is still `delta_status: inferred`, with
+  `inventory_delta`, `raw_item_id`, requested quantity, click/callback timestamps,
+  menu operation and `bank_delta_status: unknown`. Failed, late or competing
+  actions produce `uncertain`; unsupported Default/X, equipment/container buttons
+  and withdrawal reconstruction are not inferred. Notes retain their raw IDs;
+  there is no guessed note conversion or container-content expansion. Unseen
+  concurrent actions can mimic the loss, so these rows are never authoritative
+  bank credits. Loading/identity transitions discard pending attribution.
+- `plank_sack.quantities`: plain/oak/teak/mahogany/camphor/ironwood/rosewood from
+  checked varbit definitions 18171–18177, sampled from one cloned varp array at
+  most every 100 ticks. Missing definitions/ranges stay unknown; valid zero is
+  retained but does not prove sack ownership. `last_seen_ms` is sample time,
+  `authority: client_varbit_values`, `server_freshness: unknown`,
+  `ownership: unknown`, `full_or_partial: partial`. This complements raw
+  `game_vars`; it does not change that existing block or infer farming readiness.
+
+All capture waits for settled account identity. Account/profile/token changes,
+hop/relog/disconnect, revocation and restart reset the lifecycle; normal region
+loads retain last-seen states with a bank gap. No cross-session persistence or
+cross-client dedup is claimed. Consumers deduplicate session/sequence within
+account/profile, accept absent blocks from old clients, retain unknowns and gaps,
+and never sum these observations with bank_session or bank_visit manifests.
+The bank baseline and inventory are capped at 1500 received slots; malformed or
+oversized reads are rejected. Each signed difference can contain up to 3000 raw
+IDs. The 64-row window is intentionally bounded but can still approach several
+MB in a pathological case; backend payload/retention acceptance remains required.
+Snapshots are detached from mutable live capture state and keep the existing
+snapshot writer/retry policy. This is recent recovery evidence, not a lossless
+transaction log or a replacement for durable backend storage.
+
+Independently authored after inspecting the pinned BSD-2-Clause sources:
+GIM Hub `890e250370e468dc96c47b95c4023953748a1af4` (`ItemTransferQueue`,
+`ItemRepository`, `BankItems`, `TrackedItemContainer`, `PlankSackItems`);
+Dude Where's My Stuff `2f636ab8f75400219b6e35dd0412b42f510e528a`
+(`ItemContainerWatcher`, `CarryableStorageManager`, `PlankSack`, `BottomlessBucket`);
+Time Tracking Reminder `f66b6af1c6dfa2a5180fe6710a1126dcf4ce4e7b`
+(`FarmingTracker`); Farming Patch Advisor
+`fb0aa6115dd0a7dc71b146b42870b7c19b1ca10d` (`PatchTimerManager`).
+RuneLite 1.13.1 compiled gameval constants independently verify the widget and
+plank varbit IDs; numeric constants avoid new runtime enum-field dependencies.
+No competitor source or dataset is copied. Region-local farming variables,
+modal deferral and estimated growth durations require a separate verified batch;
+no remote-patch readiness or exact harvest timer is invented here.
+
+Targeted JDK 11 tests exercise callback-only baselines, signed/gapped deltas,
+fixed deposit evidence, click-only failure, competing/delayed/multiple changes,
+raw notes, empty/null/oversized data, long totals, bounded eviction, identity
+reset and missing/zero varbits. Existing account-progress grant/revocation and
+bank consumer tests remain applicable. Real-client tests are future separate:
+manually check deposit-box operation IDs and callback order, fixed/All/X/failed
+and noted deposits, bank close/reopen/final stack, sack quantities with/without
+ownership, and supported old/current clients/account modes. Compare local sink
+payloads to UI before backend acceptance. No live-client correctness is claimed.
+
+Local verification for this batch (2026-10-15): OpenJDK 11 targeted suite passed
+78 tests; the single full `./gradlew build --offline` passed 883 tests with zero
+failures/errors/skips. Offline resolution used the existing cached dependencies;
+no dependency was installed or upgraded. This verifies local compilation/tests,
+not real-client behavior or deployed ingestion.

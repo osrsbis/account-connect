@@ -5860,6 +5860,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
+		if (state == GameState.LOADING) accountProgress.storageRecovery.gap();
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			accountProgress.reset();
@@ -6013,6 +6014,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
+		if (progressReady()) accountProgress.storageRecovery.container(client, event.getContainerId(),
+			event.getItemContainer(), System.currentTimeMillis());
 		containerObservedAtMs.put(event.getContainerId(), System.currentTimeMillis());
 		handleTradeContainerChanged(event.getContainerId());
 		if (shopOpen && event.getContainerId() != INVENTORY_CONTAINER_ID)
@@ -7066,6 +7069,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onWidgetClosed(WidgetClosed event)
 	{
 		if (event.getGroupId() == COLLECTION_LOG_GROUP_ID) accountProgress.collectionClosed();
+		if (event.getGroupId() == BANK_GROUP_ID) accountProgress.storageRecovery.gap();
 		handleTradeWidgetClosed(event.getGroupId());
 		handleBankWidgetClosed(event.getGroupId(), bankCloseIsTeardown());
 		if (event.getGroupId() == SHOP_GROUP_ID)
@@ -7519,6 +7523,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
+		if (progressReady()) accountProgress.storageRecovery.menu(client, event, System.currentTimeMillis());
 		if (maxCapture() && event != null)
 		{
 			Map<String, Object> d = new LinkedHashMap<>();
