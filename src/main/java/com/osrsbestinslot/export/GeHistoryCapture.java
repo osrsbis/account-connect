@@ -16,6 +16,10 @@ final class GeHistoryCapture
     private static final String NUMBER = "([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)";
     private static final Pattern TOTAL = Pattern.compile("^" + NUMBER + " coins?(?:\\s|$)");
     private static final Pattern EACH = Pattern.compile("(?:^|\\s)>= " + NUMBER + " each(?:\\s|$)");
+    private static final String STRICT_NUMBER = "(0|[1-9][0-9]{0,2}(?:,[0-9]{3})+|[1-9][0-9]*)";
+    private static final Pattern DEDUCTION = Pattern.compile(STRICT_NUMBER + " coins?(?:<br>| )\\("
+        + STRICT_NUMBER + " - " + STRICT_NUMBER + " tax\\)");
+    private static final Pattern COLOUR_WRAPPER = Pattern.compile("<col=[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?>(.*)</col>");
     private final List<Map<String, Object>> observations = new ArrayList<>();
     private List<Map<String, Object>> previous;
     private List<Map<String, Object>> candidate;
@@ -103,9 +107,57 @@ final class GeHistoryCapture
             row.put("displayed_each_gp", number(EACH, plain));
             row.put("execution_time", "unknown");
             row.put("price_semantics", "displayed_values_tax_and_rounding_unresolved");
+            captureDeduction(row, rawState, rawPrice);
             rows.add(row);
         }
         return rows;
+    }
+
+    /**
+     * Historic format reference: Flipping Utilities GeHistoryTabExtractor.getPrice.
+     * This independently validated UI evidence is NOT field verification of current RuneLite.
+     * Unlike that extractor, retain offer totals: division cannot recover exact fills, and
+     * displayed net must never have tax deducted again. Missing tax is not evidence of zero tax.
+     */
+    private static void captureDeduction(Map<String, Object> row, String rawState, String rawPrice)
+    {
+        row.put("original_gross_gp", null);
+        row.put("explicit_tax_gp", null);
+        row.put("displayed_net_gp", null);
+        row.put("tax_gross_source", "ge_history_widget_383_3_price_text");
+        row.put("tax_gross_provenance", "historic_flipping_utilities_ge_history_format");
+        row.put("tax_gross_semantics", "unknown");
+        row.put("verified_with_actual_client", false);
+
+        // Only a complete plain string or one balanced colour wrapper is accepted. Never
+        // strip arbitrary markup: doing so can join split digits or hide truncated text.
+        String state = unwrapColour(rawState);
+        boolean buy = "Bought".equals(state);
+        if (!buy && !"Sold".equals(state)) return;
+        Matcher match = DEDUCTION.matcher(unwrapColour(rawPrice));
+        if (!match.matches()) return;
+        try
+        {
+            long net = Long.parseLong(match.group(1).replace(",", ""));
+            long gross = Long.parseLong(match.group(2).replace(",", ""));
+            long tax = Long.parseLong(match.group(3).replace(",", ""));
+            // Nonnegative longs and tax <= gross make subtraction overflow-safe.
+            if (tax > gross || gross - tax != net || (buy && tax != 0)) return;
+            row.put("original_gross_gp", gross);
+            row.put("explicit_tax_gp", tax);
+            row.put("displayed_net_gp", net);
+            row.put("tax_gross_semantics", "explicit_ui_offer_totals_not_exact_fills");
+        }
+        catch (NumberFormatException ex)
+        {
+            // All three fields remain unknown on overflow, even if a prefix was parseable.
+        }
+    }
+
+    private static String unwrapColour(String raw)
+    {
+        Matcher wrapper = COLOUR_WRAPPER.matcher(raw);
+        return wrapper.matches() ? wrapper.group(1) : raw;
     }
 
     private static Long number(Pattern pattern, String text)

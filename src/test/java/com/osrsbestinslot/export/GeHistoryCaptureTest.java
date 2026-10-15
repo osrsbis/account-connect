@@ -30,6 +30,102 @@ public class GeHistoryCaptureTest
         assertNull(r.get("displayed_each_gp"));
         assertEquals(raw, r.get("price_text"));
         assertEquals("unknown", r.get("execution_time"));
+        assertDeduction(r, 3060000000L, 60000000L, 3000000000L);
+        assertEquals("displayed_values_tax_and_rounding_unresolved", r.get("price_semantics"));
+    }
+
+    @Test public void explicitDeductionIsAnOfferTotalRegardlessOfQuantity()
+    {
+        for (int quantity : new int[] {1, 3, Integer.MAX_VALUE})
+        {
+            Map<String, Object> r = GeHistoryCapture.read(row("Sold", quantity,
+                "1,001 coins<br>(1,021 - 20 tax)")).get(0);
+            assertDeduction(r, 1021L, 20L, 1001L);
+            assertEquals(quantity, r.get("quantity"));
+            assertNull(r.get("displayed_each_gp")); // no aggregate division or rounding
+        }
+    }
+
+    @Test public void explicitZeroTaxAndZeroTotalsAreNotMissingValues()
+    {
+        for (String side : new String[] {"Bought", "Sold", "<col=fff>Sold</col>"})
+        {
+            assertDeduction(GeHistoryCapture.read(row(side, 1, "1 coin (1 - 0 tax)")).get(0), 1, 0, 1);
+            assertDeduction(GeHistoryCapture.read(row(side, 2, "0 coins<br>(0 - 0 tax)")).get(0), 0, 0, 0);
+            // Ordinary untaxed UI text does not explicitly supply gross and tax.
+            assertUnknown(GeHistoryCapture.read(row(side, 2, "100 coins<br>>= 50 each")).get(0));
+            assertUnknown(GeHistoryCapture.read(row(side, 1, "0 coins")).get(0));
+        }
+    }
+
+    @Test public void acceptsLongBoundariesWithoutAddingTaxOrMultiplyingQuantity()
+    {
+        assertDeduction(GeHistoryCapture.read(row("Sold", Integer.MAX_VALUE,
+            "9,223,372,036,854,775,806 coins<br>(9,223,372,036,854,775,807 - 1 tax)")).get(0),
+            Long.MAX_VALUE, 1, Long.MAX_VALUE - 1);
+        assertDeduction(GeHistoryCapture.read(row("Sold", 1,
+            "0 coins (9223372036854775807 - 9223372036854775807 tax)")).get(0),
+            Long.MAX_VALUE, Long.MAX_VALUE, 0);
+        assertDeduction(GeHistoryCapture.read(row("Bought", 1,
+            "9223372036854775807 coins (9223372036854775807 - 0 tax)")).get(0),
+            Long.MAX_VALUE, 0, Long.MAX_VALUE);
+    }
+
+    @Test public void rejectsAmbiguousMalformedInconsistentAndOverflowDeductionAtomically()
+    {
+        String[] invalid = {
+            "unknown", "", "98 coins", "98 coins (100 - 2)", "98 coins (100 - 2 tax",
+            "98 coins (100 - 3 tax)", "0 coins (1 - 2 tax)", "-1 coins (1 - 2 tax)",
+            "98 coins (100 - -2 tax)", "98 coins (0100 - 2 tax)", "98 coins (1,00 - 2 tax)",
+            "98 coins (100 - 2 tax) extra", "98 coins (100 - 2 tax) (100 - 2 tax)",
+            "98 coins (100 - 2 tax)<br>>= 49 each", // additional units remain unverified
+            "<col=fff>98 coins<br>(100 - 2 tax)", "98 coins<br>(100 - 2 tax)</col>",
+            "<col=fff>98 coins<br>(100 - 2 tax)</col></col>",
+            "98 coins<br>(1<col=fff>00</col> - 2 tax)",
+            "98 coins<br/>(100 - 2 tax)", "98 coins<unknown>(100 - 2 tax)",
+            "98 coins<br>(100 - 2 tax)\n", "98 coins<br>(100 - 2 tax)...",
+            "9223372036854775808 coins (9223372036854775807 - 0 tax)",
+            "9223372036854775807 coins (9223372036854775808 - 1 tax)",
+            "0 coins (9223372036854775807 - 9223372036854775808 tax)",
+            "1 coins (0 - 18446744073709551615 tax)"
+        };
+        for (String raw : invalid)
+        {
+            Map<String, Object> r = GeHistoryCapture.read(row("Sold", 2, raw)).get(0);
+            assertEquals(raw, r.get("price_text"));
+            assertUnknown(r);
+        }
+        for (String side : new String[] {"Bought", "Cancelled", "", "Unknown", "So<bad>ld", "Sold</col>"})
+            assertUnknown(GeHistoryCapture.read(row(side, 2, "98 coins (100 - 2 tax)")).get(0));
+    }
+
+    private void assertDeduction(Map<String, Object> r, long gross, long tax, long net)
+    {
+        assertEquals(gross, r.get("original_gross_gp"));
+        assertEquals(tax, r.get("explicit_tax_gp"));
+        assertEquals(net, r.get("displayed_net_gp"));
+        assertEquals(net, r.get("displayed_total_gp"));
+        assertEquals("explicit_ui_offer_totals_not_exact_fills", r.get("tax_gross_semantics"));
+        assertEvidence(r);
+    }
+
+    private void assertUnknown(Map<String, Object> r)
+    {
+        for (String field : new String[] {"original_gross_gp", "explicit_tax_gp", "displayed_net_gp"})
+        {
+            assertTrue(r.containsKey(field));
+            assertNull(r.get("price_text").toString(), r.get(field));
+        }
+        assertEquals("unknown", r.get("tax_gross_semantics"));
+        assertEvidence(r);
+    }
+
+    private void assertEvidence(Map<String, Object> r)
+    {
+        assertEquals("ge_history_widget_383_3_price_text", r.get("tax_gross_source"));
+        assertEquals("historic_flipping_utilities_ge_history_format", r.get("tax_gross_provenance"));
+        assertEquals(false, r.get("verified_with_actual_client"));
+        assertEquals("unknown", r.get("execution_time"));
     }
 
     @Test public void eachIsObservedNotMultipliedAndUnknownIsNotZeroOrSell()
