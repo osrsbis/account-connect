@@ -227,6 +227,48 @@ public class BroadCaptureBatch1Test
 		}
 	}
 
+	@Test
+	public void geModeSwitchRebaselinesAndStampsCurrentModeBeforeSyncLoop() throws Exception
+	{
+		setUp();
+		when(client.getWorldType()).thenReturn(java.util.EnumSet.noneOf(net.runelite.api.WorldType.class));
+		when(client.getAccountHash()).thenReturn(111L);
+		inject("activeHash", "old-account");
+		inject("activeRsn", "old-name");
+		offer(0, GrandExchangeOfferState.BUYING, 560, 0, 100, 250, 0);
+		String key = (String) ge().get(0).get("offer_key");
+		assertEquals("STANDARD", ge().get(0).get("profile_type"));
+		assertEquals("111", ge().get(0).get("account_hash"));
+		assertNull(ge().get(0).get("rsn"));
+		when(client.getWorldType()).thenReturn(java.util.EnumSet.of(net.runelite.api.WorldType.SEASONAL));
+		offer(0, GrandExchangeOfferState.BUYING, 560, 50, 100, 250, 10000);
+		assertEquals("mode switch seeds, never credits the old mode", 1, ge().size());
+		tick += 10;
+		offer(0, GrandExchangeOfferState.BOUGHT, 560, 100, 100, 250, 22000);
+		Map<String, Object> last = ge().get(1);
+		assertNotEquals(key, last.get("offer_key"));
+		assertNotEquals("STANDARD", last.get("profile_type"));
+		assertEquals(50L, ((Map<?, ?>) last.get("ge_observation")).get("delta_qty"));
+	}
+
+	@Test
+	public void geTokenSwitchDoesNotCarryOldCounters() throws Exception
+	{
+		setUp();
+		offer(0, GrandExchangeOfferState.BUYING, 560, 0, 100, 250, 0);
+		String key = (String) ge().get(0).get("offer_key");
+		inject("config", new AccountConnectConfig()
+		{
+			@Override public String linkToken() { return "abcdef0123456789abcdef0123456789"; }
+		});
+		offer(0, GrandExchangeOfferState.BUYING, 560, 80, 100, 250, 16000);
+		tick += 10;
+		offer(0, GrandExchangeOfferState.BOUGHT, 560, 100, 100, 250, 22000);
+		Map<String, Object> last = ge().get(1);
+		assertNotEquals(key, last.get("offer_key"));
+		assertEquals(20L, ((Map<?, ?>) last.get("ge_observation")).get("delta_qty"));
+	}
+
 	private static net.runelite.api.events.GameStateChanged gs(GameState s)
 	{
 		net.runelite.api.events.GameStateChanged e = new net.runelite.api.events.GameStateChanged();

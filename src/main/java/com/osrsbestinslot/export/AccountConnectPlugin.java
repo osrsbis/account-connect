@@ -432,6 +432,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void clearClientThreadStateOnShutdown()
 	{
+		geObservations.clear();
+		geAccountHash = -1L;
 		accountProgress.reset();	// disabled plugins miss hop/relog callbacks
 		clearResetPhaseEvidence();
 		geUnkeyed.clear();
@@ -450,12 +452,9 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		lastGeState.clear();
-		lastGeOffer.clear();
-		geOfferKey.clear();
-		geOfferSeen.clear();
-		lastGeProgressTick.clear();
+		geObservations.clear();
 		geUnkeyed.clear();	// the current slots supersede anything held from before the plugin was enabled
+		prepareGeContext();
 		geAccountHash = client.getAccountHash();
 		for (int slot = 0; slot < offers.length; slot++)
 		{
@@ -464,14 +463,8 @@ public class AccountConnectPlugin extends Plugin
 			{
 				continue;
 			}
-			lastGeState.put(slot, o.getState());
-			if (o.getState() != GrandExchangeOfferState.EMPTY)
-			{
-				lastGeOffer.put(slot, new long[]{o.getItemId(), o.getQuantitySold(), o.getTotalQuantity(),
-					o.getPrice(), o.getSpent()});
-				geOfferKey.put(slot, EventSpool.newEventId());
-				geOfferSeen.put(slot, "baseline");
-			}
+			geObservations.observe(slot, o.getState(), new long[]{o.getItemId(), o.getQuantitySold(),
+				o.getTotalQuantity(), o.getPrice(), o.getSpent()}, true, client.getTickCount(), System.currentTimeMillis());
 		}
 	}
 
@@ -667,19 +660,6 @@ public class AccountConnectPlugin extends Plugin
 	/** Dedup state for the broad activity sweep: emit a level event only on a real level change, a GE event
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
-	private final Map<Integer, GrandExchangeOfferState> lastGeState = new java.util.HashMap<>();
-	// OFFER IDENTITY. RuneLite gives a GE offer no id, so the plugin mints one: a random 32-hex offer_key when a
-	// slot starts a NEW offer (placed, or first seen already part-filled), carried on every later row of that
-	// slot until the slot is collected. It survives hops and relogs (the map is cleared only on account switch,
-	// plugin start and collect), so a completion that lands after a hop joins its own offer, and an identical
-	// re-list after a collect gets a NEW key. offer_seen says how the key began: "placed", "midway" (first seen
-	// part-filled) or "baseline" (already in the slot when the plugin started).
-	private final Map<Integer, String> geOfferKey = new java.util.HashMap<>();
-	private final Map<Integer, String> geOfferSeen = new java.util.HashMap<>();
-	/** Last seen offer per GE slot {item, qty_sold, qty_total, price, spent}, so a collect (slot -> EMPTY) still names what it held. */
-	private final Map<Integer, long[]> lastGeOffer = new java.util.HashMap<>();
-	/** Tick of the last ge_progress row per slot. A big offer fills in many steps; one row per minute per slot is enough. */
-	private final Map<Integer, Integer> lastGeProgressTick = new java.util.HashMap<>();
 	/** Tick of the last LOGGED_IN. The client replays every slot right after login; that replay is a baseline, not activity. */
 	int geLoginTick = Integer.MIN_VALUE / 2;
 	/** Set when the account leaves the world (login screen, hop, relog, disconnect); the next LOGGED_IN is a real login. */
@@ -5872,6 +5852,7 @@ public class AccountConnectPlugin extends Plugin
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			accountProgress.reset();
+			geObservations.gap();
 		}
 		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
 		// valid delivery proof if the visit had a buy/sell (upload=true only uploads when it did), else dropped.
@@ -10551,11 +10532,11 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * GE offer lifecycle, own account only, one row per real state step:
+	 * GE offer lifecycle observations, own account only:
 	 * ge_offer (a new offer placed), ge_progress (a partial fill, at most one per slot per minute),
 	 * ge_buy / ge_sell / ge_cancel (terminal, as before) and ge_collect (the slot emptied, with what it held).
-	 * The client replays every slot right after login; that replay only sets the baseline, so an old
-	 * uncollected offer is never reported again as new activity.
+	 * The client replays slots at login. First sight only baselines; matching retained slots can
+	 * report counter differences across the gap, with inferred identity and unknown fill time.
 	 */
 	@Subscribe
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
@@ -10566,6 +10547,10 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		int slot = event.getSlot();
+		if (slot < 0 || slot >= GE_SLOT_COUNT || offer.getState() == null)
+		{
+			return;
+		}
 		GrandExchangeOfferState state = offer.getState();
 		// The client clears every slot to EMPTY while hopping, logging in and at the login screen. That
 		// clear is not a collect and must not overwrite what the slot held (the RuneLite GE plugin skips
@@ -10586,21 +10571,18 @@ public class AccountConnectPlugin extends Plugin
 			// away, so hold it (latest per slot, no state change) until the account is known.
 			if (geUnkeyed.containsKey(slot) || geUnkeyed.size() < GE_SLOT_COUNT)
 			{
-				geUnkeyed.put(slot, new Object[]{state, nowOffer});
+				geUnkeyed.put(slot, new Object[]{state, nowOffer, System.currentTimeMillis()});
 			}
 			return;
 		}
+		prepareGeContext();
 		resolveUnkeyedGe(acct);
 		if (acct != geAccountHash)
 		{
 			// GE slots belong to one account. Another account's remembered slot must never make this one's
 			// replay look like an offer that finished while away. Events with hash -1 never reach here, so a
 			// stored -1 can only be the empty start or an unkeyed seed.
-			lastGeState.clear();
-			lastGeOffer.clear();
-			geOfferKey.clear();
-			geOfferSeen.clear();
-			lastGeProgressTick.clear();
+			geObservations.clear();
 			geAccountHash = acct;
 		}
 		// An identical re-send of a slot (same state, same offer) emits nothing through the rules below: an
@@ -10612,10 +10594,31 @@ public class AccountConnectPlugin extends Plugin
 		boolean loginReplay = client != null
 			&& ((geAwaitingLogin && client.getGameState() != GameState.LOGGED_IN)
 				|| tick - geLoginTick <= GE_LOGIN_BURST_TICKS);
-		judgeGeOffer(slot, state, nowOffer, loginReplay, tick);
+		judgeGeOffer(slot, state, nowOffer, loginReplay, tick, System.currentTimeMillis());
 	}
 
-	/** GE slots held while the account hash was -1: slot -> {state, offer tuple}. Client-thread only. */
+	private final GeObservationTracker geObservations = new GeObservationTracker();
+	private String geProfileType;
+	private String geTokenFingerprint;
+
+	private void prepareGeContext()
+	{
+		String profile = client == null || client.getWorldType() == null ? "UNKNOWN" : RuneScapeProfileType.getCurrent(client).name();
+		String token = currentEventTokenFingerprint();
+		if (!java.util.Objects.equals(profile, geProfileType)
+			|| !java.util.Objects.equals(token, geTokenFingerprint))
+		{
+			if (geProfileType != null && client != null)
+			{
+				geLoginTick = client.getTickCount();
+			}
+			geObservations.clear();
+			geProfileType = profile;
+			geTokenFingerprint = token;
+		}
+	}
+
+	/** GE slots held while the account hash was -1: slot -> {state, offer tuple, callback time}. Client-thread only. */
 	private final java.util.TreeMap<Integer, Object[]> geUnkeyed = new java.util.TreeMap<>();
 	/** The client has 8 GE slots; the unkeyed buffer never holds more. */
 	static final int GE_SLOT_COUNT = 8;
@@ -10632,6 +10635,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		prepareGeContext();
 		java.util.List<Map.Entry<Integer, Object[]>> held = new ArrayList<>(geUnkeyed.entrySet());
 		geUnkeyed.clear();
 		int tick = client == null ? 0 : client.getTickCount();
@@ -10639,146 +10643,36 @@ public class AccountConnectPlugin extends Plugin
 		{
 			for (Map.Entry<Integer, Object[]> e : held)
 			{
-				judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0], (long[]) e.getValue()[1], true, tick);
+				judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0], (long[]) e.getValue()[1], true, tick, (Long) e.getValue()[2]);
 			}
 			return;
 		}
-		lastGeState.clear();
-		lastGeOffer.clear();
-		geOfferKey.clear();
-		geOfferSeen.clear();
-		lastGeProgressTick.clear();
+		geObservations.clear();
 		geAccountHash = acct;
 		for (Map.Entry<Integer, Object[]> e : held)
 		{
-			GrandExchangeOfferState s = (GrandExchangeOfferState) e.getValue()[0];
-			lastGeState.put(e.getKey(), s);
-			if (s != null && s != GrandExchangeOfferState.EMPTY)
-			{
-				lastGeOffer.put(e.getKey(), (long[]) e.getValue()[1]);
-			}
+			judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0],
+				(long[]) e.getValue()[1], true, tick, (Long) e.getValue()[2]);
 		}
 	}
 
-	/** Judge one GE slot state against the stored slot and emit at most one row. */
-	private void judgeGeOffer(int slot, GrandExchangeOfferState state, long[] nowOffer, boolean loginReplay, int tick)
+	/** Emit legacy cumulative fields plus explicitly qualified observation deltas. */
+	private void judgeGeOffer(int slot, GrandExchangeOfferState state, long[] value, boolean replay, int tick, long observedAt)
 	{
-		GrandExchangeOfferState prev = lastGeState.put(slot, state);
-		long[] prevOffer = lastGeOffer.get(slot);
-		if (state == GrandExchangeOfferState.EMPTY)
+		Map<String, Object> fields = geObservations.observe(slot, state, value, replay, tick, observedAt);
+		if (fields != null)
 		{
-			lastGeOffer.remove(slot);
-			lastGeProgressTick.remove(slot);
-		}
-		else
-		{
-			lastGeOffer.put(slot, nowOffer);
-		}
-		if (state == null)
-		{
-			return;
-		}
-		if (loginReplay)
-		{
-			// Baseline only, with one exception: an offer we saw active before the hop/relog that finished
-			// while we were away (same item, now BOUGHT/SOLD/CANCELLED) is a real completion and still reported.
-			boolean finishedWhileAway = prevOffer != null && prevOffer[0] == nowOffer[0]
-				&& (prev == GrandExchangeOfferState.BUYING || prev == GrandExchangeOfferState.SELLING)
-				&& state != GrandExchangeOfferState.BUYING && state != GrandExchangeOfferState.SELLING
-				&& state != GrandExchangeOfferState.EMPTY;
-			if (!finishedWhileAway)
+			String type = (String) fields.remove("type");
+			fields.put("profile_type", geProfileType);
+			// The session upload loop may still name the previous account during login.
+			Player self = client == null ? null : client.getLocalPlayer();
+			fields.put("rsn", self == null ? null : self.getName());
+			if (geAccountHash != -1L)
 			{
-				return;
+				fields.put("account_hash", Long.toString(geAccountHash));
 			}
+			emitEvent(type, fields);
 		}
-		String type = null;
-		switch (state)
-		{
-			case BOUGHT:
-				type = state == prev ? null : "ge_buy";
-				break;
-			case SOLD:
-				type = state == prev ? null : "ge_sell";
-				break;
-			case CANCELLED_BUY:
-			case CANCELLED_SELL:
-				type = state == prev ? null : "ge_cancel";
-				break;
-			case BUYING:
-			case SELLING:
-				if (prev != state && (prev == GrandExchangeOfferState.EMPTY || (prev == null && nowOffer[1] == 0)
-					|| prev == GrandExchangeOfferState.BOUGHT || prev == GrandExchangeOfferState.SOLD
-					|| prev == GrandExchangeOfferState.CANCELLED_BUY || prev == GrandExchangeOfferState.CANCELLED_SELL))
-				{
-					// EMPTY -> an active offer: just placed. A finished slot that turns active again was
-					// collected unseen and re-used, so this is a new offer too.
-					type = "ge_offer";
-					lastGeProgressTick.put(slot, tick);
-				}
-				else if (prev != state)
-				{
-					// An offer first seen part-filled (the plugin started mid-offer): report the fill, not a new offer.
-					type = "ge_progress";
-					lastGeProgressTick.put(slot, tick);
-				}
-				else if (prevOffer != null && nowOffer[1] > prevOffer[1])
-				{
-					Integer last = lastGeProgressTick.get(slot);
-					if (last == null || tick - last >= GE_PROGRESS_MIN_TICKS || tick < last)
-					{
-						type = "ge_progress";
-						lastGeProgressTick.put(slot, tick);
-					}
-					else
-					{
-						// Rate-limited: keep the older fill as the baseline so the next row still shows the change.
-						lastGeOffer.put(slot, prevOffer);
-					}
-				}
-				break;
-			case EMPTY:
-				if (prev != null && prev != GrandExchangeOfferState.EMPTY && prevOffer != null)
-				{
-					type = "ge_collect";	// the slot was cleared: the items or coins were collected
-				}
-				break;
-			default:
-				break;
-		}
-		if (type == null)
-		{
-			return;
-		}
-		long[] o = "ge_collect".equals(type) ? prevOffer : nowOffer;
-		if (!"ge_collect".equals(type) && ("ge_offer".equals(type) || !geOfferKey.containsKey(slot)
-			|| (prevOffer != null && (prevOffer[0] != nowOffer[0] || prevOffer[2] != nowOffer[2] || prevOffer[3] != nowOffer[3]))))
-		{
-			// A new offer: placed now, first seen part-filled, or the slot now holds a different offer.
-			geOfferKey.put(slot, EventSpool.newEventId());
-			geOfferSeen.put(slot, "ge_offer".equals(type) ? "placed" : "midway");
-		}
-		String offerKey = geOfferKey.get(slot);
-		String offerSeen = geOfferSeen.get(slot);
-		if ("ge_collect".equals(type))
-		{
-			geOfferKey.remove(slot);	// the offer is finished: the next offer in this slot gets a new key
-			geOfferSeen.remove(slot);
-		}
-		Map<String, Object> fields = new LinkedHashMap<>();
-		fields.put("item", (int) o[0]);
-		fields.put("qty", (int) o[1]);
-		fields.put("price", o[3]);
-		fields.put("gp", o[4]);
-		fields.put("qty_total", (int) o[2]);
-		fields.put("slot", slot);
-		fields.put("state", "ge_collect".equals(type) ? String.valueOf(prev) : state.name());
-		fields.put("side", geSide("ge_collect".equals(type) ? prev : state));
-		if (offerKey != null)
-		{
-			fields.put("offer_key", offerKey);
-			fields.put("offer_seen", offerSeen);
-		}
-		emitEvent(type, fields);
 	}
 
 	/** "buy" or "sell" for an offer state; null for EMPTY. */

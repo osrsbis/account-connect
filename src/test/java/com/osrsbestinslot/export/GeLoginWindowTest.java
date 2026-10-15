@@ -435,4 +435,26 @@ public class GeLoginWindowTest
 		assertEquals("another account's replay of the same item is not our sale",
 			Arrays.asList("ge_offer"), types());
 	}
+	@Test
+	public void heldReplayKeepsCallbackTimeInsteadOfResolutionTime() throws Exception
+	{
+		setUp(GameState.LOGGED_IN);
+		offer(1, GrandExchangeOfferState.BUYING, 560, 0, 10, 250, 0);
+		state(GameState.HOPPING);
+		hash = -1L;
+		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2400);
+		Field f = AccountConnectPlugin.class.getDeclaredField("geUnkeyed");
+		f.setAccessible(true);
+		Map<Integer, Object[]> held = (Map<Integer, Object[]>) f.get(p);
+		long captured = (Long) held.get(1)[2];
+		hash = A;
+		p.resolveUnkeyedGe(A);
+		Map<?, ?> observation = (Map<?, ?>) ge().get(1).get("ge_observation");
+		assertEquals(captured, observation.get("observed_at_ms"));
+		assertEquals(captured, observation.get("counter_observed_at_ms"));
+		assertEquals(10L, observation.get("delta_qty"));
+		p.resolveUnkeyedGe(A);
+		assertEquals(2, ge().size());
+	}
+
 }
