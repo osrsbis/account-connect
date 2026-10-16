@@ -42,6 +42,7 @@ final class OwnGameplayCapture
     final OwnSceneCapture scene = new OwnSceneCapture(this);
     final OwnConsumptionCapture consumption = new OwnConsumptionCapture(this);
     final OwnActivityCapture activities = new OwnActivityCapture(this);
+    final OwnGroundClueCapture groundClues = new OwnGroundClueCapture(this);
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -57,7 +58,7 @@ final class OwnGameplayCapture
         identity = session = profile = null;
         accountType = null;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset();
+        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         gapReason = "not_observed";
     }
@@ -91,7 +92,7 @@ final class OwnGameplayCapture
     void gap()
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset();
+        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 

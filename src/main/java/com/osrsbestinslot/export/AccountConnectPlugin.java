@@ -9028,6 +9028,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemSpawned(net.runelite.api.events.ItemSpawned event)
 	{
+		if (event != null && gameplayReady()) ownGameplay.groundClues.spawned(client, event.getItem(), System.currentTimeMillis());
 		// A genuine NEW ground item, never a merge into an existing stack.
 		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false);
 	}
@@ -10020,6 +10021,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemDespawned(net.runelite.api.events.ItemDespawned event)
 	{
+		if (event != null && gameplayReady()) ownGameplay.groundClues.despawned(client, event.getItem(), System.currentTimeMillis());
 		if (client == null || event == null || event.getItem() == null || event.getTile() == null)
 		{
 			return;

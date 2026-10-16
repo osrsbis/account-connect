@@ -217,6 +217,55 @@ public class OwnGameplayCaptureTest
     {
         Field f=target.getClass().getDeclaredField(key); f.setAccessible(true); f.set(target,value);
     }
+
+    private TileItem groundClue(int owner,int id,int expiry)
+    {
+        TileItem item=mock(TileItem.class); when(item.getOwnership()).thenReturn(owner);
+        when(item.getId()).thenReturn(id); when(item.getQuantity()).thenReturn(1); when(item.getDespawnTime()).thenReturn(expiry);
+        return item;
+    }
+
+    @Test public void groundClueOwnershipPrecedesIdentityAndNoOtherPlayerFieldsAreRead()
+    {
+        settle();
+        for(int owner:new int[]{TileItem.OWNERSHIP_NONE,TileItem.OWNERSHIP_OTHER,TileItem.OWNERSHIP_GROUP,99})
+        {
+            TileItem other=groundClue(owner,23182,500);capture.groundClues.spawned(client,other,1000);
+            verify(other,never()).getId();verify(other,never()).getQuantity();verify(other,never()).getDespawnTime();
+        }
+        assertTrue(rows().isEmpty());
+        TileItem own=groundClue(TileItem.OWNERSHIP_SELF,23182,500);
+        capture.groundClues.spawned(client,own,1000);capture.groundClues.spawned(client,own,1001);
+        assertEquals(1,rows().size());Map<?,?> value=(Map<?,?>)rows().get(0).get("value");
+        assertEquals(500,value.get("despawn_server_tick"));assertEquals("unverified",value.get("drop_origin"));
+        assertEquals("current_client_session_only",value.get("clock_scope"));
+        assertFalse(value.containsKey("x"));assertFalse(value.containsKey("player"));verify(client,never()).getPlayers();
+    }
+
+    @Test public void groundClueMissingExpirySceneGapAndCapacityNeverClaimACompletedTimer()
+    {
+        settle();TileItem own=groundClue(TileItem.OWNERSHIP_SELF,19835,0);
+        capture.groundClues.spawned(client,own,1000);assertNull(((Map<?,?>)rows().get(0).get("value")).get("despawn_server_tick"));
+        capture.groundClues.despawned(client,own,1001);assertEquals("taken_expired_or_scene_change_unknown",((Map<?,?>)rows().get(1).get("value")).get("outcome"));
+        capture.groundClues.spawned(client,own,1002);capture.gap();int before=rows().size();
+        capture.groundClues.despawned(client,own,1003);assertEquals(before,rows().size());
+        for(int i=0;i<65;i++)capture.groundClues.spawned(client,groundClue(TileItem.OWNERSHIP_SELF,23182,600+i),2000+i);
+        assertEquals(1,rows().stream().filter(r->"clues.ground_gap".equals(r.get("kind"))).count());
+        when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,TOKEN));assertTrue(rows().isEmpty());
+        capture.groundClues.despawned(client,own,3000);assertTrue(rows().isEmpty());
+    }
+
+    @Test public void groundClueActualSubscriberRequiresCurrentGrantAndRevocationClearsTracking() throws Exception
+    {
+        AccountConnectPlugin p=plugin();TileItem own=groundClue(TileItem.OWNERSHIP_SELF,23182,500);
+        ItemSpawned spawn=new ItemSpawned(null,own);p.onItemSpawned(spawn);assertNull(p.gameplayBlock());
+        verify(own,never()).getOwnership();
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemSpawned(spawn);
+        assertEquals(1,((List<?>)p.gameplayBlock().get("observations")).size());
+        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemDespawned(new ItemDespawned(null,own));assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;
+        p.onItemDespawned(new ItemDespawned(null,own));assertTrue(((List<?>)p.gameplayBlock().get("observations")).isEmpty());
+    }
     private AccountConnectPlugin plugin() throws Exception
     {
         AccountConnectPlugin p=new AccountConnectPlugin();
