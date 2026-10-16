@@ -50,6 +50,12 @@ public class EventQueueDeliveryTest
         assertEquals(1,plugin.pendingEvents.size());assertEquals(B,plugin.pendingEvents.get(0).get("event_id"));assertEquals(20000,plugin.eventRetryBackoffMs);
         assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
         policy(null,TOKEN);plugin.eventRetryBackoffUntilMs=0;
+        // Matched site rollback refuses queue-pinned intake; it never runs the legacy writer.
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"error\":\"queue_paused\"}"));
+        plugin.flushEvents();assertEquals("queue-v1",sent().get("ack_protocol").getAsString());done();
+        assertEquals(1,plugin.pendingEvents.size());assertEquals(B,plugin.pendingEvents.get(0).get("event_id"));
+        assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
+        plugin.eventRetryBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody(receipt(row(0,B,"stored",",\"archive_receipt\":true,\"d1_receipt\":true"))));
         plugin.flushEvents();assertEquals("queue-v1",sent().get("ack_protocol").getAsString());done();assertTrue(plugin.pendingEvents.isEmpty());
     }
