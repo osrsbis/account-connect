@@ -5771,6 +5771,14 @@ public class AccountConnectPlugin extends Plugin
 		canonical.remove("captured_at");
 		canonical.remove("wealth");
 		canonical.remove("game_vars");	// varps change constantly; game_vars rides on its own interval (gameVarsBlock)
+		Object gameplay = canonical.get("own_gameplay");
+		if (gameplay instanceof Map)
+		{
+			Map<String,Object> stableGameplay = new LinkedHashMap<>((Map<String,Object>) gameplay);
+			// Keep freshness on the wire, but a passive poll alone must never trigger an upload.
+			stableGameplay.remove("last_authoritative_read_ms");
+			canonical.put("own_gameplay", stableGameplay);
+		}
 		Object src = canonical.get("source");
 		if (src instanceof Map)
 		{

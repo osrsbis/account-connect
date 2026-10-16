@@ -231,6 +231,20 @@ public class OwnGameplayCaptureTest
             .protocol(Protocol.HTTP_1_1).code(status).message("fixture").header(key,value).build();
     }
 
+    @Test public void unchangedPollDoesNotTriggerUploadButRealStateAndHitsStillDo() throws Exception
+    {
+        AccountConnectPlugin p=plugin(); settle(); capture.poll(client,1000);
+        Map<String,Object> snapshot=new LinkedHashMap<>(); snapshot.put("own_gameplay",capture.snapshot());
+        String before=p.canonicalHash(snapshot);
+        tick++; capture.poll(client,2000); snapshot.put("own_gameplay",capture.snapshot());
+        assertEquals(before,p.canonicalHash(snapshot));
+        assertEquals(2000L,((Map<?,?>)snapshot.get("own_gameplay")).get("last_authoritative_read_ms"));
+        vars[1253]=100000; tick++; capture.poll(client,3000); snapshot.put("own_gameplay",capture.snapshot());
+        String changed=p.canonicalHash(snapshot); assertNotEquals(before,changed);
+        capture.hit(client,self,splat(7,false),3001); snapshot.put("own_gameplay",capture.snapshot());
+        assertNotEquals(changed,p.canonicalHash(snapshot));
+    }
+
     @Test public void grantDefaultsOffAndCannotComeFromBroadProgressOldTokenOrFailedResponse() throws Exception
     {
         AccountConnectPlugin p=plugin(); assertNull(p.gameplayBlock());
