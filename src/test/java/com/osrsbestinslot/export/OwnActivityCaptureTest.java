@@ -62,6 +62,29 @@ public class OwnActivityCaptureTest
         when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,"grant"));
         assertTrue(((Map<?,?>)capture.snapshot().get("states")).isEmpty());assertTrue(rows().isEmpty());
     }
+    @Test public void portTasksUseOwnFixedNamespacesWithoutWidgetTaskOrRewardInference()
+    {
+        vars[5197]=100;vars[5201]=500;vars[5207]=42;vars[5586]=3;
+        bit(19589,100);bit(19591,101);vars[100]=2;vars[101]=7;
+        capture.poll(client,1000);Map<?,?> port=value("sailing.port_tasks");
+        assertEquals(6,((Map<?,?>)port.get("packed_slots_raw")).size());
+        assertEquals(100,((Map<?,?>)port.get("packed_slots_raw")).get("5197"));
+        assertEquals(500,((Map<?,?>)port.get("packed_slots_raw")).get("5201"));
+        assertEquals(42,port.get("completed_total_raw"));assertEquals(3,port.get("bounty_item_counter_raw"));
+        assertEquals(2,port.get("extra_slots_raw"));assertEquals(7,port.get("completed_today_raw"));
+        assertEquals("task_identity_and_reward_unverified",port.get("interpretation"));
+        assertFalse(port.containsKey("bounty_creature"));assertFalse(port.containsKey("reward"));
+        verify(client,never()).getVarbit(5207);verify(client,never()).getWidgetRoots();
+    }
+    @Test public void portTaskReplacementKeepsMissingDifferentFromEmptyAndDoesNotClaimCompletion()
+    {
+        vars[5197]=123;capture.poll(client,1000);vars[5197]=0;tick++;capture.poll(client,1001);
+        assertEquals(0,((Map<?,?>)value("sailing.port_tasks").get("packed_slots_raw")).get("5197"));
+        assertNull(value("sailing.port_tasks").get("extra_slots_raw"));
+        when(client.getVarps()).thenReturn(new int[5000]);tick++;capture.poll(client,1002);
+        assertTrue(((Map<?,?>)value("sailing.port_tasks").get("packed_slots_raw")).values().stream().allMatch(Objects::isNull));
+        assertNull(value("sailing.port_tasks").get("completed_total_raw"));
+    }
     @Test public void countersKeepMissingZeroAndCoarseTimerDistinct()
     {
         bit(5099,100); bit(455,101); vars[100]=20; vars[101]=7;

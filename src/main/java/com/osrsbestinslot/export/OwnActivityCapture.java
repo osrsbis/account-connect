@@ -3,6 +3,8 @@ package com.osrsbestinslot.export;
 import java.util.*;
 import java.util.regex.*;
 import net.runelite.api.*;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.Text;
@@ -36,6 +38,20 @@ final class OwnActivityCapture
         potions.put("unlocked_raw", AccountProgressCapture.bit(c,vars,11295));
         potions.put("units", "unverified_not_doses_or_bottles");
         out.state("storage.potion_store", "RuneLite1.13.1:113_named_varps;varbit:11295", potions,c.getTickCount(),at);
+
+        // Fixed own progress state avoids the competitor's arbitrary widget-tree text scan.
+        Map<String,Object> port = new LinkedHashMap<>();
+        int[] taskVars = {VarPlayerID.PORT_TASKS_0,VarPlayerID.PORT_TASKS_1,VarPlayerID.PORT_TASKS_2,
+            VarPlayerID.PORT_TASKS_3,VarPlayerID.PORT_TASKS_4,VarPlayerID.PORT_TASKS_GENERAL};
+        Map<String,Object> slots = new LinkedHashMap<>();
+        for (int id : taskVars) slots.put(String.valueOf(id),AccountProgressCapture.varp(vars,id));
+        port.put("packed_slots_raw",slots);
+        port.put("completed_total_raw",AccountProgressCapture.varp(vars,VarPlayerID.PORT_TASKS_COMPLETED));
+        port.put("bounty_item_counter_raw",AccountProgressCapture.varp(vars,VarPlayerID.PORT_TASKS_BOUNTY_ITEM_COUNTER));
+        port.put("extra_slots_raw",AccountProgressCapture.bit(c,vars,VarbitID.PORT_TASK_EXTRA_SLOTS_UNLOCKED));
+        port.put("completed_today_raw",AccountProgressCapture.bit(c,vars,VarbitID.PORT_TASKS_COMPLETED_TODAY));
+        port.put("interpretation","task_identity_and_reward_unverified");
+        out.state("sailing.port_tasks", "RuneLite1.13.1:8_named_varps;varbits:19589,19591", port,c.getTickCount(),at);
 
         bits(c,vars,"minigame.tears",new String[]{"countdown_raw","tears_raw","collecting_raw"},new int[]{5099,455,453},at);
         // Only the local player's contribution, never team bottles or other players' scoreboards.
