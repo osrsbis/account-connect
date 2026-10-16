@@ -96,6 +96,33 @@ public class EventQueueDeliveryTest
         assertEquals(1,plugin.pendingEvents.size());assertEquals(0L,plugin.captureHealthSnapshot().get("events_lost_total"));
         assertTrue(plugin.queueRetryBackoffUntilMs>0);
     }
+    @Test public void application400IsLostAndDoesNotWedgeLaterQueueEvents() throws Exception
+    {
+        policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));
+        server.enqueue(new MockResponse().setResponseCode(400).setBody("{\"error\":\"invalid_event\"}"));
+        plugin.flushEvents();sent();done();assertTrue(plugin.pendingEvents.isEmpty());
+        assertEquals(1L,plugin.captureHealthSnapshot().get("events_lost_total"));
+        assertEquals(0L,plugin.captureHealthSnapshot().get("events_sent_total"));
+        plugin.pendingEvents.add(event(B,"ge_progress"));
+        server.enqueue(new MockResponse().setBody(receipt(row(0,B,"queued",",\"broker_ack\":true"))));
+        plugin.flushEvents();sent();done();assertTrue(plugin.pendingEvents.isEmpty());
+        assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
+    }
+    @Test public void perEventRejectionSettlesAsLostWithoutAFalseDurableAck() throws Exception
+    {
+        policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));plugin.pendingEvents.add(event(B,"ge_progress"));
+        server.enqueue(new MockResponse().setBody(receipt(row(0,A,"rejected",",\"reason\":\"event_id_conflict\""),row(1,B,"queued",",\"broker_ack\":true"))));
+        plugin.flushEvents();sent();done();assertTrue(plugin.pendingEvents.isEmpty());
+        assertEquals(1L,plugin.captureHealthSnapshot().get("events_lost_total"));
+        assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
+    }
+    @Test public void onlyApplicationPermanentErrorsAreTerminalAndBankVisitKeepsExistingWriter()
+    {
+        for(int status:Arrays.asList(400,401,413,422))assertTrue(EventQueueProtocol.terminalError(status,"{\"error\":\"invalid_event\"}"));
+        for(int status:Arrays.asList(200,404,408,429,500,503))assertFalse(EventQueueProtocol.terminalError(status,"{\"error\":\"temporary\"}"));
+        assertFalse(EventQueueProtocol.terminalError(400,"<html>provider error</html>"));
+        for(String type:Arrays.asList("bank_visit_open","bank_visit_close","bank_visit_manifest_chunk"))assertFalse(EventQueueProtocol.allows("own-history-v1",event(A,type)));
+    }
     @Test public void staffSpoolGrantKeepsLegacyContract() throws Exception
     {
         policy("own-history-v1",TOKEN);set("spoolGrantToken",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));server.enqueue(new MockResponse().setBody("{}"));

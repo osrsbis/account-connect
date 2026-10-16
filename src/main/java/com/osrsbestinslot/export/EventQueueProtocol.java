@@ -10,7 +10,7 @@ final class EventQueueProtocol
     private static final Set<String> GE = new HashSet<>(Arrays.asList(
         "ge_offer", "ge_progress", "ge_buy", "ge_sell", "ge_cancel", "ge_collect"));
     private static final Set<String> HISTORY = new HashSet<>(Arrays.asList(
-        "bank_session", "bank_visit_open", "bank_visit_close", "bank_visit_manifest_chunk",
+        "bank_session",
         "equip_change", "loot", "kill_count", "level_up", "xp_gain", "alch", "pickup"));
     static boolean allows(String scope, Map<String,Object> event)
     {
@@ -19,7 +19,18 @@ final class EventQueueProtocol
             && (("ge-v1".equals(scope) || "own-history-v1".equals(scope)) && GE.contains(event.get("type"))
                 || "own-history-v1".equals(scope) && HISTORY.contains(event.get("type")));
     }
-    enum Outcome { RETRY, DURABLE, ERASED }
+    enum Outcome { RETRY, DURABLE, ERASED, REJECTED }
+
+    static boolean terminalError(int status, String body)
+    {
+        // Provider404/timeout/rate-limit and HTML answers stay retryable. A parsed
+        // application4xx rejection is a loss, never a durable acknowledgement.
+        if (status < 400 || status >= 500 || status == 404 || status == 408 || status == 429) return false;
+        try {
+            String error = string(new JsonParser().parse(body).getAsJsonObject(), "error");
+            return error != null && !error.isEmpty();
+        } catch (RuntimeException ignored) { return false; }
+    }
 
     static List<Outcome> receipts(String body, List<Map<String,Object>> batch)
     {
@@ -44,7 +55,8 @@ final class EventQueueProtocol
                 if ("queued".equals(status) && flag(row, "broker_ack")
                     || "stored".equals(status) && flag(row, "archive_receipt") && flag(row, "d1_receipt"))
                     out.set(i, Outcome.DURABLE);
-                else if ("rejected".equals(status) && "erased".equals(string(row, "reason"))) out.set(i, Outcome.ERASED);
+                else if ("rejected".equals(status) && string(row, "reason") != null && !string(row, "reason").isEmpty())
+                    out.set(i, "erased".equals(string(row, "reason")) ? Outcome.ERASED : Outcome.REJECTED);
             }
         }
         catch (RuntimeException ignored)

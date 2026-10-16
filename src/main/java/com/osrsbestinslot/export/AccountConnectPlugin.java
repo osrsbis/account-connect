@@ -4009,6 +4009,7 @@ public class AccountConnectPlugin extends Plugin
 	boolean flushEventsNow()
 	{
 		eventRetryBackoffUntilMs = 0L;
+		queueRetryBackoffUntilMs = 0L;
 		boolean before = eventPostInFlight;
 		flushEvents();
 		return !before && eventPostInFlight;
@@ -4247,7 +4248,10 @@ public class AccountConnectPlugin extends Plugin
 					if (Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE))
 						&& response.code() != 403)
 					{
-						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.receipts(readBody(response), batch);
+						String queueBody = readBody(response);
+						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.terminalError(response.code(), queueBody)
+							? java.util.Collections.nCopies(batch.size(), EventQueueProtocol.Outcome.REJECTED)
+							: EventQueueProtocol.receipts(queueBody, batch);
 						List<Map<String, Object>> retry = new ArrayList<>();
 						for (int i = 0; i < batch.size(); i++)
 						{
@@ -4255,7 +4259,7 @@ public class AccountConnectPlugin extends Plugin
 							else if (receipts.get(i) == EventQueueProtocol.Outcome.DURABLE) healthEventsSent.incrementAndGet();
 							else healthEventsLost.incrementAndGet();
 						}
-						if (retry.size() < batch.size()) healthLastEventUploadMs.set(System.currentTimeMillis());
+						if (receipts.contains(EventQueueProtocol.Outcome.DURABLE)) healthLastEventUploadMs.set(System.currentTimeMillis());
 						if (!retry.isEmpty())
 						{
 							long delay = 0;
