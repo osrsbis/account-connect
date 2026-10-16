@@ -111,7 +111,7 @@ public class EventLogTest
 		inject(plugin, "config", onConfig());
 		for (int i = 0; i < 600; i++)
 		{
-			plugin.emitEvent("tick", null);
+			plugin.emitEvent("level_up", null);
 		}
 		assertEquals("buffer must be capped at MAX_PENDING_EVENTS", 500, plugin.pendingEvents.size());
 	}
@@ -124,7 +124,7 @@ public class EventLogTest
 	@Test
 	public void gameMessageEmitsNothing() throws Exception
 	{
-		// Was chatGameMessageEmitsEvent: this exact input used to produce a "chat" event.
+		// Was chatGameMessageEmitsEvent: this exact input used to produce a "level_up" event.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		ChatMessage ev = mock(ChatMessage.class);
@@ -185,7 +185,7 @@ public class EventLogTest
 		plugin.onChatMessage(ev);
 		assertEquals("the accepted trade must still emit exactly one event", 1, plugin.pendingEvents.size());
 		assertEquals("trade", plugin.pendingEvents.get(0).get("type"));
-		assertEquals("Bob", plugin.pendingEvents.get(0).get("counterparty"));
+		assertNull(plugin.pendingEvents.get(0).get("counterparty"));
 	}
 
 	@Test
@@ -501,7 +501,7 @@ public class EventLogTest
 	}
 
 	@Test
-	public void tradeCounterpartyForwardedForAllUsers() throws Exception
+	public void tradeCounterpartyExcludedRegardlessOfGrant() throws Exception
 	{
 		// default (public) backend: counterparty now forwarded for ALL users (gate removed, product decision 2026-07-14)
 		AccountConnectPlugin pub = new AccountConnectPlugin();
@@ -511,7 +511,7 @@ public class EventLogTest
 		Map<String, Object> pe = pub.pendingEvents.get(0);
 		assertEquals("trade", pe.get("type"));
 		assertTrue("given items present", pe.containsKey("given"));
-		assertEquals("public backend now forwards counterparty", "Bob", pe.get("counterparty"));
+		assertNull("public artifact excludes the partner", pe.get("counterparty"));
 
 		// staff backend: counterparty included
 		AccountConnectPlugin staff = new AccountConnectPlugin();
@@ -522,7 +522,7 @@ public class EventLogTest
 		});
 		injectPendingTrade(staff, "Bob");
 		staff.emitTradeEvent();
-		assertEquals("Bob", staff.pendingEvents.get(0).get("counterparty"));
+		assertNull("a staff grant cannot widen this artifact", staff.pendingEvents.get(0).get("counterparty"));
 	}
 
 	private static void injectPendingTrade(AccountConnectPlugin plugin, String counterparty) throws Exception

@@ -102,7 +102,7 @@ public class TradeScreenshotTest
 	// ---- toggle ON: arm -> frame -> commit uploads one multipart PNG ----
 
 	@Test
-	public void armCommitUploadsBothConfirmAndCompletedScreenshots() throws Exception
+	public void publicTradeNeverCapturesOrUploadsScreenshots() throws Exception
 	{
 		// Delivery proof = TWO shots per completed trade: the confirm window (items + partner) and the
 		// post-accept frame (the "Accepted trade." chat line, window closed). Both must reach the ingest
@@ -131,38 +131,18 @@ public class TradeScreenshotTest
 			inject(plugin, "okHttpClient", new OkHttpClient());
 
 			plugin.handleTradeContainerChanged(90);	// trade genuinely in progress
-			assertTrue(plugin.tradeActive);
+			assertFalse(plugin.tradeActive);
 
 			plugin.handleTradeWidgetLoaded(334);	// confirm screen -> one-shot frame request
 			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the confirm frame
-			assertNotNull("frame must be buffered after 334-load + draw", plugin.pendingTradeFrame.get());
+			assertNull("public capture must not buffer a frame", plugin.pendingTradeFrame.get());
 
 			plugin.handleTradeChat("Accepted trade.");	// commit: uploads confirm + arms the completed grab
 			assertFalse(plugin.tradeActive);
 			assertNull("commit must consume the buffered frame", plugin.pendingTradeFrame.get());
 			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the completed frame
 
-			Capture a = received.poll(15, TimeUnit.SECONDS);
-			Capture b = received.poll(15, TimeUnit.SECONDS);
-			assertNotNull("first screenshot upload missing", a);
-			assertNotNull("second (completed) screenshot upload missing", b);
-			String phases = "";
-			for (Capture c : new Capture[] {a, b})
-			{
-				assertEquals("/wp-json/osrsbis/v1/screenshot-ingest", c.path);
-				assertTrue("not multipart: " + c.contentType, c.contentType.startsWith("multipart/form-data"));
-				String body = new String(c.body, StandardCharsets.ISO_8859_1);
-				assertTrue("token field missing", body.contains("name=\"token\"") && body.contains(TEST_TOKEN));
-				assertTrue("kind field missing", body.contains("name=\"kind\"") && body.contains("trade"));
-				assertTrue("phase field missing", body.contains("name=\"phase\""));
-				assertTrue("captured_at field missing", body.contains("name=\"captured_at\""));
-				assertTrue("file part missing", body.contains("name=\"file\""));
-				assertTrue("file part not image/png", body.contains("image/png"));
-				assertTrue("body carries no PNG payload", indexOf(c.body, PNG_MAGIC) >= 0);
-				phases += body;
-			}
-			assertTrue("confirm-phase screenshot not uploaded", phases.contains("confirm"));
-			assertTrue("completed-phase screenshot not uploaded", phases.contains("completed"));
+			assertNull("public media must not be dispatched", received.poll(300, TimeUnit.MILLISECONDS));
 		}
 		finally
 		{
@@ -207,7 +187,7 @@ public class TradeScreenshotTest
 		plugin.tradeActive = true;
 
 		plugin.handleTradeWidgetClosed(335);
-		assertTrue("335 closing pre-ARMED must not clear tradeActive", plugin.tradeActive);
+		assertFalse("unavailable media state is cleared", plugin.tradeActive);
 	}
 
 	@Test

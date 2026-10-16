@@ -16,7 +16,7 @@ public class CaptureHealthTest
 	public void eventQueueIsVisibleInHealth() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.emitEvent("test_event", new LinkedHashMap<>());
+		plugin.emitEvent("level_up", new LinkedHashMap<>());
 		Map<String, Object> h = plugin.captureHealthSnapshot();
 		assertEquals(1L, h.get("events_queued_total"));
 		assertEquals(1, h.get("events_pending"));

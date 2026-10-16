@@ -76,7 +76,7 @@ public class TradeOtherOfferCaptureTest
 	}
 
 	@Test
-	public void capturesReceivedItemsAndCounterpartyFromMainScreen() throws Exception
+	public void capturesReceivedItemsWithoutCounterpartyFromMainScreen() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
@@ -95,7 +95,7 @@ public class TradeOtherOfferCaptureTest
 		assertEquals(20997, recv.get(0).get("id"));
 		assertEquals(3, recv.get(0).get("qty"));
 		assertEquals(22486, recv.get(1).get("id"));
-		assertEquals("Snaauz", field(plugin, "pendingCounterparty"));
+		assertNull("partner title is never read", field(plugin, "pendingCounterparty"));
 	}
 
 	@Test
@@ -124,8 +124,8 @@ public class TradeOtherOfferCaptureTest
 		plugin.emitTradeEvent();
 
 		Map<String, Object> ev = plugin.pendingEvents.get(0);
-		assertEquals("Level Three", ev.get("counterparty"));
-		assertEquals(3, ev.get("counterparty_combat_level"));
+		assertNull(ev.get("counterparty"));
+		assertNull(ev.get("counterparty_combat_level"));
 		assertEquals(380, ev.get("world"));
 		assertEquals(false, ev.get("world_members"));
 	}
@@ -145,7 +145,7 @@ public class TradeOtherOfferCaptureTest
 		when(customer.getCombatLevel()).thenReturn(77);
 		inject(plugin, "client", client);
 
-		assertEquals(Integer.valueOf(77), plugin.visibleCounterpartyCombatLevel("Space_Name"));
+		assertNull("public build does not collect target combat level", plugin.visibleCounterpartyCombatLevel("Space_Name"));
 	}
 
 	@Test
@@ -220,7 +220,7 @@ public class TradeOtherOfferCaptureTest
 		List<Map<String, Object>> recv = (List<Map<String, Object>>) field(plugin, "pendingTradeReceived");
 		assertEquals("main-screen items preserved", 1, recv.size());
 		assertEquals(20997, recv.get(0).get("id"));
-		assertEquals("Snaauz", field(plugin, "pendingCounterparty"));
+		assertNull("partner title is never read", field(plugin, "pendingCounterparty"));
 		assertNull("no text fallback when items already captured", field(plugin, "pendingReceivedText"));
 	}
 

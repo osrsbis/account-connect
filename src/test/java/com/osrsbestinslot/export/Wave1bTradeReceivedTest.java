@@ -56,7 +56,7 @@ public class Wave1bTradeReceivedTest
 
 		Map<String, Object> ev = plugin.pendingEvents.get(0);
 		assertEquals("trade", ev.get("type"));
-		assertEquals("Bob", ev.get("counterparty"));
+		assertNull("partner name is excluded from the public event", ev.get("counterparty"));
 		assertTrue("given present", ev.containsKey("given"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> received = (List<Map<String, Object>>) ev.get("received");
@@ -67,7 +67,7 @@ public class Wave1bTradeReceivedTest
 	}
 
 	@Test
-	public void tradeEventFallsBackToReceivedText() throws Exception
+	public void tradeEventOmitsUnstructuredReceivedText() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
@@ -78,7 +78,7 @@ public class Wave1bTradeReceivedTest
 		plugin.emitTradeEvent();
 
 		Map<String, Object> ev = plugin.pendingEvents.get(0);
-		assertEquals("Blood rune x 100", ev.get("received_text"));
+		assertNull("unstructured trade text is excluded", ev.get("received_text"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> received = (List<Map<String, Object>>) ev.get("received");
 		assertTrue("received[] present but empty", received.isEmpty());

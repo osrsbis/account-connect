@@ -86,7 +86,7 @@ final class GeObservationTracker
             s.uncertain = ambiguousReuse;
             s.state = state;
             s.value = v.clone();
-            s.seen = replay ? "baseline" : active(state) && (afterEmpty || v[1] == 0) ? "placed" : "midway";
+            s.seen = replay ? "midway" : active(state) && (afterEmpty || v[1] == 0) ? "placed" : "midway";
             // Only an observed empty slot supplies a zero baseline for an instant fill.
             // Otherwise first sight cannot credit historical fills, including restart/login.
             boolean fromEmpty = afterEmpty && !replay;

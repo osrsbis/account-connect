@@ -110,6 +110,89 @@ public class UploadGatingTest
 		when(client.getSkillExperience(Skill.ATTACK)).thenReturn(xp);
 	}
 
+	@Test
+	public void failedGameVarsUploadDoesNotResendEveryIdleTick() throws Exception
+	{
+		buildPlugin();
+		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
+		when(client.getVarps()).thenReturn(new int[]{1,2});
+		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Broad-Capture", "on"));
+		plugin.syncTask();
+		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		plugin.minUploadIntervalMillis = 600_000;
+		plugin.lastSendMillis = 0;
+		server.enqueue(new MockResponse().setResponseCode(500).setHeader("X-Broad-Capture", "on"));
+		plugin.syncTask();
+		RecordedRequest failed = server.takeRequest(5, TimeUnit.SECONDS);
+		assertNotNull(failed);
+		assertTrue(failed.getBody().readUtf8().contains("game_vars"));
+		awaitBackoffArmed(2000);
+		for (int i=0; i<4; i++) plugin.syncTask();
+		plugin.forceSendSnapshot();
+		assertNull("failed uploads retain backoff, including force", server.takeRequest(150, TimeUnit.MILLISECONDS));
+		assertEquals(2, server.getRequestCount());
+		plugin.backoffUntilMillis = 0;
+		plugin.lastSendMillis = 0;
+		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Broad-Capture", "on"));
+		plugin.syncTask();
+		RecordedRequest retry = server.takeRequest(5, TimeUnit.SECONDS);
+		assertNotNull("pending state retries after backoff", retry);
+		assertFalse("revoked sensitive block must not replay", retry.getBody().readUtf8().contains("game_vars"));
+	}
+
+	@Test
+	public void closeCannotCreatePhantomLoginOrForcedSnapshot() throws Exception
+	{
+		buildPlugin();
+		server.enqueue(new MockResponse().setResponseCode(200));
+		plugin.syncTask();
+		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash,5000);
+		server.enqueue(new MockResponse().setResponseCode(200));
+		plugin.onClientShutdown(new net.runelite.client.events.ClientShutdown());
+		plugin.finalFlushDone.get(5, TimeUnit.SECONDS);
+		plugin.pendingEvents.clear();
+		int requests = server.getRequestCount();
+		plugin.syncTask();
+		plugin.forceSendSnapshot();
+		assertFalse(plugin.pendingEvents.stream().anyMatch(e -> "login".equals(e.get("type"))));
+		Thread.sleep(50);
+		assertEquals(requests, server.getRequestCount());
+	}
+
+	@Test
+	public void delayedOldTokenResponseCannotGrantOrAcceptTheNewIdentity() throws Exception
+	{
+		buildPlugin();
+		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		server.setDispatcher(new okhttp3.mockwebserver.Dispatcher()
+		{
+			public MockResponse dispatch(RecordedRequest request) throws InterruptedException
+			{
+				entered.countDown();
+				release.await(5, TimeUnit.SECONDS);
+				return new MockResponse().setResponseCode(200).setHeader("X-Broad-Capture", "on");
+			}
+		});
+		plugin.syncTask();
+		assertTrue(entered.await(5, TimeUnit.SECONDS));
+		inject("config", new AccountConnectConfig()
+		{
+			public String linkToken() { return "ffffffffffffffffffffffffffffffff"; }
+		});
+		release.countDown();
+		Field f = AccountConnectPlugin.class.getDeclaredField("okHttpClient");
+		f.setAccessible(true);
+		OkHttpClient http = (OkHttpClient) f.get(plugin);
+		long until = System.currentTimeMillis() + 5000;
+		while (http.dispatcher().runningCallsCount() > 0 && System.currentTimeMillis() < until) Thread.sleep(10);
+		assertEquals(0, http.dispatcher().runningCallsCount());
+		assertFalse(plugin.serverGameVarsEnabled);
+		assertNull("old accept cannot mark the new identity's state uploaded", plugin.lastUploadedHash);
+	}
+
 	/** Waits for the async OkHttp callback to record an accepted upload with the given hash. */
 	private void awaitUploadedHash(String expectedHash, long timeoutMillis) throws InterruptedException
 	{
@@ -251,13 +334,13 @@ public class UploadGatingTest
 	// ================================================================
 
 	@Test
-	public void anIdleGrantedClientStillPollsSoARevocationCanReachIt() throws Exception
+	public void publicClientCannotArmMediaPolicyHeartbeat() throws Exception
 	{
 		buildPlugin();
 		plugin.minUploadIntervalMillis = 1;
 		plugin.setStoreToolsForTest(true);
 		plugin.setDropProofRolloutForTest(true);
-		assertTrue("the rig holds the grant", plugin.dropProofEnabled());
+		assertFalse("the public artifact cannot arm media", plugin.dropProofEnabled());
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
@@ -277,9 +360,9 @@ public class UploadGatingTest
 
 		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Drop-Proof", "off"));
 		plugin.syncTask();
-		assertNotNull("FINDING C: a granted idle client must poll once the window elapses",
-			server.takeRequest(5, TimeUnit.SECONDS));
-		assertEquals(2, server.getRequestCount());
+		assertNull("an unavailable media feature must not create polling traffic",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
 
 		// And the revocation the poll carried must actually land.
 		long deadline = System.currentTimeMillis() + 5000L;
@@ -501,13 +584,13 @@ public class UploadGatingTest
 				return TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 		});
-		assertTrue("linked + no server override -> enabled", plugin.screenshotsEnabled());
+		assertFalse("public media is off before the first policy response", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "off"));
 		assertFalse("server force-disable overrides the local link", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
-		assertTrue("server can re-allow (local opt-in still governs)", plugin.screenshotsEnabled());
+		assertFalse("a server directive cannot widen the public artifact", plugin.screenshotsEnabled());
 	}
 
 	@Test

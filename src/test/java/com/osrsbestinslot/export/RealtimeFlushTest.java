@@ -100,9 +100,9 @@ public class RealtimeFlushTest
 		ScheduledExecutorService exec = mock(ScheduledExecutorService.class);
 		inject("executor", exec);
 
-		plugin.emitEvent("chat", field("text", "line one"));
-		plugin.emitEvent("chat", field("text", "line two"));
-		plugin.emitEvent("chat", field("text", "line three"));
+		plugin.emitEvent("level_up", field("skill", "line one"));
+		plugin.emitEvent("level_up", field("skill", "line two"));
+		plugin.emitEvent("level_up", field("skill", "line three"));
 
 		verify(exec, times(1)).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
 		assertEquals("all three buffered for a single coalesced flush", 3, plugin.pendingEvents.size());
@@ -122,9 +122,9 @@ public class RealtimeFlushTest
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
-		plugin.emitEvent("chat", field("text", "a"));
-		plugin.emitEvent("chat", field("text", "b"));
-		plugin.emitEvent("chat", field("text", "c"));
+		plugin.emitEvent("level_up", field("skill", "a"));
+		plugin.emitEvent("level_up", field("skill", "b"));
+		plugin.emitEvent("level_up", field("skill", "c"));
 
 		RecordedRequest r1 = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("the burst must flush", r1);
@@ -133,7 +133,7 @@ public class RealtimeFlushTest
 		assertEquals("three events coalesced into one POST", 3, ((List<?>) body.get("events")).size());
 		assertNull("no second POST for the same burst", server.takeRequest(300, TimeUnit.MILLISECONDS));
 
-		plugin.emitEvent("chat", field("text", "d"));
+		plugin.emitEvent("level_up", field("skill", "d"));
 		RecordedRequest r2 = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("a later event opens a fresh window -> a second POST", r2);
 		exec.shutdownNow();
