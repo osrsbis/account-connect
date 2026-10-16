@@ -43,6 +43,7 @@ import java.util.regex.Pattern;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
+import net.runelite.api.NPC;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.EquipmentInventorySlot;
@@ -155,6 +156,27 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
 	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
+	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture();
+	private volatile String gameplayGrantToken;
+	private volatile long gameplayGrantEpoch;
+
+	boolean gameplayGranted()
+	{
+		String token = currentLinkToken();
+		return token != null && token.matches("[a-f0-9]{32}") && token.equals(gameplayGrantToken);
+	}
+
+	boolean gameplayReady()
+	{
+		if (!gameplayGranted()) { ownGameplay.reset(); return false; }
+		return ownGameplay.ready(client, currentLinkToken() + ":" + gameplayGrantEpoch);
+	}
+
+	Map<String,Object> gameplayBlock()
+	{
+		return gameplayReady() ? ownGameplay.snapshot() : null;
+	}
+
 	private volatile String progressGrantToken;
 	private volatile long progressGrantEpoch;
 
@@ -432,6 +454,7 @@ public class AccountConnectPlugin extends Plugin
 		geObservations.clear();
 		geAccountHash = -1L;
 		accountProgress.reset();	// disabled plugins miss hop/relog callbacks
+		ownGameplay.reset();
 		clearResetPhaseEvidence();
 		geUnkeyed.clear();
 	}
@@ -1752,6 +1775,8 @@ public class AccountConnectPlugin extends Plugin
 			spoolOnTokenChangedWithoutAccount();
 			progressGrantToken = null;
 			progressGrantEpoch++;
+			gameplayGrantToken = null;
+			gameplayGrantEpoch++;
 			setBroadCaptureGrant(null, false);
 			snapshotRetryPending = false;
 			// A visit belongs to the token that was granted at its open: never finish it under another one.
@@ -5875,10 +5900,11 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
-		if (state == GameState.LOADING) accountProgress.storageRecovery.gap();
+		if (state == GameState.LOADING) { accountProgress.storageRecovery.gap(); ownGameplay.gap(); }
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			accountProgress.reset();
+			ownGameplay.reset();
 			geObservations.gap();
 		}
 		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
@@ -6165,6 +6191,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
 		if (progressReady())
 		{
 			accountProgress.poll(client, System.currentTimeMillis());
@@ -7211,8 +7238,15 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	@Subscribe
+	public void onNpcDespawned(net.runelite.api.events.NpcDespawned event)
+	{
+		if (gameplayReady()) ownGameplay.endNpc(client, event.getNpc(), false, System.currentTimeMillis());
+	}
+
+	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied event)
 	{
+		if (gameplayReady()) ownGameplay.hit(client, event.getActor(), event.getHitsplat(), System.currentTimeMillis());
 		if (!maxCapture() || client == null)
 		{
 			return;
@@ -10122,6 +10156,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
+		if (gameplayReady() && event.getActor() instanceof NPC)
+			ownGameplay.endNpc(client, (NPC) event.getActor(), true, System.currentTimeMillis());
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
 		{
 			// A death spawns the player's items on the ground at their tile WITH an inventory loss — exactly the
@@ -10965,6 +11001,8 @@ public class AccountConnectPlugin extends Plugin
 			snap.put("game_vars", gv);
 		}
 
+		Map<String,Object> gameplay = gameplayBlock();
+		if (gameplay != null) snap.put("own_gameplay", gameplay);
 		Map<String, Object> progress = progressBlock();
 		if (progress != null)
 		{
@@ -11343,6 +11381,7 @@ public class AccountConnectPlugin extends Plugin
 		if (!broadCaptureEnabled()) stripBroadCapture(sentSnapshot);
 		// Recheck separate grants at serialization, including cached logout snapshots.
 		if (!progressGranted() || !token.equals(progressGrantToken)) sentSnapshot.remove("account_progress");
+		if (!gameplayGranted() || !token.equals(gameplayGrantToken)) sentSnapshot.remove("own_gameplay");
 		final String sentHash = canonicalHash(sentSnapshot);
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
@@ -11450,6 +11489,12 @@ public class AccountConnectPlugin extends Plugin
 	void applyServerPolicy(Response response, String sentToken)
 	{
 		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
+		// No existing broad/progress grant widens the capture scope. Missing/failed response revokes.
+		String gameplay = response.header("X-Own-Gameplay");
+		String gameplayGrant = response.isSuccessful() && "on".equalsIgnoreCase(gameplay == null ? "" : gameplay.trim()) ? sentToken : null;
+		if (!java.util.Objects.equals(gameplayGrant, gameplayGrantToken)) gameplayGrantEpoch++;
+		gameplayGrantToken = gameplayGrant;
+
 		// Separate batch2 disclosure gate: batch1's X-Broad-Capture does not grant these fields.
 		String progress = response.header("X-Account-Progress");
 		if (progress != null && sentToken != null && sentToken.equals(currentLinkToken()))
@@ -11465,6 +11510,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			progressGrantToken = null;
 			progressGrantEpoch++;
+			gameplayGrantToken = null;
+			gameplayGrantEpoch++;
 		}
 		String eventSpool = response.header("X-Event-Spool");
 		if (eventSpool != null && sentToken != null && sentToken.equals(currentLinkToken()))
