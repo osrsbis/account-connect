@@ -47,15 +47,15 @@ public class EventQueueDeliveryTest
         policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));plugin.pendingEvents.add(event(B,"ge_progress"));
         server.enqueue(new MockResponse().setResponseCode(503).setHeader("Retry-After","20").setBody(receipt(row(0,A,"queued",",\"broker_ack\":true"),row(1,B,"retry",""))));
         plugin.flushEvents();JsonObject body=sent();assertEquals("queue-v1",body.get("ack_protocol").getAsString());assertFalse(body.toString().contains("__delivery"));done();
-        assertEquals(1,plugin.pendingEvents.size());assertEquals(B,plugin.pendingEvents.get(0).get("event_id"));assertEquals(20000,plugin.eventRetryBackoffMs);
+        assertEquals(1,plugin.pendingEvents.size());assertEquals(B,plugin.pendingEvents.get(0).get("event_id"));assertEquals(20000,plugin.queueRetryBackoffMs);
         assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
-        policy(null,TOKEN);plugin.eventRetryBackoffUntilMs=0;
+        policy(null,TOKEN);plugin.queueRetryBackoffUntilMs=0;
         // Matched site rollback refuses queue-pinned intake; it never runs the legacy writer.
         server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"error\":\"queue_paused\"}"));
         plugin.flushEvents();assertEquals("queue-v1",sent().get("ack_protocol").getAsString());done();
         assertEquals(1,plugin.pendingEvents.size());assertEquals(B,plugin.pendingEvents.get(0).get("event_id"));
         assertEquals(1L,plugin.captureHealthSnapshot().get("events_sent_total"));
-        plugin.eventRetryBackoffUntilMs=0;
+        plugin.queueRetryBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody(receipt(row(0,B,"stored",",\"archive_receipt\":true,\"d1_receipt\":true"))));
         plugin.flushEvents();assertEquals("queue-v1",sent().get("ack_protocol").getAsString());done();assertTrue(plugin.pendingEvents.isEmpty());
     }
@@ -64,7 +64,7 @@ public class EventQueueDeliveryTest
         policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));
         for(String response:Arrays.asList("{\"ok\":true,\"stored\":1}","<html>temporary failure</html>"))
         {
-            server.enqueue(new MockResponse().setBody(response));plugin.eventRetryBackoffUntilMs=0;plugin.flushEvents();sent();done();assertEquals(1,plugin.pendingEvents.size());
+            server.enqueue(new MockResponse().setBody(response));plugin.queueRetryBackoffUntilMs=0;plugin.flushEvents();sent();done();assertEquals(1,plugin.pendingEvents.size());
         }
         assertEquals(0L,plugin.captureHealthSnapshot().get("events_sent_total"));
     }
@@ -75,6 +75,26 @@ public class EventQueueDeliveryTest
         policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));plugin.pendingEvents.add(event(B,"level_up"));
         server.enqueue(new MockResponse().setBody(receipt(row(0,A,"queued",",\"broker_ack\":true"))));plugin.flushEvents();assertEquals(1,sent().getAsJsonArray("events").size());done();
         server.enqueue(new MockResponse().setBody("{}"));plugin.flushEvents();assertFalse(sent().has("ack_protocol"));done();
+    }
+    @Test public void pausedQueueCannotBlockNewLegacyEventsOrClearItsOwnBackoff() throws Exception
+    {
+        policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));
+        server.enqueue(new MockResponse().setResponseCode(503).setHeader("Retry-After","300").setBody("{\"error\":\"queue_paused\"}"));
+        plugin.flushEvents();sent();done();long until=plugin.queueRetryBackoffUntilMs;
+        policy(null,TOKEN);plugin.pendingEvents.add(event(B,"level_up"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.flushEvents();JsonObject legacy=sent();done();
+        assertFalse(legacy.has("ack_protocol"));assertEquals(B,legacy.getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString());
+        assertEquals(until,plugin.queueRetryBackoffUntilMs);assertEquals(1,plugin.pendingEvents.size());
+        plugin.flushEvents();assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
+        plugin.queueRetryBackoffUntilMs=0;
+        server.enqueue(new MockResponse().setBody(receipt(row(0,A,"queued",",\"broker_ack\":true"))));plugin.flushEvents();assertTrue(sent().has("ack_protocol"));done();assertTrue(plugin.pendingEvents.isEmpty());
+    }
+    @Test public void providerHtml404KeepsQueueEventForRetry() throws Exception
+    {
+        policy("ge-v1",TOKEN);plugin.pendingEvents.add(event(A,"ge_progress"));
+        server.enqueue(new MockResponse().setResponseCode(404).setBody("<html>provider route unavailable</html>"));plugin.flushEvents();sent();done();
+        assertEquals(1,plugin.pendingEvents.size());assertEquals(0L,plugin.captureHealthSnapshot().get("events_lost_total"));
+        assertTrue(plugin.queueRetryBackoffUntilMs>0);
     }
     @Test public void staffSpoolGrantKeepsLegacyContract() throws Exception
     {

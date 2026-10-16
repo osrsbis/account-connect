@@ -666,6 +666,8 @@ public class AccountConnectPlugin extends Plugin
 	private static final long EVENT_RETRY_MAX_BACKOFF_MS = 300_000L;
 	volatile boolean eventPostInFlight;
 	volatile long eventRetryBackoffMs;
+	volatile long queueRetryBackoffMs;
+	volatile long queueRetryBackoffUntilMs;
 	volatile long eventRetryBackoffUntilMs;
 	private volatile boolean sessionActive;
 	private volatile String activeRsn;
@@ -4109,10 +4111,6 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		String tokenFingerprint = sha256Hex("event-token:" + token);
-		if (nowMs() < eventRetryBackoffUntilMs)
-		{
-			return;	// backing off after a failure; the events stay buffered
-		}
 		List<Map<String, Object>> batch;
 		// The in-flight claim and the buffer drain happen under ONE lock. Tested separately they are
 		// check-then-act: the coalesced-flush executor and the 5s scheduler can both pass the guard
@@ -4160,6 +4158,8 @@ public class AccountConnectPlugin extends Plugin
 						token.equals(eventQueueGrantToken) && !token.equals(spoolGrantToken)
 						&& !spoolMemoryOwned.containsKey(String.valueOf(eid))
 						&& EventQueueProtocol.allows(eventQueueScope, ev));
+					boolean queue = Boolean.TRUE.equals(ev.get(EVENT_QUEUE));
+					if (nowMs() < (queue ? queueRetryBackoffUntilMs : eventRetryBackoffUntilMs)) continue;
 					if (!batch.isEmpty() && !java.util.Objects.equals(batch.get(0).get(EVENT_QUEUE), ev.get(EVENT_QUEUE))) break;
 					batch.add(ev);
 				}
@@ -4245,7 +4245,7 @@ public class AccountConnectPlugin extends Plugin
 				try
 				{
 					if (Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE))
-						&& (response.isSuccessful() || response.code() == 429 || response.code() >= 500))
+						&& response.code() != 403)
 					{
 						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.receipts(readBody(response), batch);
 						List<Map<String, Object>> retry = new ArrayList<>();
@@ -4267,8 +4267,8 @@ public class AccountConnectPlugin extends Plugin
 						{
 							eventPostInFlight = false;
 							completeFinalFlush();
-							eventRetryBackoffMs = 0;
-							eventRetryBackoffUntilMs = 0L;
+							queueRetryBackoffMs = 0;
+							queueRetryBackoffUntilMs = 0L;
 							if (!pendingEvents.isEmpty()) scheduleCoalescedFlush();
 						}
 						return;
@@ -4353,15 +4353,15 @@ public class AccountConnectPlugin extends Plugin
 				evictOneForOverflow();
 			}
 		}
-		long next = eventRetryBackoffMs <= 0
-			? EVENT_RETRY_BASE_BACKOFF_MS
-			: Math.min(eventRetryBackoffMs * 2, EVENT_RETRY_MAX_BACKOFF_MS);
+		boolean queue = !batch.isEmpty() && Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE));
+		long prior = queue ? queueRetryBackoffMs : eventRetryBackoffMs;
+		long next = prior <= 0 ? EVENT_RETRY_BASE_BACKOFF_MS : Math.min(prior * 2, EVENT_RETRY_MAX_BACKOFF_MS);
 		if (retryAfterMs > 0)
 		{
 			next = Math.max(next, Math.min(retryAfterMs, EVENT_RETRY_MAX_BACKOFF_MS));
 		}
-		eventRetryBackoffMs = next;
-		eventRetryBackoffUntilMs = nowMs() + next;
+		if (queue) { queueRetryBackoffMs = next; queueRetryBackoffUntilMs = nowMs() + next; }
+		else { eventRetryBackoffMs = next; eventRetryBackoffUntilMs = nowMs() + next; }
 		eventPostInFlight = false;
 		completeFinalFlush();
 	}
