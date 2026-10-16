@@ -3131,29 +3131,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	java.util.List<DropCandidates.Observed> observedPlayers()
 	{
-		java.util.List<DropCandidates.Observed> out = new ArrayList<>();
-		if (client == null)
-		{
-			return out;
-		}
-		Player self = client.getLocalPlayer();
-		java.util.List<Player> players = client.getPlayers();
-		if (players == null)
-		{
-			return out;
-		}
-		for (Player p : players)
-		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty()
-				|| p.getWorldLocation() == null)
-			{
-				continue;
-			}
-			WorldPoint loc = p.getWorldLocation();
-			out.add(new DropCandidates.Observed(Text.removeTags(p.getName()),
-				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel(), p.getAnimation()));
-		}
-		return out;
+		// Other-player readers are absent from the public artifact.
+		return java.util.Collections.emptyList();
 	}
 
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
@@ -6780,22 +6759,13 @@ public class AccountConnectPlugin extends Plugin
 			// Counterparty + received[] come from the 335 poll above (the only place they are readable). Fall
 			// back to the confirm screen ONLY when the poll captured nothing — counterpartyName() is usually
 			// null here (335 title gone) and readReceivedOffer() reads the value-text column.
-			if (pendingCounterparty == null || pendingCounterparty.isEmpty())
-			{
-				pendingCounterparty = counterpartyName();
-				pendingCounterpartyCombatLevel = visibleCounterpartyCombatLevel(pendingCounterparty);
-			}
+			pendingCounterparty = null;
+			pendingCounterpartyCombatLevel = null;
 			if (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
 			{
 				pendingTradeReceived = readReceivedOffer();
 			}
-			// Lossless text fallback only when we still have no structured items (e.g. big "Lots!" trade the
-			// poll missed) — keeps the existing "no received_text when items exist" contract.
-			if ((pendingTradeReceived == null || pendingTradeReceived.isEmpty())
-				&& (pendingReceivedText == null || pendingReceivedText.isEmpty()))
-			{
-				pendingReceivedText = readReceivedText();
-			}
+
 		}
 	}
 
@@ -6818,20 +6788,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			pendingTradeReceived = other;
 		}
-		String cp = counterpartyName();
-		if (cp != null && !cp.isEmpty())
-		{
-			if (pendingCounterparty == null || !cp.equalsIgnoreCase(pendingCounterparty))
-			{
-				pendingCounterpartyCombatLevel = null;
-			}
-			pendingCounterparty = cp;
-			Integer observedCombat = visibleCounterpartyCombatLevel(cp);
-			if (observedCombat != null)
-			{
-				pendingCounterpartyCombatLevel = observedCombat;
-			}
-		}
+		pendingCounterparty = null;
+		pendingCounterpartyCombatLevel = null;
 	}
 
 	/** Snapshot the items in our own trade offer (container 90) as [{id, qty}]. */
@@ -6969,23 +6927,6 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
-	/** Trade partner name from the trade window title ("Trading With: Name"), or null. */
-	private String counterpartyName()
-	{
-		Widget w = client.getWidget(TRADE_TITLE_COMPONENT);
-		if (w == null)
-		{
-			return null;
-		}
-		String t = Text.removeTags(w.getText() == null ? "" : w.getText()).trim();
-		int idx = t.toLowerCase(java.util.Locale.ROOT).indexOf("with");
-		if (idx >= 0)
-		{
-			String name = t.substring(idx + 4).replaceFirst("^[:\\s]+", "").trim();
-			return name.isEmpty() ? null : name;
-		}
-		return t.isEmpty() ? null : t;
-	}
 
 	/**
 	 * Staff-only direct-trade enrichment. The trade window proves the RSN; this only adds combat level
@@ -7009,37 +6950,8 @@ public class AccountConnectPlugin extends Plugin
 
 	Integer visibleCounterpartyCombatLevel(String rsn)
 	{
-		String wanted = normalizeRsnForMatch(rsn);
-		if (!maxCapture() || client == null || wanted.isEmpty())
-		{
-			return null;
-		}
-		List<Player> players = client.getPlayers();
-		if (players == null)
-		{
-			return null;
-		}
-		Integer found = null;
-		int matches = 0;
-		for (Player p : players)
-		{
-			if (p == null || p == client.getLocalPlayer() || p.getName() == null)
-			{
-				continue;
-			}
-			String name = normalizeRsnForMatch(p.getName());
-			if (!wanted.equals(name))
-			{
-				continue;
-			}
-			matches++;
-			int level = p.getCombatLevel();
-			if (level > 0)
-			{
-				found = level;
-			}
-		}
-		return matches == 1 ? found : null;
+		// Other-player readers are absent from the public artifact.
+		return null;
 	}
 
 	void handleTradeWidgetLoaded(int groupId)
@@ -7149,25 +7061,6 @@ public class AccountConnectPlugin extends Plugin
 		if (event.getType() == ChatMessageType.GAMEMESSAGE || event.getType() == ChatMessageType.SPAM)
 		{
 			emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
-			return;
-		}
-		// Nearby public chat, firehose grant only. This is the ONE place another player's words are read,
-		// it is off for every ordinary player, and it is batched into fh_batch like every other firehose row.
-		if (maxCapture()
-			&& (event.getType() == ChatMessageType.PUBLICCHAT || event.getType() == ChatMessageType.MODCHAT))
-		{
-			String text = Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim();
-			if (!text.isEmpty())
-			{
-				Map<String, Object> d = new LinkedHashMap<>();
-				d.put("text", text);
-				String name = Text.removeTags(event.getName() == null ? "" : event.getName()).trim();
-				if (!name.isEmpty())
-				{
-					d.put("rsn", name);
-				}
-				firehose("public_chat", d);
-			}
 			return;
 		}
 		if (event.getType() != ChatMessageType.TRADE)
@@ -7312,14 +7205,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onInteractingChanged(InteractingChanged event)
 	{
-		if (!maxCapture() || client == null || event.getSource() != client.getLocalPlayer())
-		{
-			return;
-		}
-		Actor t = event.getTarget();
-		Map<String, Object> d = new LinkedHashMap<>();
-		d.put("target", t == null || t.getName() == null ? null : Text.removeTags(t.getName()));
-		firehose("interact", d);
+		// Other-player readers are absent from the public artifact.
+
 	}
 
 	@Subscribe
@@ -7350,18 +7237,8 @@ public class AccountConnectPlugin extends Plugin
 
 	private void nearbyPlayerEvent(Player p, String kind)
 	{
-		if (!maxCapture() || p == null || (client != null && p == client.getLocalPlayer()))
-		{
-			return;
-		}
-		if (p.getName() == null || p.getName().isEmpty())
-		{
-			return;
-		}
-		Map<String, Object> d = new LinkedHashMap<>();
-		d.put("rsn", Text.removeTags(p.getName()));
-		d.put("event", kind);
-		firehose("nearby", d);
+		// Other-player readers are absent from the public artifact.
+
 	}
 
 	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
@@ -7797,41 +7674,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	List<Map<String, Object>> surroundingPlayersNow()
 	{
-		List<Map<String, Object>> out = new ArrayList<>();
-		if (client == null)
-		{
-			return out;
-		}
-		Player self = client.getLocalPlayer();
-		List<Player> players = client.getPlayers();
-		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
-		{
-			return out;
-		}
-		for (Player p : players)
-		{
-			WorldPoint loc = p == null ? null : p.getWorldLocation();
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || loc == null)
-			{
-				continue;
-			}
-			int dx = loc.getX() - me.getX();
-			int dy = loc.getY() - me.getY();
-			Map<String, Object> m = new LinkedHashMap<>();
-			m.put("rsn", Text.removeTags(p.getName()));
-			m.put("dx", dx);
-			m.put("dy", dy);
-			m.put("dist", Math.max(Math.abs(dx), Math.abs(dy)));
-			m.put("cb", p.getCombatLevel());
-			out.add(m);
-		}
-		out.sort((a, b) ->
-		{
-			int c = Integer.compare((Integer) a.get("dist"), (Integer) b.get("dist"));
-			return c != 0 ? c : ((String) a.get("rsn")).compareTo((String) b.get("rsn"));
-		});
-		return out;
+		// Other-player readers are absent from the public artifact.
+		return java.util.Collections.emptyList();
 	}
 
 	/**
@@ -7938,58 +7782,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	List<Map<String, Object>> nearbyPlayersSnapshot(int cap, boolean activity)
 	{
-		List<Map<String, Object>> out = new ArrayList<>();
-		if (client == null)
-		{
-			return out;
-		}
-		Player self = client.getLocalPlayer();
-		List<Player> players = client.getPlayers();
-		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
-		{
-			return out;
-		}
-		List<Player> others = new ArrayList<>();
-		for (Player p : players)
-		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
-			{
-				continue;
-			}
-			others.add(p);
-		}
-		others.sort((a, b) -> Integer.compare(a.getWorldLocation().distanceTo(me), b.getWorldLocation().distanceTo(me)));
-		for (Player p : others)
-		{
-			if (out.size() >= cap)
-			{
-				break;
-			}
-			WorldPoint loc = p.getWorldLocation();
-			Map<String, Object> m = new LinkedHashMap<>();
-			m.put("rsn", Text.removeTags(p.getName()));
-			m.put("dx", loc.getX() - me.getX());
-			m.put("dy", loc.getY() - me.getY());
-			m.put("dist", loc.distanceTo(me));
-			m.put("cb", p.getCombatLevel());
-			if (activity)
-			{
-				m.put("anim", p.getAnimation());
-				Actor t = p.getInteracting();
-				if (t instanceof net.runelite.api.NPC && t.getName() != null)
-				{
-					String npc = Text.removeTags(t.getName());
-					m.put("interacting_npc", npc);
-					// The SAME NPC, by index. A second trader of the same shop (a shop assistant) reads false here
-					// but still shows its name in interacting_npc; a same-named NPC elsewhere never reads true.
-					m.put("with_shopkeeper", shopkeeperIndex >= 0
-						&& ((net.runelite.api.NPC) t).getIndex() == shopkeeperIndex);
-				}
-			}
-			out.add(m);
-		}
-		return out;
+		// Other-player readers are absent from the public artifact.
+		return java.util.Collections.emptyList();
 	}
 
 	/**
@@ -8546,44 +8340,8 @@ public class AccountConnectPlugin extends Plugin
 	/** Merge the current nearby players into the shop-visit accumulator (called each tick while shop open). */
 	void accumulateShopNearby()
 	{
-		if (client == null)
-		{
-			return;
-		}
-		Player self = client.getLocalPlayer();
-		List<Player> players = client.getPlayers();
-		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
-		{
-			return;
-		}
-		int tick = client.getTickCount();
-		for (Player p : players)
-		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
-			{
-				continue;
-			}
-			int dist = p.getWorldLocation().distanceTo(me);
-			String rsn = Text.removeTags(p.getName());
-			int[] rec = shopVisitNearby.get(rsn);
-			if (rec == null)
-			{
-				if (shopVisitNearby.size() >= MAX_NEARBY_TRACKED)
-				{
-					continue;	// map full — don't grow unbounded on a crowded world
-				}
-				shopVisitNearby.put(rsn, new int[]{dist, tick, tick, p.getCombatLevel()});
-			}
-			else
-			{
-				if (dist < rec[0])
-				{
-					rec[0] = dist;	// closest approach this visit
-				}
-				rec[2] = tick;		// last seen
-			}
-		}
+		// Other-player readers are absent from the public artifact.
+		shopVisitNearby.clear();
 	}
 
 	/** Emit nearby[] from the visit accumulator, nearest-first: {rsn, dist, first_tick, last_tick, cb}. */
@@ -9610,32 +9368,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onProjectileMoved(net.runelite.api.events.ProjectileMoved event)
 	{
-		if (client == null || event == null || event.getProjectile() == null
-			|| event.getProjectile().getId() != DropCandidates.TELEGRAB_PROJECTILE)
-		{
-			return;
-		}
-		net.runelite.api.Projectile pr = event.getProjectile();
-		if (!telegrabProjectilesSeen.add(pr))
-		{
-			return;
-		}
-		WorldPoint target = pr.getTargetPoint();
-		if (target == null && event.getPosition() != null)
-		{
-			target = WorldPoint.fromLocal(client, event.getPosition());
-		}
-		if (target == null)
-		{
-			return;
-		}
-		Actor src = pr.getSourceActor();
-		boolean self = src != null && src == client.getLocalPlayer();
-		String caster = src == null || src.getName() == null ? null : Text.removeTags(src.getName());
-		WorldPoint from = src != null && src.getWorldLocation() != null ? src.getWorldLocation() : pr.getSourcePoint();
-		recordTelegrabSighting(new DropCandidates.TelegrabSighting(target.getX(), target.getY(), target.getPlane(),
-			client.getTickCount(), "projectile", self ? null : caster, self,
-			from == null ? target.getX() : from.getX(), from == null ? target.getY() : from.getY()));
+		// Other-player readers are absent from the public artifact.
+
 	}
 
 	/** A Telekinetic Grab impact graphic. It carries no caster, only the tile. */

@@ -193,4 +193,20 @@ public class PublicTransportTest
         assertEquals(expected,sent.get("items").toString());assertEquals(hash,sent.get("manifest_sha256").getAsString());
     }
 
+    @Test public void publicCollectorsNeverReadOtherPlayerIdentitiesEvenWithGrants() throws Exception
+    {
+        net.runelite.api.Client client=mock(net.runelite.api.Client.class); put("client",client);
+        plugin.applyServerPolicy(grant());
+        assertTrue(plugin.observedPlayers().isEmpty());
+        assertTrue(plugin.nearbyPlayersSnapshot(64,true).isEmpty());
+        assertTrue(plugin.surroundingPlayersNow().isEmpty());
+        plugin.accumulateShopNearby();
+        assertNull(plugin.visibleCounterpartyCombatLevel("OTHER_CANARY"));
+        plugin.captureOtherOfferWhileMainOpen();
+        verify(client,never()).getPlayers();
+        verify(client,never()).getWidget((335 << 16) | 31); // legacy partner title
+        net.runelite.api.events.ProjectileMoved projectile=mock(net.runelite.api.events.ProjectileMoved.class);
+        plugin.onProjectileMoved(projectile); verifyNoInteractions(projectile);
+    }
+
 }
