@@ -637,6 +637,9 @@ public class AccountConnectPlugin extends Plugin
 	private static final int MAX_PENDING_EVENTS = 500;
 	/** Internal-only queue binding. Removed before POST; never sent to the server. */
 	private static final String EVENT_TOKEN_FP = "__delivery_token_fp";
+	private static final String EVENT_QUEUE = "__delivery_queue_v1";
+	private volatile String eventQueueGrantToken;
+	private volatile String eventQueueScope;
 	/** Server ingest limits: at most 100 events and under 256 KiB of UTF-8 per request. */
 	static final int EVENT_BATCH_MAX_EVENTS = 100;
 	static final long EVENT_BATCH_MAX_BYTES = 256L * 1024L;
@@ -1773,6 +1776,8 @@ public class AccountConnectPlugin extends Plugin
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
 			spoolOnTokenChangedWithoutAccount();
+			eventQueueGrantToken = null;
+			eventQueueScope = null;
 			progressGrantToken = null;
 			progressGrantEpoch++;
 			gameplayGrantToken = null;
@@ -4149,6 +4154,13 @@ public class AccountConnectPlugin extends Plugin
 				Object bound = ev.get(EVENT_TOKEN_FP);
 				if (bound == null || tokenFingerprint.equals(bound))
 				{
+					// Pin the first selected writer across retries, including a later grant withdrawal.
+					// Staff durable rows retain their existing receipt/replay contract.
+					if (!ev.containsKey(EVENT_QUEUE)) ev.put(EVENT_QUEUE,
+						token.equals(eventQueueGrantToken) && !token.equals(spoolGrantToken)
+						&& !spoolMemoryOwned.containsKey(String.valueOf(eid))
+						&& EventQueueProtocol.allows(eventQueueScope, ev));
+					if (!batch.isEmpty() && !java.util.Objects.equals(batch.get(0).get(EVENT_QUEUE), ev.get(EVENT_QUEUE))) break;
 					batch.add(ev);
 				}
 				else
@@ -4187,7 +4199,8 @@ public class AccountConnectPlugin extends Plugin
 				Map<String, Object> wire = PublicTransport.event(queued);
 				encoded.add(gson.toJson(wire));
 			}
-			int kept = fitEventBatch(gson.toJson(token), encoded);
+			boolean queue = Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE));
+			int kept = fitEventBatch(gson.toJson(token), encoded, queue);
 			if (kept < batch.size())
 			{
 				List<Map<String, Object>> overflow = new ArrayList<>(batch.subList(kept, batch.size()));
@@ -4197,7 +4210,7 @@ public class AccountConnectPlugin extends Plugin
 					pendingEvents.addAll(0, overflow);
 				}
 			}
-			String body = eventBatchBody(gson.toJson(token), encoded.subList(0, kept));
+			String body = eventBatchBody(gson.toJson(token), encoded.subList(0, kept), queue);
 			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 			Request request = new Request.Builder()
 				.url(base + "/event-ingest")
@@ -4231,6 +4244,35 @@ public class AccountConnectPlugin extends Plugin
 			{
 				try
 				{
+					if (Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE))
+						&& (response.isSuccessful() || response.code() == 429 || response.code() >= 500))
+					{
+						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.receipts(readBody(response), batch);
+						List<Map<String, Object>> retry = new ArrayList<>();
+						for (int i = 0; i < batch.size(); i++)
+						{
+							if (receipts.get(i) == EventQueueProtocol.Outcome.RETRY) retry.add(batch.get(i));
+							else if (receipts.get(i) == EventQueueProtocol.Outcome.DURABLE) healthEventsSent.incrementAndGet();
+							else healthEventsLost.incrementAndGet();
+						}
+						if (retry.size() < batch.size()) healthLastEventUploadMs.set(System.currentTimeMillis());
+						if (!retry.isEmpty())
+						{
+							long delay = 0;
+							try { delay = Math.multiplyExact(Long.parseLong(response.header("Retry-After", "0")), 1000L); }
+							catch (NumberFormatException | ArithmeticException ignored) { }
+							requeueEvents(retry, delay);
+						}
+						else
+						{
+							eventPostInFlight = false;
+							completeFinalFlush();
+							eventRetryBackoffMs = 0;
+							eventRetryBackoffUntilMs = 0L;
+							if (!pendingEvents.isEmpty()) scheduleCoalescedFlush();
+						}
+						return;
+					}
 					if (response.isSuccessful())
 					{
 						// Durable rows are settled ONLY by their own event_id in `results`. The memory
@@ -5420,7 +5462,12 @@ public class AccountConnectPlugin extends Plugin
 	/** How many of these encoded events fit in one request: at most 100 and under 256 KiB, at least one. */
 	static int fitEventBatch(String tokenJson, List<String> encoded)
 	{
-		long bytes = ("{\"token\":" + tokenJson + ",\"events\":[]}").getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+		return fitEventBatch(tokenJson, encoded, false);
+	}
+
+	static int fitEventBatch(String tokenJson, List<String> encoded, boolean queue)
+	{
+		long bytes = eventBatchBody(tokenJson, java.util.Collections.emptyList(), queue).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
 		int n = 0;
 		for (String e : encoded)
 		{
@@ -5442,7 +5489,14 @@ public class AccountConnectPlugin extends Plugin
 	/** The request body, byte-identical to gson's encoding of {token, events}. */
 	static String eventBatchBody(String tokenJson, List<String> encoded)
 	{
-		StringBuilder sb = new StringBuilder("{\"token\":").append(tokenJson).append(",\"events\":[");
+		return eventBatchBody(tokenJson, encoded, false);
+	}
+
+	static String eventBatchBody(String tokenJson, List<String> encoded, boolean queue)
+	{
+		StringBuilder sb = new StringBuilder("{\"token\":").append(tokenJson);
+		if (queue) sb.append(",\"ack_protocol\":\"queue-v1\",\"schema_version\":1");
+		sb.append(",\"events\":[");
 		for (int i = 0; i < encoded.size(); i++)
 		{
 			if (i > 0)
@@ -5497,6 +5551,8 @@ public class AccountConnectPlugin extends Plugin
 		synchronized (spoolStateLock)
 		{
 			spoolGrantToken = null;
+			eventQueueGrantToken = null;
+			eventQueueScope = null;
 			setSpoolIdentityLocked(null);
 		}
 		if (spoolExec == null)
@@ -11518,6 +11574,14 @@ public class AccountConnectPlugin extends Plugin
 	void applyServerPolicy(Response response, String sentToken)
 	{
 		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
+		String queueScope = response.header("X-Event-Queue");
+		if (response.isSuccessful() && ("ge-v1".equals(queueScope) || "own-history-v1".equals(queueScope)))
+		{
+			eventQueueScope = queueScope;
+			eventQueueGrantToken = sentToken;
+		}
+		else { eventQueueGrantToken = null; eventQueueScope = null; }
+
 		// No existing broad/progress grant widens the capture scope. Missing/failed response revokes.
 		String gameplay = response.header("X-Own-Gameplay");
 		String gameplayGrant = response.isSuccessful() && "on".equalsIgnoreCase(gameplay == null ? "" : gameplay.trim()) ? sentToken : null;
