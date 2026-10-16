@@ -39,7 +39,7 @@ final class OwnActivityCapture
         potions.put("units", "unverified_not_doses_or_bottles");
         out.state("storage.potion_store", "RuneLite1.13.1:113_named_varps;varbit:11295", potions,c.getTickCount(),at);
 
-        // Fixed own progress state avoids the competitor's arbitrary widget-tree text scan.
+        // Read fixed own progress fields; task identity and reward decoding remain unverified.
         Map<String,Object> port = new LinkedHashMap<>();
         int[] taskVars = {VarPlayerID.PORT_TASKS_0,VarPlayerID.PORT_TASKS_1,VarPlayerID.PORT_TASKS_2,
             VarPlayerID.PORT_TASKS_3,VarPlayerID.PORT_TASKS_4,VarPlayerID.PORT_TASKS_GENERAL};
