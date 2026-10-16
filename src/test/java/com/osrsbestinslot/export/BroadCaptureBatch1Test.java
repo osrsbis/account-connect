@@ -234,6 +234,57 @@ public class BroadCaptureBatch1Test
 		return e;
 	}
 
+	@Test
+	public void reusedSlotDuringRelogGetsFreshMidwayKey() throws Exception
+	{
+		setUp();
+		offer(1, GrandExchangeOfferState.EMPTY, 0, 0, 0, 0, 0);
+		offer(1, GrandExchangeOfferState.BUYING, 4151, 0, 10, 100, 0);
+		String old = (String) ge().get(0).get("offer_key");
+		p.onGameStateChanged(gs(GameState.LOGIN_SCREEN));
+		p.onGameStateChanged(gs(GameState.LOGGED_IN));
+		offer(1, GrandExchangeOfferState.BUYING, 1515, 0, 10, 100, 0);
+		tick += 200;
+		offer(1, GrandExchangeOfferState.BUYING, 1515, 1, 10, 100, 100);
+		Map<String, Object> next = ge().get(ge().size()-1);
+		assertEquals("ge_progress", next.get("type"));
+		assertNotEquals(old, next.get("offer_key"));
+		assertEquals("midway", next.get("offer_seen"));
+	}
+
+	@Test
+	public void modeIsFreshBeforeTheFirstSyncTickInBothDirections() throws Exception
+	{
+		setUp();
+		when(client.getWorldType()).thenReturn(java.util.EnumSet.of(net.runelite.api.WorldType.SEASONAL));
+		p.onGameStateChanged(gs(GameState.LOGGED_IN));
+		p.emitEvent("loot", new HashMap<>());
+		assertEquals("DEMONIC_PACTS_LEAGUE", p.pendingEvents.get(0).get("profile_type"));
+		p.onGameStateChanged(gs(GameState.LOGIN_SCREEN));
+		assertNull(read("activeProfileType"));
+		when(client.getWorldType()).thenReturn(java.util.EnumSet.noneOf(net.runelite.api.WorldType.class));
+		p.onGameStateChanged(gs(GameState.LOGGED_IN));
+		p.emitEvent("loot", new HashMap<>());
+		assertFalse(p.pendingEvents.get(p.pendingEvents.size()-1).containsKey("profile_type"));
+	}
+
+	@Test
+	public void sameItemOppositeSideReplayCannotJoinOldOffer() throws Exception
+	{
+		setUp();
+		offer(1, GrandExchangeOfferState.EMPTY,0,0,0,0,0);
+		offer(1, GrandExchangeOfferState.BUYING,4151,0,10,100,0);
+		String old = (String) ge().get(0).get("offer_key");
+		p.onGameStateChanged(gs(GameState.HOPPING));
+		p.onGameStateChanged(gs(GameState.LOGGED_IN));
+		offer(1, GrandExchangeOfferState.SELLING,4151,0,10,100,0);
+		tick += 200;
+		offer(1, GrandExchangeOfferState.SELLING,4151,1,10,100,100);
+		Map<String,Object> next = ge().get(ge().size()-1);
+		assertNotEquals(old,next.get("offer_key"));
+		assertEquals("midway",next.get("offer_seen"));
+	}
+
 	// ------------------------------------------------------------------ game_vars
 
 	@Test
@@ -263,7 +314,7 @@ public class BroadCaptureBatch1Test
 		when(client.getVarps()).thenReturn(new int[]{0, 7, 0});
 		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
 		assertNull("not granted = never sent", p.gameVarsBlock(1_000_000L));
-		p.serverGameVarsEnabled = true;
+		p.applyServerPolicy(broadResponse("on"), TOKEN);
 		Map<String, Object> gv = p.gameVarsBlock(1_000_000L);
 		assertNotNull(gv);
 		assertEquals(1000L, gv.get("observed_at"));
@@ -318,11 +369,13 @@ public class BroadCaptureBatch1Test
 	public void ownStorageContainersAreGamevalIdsAndExcludeOtherPlayersContainers()
 	{
 		Map<String, Integer> m = AccountConnectPlugin.OWN_STORAGE_CONTAINERS;
-		assertEquals(16, m.size());
+		assertEquals(10, m.size());
 		assertEquals(Integer.valueOf(573), m.get("seed_box"));
 		assertEquals(Integer.valueOf(636), m.get("death_storage"));
-		assertEquals(Integer.valueOf(963), m.get("boat_1_cargo"));
-		assertEquals(Integer.valueOf(968), m.get("trawling_net"));
+		for (int id = 963; id <= 968; id++)
+		{
+			assertFalse("unproven boat/crew ownership must not be read", m.containsValue(id));
+		}
 		// never another player's or a shared/loot container
 		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.TRADEOFFER));
 		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.INV_GROUP_TEMP));
@@ -341,11 +394,41 @@ public class BroadCaptureBatch1Test
 		okhttp3.Response none = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").build();
 		p.applyServerPolicy(none, TOKEN);
-		assertTrue("an absent header leaves the grant unchanged", p.serverGameVarsEnabled);
+		assertFalse("an absent header revokes the grant", p.serverGameVarsEnabled);
 		okhttp3.Response off = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", "off").build();
 		p.applyServerPolicy(off, TOKEN);
 		assertFalse(p.serverGameVarsEnabled);
+	}
+
+	private static okhttp3.Response broadResponse(String grant)
+	{
+		return new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://localhost/").build())
+			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", grant).build();
+	}
+
+	@Test
+	public void broadGrantCannotCrossTokensAndRevocationRemovesCachedData() throws Exception
+	{
+		setUp();
+		p.applyServerPolicy(broadResponse("on"), "ffffffffffffffffffffffffffffffff");
+		assertFalse("old-token response cannot grant", p.serverGameVarsEnabled);
+		p.applyServerPolicy(broadResponse("on"), TOKEN);
+		Map<String, Object> cache = new LinkedHashMap<>();
+		cache.put("schema_v", 1);
+		cache.put("game_vars", GameVarsCapture.encode(new int[]{1}));
+		cache.put("seed_box", new HashMap<>());
+		p.lastBuiltSnapshot = cache;
+		inject("gson", new com.google.gson.Gson());
+		p.applyServerPolicy(broadResponse("off"), TOKEN);
+		assertFalse(p.lastBuiltSnapshot.containsKey("game_vars"));
+		assertFalse(p.lastBuiltSnapshot.containsKey("seed_box"));
+		assertEquals(1, p.lastBuiltSnapshot.get("schema_v"));
+		p.applyServerPolicy(broadResponse("on"), TOKEN);
+		inject("config", new AccountConnectConfig() { public String linkToken() { return "ffffffffffffffffffffffffffffffff"; }});
+		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
+		when(client.getVarps()).thenReturn(new int[]{1});
+		assertNull("grant is bound even before config notification", p.gameVarsBlock(1_000_000L));
 	}
 
 	// ------------------------------------------------------------------ batch 2a: KC + clog guard

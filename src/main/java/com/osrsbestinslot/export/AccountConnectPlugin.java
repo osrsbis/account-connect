@@ -198,12 +198,7 @@ public class AccountConnectPlugin extends Plugin
 		m.put("poh_costume_room", net.runelite.api.gameval.InventoryID.POH_COSTUMES);		// 637
 		m.put("poh_menagerie", net.runelite.api.gameval.InventoryID.POH_MENAGERIE_PETS);	// 517
 		m.put("potion_storage_device", net.runelite.api.gameval.InventoryID.PREPOT_DEVICE_INV);	// 911
-		m.put("boat_1_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_1_CARGOHOLD);	// 963
-		m.put("boat_2_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_2_CARGOHOLD);	// 964
-		m.put("boat_3_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_3_CARGOHOLD);	// 965
-		m.put("boat_4_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_4_CARGOHOLD);	// 966
-		m.put("boat_5_cargo", net.runelite.api.gameval.InventoryID.SAILING_BOAT_5_CARGOHOLD);	// 967
-		m.put("trawling_net", net.runelite.api.gameval.InventoryID.SAILING_TRAWLING_NET);	// 968
+		// Boat cargo/net can be crew-visible. Do not read them until own-boat provenance is verified.
 		OWN_STORAGE_CONTAINERS = java.util.Collections.unmodifiableMap(m);
 	}
 
@@ -375,6 +370,7 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		clientClosing = false;
 		removeOrphanedKeys();
 		// Started while already in the world: the GE slots were replayed before we were listening, so the
 		// next LOGGED_IN (a region load) is not a login and must not open a replay window.
@@ -419,6 +415,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void seedGeBaseline()
 	{
+		refreshProfileType();
 		GrandExchangeOffer[] offers = client == null || client.getGameState() != GameState.LOGGED_IN
 			? null : client.getGrandExchangeOffers();
 		if (offers == null)
@@ -544,6 +541,7 @@ public class AccountConnectPlugin extends Plugin
 	 * a NEW data class, so the server must not grant it before the disclosure for it is published.
 	 */
 	volatile boolean serverGameVarsEnabled;
+	private volatile String broadCaptureToken;
 	/**
 	 * FRESHNESS. When the client last saw each item container change (ItemContainerChanged), in ms. A container
 	 * the game loaded but never changed this session has no entry, and its block then says observed_at null,
@@ -552,8 +550,9 @@ public class AccountConnectPlugin extends Plugin
 	final Map<Integer, Long> containerObservedAtMs = new java.util.concurrent.ConcurrentHashMap<>();
 	/** Minimum seconds between two snapshots that carry game_vars (the block is excluded from the change hash). */
 	static final long GAME_VARS_MIN_INTERVAL_MS = 15L * 60L * 1000L;
-	private long lastGameVarsSentMs;
-	private String lastGameVarsSha;
+	private volatile long lastGameVarsSentMs;
+	private volatile boolean clientClosing;
+	private volatile boolean snapshotRetryPending;
 
 	/**
 	 * LOCAL TEST OVERRIDE for the store-tools gate.
@@ -1737,11 +1736,17 @@ public class AccountConnectPlugin extends Plugin
 	public void onConfigChanged(ConfigChanged event)
 	{
 		enforceDropSessionTokenIdentity();
+		if (broadCaptureToken != null && !broadCaptureToken.equals(currentLinkToken()))
+		{
+			setBroadCaptureGrant(null, false);
+		}
 		syncSpoolState();	// a cleared or changed token purges the old identity's durable spool
 		if (event != null && CONFIG_GROUP.equals(event.getGroup()) && "linkToken".equals(event.getKey())
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
 			spoolOnTokenChangedWithoutAccount();
+			setBroadCaptureGrant(null, false);
+			snapshotRetryPending = false;
 			// A visit belongs to the token that was granted at its open: never finish it under another one.
 			bankEvidenceToken = null;
 			dropBankVisit();
@@ -3885,6 +3890,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean trackSessionStart()
 	{
+		if (clientClosing) return false;
 		String rsn = client.getLocalPlayer().getName();
 		String hash = Long.toString(client.getAccountHash());
 		if (!sessionActive || !hash.equals(activeHash))
@@ -3951,6 +3957,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onClientShutdown(ClientShutdown event)
 	{
+		clientClosing = true;
 		if (client != null && client.getGameState() == GameState.LOGGED_IN)
 		{
 			trackLogout("client_close");
@@ -5598,7 +5605,7 @@ public class AccountConnectPlugin extends Plugin
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
 	public void syncTask()
 	{
-		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
+		if (clientClosing || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
 		}
@@ -5616,7 +5623,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			resolveDeathPendingViaLiveContainers();
 		}
-		activeProfileType = net.runelite.client.config.RuneScapeProfileType.getCurrent(client).name();
+		refreshProfileType();
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
 		Map<String, Object> snapshot = buildSnapshot();
@@ -5641,11 +5648,11 @@ public class AccountConnectPlugin extends Plugin
 			postSnapshot(token, snapshot, hash);
 			return;
 		}
-		if (hash.equals(lastUploadedHash) && snapshot.containsKey("game_vars"))
+		if (hash.equals(lastUploadedHash) && (snapshot.containsKey("game_vars") || snapshotRetryPending))
 		{
-			// game_vars is outside the change hash, so an idle player would never send it. gameVarsBlock
-			// returns it at most once per GAME_VARS_MIN_INTERVAL_MS after an accepted send, so this costs at
-			// most 4 extra requests an hour, and only for a granted client.
+			// game_vars is outside the change hash. Failures remain pending but obey the same
+			// debounce and error backoff as changed state; they cannot create a five-second loop.
+			if (now - lastSendMillis < minUploadIntervalMillis) return;
 			lastSendMillis = now;
 			postSnapshot(token, snapshot, hash);
 			return;
@@ -5698,7 +5705,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void forceSendSnapshot()
 	{
-		if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
+		if (clientClosing || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
 		}
@@ -5833,6 +5840,12 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	private void refreshProfileType()
+	{
+		activeProfileType = client == null || client.getWorldType() == null ? "UNKNOWN"
+			: net.runelite.client.config.RuneScapeProfileType.getCurrent(client).name();
+	}
+
 	/** Clog + trade state are per-account — clear them on hop / relog so we never mix two accounts. */
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
@@ -5957,6 +5970,7 @@ public class AccountConnectPlugin extends Plugin
 				flushPendingSnapshot();
 				break;
 			case LOGGED_IN:
+				refreshProfileType(); // before replay/loot events, not five seconds later at syncTask
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
 				groundObservationUnreliable = false;
@@ -5977,6 +5991,12 @@ public class AccountConnectPlugin extends Plugin
 				break;
 			default:
 				break;
+		}
+		if (state == GameState.HOPPING || state == GameState.LOGGING_IN
+			|| state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST)
+		{
+			// Flush old-session rows above with their old mode, then discard it for the next login.
+			activeProfileType = null;
 		}
 	}
 
@@ -10640,9 +10660,18 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (loginReplay)
 		{
+			boolean sameOffer = prevOffer != null && prevOffer[0] == nowOffer[0]
+				&& prevOffer[2] == nowOffer[2] && prevOffer[3] == nowOffer[3]
+				&& nowOffer[1] >= prevOffer[1] && geSide(prev).equals(geSide(state));
+			if (state == GrandExchangeOfferState.EMPTY || !sameOffer)
+			{
+				geOfferKey.remove(slot);
+				geOfferSeen.remove(slot);
+				lastGeProgressTick.remove(slot);
+			}
 			// Baseline only, with one exception: an offer we saw active before the hop/relog that finished
 			// while we were away (same item, now BOUGHT/SOLD/CANCELLED) is a real completion and still reported.
-			boolean finishedWhileAway = prevOffer != null && prevOffer[0] == nowOffer[0]
+			boolean finishedWhileAway = sameOffer
 				&& (prev == GrandExchangeOfferState.BUYING || prev == GrandExchangeOfferState.SELLING)
 				&& state != GrandExchangeOfferState.BUYING && state != GrandExchangeOfferState.SELLING
 				&& state != GrandExchangeOfferState.EMPTY;
@@ -11128,15 +11157,45 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	private boolean broadCaptureEnabled()
+	{
+		return serverGameVarsEnabled && broadCaptureToken != null
+			&& broadCaptureToken.equals(currentLinkToken());
+	}
+
+	private static void stripBroadCapture(Map<String, Object> snapshot)
+	{
+		snapshot.remove("game_vars");
+		for (String key : OWN_STORAGE_CONTAINERS.keySet()) snapshot.remove(key);
+	}
+
+	private void setBroadCaptureGrant(String token, boolean enabled)
+	{
+		broadCaptureToken = enabled ? token : null;
+		serverGameVarsEnabled = enabled;
+		if (!enabled)
+		{
+			lastGameVarsSentMs = 0;
+			Map<String, Object> cached = lastBuiltSnapshot;
+			if (cached != null)
+			{
+				Map<String, Object> clean = new LinkedHashMap<>(cached);
+				stripBroadCapture(clean);
+				lastBuiltSnapshot = clean;
+				lastBuiltHash = canonicalHash(clean);
+			}
+		}
+	}
+
 	/**
 	 * The game_vars block for this snapshot, or null. Null when not granted, before the player's skills have
 	 * loaded (a login snapshot can read all zeros: 6 of 3,003 production snapshots on 2026-10-15 had every skill
-	 * at level 0), or inside GAME_VARS_MIN_INTERVAL_MS of the last send of an UNCHANGED array. A changed array
-	 * is sent on the next snapshot after the interval; an unchanged one at most every interval.
+	 * at level 0), or inside GAME_VARS_MIN_INTERVAL_MS of the last accepted block. The cadence applies
+	 * to changed and unchanged arrays alike; failed requests obey snapshot retry backoff.
 	 */
 	Map<String, Object> gameVarsBlock(long nowMs)
 	{
-		if (!serverGameVarsEnabled || client == null || client.getRealSkillLevel(Skill.HITPOINTS) <= 0)
+		if (!broadCaptureEnabled() || client == null || client.getRealSkillLevel(Skill.HITPOINTS) <= 0)
 		{
 			return null;
 		}
@@ -11385,7 +11444,7 @@ public class AccountConnectPlugin extends Plugin
 		// game has sent that container this session, and carries observed_at. Group, trade, duel, Deadman loot
 		// and reward-chest containers are deliberately absent: they hold other players' items or are loot,
 		// which the loot events already cover.
-		if (serverGameVarsEnabled)
+		if (broadCaptureEnabled())
 		{
 			for (Map.Entry<String, Integer> c : OWN_STORAGE_CONTAINERS.entrySet())
 			{
@@ -11569,13 +11628,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void postSnapshot(String token, Map<String, Object> snapshot, String hash)
 	{
-		if (!uploadAllowed())
+		if (!uploadAllowed() || !token.equals(currentLinkToken()))
 		{
 			return;		// upload switch off — send nothing
 		}
+		final Map<String, Object> sentSnapshot = new LinkedHashMap<>(snapshot);
+		if (!broadCaptureEnabled()) stripBroadCapture(sentSnapshot);
+		final String sentHash = canonicalHash(sentSnapshot);
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
-		body.put("snapshot", snapshot);
+		body.put("snapshot", sentSnapshot);
 
 		String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 		Request request = new Request.Builder()
@@ -11588,6 +11650,11 @@ public class AccountConnectPlugin extends Plugin
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
+				if (token.equals(currentLinkToken()))
+				{
+					snapshotRetryPending = true;
+					applyRateLimitBackoff(null);
+				}
 				log.debug("OSRS BiS sync failed", e);
 			}
 
@@ -11596,6 +11663,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				try
 				{
+					if (!token.equals(currentLinkToken())) return; // stale identity cannot grant or ACK this cache
 					int code = response.code();
 					applyServerPolicy(response, token);	// server dictates cadence / screenshot-disable per token
 					if (code == 403)
@@ -11604,20 +11672,19 @@ public class AccountConnectPlugin extends Plugin
 					}
 					if (response.isSuccessful())
 					{
-						onUploadAccepted(hash);
-						Object gv = snapshot.get("game_vars");
+						onUploadAccepted(sentHash);
+						Object gv = sentSnapshot.get("game_vars");
 						if (gv instanceof Map)
 						{
 							lastGameVarsSentMs = System.currentTimeMillis();
-							lastGameVarsSha = String.valueOf(((Map<?, ?>) gv).get("sha"));
 						}
 					}
-					else if (code == 429)
+					else
 					{
+						snapshotRetryPending = true;
 						applyRateLimitBackoff(response.header("Retry-After"));
 					}
-					// Other non-2xx (transient 5xx, auth): no bookkeeping — the unchanged hash gate
-					// leaves the snapshot pending and a later tick retries it, no backoff imposed.
+					// All failed snapshot requests remain pending behind bounded retry backoff.
 					log.debug("OSRS BiS sync response: {}", code);
 				}
 				finally
@@ -11631,6 +11698,7 @@ public class AccountConnectPlugin extends Plugin
 	/** A 2xx accept: this canonical hash is now the server's known state, and any 429 backoff clears. */
 	private void onUploadAccepted(String hash)
 	{
+		snapshotRetryPending = false;
 		lastUploadedHash = hash;
 		healthLastSnapshotUploadMs.set(System.currentTimeMillis());
 		backoffUntilMillis = 0L;
@@ -11672,6 +11740,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void applyServerPolicy(Response response, String sentToken)
 	{
+		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
 		String eventSpool = response.header("X-Event-Spool");
 		if (eventSpool != null && sentToken != null && sentToken.equals(currentLinkToken()))
 		{
@@ -11728,11 +11797,9 @@ public class AccountConnectPlugin extends Plugin
 		}
 
 		String gameVars = response.header("X-Broad-Capture");
-		if (gameVars != null)
-		{
-			String v = gameVars.trim().toLowerCase(java.util.Locale.ROOT);
-			serverGameVarsEnabled = "on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v);
-		}
+		String broad = gameVars == null ? "" : gameVars.trim().toLowerCase(java.util.Locale.ROOT);
+		setBroadCaptureGrant(sentToken, response.isSuccessful()
+			&& ("on".equals(broad) || "enabled".equals(broad) || "true".equals(broad) || "1".equals(broad)));
 
 		String clips = response.header("X-Clips");
 		if (clips != null)
