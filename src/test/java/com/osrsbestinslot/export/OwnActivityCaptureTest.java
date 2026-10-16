@@ -34,6 +34,34 @@ public class OwnActivityCaptureTest
     {
         ChatMessage e=new ChatMessage(); e.setType(type); e.setMessage(text); capture.activities.chat(client,e,1000);
     }
+    @Test public void potionStorageUsesNamedVarpsAndDistinguishesMissingFromZero()
+    {
+        assertEquals(113,Arrays.stream(OwnPotionStorageCapture.VARPS).distinct().count());
+        assertFalse(Arrays.stream(OwnPotionStorageCapture.VARPS).anyMatch(id->id>=4272&&id<=4285));
+        vars[4327]=1234567;vars[4937]=Integer.MAX_VALUE;
+        capture.poll(client,1000);Map<?,?> raw=(Map<?,?>)value("storage.potion_store").get("storage_values_raw");
+        assertEquals(1234567,raw.get("4327"));assertEquals(Integer.MAX_VALUE,raw.get("4937"));assertEquals(0,raw.get("4286"));
+        assertEquals("unverified_not_doses_or_bottles",value("storage.potion_store").get("units"));
+        assertNull(value("storage.potion_store").get("unlocked_raw"));
+        when(client.getVarps()).thenReturn(new int[4300]);tick++;capture.poll(client,1001);
+        raw=(Map<?,?>)value("storage.potion_store").get("storage_values_raw");assertNull(raw.get("4327"));assertEquals(0,raw.get("4286"));
+        when(client.getVarps()).thenReturn(null);tick++;capture.poll(client,1002);
+        assertTrue(((Map<?,?>)value("storage.potion_store").get("storage_values_raw")).values().stream().allMatch(Objects::isNull));
+        verify(client,never()).getVarbit(4327);verify(client,never()).getPlayers();
+        verify(client,never()).runScript(anyInt(),any());
+    }
+    @Test public void potionStorageIdleDeduplicatesChangesAreAbsoluteAndProfileResetClearsValues()
+    {
+        vars[4327]=50;capture.poll(client,1000);
+        long before=rows().stream().filter(r->"storage.potion_store".equals(r.get("kind"))).count();
+        tick++;capture.poll(client,1001);assertEquals(before,rows().stream().filter(r->"storage.potion_store".equals(r.get("kind"))).count());
+        vars[4327]=0;tick++;capture.poll(client,1002);
+        List<Map<String,Object>> potions=new ArrayList<>();for(Map<String,Object> r:rows())if("storage.potion_store".equals(r.get("kind")))potions.add(r);
+        assertEquals(2,potions.size());Map<?,?> last=(Map<?,?>)potions.get(1).get("value");assertEquals("absolute_update",last.get("observation"));
+        assertEquals(0,((Map<?,?>)last.get("storage_values_raw")).get("4327"));
+        when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,"grant"));
+        assertTrue(((Map<?,?>)capture.snapshot().get("states")).isEmpty());assertTrue(rows().isEmpty());
+    }
     @Test public void countersKeepMissingZeroAndCoarseTimerDistinct()
     {
         bit(5099,100); bit(455,101); vars[100]=20; vars[101]=7;

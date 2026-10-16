@@ -31,6 +31,12 @@ final class OwnActivityCapture
 
     void poll(Client c, int[] vars, long at)
     {
+        Map<String,Object> potions = new LinkedHashMap<>();
+        potions.put("storage_values_raw", OwnPotionStorageCapture.raw(vars));
+        potions.put("unlocked_raw", AccountProgressCapture.bit(c,vars,11295));
+        potions.put("units", "unverified_not_doses_or_bottles");
+        out.state("storage.potion_store", "RuneLite1.13.1:113_named_varps;varbit:11295", potions,c.getTickCount(),at);
+
         bits(c,vars,"minigame.tears",new String[]{"countdown_raw","tears_raw","collecting_raw"},new int[]{5099,455,453},at);
         // Only the local player's contribution, never team bottles or other players' scoreboards.
         bits(c,vars,"minigame.brewing",new String[]{"own_contribution_raw"},new int[]{2290},at);
