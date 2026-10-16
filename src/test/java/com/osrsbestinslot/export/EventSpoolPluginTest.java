@@ -380,10 +380,10 @@ public class EventSpoolPluginTest
 		{
 			p.emitEvent(t, fields("marker", "MEMONLY_" + t));
 		}
-		p.emitEvent("trade", fields("marker", "SPOOLED_trade"));
+		p.emitEvent("trade", fields("given", Arrays.asList(fields("id", 995))));
 		p.awaitSpoolIdleForTest();
 		String disk = allDiskText();
-		assertTrue(disk.contains("SPOOLED_trade"));
+		assertTrue(disk.contains(pendingIds(p).get(0)));
 		assertFalse("memory-only types never touch disk", disk.contains("MEMONLY_"));
 		assertEquals(1, pendingIds(p).size());
 	}
@@ -636,21 +636,23 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		for (int i = 0; i < 150; i++)
 		{
-			p.emitEvent("chat", fields("n", i));
+			p.emitEvent("ge_offer", fields("slot", i % 8));
 		}
 		flushAndWait(p, 1);
 		assertEquals(100, idsIn(bodies.get(0)).size());
 		flushAndWait(p, 2);
 		assertEquals(50, idsIn(bodies.get(1)).size());
 
-		StringBuilder big = new StringBuilder();
-		for (int i = 0; i < 100_000; i++)
+		List<Map<String,Object>> big = new ArrayList<>();
+		for (int i = 0; i < 4_000; i++)
 		{
-			big.append('x');
+			Map<String,Object> item = fields("id", 10000 + i);
+			item.put("qty", 100000);
+			big.add(item);
 		}
 		for (int i = 0; i < 3; i++)
 		{
-			p.emitEvent("chat", fields("blob", big.toString()));
+			p.emitEvent("bank_visit_manifest_chunk", fields("items", big));
 		}
 		flushAndWait(p, 3);
 		assertEquals(2, idsIn(bodies.get(2)).size());

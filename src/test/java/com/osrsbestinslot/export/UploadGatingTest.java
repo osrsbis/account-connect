@@ -334,13 +334,13 @@ public class UploadGatingTest
 	// ================================================================
 
 	@Test
-	public void anIdleGrantedClientStillPollsSoARevocationCanReachIt() throws Exception
+	public void publicClientCannotArmMediaPolicyHeartbeat() throws Exception
 	{
 		buildPlugin();
 		plugin.minUploadIntervalMillis = 1;
 		plugin.setStoreToolsForTest(true);
 		plugin.setDropProofRolloutForTest(true);
-		assertTrue("the rig holds the grant", plugin.dropProofEnabled());
+		assertFalse("the public artifact cannot arm media", plugin.dropProofEnabled());
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
@@ -360,9 +360,9 @@ public class UploadGatingTest
 
 		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Drop-Proof", "off"));
 		plugin.syncTask();
-		assertNotNull("FINDING C: a granted idle client must poll once the window elapses",
-			server.takeRequest(5, TimeUnit.SECONDS));
-		assertEquals(2, server.getRequestCount());
+		assertNull("an unavailable media feature must not create polling traffic",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(1, server.getRequestCount());
 
 		// And the revocation the poll carried must actually land.
 		long deadline = System.currentTimeMillis() + 5000L;
@@ -584,13 +584,13 @@ public class UploadGatingTest
 				return TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 		});
-		assertTrue("linked + no server override -> enabled", plugin.screenshotsEnabled());
+		assertFalse("public media is off before the first policy response", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "off"));
 		assertFalse("server force-disable overrides the local link", plugin.screenshotsEnabled());
 
 		plugin.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
-		assertTrue("server can re-allow (local opt-in still governs)", plugin.screenshotsEnabled());
+		assertFalse("a server directive cannot widen the public artifact", plugin.screenshotsEnabled());
 	}
 
 	@Test

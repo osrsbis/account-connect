@@ -1441,13 +1441,12 @@ public class AccountConnectPlugin extends Plugin
 		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death", "drop", "alch"));
 
 	/**
-	 * Trade-screenshot capture is part of core sync (2026-09-02): active whenever the activity log is —
-	 * i.e. a valid link token is set — with no separate opt-in. osrsbestinslot.com can still force it off
-	 * per token via the X-Screenshots response header.
+	 * The public artifact cannot capture/upload media, including before the first server response.
+	 * Legacy private operational code below is retained but no server grant widens this boundary.
 	 */
 	boolean screenshotsEnabled()
 	{
-		return activityLogActive() && !serverScreenshotsDisabled;
+		return PublicTransport.mediaAllowed() && activityLogActive() && !serverScreenshotsDisabled;
 	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
@@ -1651,7 +1650,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean dropProofEnabled()
 	{
-		return storeToolsEnabled()
+		return PublicTransport.mediaAllowed() && storeToolsEnabled()
 			&& serverDropProofEnabled
 			&& (!serverClipsDisabled || dropProofDevOverride());
 	}
@@ -3160,7 +3159,7 @@ public class AccountConnectPlugin extends Plugin
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
 	{
-		return activityLogActive() && !serverClipsDisabled;
+		return PublicTransport.mediaAllowed() && activityLogActive() && !serverClipsDisabled;
 	}
 
 	/**
@@ -3539,7 +3538,7 @@ public class AccountConnectPlugin extends Plugin
 	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt,
 		int attempt, boolean held)
 	{
-		if (!uploadAllowed() || (attempt > 0 && !token.equals(currentLinkToken())))
+		if (!PublicTransport.mediaAllowed() || !uploadAllowed() || (attempt > 0 && !token.equals(currentLinkToken())))
 		{
 			// Uploads switched off, or a retry after the user linked a different token: this chunk
 			// was captured under the old token and must not be filed under the new one.
@@ -3799,6 +3798,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void emitEventBound(String type, Map<String, Object> fields, String tokenFingerprint)
 	{
+		if (!PublicTransport.allowsEvent(type)) return;
 		String liveFingerprint = currentEventTokenFingerprint();
 		if (tokenFingerprint == null || !tokenFingerprint.equals(liveFingerprint))
 		{
@@ -3832,6 +3832,8 @@ public class AccountConnectPlugin extends Plugin
 		// Generated ONCE, before either queue sees the event, so a retry and a replay carry the same id.
 		String eventId = EventSpool.newEventId();
 		ev.put("event_id", eventId);
+		ev = PublicTransport.event(ev);
+		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
 		spoolOnEmit(type, ev, eventId);
 		synchronized (pendingEvents)
@@ -4124,6 +4126,14 @@ public class AccountConnectPlugin extends Plugin
 					// overtake it either, so the batch stops here.
 					break;
 				}
+				if (!PublicTransport.allowsEvent(String.valueOf(ev.get("type"))))
+				{
+					// Legacy memory rows are dropped locally; durable rows are quarantined on replay.
+					healthEventsLost.incrementAndGet();
+					spoolReleaseFromMemory(ev);
+					it.remove();
+					continue;
+				}
 				Object bound = ev.get(EVENT_TOKEN_FP);
 				if (bound == null || tokenFingerprint.equals(bound))
 				{
@@ -4162,8 +4172,7 @@ public class AccountConnectPlugin extends Plugin
 			List<String> encoded = new ArrayList<>(batch.size());
 			for (Map<String, Object> queued : batch)
 			{
-				Map<String, Object> wire = new LinkedHashMap<>(queued);
-				wire.remove(EVENT_TOKEN_FP);
+				Map<String, Object> wire = PublicTransport.event(queued);
 				encoded.add(gson.toJson(wire));
 			}
 			int kept = fitEventBatch(gson.toJson(token), encoded);
@@ -5263,10 +5272,24 @@ public class AccountConnectPlugin extends Plugin
 				return false;
 			}
 			List<String> encoded = new ArrayList<>();
-			for (int i = 0; i < candidates.size() && i < EVENT_BATCH_MAX_EVENTS; i++)
+			List<EventSpool.Record> eligible = new ArrayList<>();
+			List<String> privacyRejected = new ArrayList<>();
+			for (EventSpool.Record candidate : candidates)
 			{
-				encoded.add(candidates.get(i).eventJson);
+				Map<String, Object> wire = PublicTransport.event(gson.fromJson(candidate.eventJson, Map.class));
+				if (wire == null)
+				{
+					privacyRejected.add(candidate.eventId);
+					continue;
+				}
+				eligible.add(candidate);
+				encoded.add(gson.toJson(wire));
+				if (eligible.size() == EVENT_BATCH_MAX_EVENTS) break;
 			}
+			// -1 is a local privacy rejection, not an HTTP ACK. No payload enters quarantine.
+			spool.quarantine(privacyRejected, -1);
+			candidates = eligible;
+			if (candidates.isEmpty()) return false;
 			String tokenJson = gson.toJson(token);
 			int kept = fitEventBatch(tokenJson, encoded);
 			final Map<String, String> sentIds = new LinkedHashMap<>();
@@ -7175,7 +7198,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean maxCapture()
 	{
-		return serverMaxCaptureEnabled && uploadAllowed();
+		return PublicTransport.firehoseAllowed() && serverMaxCaptureEnabled && uploadAllowed();
 	}
 
 	/** Buffer one firehose row. No-op unless the grant is live. Batched, never emitted per event. */
@@ -7434,9 +7457,8 @@ public class AccountConnectPlugin extends Plugin
 
 	/**
 	 * On "Accepted trade.", emit a structured "trade" event from what was captured at the confirm screen:
-	 * the items WE gave (own offer), the counterparty name (forwarded for ALL users, disclosed), and the items
-	 * WE receive (WAVE 1b — structured [{id,qty}] from the YOU_WILL_RECEIVE widget, or a raw received_text
-	 * summary fallback when that widget carries text rather than item sprites).
+	 * the items WE gave and received. PublicTransport removes legacy partner/context/text fields
+	 * before either memory or disk enqueue, and again before transmission of old queued rows.
 	 */
 	void putWorldContext(Map<String, Object> fields)
 	{
@@ -7474,8 +7496,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("given", given);
-		// Counterparty RSN forwarded for ALL users (staff-backend gate removed — product decision 2026-07-14). It is the
-		// one other-player field we send, on purpose, disclosed in the config item + Hub warning text.
+		// Legacy operational context. PublicTransport excludes it from both queues and the wire.
 		if (counterparty != null)
 		{
 			fields.put("counterparty", counterparty);
@@ -11047,7 +11068,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void uploadTradeScreenshot(String token, byte[] pngBytes, String phase)
 	{
-		if (!uploadAllowed())
+		if (!PublicTransport.mediaAllowed() || !uploadAllowed())
 		{
 			return;		// upload switch off — send nothing
 		}
@@ -11430,10 +11451,10 @@ public class AccountConnectPlugin extends Plugin
 
 		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
 		// only when non-null = opened at least once this session, so a normal snapshot never carries empty blocks.
-		// group_storage is a GENUINE cross-account container (shared between Group-Ironman members) — disclosed. ----
+		// Shared Group Ironman storage is deliberately excluded from this public artifact. ----
 		addContainerSnapshot(snap, "looting_bag", client.getItemContainer(LOOTING_BAG_CONTAINER_ID));
 		addContainerSnapshot(snap, "seed_vault", client.getItemContainer(SEED_VAULT_CONTAINER_ID));
-		addContainerSnapshot(snap, "group_storage", client.getItemContainer(InventoryID.GROUP_STORAGE));
+		// Shared group storage is outside the public own-player transport contract.
 		// Storage-visibility (gap audit 2026-07-18): real wealth a bank+inv+equip snapshot can't see — a bond
 		// is ~30M+ parked invisibly; quiver ammo can be a large stacked value. False-residual sources closed.
 		addContainerSnapshot(snap, "bonds_pouch", client.getItemContainer(BONDS_POUCH_CONTAINER_ID));
@@ -11633,6 +11654,7 @@ public class AccountConnectPlugin extends Plugin
 			return;		// upload switch off — send nothing
 		}
 		final Map<String, Object> sentSnapshot = new LinkedHashMap<>(snapshot);
+		sentSnapshot.remove("group_storage"); // also covers cached snapshots from before this boundary
 		if (!broadCaptureEnabled()) stripBroadCapture(sentSnapshot);
 		final String sentHash = canonicalHash(sentSnapshot);
 		Map<String, Object> body = new LinkedHashMap<>();
