@@ -11,7 +11,7 @@ import net.runelite.api.Skill;
 import net.runelite.client.config.RuneScapeProfileType;
 
 /**
- * Bounded, passive first-party observations. No scene sweep, player target reads, chat, actions,
+ * Bounded, passive first-party observations. No scene sweep, player target reads, raw chat, actions,
  * plugin configuration or peer messages. The caller must hold the separate current-token grant.
  * This recent-observation snapshot is not a durable event ledger or proof of a complete encounter.
  */
@@ -37,6 +37,11 @@ final class OwnGameplayCapture
     private final Deque<Integer> observationBytes = new ArrayDeque<>();
     private int bufferedBytes;
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
+    final OwnInterfaceCapture interfaces = new OwnInterfaceCapture(this);
+    final OwnSequenceCapture sequences = new OwnSequenceCapture(this);
+    final OwnSceneCapture scene = new OwnSceneCapture(this);
+    final OwnConsumptionCapture consumption = new OwnConsumptionCapture(this);
+    final OwnActivityCapture activities = new OwnActivityCapture(this);
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -52,7 +57,7 @@ final class OwnGameplayCapture
         identity = session = profile = null;
         accountType = null;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear();
+        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         gapReason = "not_observed";
     }
@@ -86,16 +91,21 @@ final class OwnGameplayCapture
     void gap()
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); states.clear();
+        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset();
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
-    private void append(String kind, String source, int tick, long at, Map<String,Object> value)
+    void append(String kind, String source, int tick, long at, Map<String,Object> value)
+    {
+        append(kind,source,tick,at,value,true);
+    }
+
+    void append(String kind, String source, int tick, long at, Map<String,Object> value, boolean direct)
     {
         Map<String,Object> row = new LinkedHashMap<>();
         row.put("sequence", ++sequence); row.put("event_id", session + ":" + sequence);
         row.put("kind", kind); row.put("source", source); row.put("tick", tick);
-        row.put("observed_at_ms", at); row.put("direct", true); row.put("value", value);
+        row.put("observed_at_ms", at); row.put("direct", direct); row.put("value", value);
         int bytes = JSON.toJson(row).getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
         if (bytes > MAX_OBSERVATION_BYTES) { evicted++; return; }
         while (observations.size() >= MAX_OBSERVATIONS || bufferedBytes + bytes > MAX_OBSERVATION_BYTES)
@@ -105,7 +115,7 @@ final class OwnGameplayCapture
         observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
     }
 
-    private void state(String kind, String source, Map<String,Object> value, int tick, long at)
+    void state(String kind, String source, Map<String,Object> value, int tick, long at)
     {
         Map<String,Object> previous = states.get(kind);
         if (previous == null || !Objects.equals(previous.get("value"), value))
@@ -174,6 +184,11 @@ final class OwnGameplayCapture
             goals.put(GOAL_SKILLS[i].name(), goal);
         }
         state("skills.goal_xp", "varps:1229-1251,1253-1275", goals, tick, at);
+        activities.poll(client, vars, at);
+        interfaces.poll(client, at);
+        sequences.poll(client, at, System.nanoTime());
+        scene.poll(client, at);
+        consumption.poll(client, at);
     }
 
     void hit(Client client, Actor actor, Hitsplat splat, long at)
@@ -220,7 +235,7 @@ final class OwnGameplayCapture
     Map<String,Object> snapshot()
     {
         Map<String,Object> out = new LinkedHashMap<>();
-        out.put("schema_v", 1); out.put("decoder_version", "own-gameplay-v1");
+        out.put("schema_v", 1); out.put("decoder_version", "own-gameplay-v2");
         out.put("collector_session", session); out.put("profile_type", profile); out.put("account_type_raw", accountType);
         out.put("last_authoritative_read_ms", lastReadAt == 0 ? null : lastReadAt);
         out.put("completeness_scope", "bounded_recent_observations"); out.put("complete", false);

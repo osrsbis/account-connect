@@ -7131,6 +7131,7 @@ public class AccountConnectPlugin extends Plugin
 		// no raw chat line is emitted, no other player's name is read, and no other channel is examined.
 		if (event.getType() == ChatMessageType.GAMEMESSAGE || event.getType() == ChatMessageType.SPAM)
 		{
+			if (gameplayReady()) ownGameplay.activities.chat(client, event, System.currentTimeMillis());
 			if (progressReady())
 			{
 				accountProgress.chat(event.getMessage(), System.currentTimeMillis() / 1000L);
@@ -7289,6 +7290,24 @@ public class AccountConnectPlugin extends Plugin
 	{
 		// Other-player readers are absent from the public artifact.
 
+	}
+
+	@Subscribe
+	public void onOwnActivityClientTick(net.runelite.api.events.ClientTick event)
+	{
+		if (gameplayReady()) ownGameplay.interfaces.clientTick(client, System.currentTimeMillis());
+	}
+
+	@Subscribe
+	public void onOwnActivityObjectSpawned(net.runelite.api.events.GameObjectSpawned event)
+	{
+		if (gameplayReady()) ownGameplay.scene.spawned(client, event.getGameObject(), System.currentTimeMillis());
+	}
+
+	@Subscribe
+	public void onOwnActivityObjectDespawned(net.runelite.api.events.GameObjectDespawned event)
+	{
+		if (gameplayReady()) ownGameplay.scene.despawned(event.getGameObject());
 	}
 
 	@Subscribe
@@ -7483,6 +7502,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
+		if (gameplayReady()) ownGameplay.consumption.menu(client, event);
 		if (progressReady()) accountProgress.storageRecovery.menu(client, event, System.currentTimeMillis());
 		if (maxCapture() && event != null)
 		{
@@ -10164,6 +10184,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
+		if (gameplayReady()) ownGameplay.activities.death(client, event.getActor(), System.currentTimeMillis());
 		if (gameplayReady() && event.getActor() instanceof NPC)
 			ownGameplay.endNpc(client, (NPC) event.getActor(), true, System.currentTimeMillis());
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())

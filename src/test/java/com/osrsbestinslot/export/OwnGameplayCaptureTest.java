@@ -180,12 +180,12 @@ public class OwnGameplayCaptureTest
 
     @Test public void bufferIsBoundedWithExplicitLossAndStableOldSnapshots()
     {
-        settle(); capture.poll(client,1000); Map<String,Object> old=capture.snapshot();
+        settle(); capture.poll(client,1000); Map<String,Object> old=capture.snapshot(); int baseline=rows().size();
         for(int i=0;i<300;i++) { tick++; capture.hit(client,self,splat(1,false),1000+i); }
         assertEquals(OwnGameplayCapture.MAX_OBSERVATIONS,rows().size());
-        assertEquals(51,capture.snapshot().get("evicted")); assertEquals("buffer_eviction",capture.snapshot().get("gap_reason"));
+        assertEquals(300+baseline-OwnGameplayCapture.MAX_OBSERVATIONS,capture.snapshot().get("evicted")); assertEquals("buffer_eviction",capture.snapshot().get("gap_reason"));
         assertEquals(false,capture.snapshot().get("complete"));
-        assertEquals(7,((List<?>)old.get("observations")).size());
+        assertEquals(baseline,((List<?>)old.get("observations")).size());
     }
 
     @Test public void escapeSettingsAndArenaAvailabilityAreNotPossessionIdleOrCurrency()
@@ -207,7 +207,7 @@ public class OwnGameplayCaptureTest
         settle();
         for(int i=0;i<300;i++) { vars[1253]=1000+i; tick++; capture.poll(client,1000+i); }
         int bytes = new com.google.gson.Gson().toJson(capture.snapshot()).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        assertTrue("recent block leaves room in the existing 512KiB snapshot contract", bytes < 110 * 1024);
+        assertTrue("recent block leaves room in the existing 512KiB snapshot contract", bytes < 128 * 1024);
         assertTrue((Integer)capture.snapshot().get("evicted") > 0);
         assertTrue(rows().size() < OwnGameplayCapture.MAX_OBSERVATIONS);
         System.out.println("OWN_GAMEPLAY_WIDE_FIXTURE_BYTES="+bytes+" observations="+rows().size());
@@ -277,5 +277,19 @@ public class OwnGameplayCaptureTest
         assertTrue(first.readUtf8().contains("own_gameplay")); assertFalse(second.readUtf8().contains("own_gameplay"));
         assertTrue(cached.containsKey("own_gameplay"));
         assertNull(p.gameplayBlock());
+    }
+
+    @Test public void newSystemAndClientTickHandlersRequireSeparateGrantAndRevocationClearsThem() throws Exception
+    {
+        AccountConnectPlugin p=plugin();
+        ChatMessage msg=new ChatMessage(); msg.setType(ChatMessageType.GAMEMESSAGE);
+        msg.setMessage("Your quetzal whistle has 42 charges remaining.");
+        p.onChatMessage(msg); p.onOwnActivityClientTick(new ClientTick());
+        verify(client,never()).getWidget(193,2); assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN); p.gameplayBlock(); tick+=2;
+        p.onChatMessage(msg);
+        assertEquals(1,((List<?>)p.gameplayBlock().get("observations")).size());
+        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); assertNull(p.gameplayBlock());
+        p.onChatMessage(msg); assertNull(p.gameplayBlock());
     }
 }
