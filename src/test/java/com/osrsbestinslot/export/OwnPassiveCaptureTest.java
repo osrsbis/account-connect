@@ -41,6 +41,24 @@ public class OwnPassiveCaptureTest
         when(c.getWorld()).thenReturn(302); seq();
         when(self.getWorldLocation()).thenReturn(new WorldPoint(3100,3400,0)); seq(); assertEquals(1,rows().size());
     }
+    @Test public void geIdleBeyondTwoHundredTicksDoesNotRollOverOrChangeUploadHash() throws Exception
+    {
+        when(self.getWorldLocation()).thenReturn(new WorldPoint(3164,3488,0)); seq(); seq(); seq();
+        when(self.getWorldLocation()).thenReturn(new WorldPoint(3165,3488,0)); seq();
+        assertEquals(1,rows().size());
+        java.lang.reflect.Method hash=AccountConnectPlugin.class.getDeclaredMethod("canonicalHash",Map.class);
+        hash.setAccessible(true); AccountConnectPlugin plugin=new AccountConnectPlugin();
+        java.lang.reflect.Field gson=AccountConnectPlugin.class.getDeclaredField("gson");
+        gson.setAccessible(true); gson.set(plugin,new com.google.gson.Gson());
+        Map<String,Object> snapshot=new LinkedHashMap<>(); snapshot.put("own_gameplay",capture.snapshot());
+        Object before=hash.invoke(plugin,snapshot);
+        for(int i=0;i<250;i++) seq();
+        snapshot.put("own_gameplay",capture.snapshot());
+        assertEquals(before,hash.invoke(plugin,snapshot)); assertEquals(1,rows().size());
+        when(self.getWorldLocation()).thenReturn(new WorldPoint(3166,3488,0)); seq();
+        assertEquals(2,rows().size());
+        assertEquals(150000L,((Map<?,?>)rows().get(1).get("value")).get("monotonic_elapsed_ms"));
+    }
     @Test public void geGapOrWorldChangeCannotCarryAnInterval()
     {
         when(self.getWorldLocation()).thenReturn(new WorldPoint(3164,3488,0)); seq(); seq(); capture.gap();

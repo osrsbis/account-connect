@@ -32,8 +32,9 @@ final class OwnSequenceCapture
         if(!contiguous) { anchor=null; inventory=null; }
         WorldPoint point=c.getLocalPlayer()==null?null:c.getLocalPlayer().getWorldLocation();
         boolean inGe=courtyard(point);
-        if(anchor!=null && (!anchor.equals(point) || tick-startTick>=100))
+        if(anchor!=null && !anchor.equals(point))
         {
+            // Only movement closes an interval. Periodic rollover would upload indefinitely while idle.
             // End at the last stationary sample, not at the new moving sample.
             if(previousTick>startTick)
             {
