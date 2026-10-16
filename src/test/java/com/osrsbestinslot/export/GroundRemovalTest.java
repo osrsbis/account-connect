@@ -84,13 +84,7 @@ public class GroundRemovalTest
 		Map<String, Object> ev = onlyEvent(plugin, "ground_removed");
 		assertEquals("removed_early", ev.get("cause"));
 		assertEquals("the plugin still never names the taker", "UNKNOWN", ev.get("recipient"));
-		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> cands = (List<Map<String, Object>>) ev.get("taken_by_candidates");
-		assertEquals(2, cands.size());
-		assertEquals("nearest first", "Buyer", cands.get(0).get("rsn"));
-		assertEquals(0, cands.get(0).get("dist"));
-		assertEquals(92, cands.get(0).get("cb"));
-		assertEquals(2, cands.get(1).get("dist"));
+		assertNull("public event excludes other-player candidates", ev.get("taken_by_candidates"));
 	}
 
 	/** Nobody around: the key is ABSENT, exactly as the store path does it, so readers keep one rule. */

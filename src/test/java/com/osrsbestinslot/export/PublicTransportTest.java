@@ -168,4 +168,29 @@ public class PublicTransportTest
         }
     }
 
+    @Test public void bankPairsKeepTheirExactManifestOnMemoryAndLegacyReplay() throws Exception
+    {
+        List<long[]> pairs=Arrays.asList(new long[]{995,5000}, new long[]{4151,1});
+        String expected=BankVisitManifest.json(pairs);
+        String hash=BankVisitManifest.sha256(pairs);
+        Map<String,Object> bank=new LinkedHashMap<>(Map.of("type","bank_visit_manifest_chunk",
+            "event_id",ID,"account_hash","12345","items",pairs,"manifest_sha256",hash));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        plugin.pendingEvents.add(bank); plugin.flushEvents();
+        RecordedRequest memory=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(memory);
+        com.google.gson.JsonObject sent=new com.google.gson.JsonParser().parse(memory.getBody().readUtf8())
+            .getAsJsonObject().getAsJsonArray("events").get(0).getAsJsonObject();
+        assertEquals(expected,sent.get("items").toString()); assertEquals(hash,sent.get("manifest_sha256").getAsString());
+        Path dir=data.resolve("osrsbis/spool").resolve(EventSpool.identityKey(TOKEN,"12345"));
+        EventSpool old=new EventSpool(data,dir,System::currentTimeMillis,
+            EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
+        assertTrue(old.append(ID,"bank_visit_manifest_chunk",System.currentTimeMillis(),gson.toJson(bank)));old.crashForTest();
+        plugin.applyServerPolicy(grant());plugin.awaitSpoolIdleForTest();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.replaySpoolTick();
+        RecordedRequest replay=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(replay);
+        sent=new com.google.gson.JsonParser().parse(replay.getBody().readUtf8())
+            .getAsJsonObject().getAsJsonArray("events").get(0).getAsJsonObject();
+        assertEquals(expected,sent.get("items").toString());assertEquals(hash,sent.get("manifest_sha256").getAsString());
+    }
+
 }

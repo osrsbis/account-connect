@@ -13,7 +13,7 @@ final class PublicTransport
     static boolean firehoseAllowed() { return false; }
 
     private static final Map<String, Set<String>> FIELDS = new HashMap<>();
-    private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type");
+    private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type world world_members");
     private static final Set<String> ITEMS = keys("given received equipped unequipped items items_lost deposited withdrawn");
     static
     {
@@ -61,14 +61,27 @@ final class PublicTransport
             String k = e.getKey(); Object v = e.getValue();
             if (ENVELOPE.contains(k))
             {
-                if (v instanceof String || v instanceof Number) out.put(k,v);
+                if (v instanceof String || v instanceof Number || v instanceof Boolean) out.put(k,v);
             }
             else if (fields.contains(k))
             {
                 if (ITEMS.contains(k)) out.put(k, itemRows(v));
                 else if ("location".equals(k) || "tile".equals(k))
                     out.put(k, numericMap(v, keys("x y plane region_id")));
-                else if ("gains".equals(k)) out.put(k, numericMap(v, null));
+                else if ("gains".equals(k) && v instanceof List)
+                {
+                    List<Map<String,Object>> gains = new ArrayList<>();
+                    for (Object entry : (List<?>) v) if (entry instanceof Map)
+                    {
+                        Map<?,?> g = (Map<?,?>) entry;
+                        if (g.get("skill") instanceof String && g.get("xp") instanceof Number)
+                        {
+                            Map<String,Object> gain = new LinkedHashMap<>();
+                            gain.put("skill", g.get("skill")); gain.put("xp", g.get("xp")); gains.add(gain);
+                        }
+                    }
+                    out.put(k, gains);
+                }
                 else if ("loc".equals(k) && v instanceof List)
                 {
                     List<?> loc = (List<?>) v;
@@ -93,11 +106,23 @@ final class PublicTransport
                 out.put((String)e.getKey(), e.getValue());
         return out;
     }
-    private static List<Map<String,Object>> itemRows(Object input)
+    private static List<Object> itemRows(Object input)
     {
-        List<Map<String,Object>> out = new ArrayList<>();
+        List<Object> out = new ArrayList<>();
         if (input instanceof List) for (Object item : (List<?>) input)
         {
+            // Bank manifests use integer pairs, both in-memory long[] and JSON replay Lists.
+            if (item instanceof long[] && ((long[])item).length == 2)
+            {
+                out.add(((long[])item).clone()); continue;
+            }
+            if (item instanceof List)
+            {
+                List<?> pair = (List<?>)item;
+                if (pair.size() == 2 && pair.get(0) instanceof Number && pair.get(1) instanceof Number)
+                    out.add(Arrays.asList(((Number)pair.get(0)).longValue(), ((Number)pair.get(1)).longValue()));
+                continue;
+            }
             Map<String,Object> row = numericMap(item, keys("id qty slot"));
             if (row.containsKey("id") && row.containsKey("qty")) out.add(row);
         }

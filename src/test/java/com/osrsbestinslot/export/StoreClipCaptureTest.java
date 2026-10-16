@@ -69,7 +69,7 @@ public class StoreClipCaptureTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", linked());
 		// linked, server not disabling -> enabled.
-		assertTrue("a linked token with no server disable must enable capture",
+		assertFalse("the public artifact never enables media capture",
 			plugin.storeClipsEnabled());
 		// server flips it off -> gate closes despite the link.
 		plugin.serverClipsDisabled = true;

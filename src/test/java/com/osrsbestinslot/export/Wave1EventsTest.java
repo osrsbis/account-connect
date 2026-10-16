@@ -123,8 +123,8 @@ public class Wave1EventsTest
 		Map<String, Object> e = p.pendingEvents.get(0);
 		assertEquals("kill_count", e.get("type"));
 		assertEquals("comma-stripped count", 1024L, e.get("count"));
-		assertEquals("raw line carried so the count says WHAT was killed",
-			"Your Zulrah kill count is: 1,024", e.get("text"));
+		assertNull("raw chat text is excluded", e.get("text"));
+		assertEquals("Zulrah", e.get("source"));
 	}
 
 	@Test

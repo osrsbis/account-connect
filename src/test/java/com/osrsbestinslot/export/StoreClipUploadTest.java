@@ -25,6 +25,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -223,7 +224,7 @@ public class StoreClipUploadTest
 	// (glue) happy path: submitStoreClipUpload actually POSTs the burst to the real /store-frames-ingest
 	// route with the real constants — the pure-seam tests above prove the logic but not the wiring.
 	@Test
-	public void submitStoreClipUploadPostsBurstToIngestRoute() throws Exception
+	public void publicStoreClipUploadRefusesEncodedBurst() throws Exception
 	{
 		BlockingQueue<Capture> received = new LinkedBlockingQueue<>();
 		HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -253,18 +254,7 @@ public class StoreClipUploadTest
 			plugin.submitStoreClipUpload(frames, java.util.Arrays.asList(1_700_000_000_000L,
 				1_700_000_000_033L, 1_700_000_000_066L));
 
-			Capture c = received.poll(15, TimeUnit.SECONDS);
-			assertNotNull("burst upload never arrived", c);
-			assertEquals("/wp-json/osrsbis/v1/store-frames-ingest", c.path);
-			assertTrue("not multipart: " + c.contentType, c.contentType.startsWith("multipart/form-data"));
-			String body = new String(c.body, StandardCharsets.ISO_8859_1);
-			assertTrue("token field missing", body.contains("name=\"token\"") && body.contains(TEST_TOKEN));
-			assertTrue("captured_at field missing", body.contains("name=\"captured_at\""));
-			assertTrue("fps field missing", body.contains("name=\"fps\""));
-			assertTrue("frame_count field missing", body.contains("name=\"frame_count\""));
-			assertTrue("frames[] parts missing", body.contains("name=\"frames[]\""));
-			assertTrue("parts not image/jpeg", body.contains("image/jpeg"));
-			assertTrue("no JPEG payload in body", indexOf(c.body, JPEG_SOI) >= 0);
+			assertNull("encoded frames must not leave the public artifact", received.poll(300, TimeUnit.MILLISECONDS));
 		}
 		finally
 		{

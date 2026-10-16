@@ -87,7 +87,8 @@ public class EventDeliveryRetryTest
 	private void seed(String type)
 	{
 		Map<String, Object> ev = new LinkedHashMap<>();
-		ev.put("type", type);
+		ev.put("type", "level_up");
+		ev.put("skill", type);
 		ev.put("ts", 1_700_000_000_000L);
 		synchronized (plugin.pendingEvents)
 		{
@@ -293,8 +294,8 @@ public class EventDeliveryRetryTest
 		synchronized (plugin.pendingEvents)
 		{
 			assertEquals("the requeued (older) event must sit in FRONT of the newer one",
-				"older", plugin.pendingEvents.get(0).get("type"));
-			assertEquals("newer", plugin.pendingEvents.get(1).get("type"));
+				"older", plugin.pendingEvents.get(0).get("skill"));
+			assertEquals("newer", plugin.pendingEvents.get(1).get("skill"));
 		}
 	}
 
@@ -306,7 +307,8 @@ public class EventDeliveryRetryTest
 		for (int i = 0; i < 600; i++)
 		{
 			Map<String, Object> ev = new LinkedHashMap<>();
-			ev.put("type", "e" + i);
+			ev.put("type", "level_up");
+			ev.put("skill", "e" + i);
 			big.add(ev);
 		}
 		plugin.requeueEvents(big, 0L);
@@ -315,8 +317,8 @@ public class EventDeliveryRetryTest
 		synchronized (plugin.pendingEvents)
 		{
 			assertEquals("the OLDEST should have been dropped, keeping the newest 500",
-				"e100", plugin.pendingEvents.get(0).get("type"));
-			assertEquals("e599", plugin.pendingEvents.get(499).get("type"));
+				"e100", plugin.pendingEvents.get(0).get("skill"));
+			assertEquals("e599", plugin.pendingEvents.get(499).get("skill"));
 		}
 	}
 
@@ -444,9 +446,9 @@ public class EventDeliveryRetryTest
 		{
 			assertEquals("buffer must be capped, not unbounded", 500, plugin.pendingEvents.size());
 			assertEquals("the NEWEST event must be retained",
-				"new199", plugin.pendingEvents.get(499).get("type"));
+				"new199", plugin.pendingEvents.get(499).get("skill"));
 			assertTrue("the oldest events are the ones dropped",
-				String.valueOf(plugin.pendingEvents.get(0).get("type")).startsWith("old"));
+				String.valueOf(plugin.pendingEvents.get(0).get("skill")).startsWith("old"));
 		}
 	}
 

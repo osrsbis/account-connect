@@ -63,7 +63,7 @@ public class Wave3FirehoseTest
 	}
 
 	@Test
-	public void grantedClientBatchesRowsIntoOneEvent() throws Exception
+	public void grantedPublicClientStillEmitsNothing() throws Exception
 	{
 		AccountConnectPlugin p = plug();
 		p.serverMaxCaptureEnabled = true;
@@ -72,18 +72,11 @@ public class Wave3FirehoseTest
 		p.firehose("anim", row("id", 829));
 		assertTrue("buffered, not emitted per row", p.pendingEvents.isEmpty());
 		p.flushFirehose();
-		assertEquals("one batch event", 1, p.pendingEvents.size());
-		Map<String, Object> ev = p.pendingEvents.get(0);
-		assertEquals("fh_batch", ev.get("type"));
-		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> rows = (List<Map<String, Object>>) ev.get("events");
-		assertEquals(3, rows.size());
-		assertEquals("pos", rows.get(0).get("k"));
-		assertEquals("anim", rows.get(2).get("k"));
+		assertTrue("public grants cannot emit firehose rows", p.pendingEvents.isEmpty());
 	}
 
 	@Test
-	public void bufferIsCappedAndDropsOverflow() throws Exception
+	public void publicFirehoseDoesNotAccumulateRows() throws Exception
 	{
 		AccountConnectPlugin p = plug();
 		p.serverMaxCaptureEnabled = true;
@@ -92,9 +85,7 @@ public class Wave3FirehoseTest
 			p.firehose("pos", row("x", i));
 		}
 		p.flushFirehose();
-		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> rows = (List<Map<String, Object>>) p.pendingEvents.get(0).get("events");
-		assertEquals("hard cap holds at 500", 500, rows.size());
+		assertTrue("no firehose rows enter the public buffer", p.pendingEvents.isEmpty());
 	}
 
 	@Test
