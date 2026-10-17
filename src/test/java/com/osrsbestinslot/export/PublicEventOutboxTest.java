@@ -27,6 +27,7 @@ public class PublicEventOutboxTest
     {
         Map<String,Object> e = new LinkedHashMap<>(); e.put("event_id", id); e.put("type", "ge_progress");
         e.put("account_hash", "123"); e.put("ts", now.get()); e.put("item", 2); e.put("qty", 1);
+        e.put("rsn", "OWN_NAME_NOT_NEEDED_ON_DISK");
         e.put("other_player_name", "must-never-reach-disk"); e.put("__delivery_token_fp", "internal-binding"); return e;
     }
     @Test public void forcedRowsSurviveCrashAndOnlyExactDurableReceiptsRemoveThem() throws Exception
@@ -49,7 +50,7 @@ public class PublicEventOutboxTest
             for (Path p : (Iterable<Path>) files.filter(Files::isRegularFile)::iterator)
             {
                 String text = new String(Files.readAllBytes(p), java.nio.charset.StandardCharsets.UTF_8);
-                for (String forbidden : Arrays.asList(TOKEN, "must-never-reach-disk", "internal-binding", "profile-a"))
+                for (String forbidden : Arrays.asList(TOKEN, "must-never-reach-disk", "internal-binding", "profile-a", "OWN_NAME_NOT_NEEDED_ON_DISK"))
                     assertFalse(forbidden, text.contains(forbidden));
             }
         }
@@ -95,5 +96,46 @@ public class PublicEventOutboxTest
         assertTrue(box.append(owner, "own-history-v1", e));
         assertTrue(box.pending(owner, "ge-v1", 100).isEmpty()); assertEquals(1, box.size());
         assertEquals(1, box.pending(owner, "own-history-v1", 100).size());
+    }
+    @Test public void failedCompactionWriterRecoversWithoutRequiringAClientRestart() throws Exception
+    {
+        box.append(owner, "ge-v1", event(A)); box.append(owner, "ge-v1", event(B));
+        java.lang.reflect.Field field = PublicEventOutbox.class.getDeclaredField("journal"); field.setAccessible(true);
+        EventSpool journal = (EventSpool)field.get(box);
+        journal.ack(Collections.singletonList(A));
+        journal.setReopenerForTest(path -> { throw new java.io.IOException("temporary reopen failure"); });
+        try { journal.compactNow(); fail("fault must surface"); }
+        catch (java.io.IOException expected) { assertTrue(journal.isFailed()); }
+        List<Map<String,Object>> recovered = box.pending(owner, "ge-v1", 100);
+        assertEquals(1, recovered.size()); assertEquals(B, recovered.get(0).get("event_id"));
+        assertTrue(box.append(owner, "ge-v1", event(A))); assertEquals(2, box.size());
+    }
+    @Test public void observedErasureMarkerDeletesOwnPayloadInsteadOfOnlyPausingIt() throws Exception
+    {
+        box.append(owner, "ge-v1", event(A));
+        Path identity = dir.resolve("osrsbis/public-events-v1").resolve(owner.identity);
+        EventSpool.purgeIdentityDir(identity, now::get);
+        assertTrue(box.pending(owner, "ge-v1", 100).isEmpty()); assertEquals(0, box.size());
+        assertFalse(box.append(owner, "ge-v1", event(B))); // retained marker forbids stale-grant writes
+        try (java.util.stream.Stream<Path> paths = Files.walk(identity))
+        { assertFalse(paths.anyMatch(path -> path.toString().endsWith(".spl"))); }
+    }
+    @Test public void coldWithdrawalFindsIdleIdentitiesThatFellOutOfTheBoundedIndex() throws Exception
+    {
+        List<PublicEventOutbox> writers = new ArrayList<>();
+        try
+        {
+            for (int i = 0; i <= EventSpool.MAX_INDEX; i++)
+            {
+                PublicEventOutbox writer = fresh(); writers.add(writer);
+                PublicEventOutbox.Context context = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-" + i);
+                assertTrue(writer.append(context, "ge-v1", event(A)));
+            }
+        }
+        finally { for (PublicEventOutbox writer : writers) writer.close(); }
+        assertEquals(EventSpool.MAX_INDEX, EventSpool.readIndex(dir.resolve("osrsbis/public-events-v1")).size());
+        box.purge();
+        try (java.util.stream.Stream<Path> paths = Files.walk(dir))
+        { assertFalse(paths.anyMatch(path -> path.toString().endsWith(".spl"))); }
     }
 }

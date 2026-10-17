@@ -287,8 +287,9 @@ and other observed own storage; GE offers and displayed recent GE history;
 own trades and item movements, loot, deaths, session times and gameplay observations.
 Separately enabled progress/gameplay uploads include own combat/NPC encounters,
 skilling, travel and raw settings/progress observations. Observations can be partial
-or unknown. Your IP address reaches the service. Eligible event retries are stored
-locally for up to 48 hours, 5,000 rows or 5 MiB per journal, whichever bound is reached.
+or unknown. Your IP address reaches the service. Eligible events can replay from a bounded local journal for up to 48 hours,
+with at most 5,000 rows or 5 MiB per journal. Local files are cleaned on journal
+access or token withdrawal; files can remain while the client or grant is inactive.
 It does not receive your Jagex credentials.”
 
 This public artifact removes counterparty/nearby-player context and shared group
@@ -309,13 +310,18 @@ before POST. Other public families and snapshots retain their existing memory
 path; this is not whole-intake crash durability.
 
 The separate `osrsbis/public-events-v1` journal uses hashed token/account/mode/profile
-identities and the existing forced-write/CRC journal core. No raw token or profile
-identifier is persisted. A row becomes durable after its forced append, before it
-can enter HTTP delivery. There can be up to 500 not-yet-durable append jobs; process
-death before force, disk failure and bound eviction remain explicit gaps.
+identities and the existing forced-write/CRC journal core. No raw token, profile identifier or own RSN is persisted. Normally a row enters
+HTTP delivery after its forced append. If disk IO or the bounded append backlog
+fails, the previous bounded memory Queue retry path remains available under the
+same identity checks; those rows are explicitly not crash-durable. This fallback
+never overrides an erasure marker or ownership mismatch. There can be up to 500
+not-yet-durable append jobs; process death before force and bound eviction remain
+explicit gaps. A failed compaction writer recovers without restarting the client.
 `public_outbox_not_durable_total`, `public_outbox_append_pending`,
 `public_outbox_dropped_total`, pending rows/bytes and retired-identity counters expose
-these limits. Counters are process-local, not a durable completeness denominator.
+these limits. Retiring an idle prior identity is an explicit local retry gap; its
+exact lost-row count is unknown for unopened shards. Counters are process-local,
+not a durable completeness denominator.
 
 Only exact per-ID Queue receipts settle durable rows. Generic 2xx and retryable
 failures retain them; permanent rejected rows become metadata-only quarantine.

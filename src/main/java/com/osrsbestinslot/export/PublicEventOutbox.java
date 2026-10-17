@@ -66,11 +66,22 @@ final class PublicEventOutbox
     {
         if (next == null) return false;
         if (context != null && context.identity.equals(next.identity) && journal != null)
-            return !journal.purgeRequested() && !journal.isFailed();
+        {
+            if (journal.purgeRequested())
+            {
+                // Remove this writer's sensitive payload now. Keep the marker/closed handle so
+                // the same stale grant cannot reopen it on the following tick.
+                journal.closeAndDeleteOwn();
+                return false;
+            }
+            if (!journal.isFailed()) return true;
+            // A compaction reopen failure leaves recoverable rows on disk. Retire the failed
+            // writer and recover under the same still-valid context, as the staff adapter does.
+        }
         close();
         // As in the staff journal, retire idle prior identities, never another live writer.
         // This is bounded local retry storage, not the durable server history.
-        for (String old : EventSpool.readIndex(root))
+        for (String old : knownIdentities())
             if (!old.equals(next.identity) && EventSpool.purgeIfIdle(root.resolve(old)))
             {
                 EventSpool.deletePointerIf(root, old);
@@ -92,6 +103,7 @@ final class PublicEventOutbox
         Map<String, Object> event = PublicTransport.event(input);
         if (owner == null || event == null || !owner.owns(event) || !EventQueueProtocol.allows(scope, event))
             return false;
+        event.remove("rsn"); // account_hash and the token-bound context suffice for public Queue routing
         Object timestamp = event.get("ts");
         if (!(timestamp instanceof Number) || ((Number) timestamp).longValue() <= 0) return false;
         String json = gson.toJson(event);
@@ -175,10 +187,25 @@ final class PublicEventOutbox
         }
         // A cold client can receive revocation or clear its token before any grant/recovery.
         // Use only hashed pointers; never open payloads or mark an unrelated live writer.
-        for (String old : EventSpool.readIndex(root))
+        for (String old : knownIdentities())
             if (EventSpool.purgeIfIdle(root.resolve(old)))
                 EventSpool.deletePointerIf(root, old);
         counters.purged.incrementAndGet();
+    }
+
+    /** The bounded index is a hint, not proof that no older local identity exists. */
+    private Set<String> knownIdentities() throws IOException
+    {
+        Set<String> identities = new LinkedHashSet<>(EventSpool.readIndex(root));
+        if (Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            try (java.nio.file.DirectoryStream<Path> dirs = Files.newDirectoryStream(root))
+            {
+                for (Path dir : dirs)
+                    if (dir.getFileName().toString().matches("[a-f0-9]{32}")
+                        && Files.isDirectory(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                        identities.add(dir.getFileName().toString());
+            }
+        return identities;
     }
 
     /** A late account-erased receipt may only retire the identity that was sent. */

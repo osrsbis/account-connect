@@ -642,6 +642,7 @@ public class AccountConnectPlugin extends Plugin
 	private volatile String eventQueueGrantToken;
 	private volatile String eventQueueScope;
 	private static final String EVENT_PUBLIC_OUTBOX = "__public_outbox_context";
+	private static final String EVENT_PUBLIC_VOLATILE = "__public_outbox_volatile";
 	private final java.util.Set<String> publicOutboxMemoryIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 	private final java.util.concurrent.atomic.AtomicInteger publicOutboxWrites = new java.util.concurrent.atomic.AtomicInteger();
 	private final java.util.concurrent.atomic.AtomicBoolean publicOutboxPumpQueued = new java.util.concurrent.atomic.AtomicBoolean();
@@ -3821,7 +3822,8 @@ public class AccountConnectPlugin extends Plugin
 		Object t = gone.get("type");
 		healthOverflowByClass.incrementAndGet(EventPriority.classOf(t == null ? null : String.valueOf(t)));
 		spoolReleaseFromMemory(gone);
-		if (!gone.containsKey(EVENT_PUBLIC_OUTBOX)) healthEventsLost.incrementAndGet();
+		if (!gone.containsKey(EVENT_PUBLIC_OUTBOX) || Boolean.TRUE.equals(gone.get(EVENT_PUBLIC_VOLATILE)))
+			healthEventsLost.incrementAndGet();
 	}
 
 	void emitEvent(String type, Map<String, Object> fields)
@@ -4134,8 +4136,7 @@ public class AccountConnectPlugin extends Plugin
 		if (publicOutboxWrites.incrementAndGet() > MAX_PENDING_EVENTS)
 		{
 			publicOutboxWrites.decrementAndGet();
-			publicOutboxUndurable.incrementAndGet();
-			healthEventsLost.incrementAndGet();
+			stageUndurablePublicEvent(owner, event);
 			return true;
 		}
 		boolean submitted = onSpoolThread(() ->
@@ -4154,8 +4155,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			catch (IOException | RuntimeException failure)
 			{
-				publicOutboxUndurable.incrementAndGet();
-				healthEventsLost.incrementAndGet();
+				stageUndurablePublicEvent(owner, event);
 				log.debug("OSRS BiS public event journal append failed", failure);
 			}
 			finally { publicOutboxWrites.decrementAndGet(); publicOutboxHealth(); }
@@ -4163,10 +4163,32 @@ public class AccountConnectPlugin extends Plugin
 		if (!submitted)
 		{
 			publicOutboxWrites.decrementAndGet();
-			publicOutboxUndurable.incrementAndGet();
-			healthEventsLost.incrementAndGet();
+			stageUndurablePublicEvent(owner, event);
 		}
 		return true;
+	}
+
+	/** IO/backlog failures retain the old bounded memory service, with no durability claim. */
+	private void stageUndurablePublicEvent(PublicEventOutbox.Context owner, Map<String, Object> event)
+	{
+		publicOutboxUndurable.incrementAndGet();
+		PublicEventOutbox.Context current = publicQueueContext(true);
+		if (current == null || !owner.identity.equals(current.identity))
+		{
+			healthEventsLost.incrementAndGet();
+			return;
+		}
+		Map<String, Object> retry = new LinkedHashMap<>(event);
+		retry.put(EVENT_QUEUE, true);
+		retry.put(EVENT_PUBLIC_OUTBOX, owner);
+		retry.put(EVENT_PUBLIC_VOLATILE, true);
+		synchronized (pendingEvents)
+		{
+			if (!publicOutboxMemoryIds.add(String.valueOf(event.get("event_id")))) return;
+			pendingEvents.add(retry);
+			while (pendingEvents.size() > MAX_PENDING_EVENTS) evictOneForOverflow();
+		}
+		scheduleCoalescedFlush();
 	}
 
 	private void stagePublicOutbox(PublicEventOutbox.Context owner, String scope) throws IOException
@@ -4365,6 +4387,7 @@ public class AccountConnectPlugin extends Plugin
 					if (nowMs() < (queue ? queueRetryBackoffUntilMs : eventRetryBackoffUntilMs)) continue;
 					if (!batch.isEmpty() && !java.util.Objects.equals(batch.get(0).get(EVENT_QUEUE), ev.get(EVENT_QUEUE))) break;
 					if (!batch.isEmpty() && !java.util.Objects.equals(publicOutboxIdentity(batch.get(0)), publicOutboxIdentity(ev))) break;
+					if (!batch.isEmpty() && !java.util.Objects.equals(batch.get(0).get(EVENT_PUBLIC_VOLATILE), ev.get(EVENT_PUBLIC_VOLATILE))) break;
 					batch.add(ev);
 				}
 				else
@@ -4380,7 +4403,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			eventPostInFlight = true;
 		}
-		if (publicOutboxIdentity(batch.get(0)) != null)
+		if (publicOutboxIdentity(batch.get(0)) != null && !Boolean.TRUE.equals(batch.get(0).get(EVENT_PUBLIC_VOLATILE)))
 		{
 			final List<Map<String, Object>> selected = batch;
 			if (!onSpoolThread(() -> dispatchPublicOutbox(selected, token))) requeueEvents(selected, 0);

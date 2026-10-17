@@ -174,4 +174,27 @@ public class PublicEventOutboxPluginTest
         }
         finally { release.countDown(); }
     }
+    @Test public void diskFailureKeepsBoundedQueueRetryAndRecoversWhenStorageReturns() throws Exception
+    {
+        grant();
+        Path blockedRoot = data.resolve("osrsbis/public-events-v1");
+        Files.createDirectories(blockedRoot.getParent()); Files.write(blockedRoot, new byte[]{1});
+        emit(); String id = (String)p.pendingEvents.get(0).get("event_id");
+        assertEquals(1, ((Number)p.captureHealthSnapshot().get("public_outbox_not_durable_total")).intValue());
+        assertEquals(0, ((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        server.enqueue(new MockResponse().setResponseCode(500)); p.flushEvents(); request(); done();
+        assertEquals(1, p.pendingEvents.size()); assertTrue(p.queueRetryBackoffUntilMs > 0);
+        p.queueRetryBackoffUntilMs = 0;
+        server.enqueue(new MockResponse().setBody(receipt(id))); p.flushEvents(); request(); done();
+        assertTrue(p.pendingEvents.isEmpty());
+        Files.delete(blockedRoot); emit();
+        assertEquals(1, ((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
+    @Test public void diskFailureFallbackCannotCrossTheAccountBoundary() throws Exception
+    {
+        grant(); Path blockedRoot = data.resolve("osrsbis/public-events-v1");
+        Files.createDirectories(blockedRoot.getParent()); Files.write(blockedRoot, new byte[]{1});
+        emit(); set(p, "activeHash", "456"); p.flushEvents(); done();
+        assertTrue(p.pendingEvents.isEmpty()); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+    }
 }
