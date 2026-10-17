@@ -215,7 +215,18 @@ public class OwnGameplayCaptureTest
         assertEquals("unset",((Map<?,?>)state("skills.goal_xp").get("ATTACK")).get("status"));
         when(client.getVarps()).thenReturn(new int[100]); tick++; capture.poll(client,1003);
         assertEquals("unknown",((Map<?,?>)state("skills.goal_xp").get("ATTACK")).get("status"));
-        assertEquals(23,state("skills.goal_xp").size()); // Sailing goals not established by this source
+        assertEquals(24,state("skills.goal_xp").size());
+    }
+
+    @Test public void sailingGoalUsesPinnedNoncontiguousVarpsAndMissingRemainsUnknown()
+    {
+        settle();vars[4964]=100;vars[4965]=200;vars[1252]=999;vars[1276]=999;
+        capture.poll(client,1000);Map<?,?> goal=(Map<?,?>)state("skills.goal_xp").get("SAILING");
+        assertEquals(100,goal.get("start_xp"));assertEquals(200,goal.get("end_xp"));assertEquals("configured",goal.get("status"));
+        vars[4965]=0;tick++;capture.poll(client,1600);assertEquals("unset",((Map<?,?>)state("skills.goal_xp").get("SAILING")).get("status"));
+        vars[4965]=100;tick++;capture.poll(client,2200);assertEquals("invalid",((Map<?,?>)state("skills.goal_xp").get("SAILING")).get("status"));
+        when(client.getVarps()).thenReturn(new int[4965]);tick++;capture.poll(client,2800);
+        assertEquals("unknown",((Map<?,?>)state("skills.goal_xp").get("SAILING")).get("status"));
     }
 
     @Test public void bufferIsBoundedWithExplicitLossAndStableOldSnapshots()

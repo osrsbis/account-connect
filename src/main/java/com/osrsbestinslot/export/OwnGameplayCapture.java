@@ -8,6 +8,7 @@ import net.runelite.api.Hitsplat;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.config.RuneScapeProfileType;
 
 /**
@@ -27,7 +28,7 @@ final class OwnGameplayCapture
         Skill.MAGIC, Skill.DEFENCE, Skill.HITPOINTS, Skill.PRAYER, Skill.AGILITY, Skill.HERBLORE,
         Skill.THIEVING, Skill.CRAFTING, Skill.RUNECRAFT, Skill.MINING, Skill.SMITHING, Skill.FISHING,
         Skill.COOKING, Skill.FIREMAKING, Skill.WOODCUTTING, Skill.FLETCHING, Skill.SLAYER,
-        Skill.FARMING, Skill.CONSTRUCTION, Skill.HUNTER};
+        Skill.FARMING, Skill.CONSTRUCTION, Skill.HUNTER, Skill.SAILING};
     private String identity, session, profile;
     private Integer accountType;
     private int settledAt, lastTick = -1, splatTick = -1, evicted;
@@ -190,7 +191,9 @@ final class OwnGameplayCapture
         Map<String,Object> goals = new LinkedHashMap<>();
         for (int i = 0; i < GOAL_SKILLS.length; i++)
         {
-            Integer start = AccountProgressCapture.varp(vars, 1229+i), end = AccountProgressCapture.varp(vars, 1253+i);
+            // Sailing is outside the original contiguous 23-skill ranges. Pinned1.13.1 XpTracker uses these named varps.
+            Integer start = AccountProgressCapture.varp(vars, GOAL_SKILLS[i] == Skill.SAILING ? VarPlayerID.XPDROPS_SAILING_START : 1229+i);
+            Integer end = AccountProgressCapture.varp(vars, GOAL_SKILLS[i] == Skill.SAILING ? VarPlayerID.XPDROPS_SAILING_END : 1253+i);
             Map<String,Object> goal = new LinkedHashMap<>();
             goal.put("start_xp", start); goal.put("end_xp", end);
             // Preserve raw values; no division, fictional gain, or inferred completion.
@@ -198,7 +201,7 @@ final class OwnGameplayCapture
                 : start < 0 || end <= start || end > 200000000 ? "invalid" : "configured");
             goals.put(GOAL_SKILLS[i].name(), goal);
         }
-        state("skills.goal_xp", "varps:1229-1251,1253-1275", goals, tick, at);
+        state("skills.goal_xp", "varps:1229-1251,1253-1275,4964,4965", goals, tick, at);
         state("storage.rune_pouch", "own_inventory,varbits,enum:982", OwnRunePouchCapture.read(client,vars), tick, at);
         activities.poll(client, vars, at);
         interfaces.poll(client, at);
