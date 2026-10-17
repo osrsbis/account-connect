@@ -34,6 +34,41 @@ public class OwnActivityCaptureTest
     {
         ChatMessage e=new ChatMessage(); e.setType(type); e.setMessage(text); capture.activities.chat(client,e,1000);
     }
+    @Test public void whistleObservesKnownTargetAndExplicitAbsenceWithoutInventingTurnIn()
+    {
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is a Red chinchompa. You'll need to find it.");
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is a Red chinchompa. You'll need to find it.");
+        assertEquals(1,rows().size()); Map<?,?> first=(Map<?,?>)rows().get(0).get("value");
+        assertEquals("red_chinchompa",first.get("target_observed"));
+        assertEquals("whistle_target",first.get("signal")); assertEquals(false,first.get("turn_in_verified"));
+        tick++; chat(ChatMessageType.GAMEMESSAGE,"You do not have an active rumour right now.");
+        assertEquals(2,rows().size()); Map<?,?> last=(Map<?,?>)rows().get(1).get("value");
+        assertEquals("whistle_no_active",last.get("signal"));assertNull(last.get("target_observed"));
+        assertFalse(last.containsKey("completed_total"));
+        verify(client,never()).getItemContainer(any(InventoryID.class));verify(client,never()).getPlayers();
+    }
+    @Test public void whistleDoesNotReadChatNamesOrExportUnknownTextAndDialogue()
+    {
+        ChatMessage other=mock(ChatMessage.class);when(other.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
+        capture.activities.chat(client,other,1000); verify(other,never()).getMessage();verify(other,never()).getName();
+        chat(ChatMessageType.SPAM,"Your current rumour target is a Red chinchompa. You'll find it.");
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is a Private Player. You'll find it.");
+        chat(ChatMessageType.GAMEMESSAGE,"OtherPlayer: You do not have an active rumour right now.");
+        chat(ChatMessageType.DIALOG,"Guild Hunter Wolf|Thanks for that. Red chinchompa.");
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is a red chinchompa. You'll " + String.join("",Collections.nCopies(200,"x")));
+        assertTrue(rows().isEmpty());
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is an Embertailed jerboa. You'll find Private Player nearby.");
+        assertEquals(1,rows().size());assertEquals("embertailed_jerboa",((Map<?,?>)rows().get(0).get("value")).get("target_observed"));
+        assertFalse(rows().toString().contains("Private"));assertFalse(rows().toString().contains("You'll"));
+    }
+    @Test public void whistleHistoryDoesNotSurviveAccountSwitchOrFabricateMissingActivity()
+    {
+        chat(ChatMessageType.GAMEMESSAGE,"Your current rumour target is a Sabre-toothed kebbit. You'll need to find it.");
+        assertEquals(1,rows().size());when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,"grant"));
+        assertTrue(rows().isEmpty());tick+=2;assertTrue(capture.ready(client,"grant"));assertTrue(rows().isEmpty());
+        chat(ChatMessageType.GAMEMESSAGE,"You do not have an active rumour right now.");assertEquals(1,rows().size());
+        assertEquals("whistle_no_active",((Map<?,?>)rows().get(0).get("value")).get("signal"));
+    }
     @Test public void potionStorageUsesNamedVarpsAndDistinguishesMissingFromZero()
     {
         assertEquals(113,Arrays.stream(OwnPotionStorageCapture.VARPS).distinct().count());

@@ -19,6 +19,16 @@ final class OwnActivityCapture
     private static final Pattern CHOMPY_TOTAL = Pattern.compile("You've scratched up a total of ([0-9,]+) chompy bird kills?\\.");
     private static final Pattern COAL = Pattern.compile("The coal bag (?:still )?contains (one|[0-9]+) pieces? of coal\\.");
     private static final Pattern COMPOST = Pattern.compile("You treat the [A-Za-z -]{1,80} with (ultra|super|)compost\\.");
+    // Pinned rumour-reminder 38a5b7ae message prefix and public game creature names.
+    // The trailing instruction is checked for shape, then discarded; it is never telemetry.
+    private static final Pattern RUMOUR_TARGET = Pattern.compile("Your current rumour target is (?:a|an) ([A-Za-z -]{1,40})\\. You'll [A-Za-z ,'-]{1,160}[.!]?");
+    private static final Set<String> RUMOUR_TARGETS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+        "tropical wagtail", "wild kebbit", "sapphire glacialis", "swamp lizard", "spined larupia",
+        "barb-tailed kebbit", "snowy knight", "prickly kebbit", "embertailed jerboa", "horned graahk",
+        "spotted kebbit", "black warlock", "orange salamander", "razor-backed kebbit", "sabre-toothed kebbit",
+        "red chinchompa", "chinchompa", "sabre-toothed kyatt", "dark kebbit", "pyre fox", "red salamander",
+        "sunlight moth", "sunlight antelope", "dashing kebbit", "moonlight moth", "tecu salamander",
+        "herbiboar", "moonlight antelope")));
     private static final String[] ROOMS = {"The Maiden of Sugadinti", "Pestilent Bloat", "Nylocas Prinkipas", "Nylocas Vasilias", "Sotetseg", "Xarpus", "Verzik Vitur"};
 
     OwnActivityCapture(OwnGameplayCapture out) { this.out = out; }
@@ -155,6 +165,20 @@ final class OwnActivityCapture
         {
             Long charges=number(m.group(1)); if(charges==null) return;
             value.put("whistle_charges_observed",charges); family="hunter.rumour";
+        }
+        else if(type==ChatMessageType.GAMEMESSAGE && (m=RUMOUR_TARGET.matcher(text)).matches())
+        {
+            String target=m.group(1).toLowerCase(Locale.ROOT);
+            if(!RUMOUR_TARGETS.contains(target)) return;
+            value.put("signal","whistle_target");
+            value.put("target_observed",target.replace(' ','_').replace('-','_'));
+            value.put("turn_in_verified",false); family="hunter.rumour";
+        }
+        else if(type==ChatMessageType.GAMEMESSAGE && text.equals("You do not have an active rumour right now."))
+        {
+            // Absence observed now is not proof of a turn-in or of what happened during a gap.
+            value.put("signal","whistle_no_active"); value.put("target_observed",null);
+            value.put("turn_in_verified",false); family="hunter.rumour";
         }
         else if((m=COAL.matcher(text)).matches())
         {

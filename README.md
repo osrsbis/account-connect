@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.25 candidate)
+## Own-event provenance (0.7.26 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -16,6 +16,15 @@ unsettled identity, clock reversal and context older than ten seconds stay
 unknown. No raw local profile ID, token or player name enters this context.
 Backend projection support and exact-client QA remain release prerequisites;
 older projected archives do not acquire this metadata retroactively.
+
+The granted hunter snapshot history records a whistle's observed target from a
+closed 28-creature list, or its exact no-active-rumour response. It exports fixed
+codes only, with no message, hunter or player names. These observations do not
+prove when an assignment began, a rare item was obtained or a rumour was turned
+in; missing activity remains unknown. Other chat and dialogue are excluded.
+Account/grant changes clear this recent snapshot history. Exact English client
+wording still needs game QA; this family is not yet in the durable event journal.
+Source: [pinned rumour-reminder acquisition](https://github.com/DrJam/rumour-reminder/blob/38a5b7aefc4314dc1f321bea74c994bcea23aa61/src/main/java/com/drjam/rumourreminder/RumoursManager.java).
 
 The granted own-gameplay snapshot also decodes carried rune-pouch cache slots.
 Only four recognized unnoted pouch items in the player's inventory enable the

@@ -420,6 +420,18 @@ public class OwnGameplayCaptureTest
         assertNull(p.gameplayBlock());
     }
 
+    @Test public void whistleTargetUsesActualGrantedHandlerAndRevocationClearsIt() throws Exception
+    {
+        AccountConnectPlugin p=plugin(); ChatMessage msg=new ChatMessage();msg.setType(ChatMessageType.GAMEMESSAGE);
+        msg.setMessage("Your current rumour target is a red chinchompa. You'll need to find it.");
+        p.onChatMessage(msg);assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onChatMessage(msg);assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onChatMessage(msg);
+        List<?> observations=(List<?>)p.gameplayBlock().get("observations");assertEquals(1,observations.size());
+        Map<?,?> value=(Map<?,?>)((Map<?,?>)observations.get(0)).get("value");assertEquals("red_chinchompa",value.get("target_observed"));
+        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onChatMessage(msg);assertNull(p.gameplayBlock());
+    }
+
     @Test public void newSystemAndClientTickHandlersRequireSeparateGrantAndRevocationClearsThem() throws Exception
     {
         AccountConnectPlugin p=plugin();
