@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.34 candidate)
+## Own-event provenance (0.7.35 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -66,6 +66,16 @@ wealth nor a durable history stream. Container observation timestamps clear on
 relog, hop and disconnect; old-account timestamps cannot label a new cache.
 Source-specific callback and actual-client acceptance remain separate.
 
+The future own-state journal also preserves carried map/coordinate clue references
+against the 173 primary entries in the pinned RuneLite1.13.1 library. Unknown
+inventory and an empty supported subset stay distinct. These are public library
+locations, not the player's location or a resolved quest-dependent route. A
+future own-signals grant preserves SELF-owned ground-clue appearance/removal
+observations and explicit ground/object tracking-capacity gaps. Ground events
+contain no location or player labels. Drop origin, removal cause and timers
+across client sessions remain unknown; removal is never a claimed pickup,
+expiry or completion. These additions are LOCAL and not activated.
+
 ## Own-state journal candidate
 
 The future `own-signals-v1` scope adds seven closed system-message and visible-check
@@ -86,8 +96,7 @@ consumption effect, cooldown or income. No coordinates, input-device activity,
 menu target text or other-player fields are journaled. This extends the same
 unreleased own-signals contract; no capture scope is activated.
 
-Two own combat callbacks also enter that future journal, for twelve signal
-families in total: own ActorDeath with the observed ToB status and a fixed HUD
+Two own combat callbacks also enter that future journal: own ActorDeath with the observed ToB status and a fixed HUD
 room label (or unknown), and own tile overlap with a previously observed ToA
 acid object. Other actors and names are excluded. The death observation does not
 prove encounter membership or a team wipe; the overlap does not prove damage or
@@ -125,7 +134,8 @@ so the earlier14-family budget must not be presented as a whole-gameplay quote.
 
 The future `own-state-v1` Queue scope adds one closed `own_state` event type for
 skill goal settings, carried rune-pouch cache, inferred bank-tab currency, visible
-fairy-ring favourites, mixology orders, Spirit Tree options and own raid context.
+fairy-ring favourites, mixology orders, Spirit Tree options, own raid context and
+carried clue-library references.
 The four interface/context additions extend an unreleased scope. Missing values
 remain unknown, repeated orders survive, and only fixed game codes/destinations
 are retained. Visible options do not prove permanent unlocks or house ownership;
@@ -133,7 +143,7 @@ raid context excludes team details and completion claims.
 It requires current-token own-gameplay permission plus the explicit scope. The
 matched backend additionally requires `own_state`, `own_gameplay` and `own_combat`
 permissions before advertising this superset. Old grants do not enable it.
-Only these seven typed projections enter the journal; raw snapshots keep their
+Only these eight typed projections enter the journal; raw snapshots keep their
 existing path. Unknown values stay unknown, goals remain settings rather than XP
 earned, and bank ranges remain inferred rather than a complete wealth balance.
 
@@ -457,7 +467,7 @@ No new permission toggle or account action is introduced here.
 ### Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The seven own-state kinds, seventeen own-vars families and twelve own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The eight own-state kinds, seventeen own-vars families and fifteen own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue

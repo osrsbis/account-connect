@@ -8,12 +8,13 @@ final class OwnSignalEvent
     private OwnSignalEvent() {}
     static final Set<String> KINDS=Set.of("storage.coal_bag","storage.fish_barrel","storage.grape_barrel",
         "combat.chompy_kc","minigame.construction_contract","farming.compost","hunter.rumour","combat.tob_room_death","combat.toa_hazards");
-    static boolean supports(Object kind) { return kind instanceof String && (KINDS.contains(kind)||OwnInferredSignal.supports(kind)); }
+    static boolean supports(Object kind) { return kind instanceof String && (KINDS.contains(kind)||OwnInferredSignal.supports(kind)||OwnClueProjection.supports(kind)); }
     static Map<String,Object> value(String kind,Object raw)
     {
         try
         {
             if(!(raw instanceof Map))return null;Map<?,?> p=(Map<?,?>)raw;Map<String,Object> out=new LinkedHashMap<>();
+            if(OwnClueProjection.supports(kind))return OwnClueProjection.signal(kind,p);
             if(OwnInferredSignal.supports(kind))return OwnInferredSignal.value(kind,p);
             switch(kind)
             {
@@ -70,6 +71,7 @@ final class OwnSignalEvent
             Object session=p.get("gameplay_session");if(!(session instanceof String)||!((String)session).matches("[a-f0-9]{32}"))return null;
             String kind=(String)p.get("signal_kind");
             String source=choice(p.get("source"),inferred?List.of("own_client_sequence")
+                :OwnClueProjection.supports(kind)?List.of(OwnClueProjection.source(kind))
                 :kind.equals("combat.tob_room_death")?List.of("own_client_actor")
                 :kind.equals("combat.toa_hazards")?List.of("own_client_scene"):List.of("own_client_system","own_client_dialog"));
             if(source.equals("own_client_dialog")&&!List.of("storage.coal_bag","storage.fish_barrel").contains(kind))return null;
@@ -91,6 +93,10 @@ final class OwnSignalEvent
         Object rawSource=row.get("source");String source;
         boolean inferred=OwnInferredSignal.supports(row.get("kind"));
         if(inferred) {if(!OwnInferredSignal.source((String)row.get("kind")).equals(rawSource))return null;source="own_client_sequence";}
+        else if(OwnClueProjection.supports(row.get("kind"))) {
+            if(!(row.get("value") instanceof Map)||!OwnClueProjection.sourceMatches((String)row.get("kind"),rawSource,(Map<?,?>)row.get("value")))return null;
+            source=OwnClueProjection.source((String)row.get("kind"));
+        }
         else if("combat.tob_room_death".equals(row.get("kind"))&&"ActorDeath:self".equals(rawSource))source="own_client_actor";
         else if("combat.toa_hazards".equals(row.get("kind"))&&"own_tile+observed_acid_object".equals(rawSource))source="own_client_scene";
         else if("ChatMessage:GAMEMESSAGE:exact_english_projection".equals(rawSource)||"ChatMessage:SPAM:exact_english_projection".equals(rawSource))source="own_client_system";

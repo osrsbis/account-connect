@@ -13,7 +13,7 @@ final class OwnStateEvent
     private static final Map<String,String> KINDS = Map.of("skills.goal_xp", "skill_goals",
         "storage.rune_pouch", "rune_pouch", "storage.bank_tab_currency", "bank_tabs",
         "travel.fairy_destinations","fairy_favourites","minigame.mixology_orders","mixology_orders",
-        "travel.spirit_destinations","spirit_destinations","combat.raid_context","raid_context");
+        "travel.spirit_destinations","spirit_destinations","combat.raid_context","raid_context","clues.destination","clue_inventory");
     static boolean supportsWireKind(Object kind) { return kind instanceof String && KINDS.containsValue(kind); }
     static boolean supports(Object kind) { return kind instanceof String && KINDS.containsKey(kind); }
     static Map<String,Object> wire(Map<String,Object> input)
@@ -160,6 +160,7 @@ final class OwnStateEvent
                 }
                 out.put("tabs", tabs); out.put("untabbed", range(map(p.get("untabbed")), start));
             }
+            else if("clue_inventory".equals(kind))return OwnClueProjection.inventory(p);
             else if("fairy_favourites".equals(kind))
             {
                 List<?> raw=list(p.get("favourite_codes_visible"),10);if(raw.size()!=10)throw new IllegalArgumentException();
