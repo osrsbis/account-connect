@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.24";
+	private static final String PLUGIN_VERSION = "0.7.25";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -6329,6 +6329,7 @@ public class AccountConnectPlugin extends Plugin
 		if (state == GameState.LOADING) { accountProgress.storageRecovery.gap(); ownGameplay.gap(); }
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
+			containerObservedAtMs.clear(); // observations from a prior account/world login cannot timestamp a new cache
 			accountProgress.reset();
 			ownGameplay.reset();
 			geObservations.gap();
@@ -11818,11 +11819,52 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		if ("seed_box".equals(key))
+		{
+			Map<String,Object> seed = seedBoxSnapshot(c);
+			if (seed != null) snap.put(key, seed);
+			return;
+		}
 		Map<String, Object> block = new LinkedHashMap<>();
 		block.put("items", itemList(c));
 		block.put("value_gp", containerValue(c));
 		block.put("observed_at", observedAtSeconds(c.getId()));
 		snap.put(key, block);
+	}
+
+	/** Own fixed container only. Unknown or malformed cache never becomes an empty box. */
+	private Map<String,Object> seedBoxSnapshot(ItemContainer c)
+	{
+		if (c.getId() != net.runelite.api.gameval.InventoryID.SEED_BOX) return null;
+		Item[] raw = c.getItems();
+		if (raw == null || raw.length > 4096) return null;
+		Map<Integer,Long> totals = new java.util.TreeMap<>();
+		for (Item item : raw)
+		{
+			if (item == null || item.getId() < -1 || item.getQuantity() < 0
+				|| item.getId() <= 0 && item.getQuantity() > 0) return null;
+			if (item.getId() > 0 && item.getQuantity() > 0)
+				totals.merge(item.getId(), (long)item.getQuantity(), Long::sum);
+		}
+		List<Map<String,Object>> items = new ArrayList<>();
+		Long estimate = 0L;
+		for (Map.Entry<Integer,Long> entry : totals.entrySet())
+		{
+			items.add(itemMapLong(entry.getKey(), entry.getValue()));
+			if (estimate != null)
+			{
+				long price = itemManager == null ? -1 : itemManager.getItemPrice(entry.getKey());
+				if (price <= 0) estimate = null;
+				else try { estimate = Math.addExact(estimate, Math.multiplyExact(price, entry.getValue())); }
+				catch (ArithmeticException overflow) { estimate = null; }
+				if (estimate != null && estimate > 9007199254740991L) estimate = null; // exact JSON integer range
+			}
+		}
+		Map<String,Object> block = new LinkedHashMap<>(); block.put("items", items); block.put("value_gp", estimate);
+		block.put("observed_at", observedAtSeconds(net.runelite.api.gameval.InventoryID.SEED_BOX));
+		block.put("basis", "client_cached_seed_box"); block.put("complete", false);
+		block.put("status", items.isEmpty() ? "observed_empty_cache" : "cached_items");
+		block.put("valuation_basis", "client_item_price_estimate"); return block;
 	}
 
 	/**

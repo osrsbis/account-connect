@@ -391,7 +391,7 @@ public class BroadCaptureBatch1Test
 		assertNull("another container is unaffected", p.observedAtSeconds(93));
 	}
 
-	// ------------------------------------------------------------------ profile fencing
+    // ------------------------------------------------------------------ profile fencing
 
 	@Test
 	public void eventsCarryProfileTypeOnlyOutsideTheMainGame() throws Exception
@@ -423,6 +423,54 @@ public class BroadCaptureBatch1Test
 		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.INV_GROUP_TEMP));
 		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.DUELOFFER));
 		assertFalse(m.containsValue(net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV0));
+	}
+
+	@Test
+	public void seedBoxMissingDuplicateAndEmptyStatesNeverFabricateABalance() throws Exception
+	{
+		setUp();net.runelite.client.game.ItemManager prices=mock(net.runelite.client.game.ItemManager.class);
+		when(prices.getItemPrice(5291)).thenReturn(2L);inject("itemManager",prices);
+		net.runelite.api.ItemContainer c=mock(net.runelite.api.ItemContainer.class);when(c.getId()).thenReturn(573);
+		Map<String,Object> snap=new LinkedHashMap<>();
+		p.addContainerSnapshot(snap,"seed_box",null);assertFalse(snap.containsKey("seed_box"));
+		p.addContainerSnapshot(snap,"seed_box",c);assertFalse("null array is unknown",snap.containsKey("seed_box"));
+		when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,Integer.MAX_VALUE),
+			new net.runelite.api.Item(5291,Integer.MAX_VALUE),new net.runelite.api.Item(-1,0)});
+		p.containerObservedAtMs.put(573,1700000000123L);p.addContainerSnapshot(snap,"seed_box",c);
+		Map<?,?> block=(Map<?,?>)snap.get("seed_box");
+		assertEquals(List.of(Map.of("id",5291,"qty",4294967294L)),block.get("items"));
+		assertEquals(8589934588L,block.get("value_gp"));assertEquals(false,block.get("complete"));
+		assertEquals("client_cached_seed_box",block.get("basis"));assertEquals(1700000000L,block.get("observed_at"));
+		when(c.getItems()).thenReturn(new net.runelite.api.Item[0]);snap.clear();p.addContainerSnapshot(snap,"seed_box",c);
+		block=(Map<?,?>)snap.get("seed_box");assertEquals(List.of(),block.get("items"));assertEquals("observed_empty_cache",block.get("status"));
+		when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,-1)});
+		snap.clear();p.addContainerSnapshot(snap,"seed_box",c);assertFalse("invalid is not empty",snap.containsKey("seed_box"));
+	}
+
+	@Test
+	public void seedBoxRejectsWrongContainerAndUnknownValueWithoutReadingOtherPlayers() throws Exception
+	{
+		setUp();net.runelite.api.ItemContainer c=mock(net.runelite.api.ItemContainer.class);
+		when(c.getId()).thenReturn(90);Map<String,Object> snap=new LinkedHashMap<>();p.addContainerSnapshot(snap,"seed_box",c);
+		assertFalse(snap.containsKey("seed_box"));org.mockito.Mockito.verify(c,org.mockito.Mockito.never()).getItems();
+		when(c.getId()).thenReturn(573);when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,2)});
+		net.runelite.client.game.ItemManager prices=mock(net.runelite.client.game.ItemManager.class);inject("itemManager",prices);
+		when(prices.getItemPrice(5291)).thenReturn(Long.MAX_VALUE);p.addContainerSnapshot(snap,"seed_box",c);
+		assertNull(((Map<?,?>)snap.get("seed_box")).get("value_gp"));
+		assertEquals("client_item_price_estimate",((Map<?,?>)snap.get("seed_box")).get("valuation_basis"));
+		for(long price:new long[]{0,4503599627370496L})
+		{
+			when(prices.getItemPrice(5291)).thenReturn(price);snap.clear();p.addContainerSnapshot(snap,"seed_box",c);
+			assertNull("unpriced or inexact JSON values stay unknown",((Map<?,?>)snap.get("seed_box")).get("value_gp"));
+		}
+	}
+
+	@Test
+	public void containerObservationTimeDoesNotSurviveRelog() throws Exception
+	{
+		setUp();p.containerObservedAtMs.put(573,1700000000123L);p.containerObservedAtMs.put(95,1700000000123L);
+		net.runelite.api.events.GameStateChanged e=new net.runelite.api.events.GameStateChanged();e.setGameState(GameState.LOGGING_IN);
+		p.onGameStateChanged(e);assertNull(p.observedAtSeconds(573));assertNull(p.observedAtSeconds(95));
 	}
 
 	@Test

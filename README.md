@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.24 candidate)
+## Own-event provenance (0.7.25 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -37,6 +37,15 @@ values. Inventory is not added, and no gain, item-price valuation or spendable
 wealth is claimed. The packet observation time remains visible. This is bounded
 recent snapshot history. The future own-state scope also journals these typed observations; actual-client verification is still pending.
 Sources: [reviewed tab-offset technique](https://github.com/BrastaSauce/purchase-progress/blob/9b190e3cdfee0c3848380e57d044028e63f05e34/src/main/java/com/brastasauce/purchaseprogress/BankCalculation.java) and [RuneLite1.13.1 bank interface](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/bank/BankPlugin.java).
+
+The granted seed-box snapshot now merges duplicate IDs with long quantities.
+A missing container or invalid item array is omitted, while a valid empty array
+is explicitly an observed empty cache. The fixed seed-box container ID is checked
+before reading items. Values remain client price estimates, with unpriced,
+overflowing or inexact JSON totals unknown. This is neither verified current
+wealth nor a durable history stream. Container observation timestamps clear on
+relog, hop and disconnect; old-account timestamps cannot label a new cache.
+Source-specific callback and actual-client acceptance remain separate.
 
 ## Own-state journal candidate
 
