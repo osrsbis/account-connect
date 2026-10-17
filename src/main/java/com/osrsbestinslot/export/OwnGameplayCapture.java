@@ -37,10 +37,11 @@ final class OwnGameplayCapture
     private final Deque<Map<String,Object>> observations = new ArrayDeque<>();
     private final Deque<Integer> observationBytes = new ArrayDeque<>();
     private int bufferedBytes;
-    private final java.util.function.Predicate<Map<String,Object>> combatSink;
+    private final java.util.function.Predicate<Map<String,Object>> eventSink;
     private long combatObserved, combatHandedOff, combatNotHandedOff;
+    private long stateObserved, stateHandedOff, stateNotHandedOff;
     OwnGameplayCapture() { this(row -> false); }
-    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { combatSink = sink; }
+    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { eventSink = sink; }
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
     final OwnInterfaceCapture interfaces = new OwnInterfaceCapture(this);
     final OwnSequenceCapture sequences = new OwnSequenceCapture(this);
@@ -67,6 +68,7 @@ final class OwnGameplayCapture
         states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         combatObserved = combatHandedOff = combatNotHandedOff = 0;
+        stateObserved = stateHandedOff = stateNotHandedOff = 0;
         gapReason = "not_observed";
     }
 
@@ -126,9 +128,17 @@ final class OwnGameplayCapture
         {
             combatObserved++;
             boolean handedOff = false;
-            try { handedOff = combatSink.test(combat); }
+            try { handedOff = eventSink.test(combat); }
             catch (RuntimeException failure) { /* The snapshot still contains the observation. */ }
             if (handedOff) combatHandedOff++; else combatNotHandedOff++;
+        }
+        if (OwnStateEvent.supports(kind))
+        {
+            stateObserved++; boolean handedOff = false;
+            Map<String,Object> event = OwnStateEvent.from(session, row);
+            try { handedOff = event != null && eventSink.test(event); }
+            catch (RuntimeException failure) { /* snapshot remains; a handoff is not a durable ACK */ }
+            if (handedOff) stateHandedOff++; else stateNotHandedOff++;
         }
     }
 
@@ -269,6 +279,8 @@ final class OwnGameplayCapture
         // Handoff is not disk durability or server ACK. Scope is this capture session only.
         out.put("combat_events_observed", combatObserved);out.put("combat_events_handed_off", combatHandedOff);
         out.put("combat_events_not_handed_off", combatNotHandedOff);
+        out.put("state_events_observed", stateObserved); out.put("state_events_handed_off", stateHandedOff);
+        out.put("state_events_not_handed_off", stateNotHandedOff);
         out.put("states", new LinkedHashMap<>(states)); out.put("observations", new ArrayList<>(observations));
         return out;
     }

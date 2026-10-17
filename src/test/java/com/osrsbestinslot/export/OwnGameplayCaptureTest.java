@@ -57,6 +57,28 @@ public class OwnGameplayCaptureTest
         NPC n = mock(NPC.class); when(n.getId()).thenReturn(id); return n;
     }
 
+    @Test public void auditedStateSourcesHandoffOncePerChangeAndExposeFailuresWithoutCallingThemAcknowledged()
+    {
+        List<Map<String,Object>> sent = new ArrayList<>();
+        capture = new OwnGameplayCapture(e -> { sent.add(e); return sent.size() != 2; }); settle();
+        long at = OwnStateEventTest.AT;
+        capture.poll(client,at); tick++; capture.poll(client,at+600);
+        assertEquals(2,sent.size());
+        assertEquals(new HashSet<>(Arrays.asList("skill_goals","rune_pouch")),
+            new HashSet<>(Arrays.asList(sent.get(0).get("state_kind"),sent.get(1).get("state_kind"))));
+        ItemContainer bank=mock(ItemContainer.class);when(bank.getItems()).thenReturn(new Item[]{new Item(995,100)});
+        when(client.getItemContainer(95)).thenReturn(bank);
+        when(client.getWidget(net.runelite.api.gameval.InterfaceID.Bankmain.ITEMS)).thenReturn(mock(net.runelite.api.widgets.Widget.class));
+        bit(4150,1);for(int i=0;i<9;i++)bit(4171+i,2+i);vars[2]=1;
+        capture.bankTabs.container(95,bank,tick,at+600);capture.bankTabs.built(client,at+601);
+        assertEquals(3,sent.size());assertEquals(false,sent.get(2).get("direct"));
+        assertEquals(3L,capture.snapshot().get("state_events_observed"));
+        assertEquals(2L,capture.snapshot().get("state_events_handed_off"));
+        assertEquals(1L,capture.snapshot().get("state_events_not_handed_off"));
+        for(Map<String,Object> e:sent)assertNotNull(OwnStateEvent.wire(e));
+        capture.reset();assertEquals(0L,capture.snapshot().get("state_events_observed"));
+    }
+
     @Test public void carriedPouchStateChangesRemainAbsoluteAndResetAfterSceneGap()
     {
         settle();ItemContainer inventory=mock(ItemContainer.class);

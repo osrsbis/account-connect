@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.22 candidate)
+## Own-event provenance (0.7.23 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -23,7 +23,7 @@ read. Missing inventory, absent varbits and unknown rune mappings stay unknown;
 duplicate rune slots use 64-bit totals. These are cached absolute observations,
 not consumption events, complete storage or a wealth valuation. The original
 raw snapshot remains raw. This new decoder is local and still needs game-client
-verification; its recent snapshot history is not the durable combat event path.
+verification; explicit future own-state scope adds bounded journal transport as described below.
 Source: [RuneLite1.13.1 rune-pouch overlay](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/runepouch/RunepouchOverlay.java).
 
 The same granted snapshot now qualifies bank-tab ranges and currency quantities.
@@ -35,8 +35,28 @@ ranges are explicitly inferred; tab 0 displays the whole bank, so the remainder
 is labelled untabbed. Only coins and platinum quantities are summed, using long
 values. Inventory is not added, and no gain, item-price valuation or spendable
 wealth is claimed. The packet observation time remains visible. This is bounded
-recent snapshot history, with actual-client verification still pending.
+recent snapshot history. The future own-state scope also journals these typed observations; actual-client verification is still pending.
 Sources: [reviewed tab-offset technique](https://github.com/BrastaSauce/purchase-progress/blob/9b190e3cdfee0c3848380e57d044028e63f05e34/src/main/java/com/brastasauce/purchaseprogress/BankCalculation.java) and [RuneLite1.13.1 bank interface](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/bank/BankPlugin.java).
+
+## Own-state journal candidate
+
+The future `own-state-v1` Queue scope adds one closed `own_state` event type for
+skill goal settings, carried rune-pouch cache and inferred bank-tab currency.
+It requires current-token own-gameplay permission plus the explicit scope. The
+matched backend additionally requires `own_state`, `own_gameplay` and `own_combat`
+permissions before advertising this superset. Old grants do not enable it.
+Only these three typed projections enter the journal; raw snapshots keep their
+existing path. Unknown values stay unknown, goals remain settings rather than XP
+earned, and bank ranges remain inferred rather than a complete wealth balance.
+
+Each source baseline/change uses the existing per-ID journal and ACK path.
+Restart or scope rollback retains pending rows until the matching scope returns;
+explicit erasure still prevents replay. Process-local observed/handed-off/failure
+counters are not durable delivery counts. Schema5 and the separate state policy
+are LOCAL candidates; no server policy, public release or live retention scope
+has been activated. The frozen public QA artifact and private staff build remain
+separate. Exact-source review, truthful disclosure, matched backend and actual
+client QA are still required before release.
 
 ## Own-combat journal candidate
 
@@ -349,8 +369,8 @@ No new permission toggle or account action is introduced here.
 ### Public Queue retry contract (local candidate)
 
 A successful token-bound `X-Event-Queue: ge-v1` or `own-history-v1` response,
-a settled own account/mode and a known RuneLite profile are required. Only the
-14 Queue-supported event types enter the public journal: six GE types plus
+a settled own account/mode and a known RuneLite profile are required. The base contract journals
+14 Queue-supported event types: six GE types plus
 bank_session, equip_change, loot, kill_count, level_up, xp_gain, alch and pickup.
 The existing first-party field projection runs before disk, during recovery and
 before POST. Other public families and snapshots retain their existing memory

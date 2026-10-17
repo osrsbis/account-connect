@@ -83,6 +83,30 @@ public class PublicEventOutboxPluginTest
             .header("X-Own-Gameplay",gameplay?"on":"off").build();
         p.applyServerPolicy(r,token.get());p.awaitSpoolIdleForTest();
     }
+    private void stateGrant(boolean gameplay, String responseToken) throws Exception
+    {
+        Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-state-v1")
+            .header("X-Own-Gameplay",gameplay?"on":"off").build();
+        p.applyServerPolicy(r,responseToken);p.awaitSpoolIdleForTest();
+    }
+    @Test public void stateRequiresCurrentExplicitGrantAndKeepsOldRowsAcrossScopeRollback() throws Exception
+    {
+        Map<String,Object> event=OwnStateEventTest.goalEvent();
+        stateGrant(false,token.get());assertFalse(p.emitOwnGameplayEvent(event));
+        combatGrant(true);assertFalse(p.emitOwnGameplayEvent(event));
+        stateGrant(true,"f".repeat(32));assertFalse(p.emitOwnGameplayEvent(event));
+        stateGrant(true,token.get());assertTrue(p.emitOwnGameplayEvent(event));p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());String id=(String)p.pendingEvents.get(0).get("event_id");
+        p.crashSpoolForTest();p=fresh("STANDARD",7);combatGrant(true);p.pumpPublicOutbox();p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        stateGrant(true,token.get());p.pumpPublicOutbox();p.awaitSpoolIdleForTest();
+        assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+        server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();
+        JsonObject uploaded=request().getAsJsonArray("events").get(0).getAsJsonObject();
+        assertEquals("skill_goals",uploaded.get("state_kind").getAsString());done();
+        p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
+    }
     @Test public void combatRequiresBothGrantsAndSurvivesRestartAndScopeRollbackUntilOwnAck() throws Exception
     {
         Map<String,Object> event=new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,

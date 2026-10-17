@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.22";
+	private static final String PLUGIN_VERSION = "0.7.23";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -156,7 +156,7 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
 	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
-	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnCombat);
+	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnGameplayEvent);
 	private volatile String gameplayGrantToken;
 	private volatile long gameplayGrantEpoch;
 
@@ -168,15 +168,23 @@ public class AccountConnectPlugin extends Plugin
 
 	boolean emitOwnCombat(Map<String,Object> observation)
 	{
+		if (!"combat_hit".equals(observation.get("type")) && !"combat_npc_end".equals(observation.get("type"))) return false;
+		return emitOwnGameplayEvent(observation);
+	}
+
+	boolean emitOwnGameplayEvent(Map<String,Object> observation)
+	{
 		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
-		if (!gameplayGranted() || !"own-combat-v1".equals(eventQueueScope) || publicQueueContext(true) == null)
+		boolean states = "own-state-v1".equals(eventQueueScope);
+		if (!gameplayGranted() || (!states && !"own-combat-v1".equals(eventQueueScope)) || publicQueueContext(true) == null)
 			return false;
 		// Capture can settle before the slower snapshot/session task catches an account switch.
 		if (client != null && (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
 			|| !Long.toString(client.getAccountHash()).equals(activeHash)
 			|| !RuneScapeProfileType.getCurrent(client).name().equals(activeProfileType))) return false;
 		String type = String.valueOf(observation.get("type"));
-		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)) return false;
+		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)
+			&& !(states && "own_state".equals(type) && OwnStateEvent.wire(observation) != null)) return false;
 		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
 		emitEvent(type, fields); return true;
 	}
@@ -11935,7 +11943,7 @@ public class AccountConnectPlugin extends Plugin
 		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
 		String queueScope = response.header("X-Event-Queue");
 		if (response.isSuccessful() && ("ge-v1".equals(queueScope) || "own-history-v1".equals(queueScope)
-			|| "own-combat-v1".equals(queueScope)))
+			|| "own-combat-v1".equals(queueScope) || "own-state-v1".equals(queueScope)))
 		{
 			eventQueueScope = queueScope;
 			eventQueueGrantToken = sentToken;
