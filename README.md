@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.29 candidate)
+## Own-event provenance (0.7.30 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -67,6 +67,15 @@ relog, hop and disconnect; old-account timestamps cannot label a new cache.
 Source-specific callback and actual-client acceptance remain separate.
 
 ## Own-state journal candidate
+
+A change in the effective gameplay Queue scope or settlement of its current
+account/profile journal gate starts a new capture baseline after two client
+ticks. This prevents a state first seen under a narrower scope from staying
+absent forever when the scope expands. Unchanged policy responses and replies
+for an old token do not reset it. Only newly observed values form the baseline;
+the earlier snapshot is not replayed as current. Pending journal rows keep their
+original IDs and survive the capture reset. This behavior is locally tested;
+exact-client QA and activation remain open.
 
 The separate future `own-vars-v1` scope journals seventeen closed own-player raw
 counter/settings families: Surge, Death Charge, escape crystal settings, arena,

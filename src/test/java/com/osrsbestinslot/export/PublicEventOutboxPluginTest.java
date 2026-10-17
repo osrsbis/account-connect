@@ -97,6 +97,63 @@ public class PublicEventOutboxPluginTest
             .header("X-Own-Gameplay",gameplay?"on":"off").build();
         p.applyServerPolicy(r,responseToken);p.awaitSpoolIdleForTest();
     }
+    @Test public void lateJournalIdentitySettlementReobservesCurrentStateWithoutImportingEarlierValues() throws Exception
+    {
+        net.runelite.api.Client client=mock(net.runelite.api.Client.class);int[] tick={100};
+        when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+        when(client.getLocalPlayer()).thenReturn(mock(net.runelite.api.Player.class));
+        when(client.getAccountHash()).thenReturn(123L);when(client.getRealSkillLevel(net.runelite.api.Skill.HITPOINTS)).thenReturn(10);
+        when(client.getWorldType()).thenReturn(EnumSet.noneOf(net.runelite.api.WorldType.class));
+        when(client.getTickCount()).thenAnswer(i->tick[0]);set(p,"client",client);set(p,"activeHash","999");
+        Field field=AccountConnectPlugin.class.getDeclaredField("ownGameplay");field.setAccessible(true);
+        OwnGameplayCapture capture=(OwnGameplayCapture)field.get(p);long at=System.currentTimeMillis();
+        varsGrant(true,token.get());assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",55),tick[0],at);p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        set(p,"activeHash","123");assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at+1200);p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());Map<String,Object> event=p.pendingEvents.get(0);
+        assertEquals("baseline",event.get("observation"));assertEquals(0L,((Map<?,?>)event.get("values")).get("timer_raw"));
+        assertEquals("123",event.get("account_hash"));assertEquals(1L,capture.snapshot().get("vars_events_handed_off"));
+        set(p,"sessionActive",false);assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",99),tick[0],at+2400);p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());
+        set(p,"sessionActive",true);assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at+3600);p.awaitSpoolIdleForTest();
+        assertEquals(2,p.pendingEvents.size());assertEquals("baseline",p.pendingEvents.get(1).get("observation"));
+        assertEquals(0L,((Map<?,?>)p.pendingEvents.get(1).get("values")).get("timer_raw"));
+    }
+
+    @Test public void sameTokenScopePromotionStartsFreshJournalBaselineAndIdenticalPolicyDoesNot() throws Exception
+    {
+        net.runelite.api.Client client=mock(net.runelite.api.Client.class);int[] tick={100};
+        when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+        when(client.getLocalPlayer()).thenReturn(mock(net.runelite.api.Player.class));
+        when(client.getAccountHash()).thenReturn(123L);when(client.getRealSkillLevel(net.runelite.api.Skill.HITPOINTS)).thenReturn(10);
+        when(client.getWorldType()).thenReturn(EnumSet.noneOf(net.runelite.api.WorldType.class));
+        when(client.getTickCount()).thenAnswer(i->tick[0]);set(p,"client",client);
+        Field field=AccountConnectPlugin.class.getDeclaredField("ownGameplay");field.setAccessible(true);
+        OwnGameplayCapture capture=(OwnGameplayCapture)field.get(p);long at=System.currentTimeMillis();
+        stateGrant(true,token.get());assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at);p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());assertEquals(1L,capture.snapshot().get("vars_events_not_handed_off"));
+        varsGrant(true,token.get());assertFalse("broader scope needs a new source baseline",p.gameplayReady());
+        tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at+1200);p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());assertEquals("baseline",p.pendingEvents.get(0).get("observation"));
+        String session=(String)p.pendingEvents.get(0).get("gameplay_session");
+        varsGrant(true,token.get());assertTrue(p.gameplayReady());
+        stateGrant(true,"f".repeat(32));assertTrue(p.gameplayReady());
+        tick[0]++;capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at+1800);p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());assertEquals(session,capture.snapshot().get("collector_session").toString().replace("-",""));
+        stateGrant(true,token.get());assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        varsGrant(true,token.get());assertFalse(p.gameplayReady());tick[0]+=2;assertTrue(p.gameplayReady());
+        capture.state("effects.surge","varbit:16270",Map.of("timer_raw",0),tick[0],at+4200);p.awaitSpoolIdleForTest();
+        assertEquals(2,p.pendingEvents.size());assertEquals("baseline",p.pendingEvents.get(1).get("observation"));
+        assertNotEquals(session,p.pendingEvents.get(1).get("gameplay_session"));
+        assertNotEquals(p.pendingEvents.get(0).get("event_id"),p.pendingEvents.get(1).get("event_id"));
+    }
+
     @Test public void rawVarsRequireCurrentScopeAndSurviveRollbackRestartWithUnknownFields() throws Exception
     {
         Map<String,Object> event=OwnVarsEventTest.event();

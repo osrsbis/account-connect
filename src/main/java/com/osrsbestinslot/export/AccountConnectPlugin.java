@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.29";
+	private static final String PLUGIN_VERSION = "0.7.30";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -175,13 +175,9 @@ public class AccountConnectPlugin extends Plugin
 	boolean emitOwnGameplayEvent(Map<String,Object> observation)
 	{
 		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
-		boolean vars = "own-vars-v1".equals(eventQueueScope), states = vars || "own-state-v1".equals(eventQueueScope);
-		if (!gameplayGranted() || (!states && !"own-combat-v1".equals(eventQueueScope)) || publicQueueContext(true) == null)
-			return false;
-		// Capture can settle before the slower snapshot/session task catches an account switch.
-		if (client != null && (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
-			|| !Long.toString(client.getAccountHash()).equals(activeHash)
-			|| !RuneScapeProfileType.getCurrent(client).name().equals(activeProfileType))) return false;
+		String scope = ownGameplayQueueScope();
+		if (!gameplayGranted() || scope == null) return false;
+		boolean vars = "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope);
 		String type = String.valueOf(observation.get("type"));
 		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)
 			&& !(states && "own_state".equals(type) && OwnStateEvent.wire(observation) != null)
@@ -190,10 +186,25 @@ public class AccountConnectPlugin extends Plugin
 		emitEvent(type, fields); return true;
 	}
 
+	/** Same effective gate for capture baselines and their journal handoff. No network or disk work. */
+	private String ownGameplayQueueScope()
+	{
+		String scope = eventQueueScope;
+		if (!("own-combat-v1".equals(scope) || "own-state-v1".equals(scope) || "own-vars-v1".equals(scope))
+			|| publicQueueContext(true) == null) return null;
+		// Capture can settle before the slower snapshot/session task catches an account switch.
+		if (client != null && (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
+			|| !Long.toString(client.getAccountHash()).equals(activeHash)
+			|| !RuneScapeProfileType.getCurrent(client).name().equals(activeProfileType))) return null;
+		return scope;
+	}
+
 	boolean gameplayReady()
 	{
 		if (!gameplayGranted()) { ownGameplay.reset(); return false; }
-		return ownGameplay.ready(client, currentLinkToken() + ":" + gameplayGrantEpoch);
+		// A broader scope or newly settled journal identity needs a fresh absolute baseline.
+		// The journal is separate: changing this capture session never erases pending rows.
+		return ownGameplay.ready(client, currentLinkToken() + ":" + gameplayGrantEpoch + ":" + ownGameplayQueueScope());
 	}
 
 	Map<String,Object> gameplayBlock()
