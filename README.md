@@ -4,7 +4,9 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.36 candidate)
+## Own-event provenance (0.7.37 candidate)
+
+RuneLite subscriber names follow the actual event-bus contract. The 0.7.36 isolated Java17 client exposed a startup rejection for three noncanonical method names; the focused regression registers the plugin with RuneLite's EventBus. Exact-client gameplay and release acceptance remain separate.
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local

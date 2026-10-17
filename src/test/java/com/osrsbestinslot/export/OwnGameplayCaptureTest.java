@@ -515,7 +515,7 @@ public class OwnGameplayCaptureTest
         AccountConnectPlugin p=plugin();
         ChatMessage msg=new ChatMessage(); msg.setType(ChatMessageType.GAMEMESSAGE);
         msg.setMessage("Your quetzal whistle has 42 charges remaining.");
-        p.onChatMessage(msg); p.onOwnActivityClientTick(new ClientTick());
+        p.onChatMessage(msg); p.onClientTick(new ClientTick());
         verify(client,never()).getWidget(193,2); assertNull(p.gameplayBlock());
         p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN); p.gameplayBlock(); tick+=2;
         p.onChatMessage(msg);

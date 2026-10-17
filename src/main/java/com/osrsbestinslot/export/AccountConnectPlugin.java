@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.36";
+	private static final String PLUGIN_VERSION = "0.7.37";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -7733,19 +7733,19 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onOwnActivityClientTick(net.runelite.api.events.ClientTick event)
+	public void onClientTick(net.runelite.api.events.ClientTick event)
 	{
 		if (gameplayReady()) ownGameplay.interfaces.clientTick(client, System.currentTimeMillis());
 	}
 
 	@Subscribe
-	public void onOwnActivityObjectSpawned(net.runelite.api.events.GameObjectSpawned event)
+	public void onGameObjectSpawned(net.runelite.api.events.GameObjectSpawned event)
 	{
 		if (gameplayReady()) ownGameplay.scene.spawned(client, event.getGameObject(), System.currentTimeMillis());
 	}
 
 	@Subscribe
-	public void onOwnActivityObjectDespawned(net.runelite.api.events.GameObjectDespawned event)
+	public void onGameObjectDespawned(net.runelite.api.events.GameObjectDespawned event)
 	{
 		if (gameplayReady()) ownGameplay.scene.despawned(event.getGameObject());
 	}
