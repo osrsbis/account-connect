@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.27 candidate)
+## Own-event provenance (0.7.28 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -16,6 +16,16 @@ unsettled identity, clock reversal and context older than ten seconds stay
 unknown. No raw local profile ID, token or player name enters this context.
 Backend projection support and exact-client QA remain release prerequisites;
 older projected archives do not acquire this metadata retroactively.
+
+The granted own-gameplay snapshot now reads five personal loot-key slots only
+while the fixed chest tabs are visible and a matching container packet was seen
+in the current session. Missing, empty and changed-without-packet caches remain
+distinct. Duplicate item quantities use long totals; unpriced or unsafe reference
+values stay unknown. No labels, victim fields or original-owner information are
+read. This is a cache valuation, not new loot or realized income. Closing the UI,
+a scene gap, account switch or grant reset clears the source cache. Exact-client
+verification and durable transport for this new snapshot family remain open.
+Source: [pinned personal-key container mapping](https://github.com/pk-enjoyer/real-loot-key-value/blob/938d5157fb8202f3766b358466743048e0ce44c4/src/main/java/com/reallootkeyvalue/LootKeyValueCalculator.java).
 
 The granted hunter snapshot history records a whistle's observed target from a
 closed 28-creature list, or its exact no-active-rumour response. It exports fixed

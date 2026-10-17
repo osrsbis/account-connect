@@ -650,6 +650,18 @@ public class OffBookEventsTest
 	}
 
 	@Test
+	public void unavailableChestItemArrayDoesNotThrowOrLatchLooted() throws Exception
+	{
+		AccountConnectPlugin plugin = new AccountConnectPlugin();inject(plugin,"config",onConfig());
+		Client client=mock(Client.class);ItemContainer reward=mock(ItemContainer.class);
+		when(client.getItemContainer(581)).thenReturn(reward);inject(plugin,"client",client);
+		when(reward.getItems()).thenReturn(null);plugin.handleChestLootWidgetLoaded(539);
+		assertTrue(plugin.pendingEvents.isEmpty());
+		when(reward.getItems()).thenReturn(new Item[]{new Item(995,100)});plugin.handleChestLootWidgetLoaded(539);
+		assertEquals(1,plugin.pendingEvents.size());
+	}
+
+	@Test
 	public void emptyOrAbsentRewardContainerEmitsNothing() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();

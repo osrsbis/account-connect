@@ -42,7 +42,9 @@ final class OwnGameplayCapture
     private long stateObserved, stateHandedOff, stateNotHandedOff;
     private long varsObserved, varsHandedOff, varsNotHandedOff;
     OwnGameplayCapture() { this(row -> false); }
-    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { eventSink = sink; }
+    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { this(sink,id -> -1); }
+    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink,java.util.function.IntToLongFunction prices)
+    { eventSink = sink;lootKeys=new OwnLootKeysCapture(this,prices); }
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
     final OwnInterfaceCapture interfaces = new OwnInterfaceCapture(this);
     final OwnSequenceCapture sequences = new OwnSequenceCapture(this);
@@ -50,6 +52,7 @@ final class OwnGameplayCapture
     final OwnConsumptionCapture consumption = new OwnConsumptionCapture(this);
     final OwnActivityCapture activities = new OwnActivityCapture(this);
     final OwnGroundClueCapture groundClues = new OwnGroundClueCapture(this);
+    final OwnLootKeysCapture lootKeys;
     final OwnBankTabsCapture bankTabs = new OwnBankTabsCapture(this);
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -66,7 +69,7 @@ final class OwnGameplayCapture
         identity = session = profile = null;
         accountType = null;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset();
+        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         combatObserved = combatHandedOff = combatNotHandedOff = 0;
         stateObserved = stateHandedOff = stateNotHandedOff = 0;
@@ -103,7 +106,7 @@ final class OwnGameplayCapture
     void gap()
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset();
+        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -230,6 +233,7 @@ final class OwnGameplayCapture
         state("skills.goal_xp", "varps:1229-1251,1253-1275,4964,4965", goals, tick, at);
         state("storage.rune_pouch", "own_inventory,varbits,enum:982", OwnRunePouchCapture.read(client,vars), tick, at);
         activities.poll(client, vars, at);
+        lootKeys.poll(client,at);
         interfaces.poll(client, at);
         sequences.poll(client, at, System.nanoTime());
         scene.poll(client, at);

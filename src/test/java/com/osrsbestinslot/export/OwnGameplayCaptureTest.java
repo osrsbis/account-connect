@@ -367,6 +367,27 @@ public class OwnGameplayCaptureTest
         return p;
     }
 
+    @Test public void lootKeyContainerHandlerReadsOnlyWithCurrentGameplayGrantAndClearsAfterRevocation() throws Exception
+    {
+        AccountConnectPlugin p=plugin();ItemContainer c=mock(ItemContainer.class);when(c.getId()).thenReturn(558);
+        when(c.getItems()).thenReturn(new Item[]{new Item(995,100)});when(client.getItemContainer(558)).thenReturn(c);
+        net.runelite.api.widgets.Widget tabs=mock(net.runelite.api.widgets.Widget.class);
+        when(client.getWidget(net.runelite.api.gameval.InterfaceID.WildyLootChest.TABS)).thenReturn(tabs);
+        ItemContainerChanged change=new ItemContainerChanged(558,c);p.onItemContainerChanged(change);verify(c,never()).getItems();
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onItemContainerChanged(change);verify(c,never()).getItems();
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemContainerChanged(change);
+        Field field=AccountConnectPlugin.class.getDeclaredField("ownGameplay");field.setAccessible(true);
+        OwnGameplayCapture own=(OwnGameplayCapture)field.get(p);own.lootKeys.poll(client,System.currentTimeMillis());
+        Map<?,?> value=(Map<?,?>)((Map<?,?>)((Map<?,?>)p.gameplayBlock().get("states")).get("loot.owned_key_contents")).get("value");
+        assertEquals("cached_items",((Map<?,?>)((List<?>)value.get("slots")).get(0)).get("status"));
+        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemContainerChanged(change);assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;assertNotNull(p.gameplayBlock());
+        own.lootKeys.poll(client,System.currentTimeMillis());
+        value=(Map<?,?>)((Map<?,?>)((Map<?,?>)p.gameplayBlock().get("states")).get("loot.owned_key_contents")).get("value");
+        assertEquals("not_observed_in_session",((Map<?,?>)((List<?>)value.get("slots")).get(0)).get("status"));
+        verify(tabs,never()).getText();verify(client,never()).getPlayers();
+    }
+
     @Test public void bankBuildNeedsOwnCurrentGrantAndPacketAndRevocationClearsItsCache() throws Exception
     {
         AccountConnectPlugin p = plugin(); ScriptPostFired build = new ScriptPostFired(ScriptID.BANKMAIN_BUILD);

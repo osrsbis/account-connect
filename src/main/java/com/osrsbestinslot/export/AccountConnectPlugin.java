@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.27";
+	private static final String PLUGIN_VERSION = "0.7.28";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -156,7 +156,7 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
 	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
-	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnGameplayEvent);
+	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnGameplayEvent, id -> this.itemManager == null ? -1 : this.itemManager.getItemPrice(id));
 	private volatile String gameplayGrantToken;
 	private volatile long gameplayGrantEpoch;
 
@@ -6491,6 +6491,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
+		if (OwnLootKeysCapture.supports(event.getContainerId()) && gameplayReady())
+			ownGameplay.lootKeys.container(client, event.getContainerId(), event.getItemContainer(), System.currentTimeMillis());
 		if (event.getContainerId() == BANK_CONTAINER_ID && gameplayReady())
 			ownGameplay.bankTabs.container(event.getContainerId(), event.getItemContainer(), client.getTickCount(), System.currentTimeMillis());
 		if (progressReady()) accountProgress.storageRecovery.container(client, event.getContainerId(),
@@ -6767,7 +6769,9 @@ public class AccountConnectPlugin extends Plugin
 			{
 				continue;
 			}
-			for (Item item : c.getItems())
+			Item[] rewardItems = c.getItems();
+			if (rewardItems == null) continue; // An unloaded reward is unknown; do not latch chestLooted.
+			for (Item item : rewardItems)
 			{
 				if (item != null && item.getId() > 0 && item.getQuantity() > 0)
 				{
