@@ -103,6 +103,18 @@ public class PublicEventOutboxPluginTest
         server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();request();done();
         p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
     }
+    @Test public void combatCannotUsePreviousAccountOrWorldProfileBeforeSessionTaskCatchesUp() throws Exception
+    {
+        combatGrant(true);net.runelite.api.Client client=mock(net.runelite.api.Client.class);
+        set(p,"client",client);when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+        when(client.getLocalPlayer()).thenReturn(mock(net.runelite.api.Player.class));
+        when(client.getWorldType()).thenReturn(EnumSet.noneOf(net.runelite.api.WorldType.class));
+        when(client.getAccountHash()).thenReturn(456L);
+        assertFalse(p.emitOwnCombat(Map.of("type","combat_hit")));assertTrue(p.pendingEvents.isEmpty());
+        when(client.getAccountHash()).thenReturn(123L);
+        when(client.getWorldType()).thenReturn(EnumSet.of(net.runelite.api.WorldType.SEASONAL));
+        assertFalse(p.emitOwnCombat(Map.of("type","combat_hit")));assertTrue(p.pendingEvents.isEmpty());
+    }
     @Test public void ownVarbitContextSurvivesCrashAndCannotBeForgedByCallerFields() throws Exception
     {
         net.runelite.api.Client client=mock(net.runelite.api.Client.class);

@@ -171,6 +171,10 @@ public class AccountConnectPlugin extends Plugin
 		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
 		if (!gameplayGranted() || !"own-combat-v1".equals(eventQueueScope) || publicQueueContext(true) == null)
 			return false;
+		// Capture can settle before the slower snapshot/session task catches an account switch.
+		if (client != null && (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
+			|| !Long.toString(client.getAccountHash()).equals(activeHash)
+			|| !RuneScapeProfileType.getCurrent(client).name().equals(activeProfileType))) return false;
 		String type = String.valueOf(observation.get("type"));
 		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)) return false;
 		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
