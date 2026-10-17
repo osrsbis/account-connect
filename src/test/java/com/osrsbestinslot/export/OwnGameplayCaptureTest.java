@@ -57,23 +57,42 @@ public class OwnGameplayCaptureTest
         NPC n = mock(NPC.class); when(n.getId()).thenReturn(id); return n;
     }
 
-    @Test public void rawOwnVarSourcesHandoffTwelveBaselinesThenOnlyObservedChanges()
+    @Test public void rawOwnVarSourcesHandoffAuditedBaselinesThenOnlyObservedChanges()
     {
         List<Map<String,Object>> sent=new ArrayList<>();
         capture=new OwnGameplayCapture(e->{if(!"own_vars".equals(e.get("type")))return false;sent.add(e);return true;});settle();
-        long at=OwnStateEventTest.AT;capture.poll(client,at);assertEquals(12,sent.size());
+        long at=OwnStateEventTest.AT;capture.poll(client,at);assertEquals(17,sent.size());
         for(Map<String,Object> event:sent)assertNotNull(OwnVarsEvent.wire(event));
         Map<String,Object> surge=sent.stream().filter(e->"effects.surge".equals(e.get("var_family"))).findFirst().get();
         assertNull(((Map<?,?>)surge.get("values")).get("timer_raw"));String session=(String)surge.get("gameplay_session");
-        tick++;capture.poll(client,at+600);assertEquals(12,sent.size());
-        vars[300]=100;tick++;capture.poll(client,at+1200);assertEquals(13,sent.size());
-        assertEquals("combat.special_attack",sent.get(12).get("var_family"));
-        assertEquals(100L,((Map<?,?>)sent.get(12).get("values")).get("energy_raw"));
-        assertEquals("absolute_update",sent.get(12).get("observation"));
+        tick++;capture.poll(client,at+600);assertEquals(17,sent.size());
+        vars[300]=100;tick++;capture.poll(client,at+1200);assertEquals(18,sent.size());
+        assertEquals("combat.special_attack",sent.get(17).get("var_family"));
+        assertEquals(100L,((Map<?,?>)sent.get(17).get("values")).get("energy_raw"));
+        assertEquals("absolute_update",sent.get(17).get("observation"));
         when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,TOKEN));tick+=2;assertTrue(capture.ready(client,TOKEN));
-        assertEquals(0L,capture.snapshot().get("vars_events_observed"));capture.poll(client,at+2400);assertEquals(25,sent.size());
-        assertNotEquals(session,sent.get(13).get("gameplay_session"));assertEquals("baseline",sent.get(13).get("observation"));
+        assertEquals(0L,capture.snapshot().get("vars_events_observed"));capture.poll(client,at+2400);assertEquals(35,sent.size());
+        assertNotEquals(session,sent.get(18).get("gameplay_session"));assertEquals("baseline",sent.get(18).get("observation"));
         verify(client,never()).getPlayers();
+    }
+
+    @Test public void remainingFixedVarSourcesFlattenOnlyPinnedFieldsAndNeverDecodeTheirUnits()
+    {
+        List<Map<String,Object>> sent=new ArrayList<>();capture=new OwnGameplayCapture(e->{if("own_vars".equals(e.get("type")))sent.add(e);return true;});
+        vars=new int[6000];when(client.getVarps()).thenReturn(vars);vars[4286]=12;vars[5197]=123;vars[5202]=456;vars[5207]=7;
+        bit(18574,100);vars[100]=1;bit(17611,101);vars[101]=2;bit(4171,102);vars[102]=3;vars[4764]=99;settle();
+        capture.poll(client,OwnStateEventTest.AT);assertEquals(17,sent.size());
+        Map<String,Map<?,?>> values=new HashMap<>();for(Map<String,Object> e:sent)values.put((String)e.get("var_family"),(Map<?,?>)e.get("values"));
+        assertEquals(358,values.get("sailing.charting").size());assertEquals(1L,values.get("sailing.charting").get("18574"));
+        assertNull(values.get("sailing.charting").get("18575"));
+        assertEquals(114,values.get("storage.potion_store").size());assertEquals(12L,values.get("storage.potion_store").get("4286"));
+        assertFalse(values.get("storage.potion_store").containsKey("units"));assertNull(values.get("storage.potion_store").get("unlocked_raw"));
+        assertEquals(456L,values.get("sailing.port_tasks").get("5202"));assertFalse(values.get("sailing.port_tasks").containsKey("5196"));
+        assertEquals(7L,values.get("sailing.port_tasks").get("completed_total_raw"));
+        assertEquals(89,values.get("minigame.totem_state").size());assertEquals(2L,values.get("minigame.totem_state").get("site_1.base_raw"));
+        assertEquals(99L,values.get("minigame.totem_state").get("research_points_raw"));
+        assertEquals(3L,values.get("storage.bank_tabs").get("tab_1_slots"));
+        verify(client,never()).getPlayers();verify(client,never()).runScript(anyInt(),any());
     }
 
     @Test public void auditedStateSourcesHandoffOncePerChangeAndExposeFailuresWithoutCallingThemAcknowledged()

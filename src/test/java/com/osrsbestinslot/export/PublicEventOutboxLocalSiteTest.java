@@ -23,7 +23,18 @@ public class PublicEventOutboxLocalSiteTest
     private OkHttpClient http;
     private final List<AccountConnectPlugin> instances = new ArrayList<>();
     private final boolean combat = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT"));
-    private final boolean vars = "1".equals(System.getenv("OSRSBIS_CHECK_VARS"));
+    private final boolean additionalVars = "1".equals(System.getenv("OSRSBIS_CHECK_VARS_ADDITIONAL"));
+    private final boolean vars = additionalVars || "1".equals(System.getenv("OSRSBIS_CHECK_VARS"));
+    private final List<String> varFamilies = additionalVars ? List.of("sailing.charting","storage.potion_store","minigame.totem_state","sailing.port_tasks","storage.bank_tabs")
+        : new ArrayList<>(OwnVarsEvent.FIELDS.keySet());
+    private Map<String,Object> varsEvent(String family)
+    {
+        Map<String,Object> event=OwnVarsEventTest.event();event.put("var_family",family);
+        Map<String,Object> values=new LinkedHashMap<>();
+        for(String key:OwnVarsEvent.FIELDS.get(family))values.put(key,family.equals("sailing.charting")?Integer.MIN_VALUE:null);
+        if(!family.equals("combat.raid_points")&&!family.equals("effects.surge")&&!family.equals("sailing.charting"))values.put(OwnVarsEvent.FIELDS.get(family).get(0),0);
+        event.put("values",values);return event;
+    }
     private final boolean states = "1".equals(System.getenv("OSRSBIS_CHECK_STATE"));
 
     private static void set(AccountConnectPlugin p, String name, Object value) throws Exception
@@ -69,7 +80,7 @@ public class PublicEventOutboxLocalSiteTest
         try
         {
             AccountConnectPlugin p=fresh();
-            if(vars)assertTrue(p.emitOwnGameplayEvent(OwnVarsEventTest.event()));
+            if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
             else if(states)assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.goalEvent()));
             else if(combat)assertTrue(p.emitOwnCombat(new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
                 "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
@@ -79,18 +90,12 @@ public class PublicEventOutboxLocalSiteTest
             List<Map<String,Object>> rows=new ArrayList<>();
             for(int i=0;i<90;i++) rows.add(Map.of("id",1000+i,"qty",2000000000));
             if(vars) {
-                for(Map.Entry<String,List<String>> entry:OwnVarsEvent.FIELDS.entrySet()) {
-                    if(entry.getKey().equals("effects.surge"))continue;
-                    Map<String,Object> event=OwnVarsEventTest.event();event.put("var_family",entry.getKey());
-                    Map<String,Object> values=new LinkedHashMap<>();for(String key:entry.getValue())values.put(key,null);
-                    if(!entry.getKey().equals("combat.raid_points"))values.put(entry.getValue().get(0),0);
-                    event.put("values",values);assertTrue(p.emitOwnGameplayEvent(event));
-                }
+                for(int i=1;i<varFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(i))));
             }
             else if(states) { assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.pouchEvent()));
                 assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.bankEvent())); }
             else p.emitEvent("bank_session",new LinkedHashMap<>(Map.of("deposited",rows,"withdrawn",rows,"complete",true)));
-            int valid=vars?12:states?3:2,total=valid+1;
+            int valid=vars?varFamilies.size():states?3:2,total=valid+1;
             p.awaitSpoolIdleForTest(); assertEquals(total,p.pendingEvents.size());
             List<String> ids=new ArrayList<>();
             for(Map<String,Object> event:p.pendingEvents) ids.add((String)event.get("event_id"));
@@ -116,14 +121,14 @@ public class PublicEventOutboxLocalSiteTest
             }
             if(vars) {
                 Map<?,?> families=(Map<?,?>)((Map<?,?>)p.captureHealthSnapshot().get("queue_delivery")).get("by_family");
-                for(String family:OwnVarsEvent.FIELDS.keySet()) {
+                for(String family:varFamilies) {
                     Map<?,?> counts=(Map<?,?>)families.get("own_vars_"+family);
                     assertEquals(1L,counts.get("archive_receipts"));assertEquals(0L,counts.get("capture_handoffs"));
                 }
             }
             command("/test/drain-two");
             command("/test/erase");
-            if(vars)assertTrue(p.emitOwnGameplayEvent(OwnVarsEventTest.event()));
+            if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
             else p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
             p.awaitSpoolIdleForTest(); p.flushEvents(); done(p);
             assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());

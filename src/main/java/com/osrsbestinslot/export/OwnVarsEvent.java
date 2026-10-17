@@ -22,6 +22,20 @@ final class OwnVarsEvent
         m.put("minigame.plunder_state", List.of("timer_raw", "room_raw"));
         m.put("sailing.trial_progress", List.of("tempor_tantrum_raw", "jubbly_jive_raw", "gwenith_glide_raw"));
         m.put("combat.special_attack", List.of("energy_raw"));
+        List<String> chart=new ArrayList<>();
+        for(int id:OwnActivityMappings.CHARTING)chart.add(String.valueOf(id));
+        m.put("sailing.charting",Collections.unmodifiableList(chart));
+        List<String> potions=new ArrayList<>();
+        for(int id:OwnPotionStorageCapture.VARPS)potions.add(String.valueOf(id));
+        potions.add("unlocked_raw");m.put("storage.potion_store",Collections.unmodifiableList(potions));
+        List<String> totems=new ArrayList<>();totems.add("research_points_raw");
+        for(int site=1;site<=OwnActivityMappings.TOTEMS.length;site++)
+            for(String field:OwnActivityMappings.TOTEM_FIELDS)totems.add("site_"+site+"."+field);
+        m.put("minigame.totem_state",Collections.unmodifiableList(totems));
+        m.put("sailing.port_tasks",List.of("5197","5198","5199","5200","5201","5202",
+            "completed_total_raw","bounty_item_counter_raw","extra_slots_raw","completed_today_raw"));
+        m.put("storage.bank_tabs",List.of("tab_1_slots","tab_2_slots","tab_3_slots","tab_4_slots","tab_5_slots",
+            "tab_6_slots","tab_7_slots","tab_8_slots","tab_9_slots"));
         FIELDS = Collections.unmodifiableMap(m);
     }
     static boolean supports(Object family) { return FIELDS.containsKey(family); }
@@ -62,7 +76,24 @@ final class OwnVarsEvent
         input.put("vars_schema",1); input.put("var_family",row.get("kind")); input.put("source","own_client_vars");
         input.put("gameplay_session",session.replace("-","")); input.put("direct",row.get("direct"));
         input.put("observation",value.get("observation")); input.put("source_sequence",row.get("sequence"));
-        input.put("source_tick",row.get("tick")); input.put("observed_at_ms",row.get("observed_at_ms")); input.put("values",value);
+        input.put("source_tick",row.get("tick")); input.put("observed_at_ms",row.get("observed_at_ms"));
+        Map<String,Object> flat=new LinkedHashMap<>();
+        for(String key:FIELDS.get(row.get("kind")))
+        {
+            Map<?,?> source=value;
+            if("storage.potion_store".equals(row.get("kind"))&&!key.equals("unlocked_raw"))
+                source=value.get("storage_values_raw") instanceof Map?(Map<?,?>)value.get("storage_values_raw"):Collections.emptyMap();
+            if("sailing.port_tasks".equals(row.get("kind"))&&key.matches("[0-9]+"))
+                source=value.get("packed_slots_raw") instanceof Map?(Map<?,?>)value.get("packed_slots_raw"):Collections.emptyMap();
+            String field=key;
+            if("minigame.totem_state".equals(row.get("kind"))&&key.contains("."))
+            {
+                String[] path=key.split("\\.",2);field=path[1];
+                source=value.get(path[0]) instanceof Map?(Map<?,?>)value.get(path[0]):Collections.emptyMap();
+            }
+            flat.put(key,source.get(field));
+        }
+        input.put("values",flat);
         Map<String,Object> out = wire(input); if (out != null) out.put("type","own_vars"); return out;
     }
     private static long number(Object x,long min,long max)
