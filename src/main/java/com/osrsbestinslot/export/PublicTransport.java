@@ -59,7 +59,8 @@ final class PublicTransport
         for (Map.Entry<String,Object> e : input.entrySet())
         {
             String k = e.getKey(); Object v = e.getValue();
-            if (ENVELOPE.contains(k))
+            if ("observation_context".equals(k)) out.put(k, EventObservationContext.project(v));
+            else if (ENVELOPE.contains(k))
             {
                 if (v instanceof String || v instanceof Number || v instanceof Boolean) out.put(k,v);
             }

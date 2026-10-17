@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.17";
+	private static final String PLUGIN_VERSION = "0.7.18";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -690,6 +690,7 @@ public class AccountConnectPlugin extends Plugin
 	// never mix with the main game's GE, loot or bank history under the same account hash.
 	private volatile String activeProfileType;
 	private volatile String activeHash;
+	private final EventObservationContext eventObservationContext = new EventObservationContext();
 	private volatile long sessionStartMillis;
 	// WAVE 3: idle counters sampled on the last logged-in tick (syncTask), used to classify the logout reason.
 	private volatile int lastKeyboardIdleTicks;
@@ -3856,7 +3857,7 @@ public class AccountConnectPlugin extends Plugin
 			ev.put("rsn", activeRsn);
 		}
 		String profile = activeProfileType;
-		if (profile != null && !"STANDARD".equals(profile))
+		if (profile != null)
 		{
 			ev.put("profile_type", profile);
 		}
@@ -3867,6 +3868,13 @@ public class AccountConnectPlugin extends Plugin
 		// Generated ONCE, before either queue sees the event, so a retry and a replay carry the same id.
 		String eventId = EventSpool.newEventId();
 		ev.put("event_id", eventId);
+		// Generated once before durable append; caller fields cannot forge collector context.
+		ev.remove("observation_context");
+		String contextOwner = java.util.Objects.equals(activeHash, ev.get("account_hash"))
+			&& java.util.Objects.equals(activeProfileType, ev.get("profile_type")) ? observationOwner() : null;
+		Map<String,Object> context = eventObservationContext.event(contextOwner, PLUGIN_VERSION,
+			((Number)ev.get("ts")).longValue());
+		if (context != null) ev.put("observation_context", context);
 		ev = PublicTransport.event(ev);
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
@@ -4069,6 +4077,32 @@ public class AccountConnectPlugin extends Plugin
 		}
 		emitEvent("logout", fields);
 		sessionActive = false;
+		eventObservationContext.clear();
+	}
+
+	/** Internal identity only; no raw token/profile identifier is serialized. */
+	private String observationOwner()
+	{
+		String fp = currentEventTokenFingerprint();
+		if (!sessionActive || fp == null || activeHash == null || "-1".equals(activeHash)
+			|| activeProfileType == null || "UNKNOWN".equals(activeProfileType)
+			|| configManager == null || configManager.getProfile() == null) return null;
+		return fp + ":" + activeHash + ":" + activeProfileType + ":" + sessionStartMillis
+			+ ":" + configManager.getProfile().getId();
+	}
+
+	/** Client-thread tick only. A missing definition/varp is unknown, never normal mode. */
+	void refreshEventObservationContext()
+	{
+		String owner = observationOwner();
+		if (owner == null || client == null || client.getGameState() != GameState.LOGGED_IN
+			|| client.getLocalPlayer() == null || !Long.toString(client.getAccountHash()).equals(activeHash))
+		{
+			eventObservationContext.clear(); return;
+		}
+		Integer raw = AccountProgressCapture.bit(client, client.getVarps(), ACCOUNT_TYPE_VARBIT);
+		eventObservationContext.observe(owner, raw == null ? null : accountTypeName(raw),
+			client.getTickCount(), System.currentTimeMillis());
 	}
 
 	/**
@@ -6408,6 +6442,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			// Flush old-session rows above with their old mode, then discard it for the next login.
 			activeProfileType = null;
+			eventObservationContext.clear();
 		}
 	}
 
@@ -6546,6 +6581,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		refreshEventObservationContext();
 		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
 		if (progressReady())
 		{

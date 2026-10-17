@@ -75,6 +75,44 @@ public class PublicEventOutboxPluginTest
     }
     private String receipt(String id)
     { return "{\"receipt_version\":1,\"results\":[{\"index\":0,\"event_id\":\""+id+"\",\"status\":\"queued\",\"broker_ack\":true}]}"; }
+    @Test public void ownVarbitContextSurvivesCrashAndCannotBeForgedByCallerFields() throws Exception
+    {
+        net.runelite.api.Client client=mock(net.runelite.api.Client.class);
+        when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGGED_IN);
+        when(client.getLocalPlayer()).thenReturn(mock(net.runelite.api.Player.class));
+        when(client.getAccountHash()).thenReturn(123L);when(client.getTickCount()).thenReturn(50);
+        set(p,"client",client);p.refreshEventObservationContext();
+        // Missing definition/varps must not turn the mock/default0 into NORMAL.
+        p.emitEvent("pickup",Map.of("item",2,"qty",1));
+        assertNull(((Map<?,?>)p.pendingEvents.get(0).get("observation_context")).get("account_mode"));
+        p.pendingEvents.clear();
+        net.runelite.api.VarbitComposition def=mock(net.runelite.api.VarbitComposition.class);
+        when(def.getIndex()).thenReturn(1);when(def.getLeastSignificantBit()).thenReturn(0);
+        when(def.getMostSignificantBit()).thenReturn(2);when(client.getVarps()).thenReturn(new int[]{0,1});
+        when(client.getVarbit(AccountConnectPlugin.ACCOUNT_TYPE_VARBIT)).thenReturn(def);
+        p.refreshEventObservationContext();grant();
+        p.emitEvent("pickup",Map.of("item",2,"qty",1,"observation_context",Map.of("other_player","must-not-send")));
+        p.awaitSpoolIdleForTest();Map<?,?> before=(Map<?,?>)p.pendingEvents.get(0).get("observation_context");
+        assertEquals("IRONMAN",before.get("account_mode"));assertEquals("varbit_1777",before.get("account_mode_source"));
+        assertEquals("0.7.18",before.get("plugin_version"));
+        assertEquals("STANDARD",p.pendingEvents.get(0).get("profile_type"));
+        assertFalse(before.toString().contains("must-not-send"));
+        String session=(String)before.get("collector_session");Object sequence=before.get("sequence");
+        p.crashSpoolForTest();p=fresh("STANDARD",7);grant();
+        Map<?,?> replay=(Map<?,?>)p.pendingEvents.get(0).get("observation_context");
+        assertEquals(session,replay.get("collector_session"));
+        assertEquals(((Number)sequence).longValue(),((Number)replay.get("sequence")).longValue());
+        assertEquals("IRONMAN",replay.get("account_mode"));
+        p.emitEvent("pickup",Map.of("item",3,"qty",1));p.awaitSpoolIdleForTest();
+        Map<?,?> newProcess=(Map<?,?>)p.pendingEvents.get(1).get("observation_context");
+        assertNotEquals(session,newProcess.get("collector_session"));assertNull(newProcess.get("account_mode"));
+        // Early callbacks can already identify a new account/profile before the slower
+        // session tracker. Never attach the previous account's context to those rows.
+        p.emitEvent("pickup",Map.of("item",3,"qty",1,"account_hash","456"));p.awaitSpoolIdleForTest();
+        assertFalse(p.pendingEvents.get(2).containsKey("observation_context"));
+        p.emitEvent("pickup",Map.of("item",3,"qty",1,"profile_type","LEAGUE"));p.awaitSpoolIdleForTest();
+        assertFalse(p.pendingEvents.get(3).containsKey("observation_context"));
+    }
     @Test public void emittedEventSurvivesProcessDeathAndGeneric200CannotRemoveIt() throws Exception
     {
         grant(); emit(); String id = (String)p.pendingEvents.get(0).get("event_id");

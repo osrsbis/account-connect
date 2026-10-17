@@ -4,6 +4,19 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
+## Own-event provenance (0.7.18 candidate)
+
+Own events carry a random collector-session identifier, emit sequence and plugin
+version. These identifiers rotate on login, account, world profile, link, local
+profile or process changes. Replayed journal rows retain their original context.
+The sequence covers public emits, not successfully delivered events or complete
+gameplay. World profile is separate from account mode. Mode is observed from the
+own-account varbit on a matching logged-in client tick; absent definitions,
+unsettled identity, clock reversal and context older than ten seconds stay
+unknown. No raw local profile ID, token or player name enters this context.
+Backend projection support and exact-client QA remain release prerequisites;
+older projected archives do not acquire this metadata retroactively.
+
 ## How it works
 
 1. On osrsbestinslot.com, open **Connect account** and copy your one-time link token.
