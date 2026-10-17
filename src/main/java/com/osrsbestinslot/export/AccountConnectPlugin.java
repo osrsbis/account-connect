@@ -4369,6 +4369,7 @@ public class AccountConnectPlugin extends Plugin
 					if (current == null) continue; // logout/unknown mode pauses replay
 					if (!current.identity.equals(((PublicEventOutbox.Context) durableOwner).identity))
 					{
+						if (Boolean.TRUE.equals(ev.get(EVENT_PUBLIC_VOLATILE))) healthEventsLost.incrementAndGet();
 						spoolReleaseFromMemory(ev);
 						it.remove();
 						continue; // never send a previous account/profile under the new one

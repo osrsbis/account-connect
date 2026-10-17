@@ -196,5 +196,6 @@ public class PublicEventOutboxPluginTest
         Files.createDirectories(blockedRoot.getParent()); Files.write(blockedRoot, new byte[]{1});
         emit(); set(p, "activeHash", "456"); p.flushEvents(); done();
         assertTrue(p.pendingEvents.isEmpty()); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+        assertEquals(1, ((Number)p.captureHealthSnapshot().get("events_lost_total")).intValue());
     }
 }
