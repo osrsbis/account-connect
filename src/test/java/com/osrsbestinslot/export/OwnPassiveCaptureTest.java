@@ -65,6 +65,13 @@ public class OwnPassiveCaptureTest
         when(self.getWorldLocation()).thenReturn(new WorldPoint(3165,3488,0)); seq(); assertTrue(rows().isEmpty());
         assertFalse(OwnSequenceCapture.courtyard(new WorldPoint(3155,3480,0))); assertFalse(OwnSequenceCapture.courtyard(new WorldPoint(3164,3488,1)));
     }
+    @Test public void missingOwnPositionCannotCloseAStationaryIntervalAsMovement()
+    {
+        when(self.getWorldLocation()).thenReturn(new WorldPoint(3164,3488,0)); seq(); seq(); seq();
+        when(c.getLocalPlayer()).thenReturn(null); seq(); assertTrue(rows().isEmpty());
+        when(c.getLocalPlayer()).thenReturn(self); when(self.getWorldLocation()).thenReturn(new WorldPoint(3165,3488,0));
+        seq(); assertTrue(rows().isEmpty());
+    }
     @Test public void boltPairNeedsLossGainXpAndConsecutiveSampleAndIsNeverAConfirmedCast()
     {
         int[] pair=OwnActivityMappings.BOLTS[0]; when(inv.getItems()).thenReturn(new Item[]{new Item(pair[0],20)});

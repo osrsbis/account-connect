@@ -36,7 +36,7 @@ final class OwnSequenceCapture
         {
             // Only movement closes an interval. Periodic rollover would upload indefinitely while idle.
             // End at the last stationary sample, not at the new moving sample.
-            if(previousTick>startTick)
+            if(point!=null && previousTick>startTick)
             {
                 Map<String,Object> value=new LinkedHashMap<>();
                 value.put("start_tick",startTick); value.put("end_tick",previousTick);

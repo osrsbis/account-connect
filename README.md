@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.32 candidate)
+## Own-event provenance (0.7.33 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -33,7 +33,7 @@ codes only, with no message, hunter or player names. These observations do not
 prove when an assignment began, a rare item was obtained or a rumour was turned
 in; missing activity remains unknown. Other chat and dialogue are excluded.
 Account/grant changes clear this recent snapshot history. Exact English client
-wording still needs game QA; this family is not yet in the durable event journal.
+wording still needs game QA; the unreleased own-signals scope now adds durable transport for this family.
 Source: [pinned rumour-reminder acquisition](https://github.com/DrJam/rumour-reminder/blob/38a5b7aefc4314dc1f321bea74c994bcea23aa61/src/main/java/com/drjam/rumourreminder/RumoursManager.java).
 
 The granted own-gameplay snapshot also decodes carried rune-pouch cache slots.
@@ -77,7 +77,14 @@ writer. Only fixed numeric fields and allowlisted codes are projected; raw chat,
 player names and arbitrary labels are excluded. A notch does not supply a total,
 absolute totals are not new rewards, and no-active-rumour is not a verified turn-in.
 Observed storage checks are not continuous balances. Source time and observation
-kind remain explicit. This is an unreleased LOCAL candidate, not activated capture.
+kind remain explicit. Three additional sequence families are explicitly inferred:
+stationary samples in the GE courtyard closed by observed movement, paired bolt
+inventory changes with Magic XP, and own Eat/Drink/Chew intent followed by a slot
+change within two ticks. Missing position or sample gaps cannot close a stationary
+interval as movement. These records never prove input idleness, an aura, a cast,
+consumption effect, cooldown or income. No coordinates, input-device activity,
+menu target text or other-player fields are journaled. This extends the same
+unreleased own-signals contract to ten families, not an activated capture scope.
 
 
 A change in the effective gameplay Queue scope or settlement of its current
@@ -442,7 +449,7 @@ No new permission toggle or account action is introduced here.
 ### Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The seven own-state kinds, seventeen own-vars families and seven own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The seven own-state kinds, seventeen own-vars families and ten own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue

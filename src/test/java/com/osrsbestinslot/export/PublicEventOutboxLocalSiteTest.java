@@ -22,8 +22,10 @@ public class PublicEventOutboxLocalSiteTest
     private Path data;
     private OkHttpClient http;
     private final List<AccountConnectPlugin> instances = new ArrayList<>();
-    private final boolean signals = "1".equals(System.getenv("OSRSBIS_CHECK_SIGNALS"));
-    private final List<String> signalFamilies=new ArrayList<>(OwnSignalEventTest.examples().keySet());
+    private final boolean inferred = "1".equals(System.getenv("OSRSBIS_CHECK_INFERRED"));
+    private final boolean signals = inferred || "1".equals(System.getenv("OSRSBIS_CHECK_SIGNALS"));
+    private final List<String> signalFamilies=new ArrayList<>((inferred?OwnInferredSignalTest.examples():OwnSignalEventTest.examples()).keySet());
+    private Map<String,Object> signalEvent(String family) { return inferred?OwnInferredSignalTest.event(family):OwnSignalEventTest.event(family); }
     private final boolean combat = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT"));
     private final boolean additionalVars = "1".equals(System.getenv("OSRSBIS_CHECK_VARS_ADDITIONAL"));
     private final boolean vars = additionalVars || "1".equals(System.getenv("OSRSBIS_CHECK_VARS"));
@@ -85,7 +87,7 @@ public class PublicEventOutboxLocalSiteTest
         try
         {
             AccountConnectPlugin p=fresh();
-            if(signals)assertTrue(p.emitOwnGameplayEvent(OwnSignalEventTest.event(signalFamilies.get(0))));
+            if(signals)assertTrue(p.emitOwnGameplayEvent(signalEvent(signalFamilies.get(0))));
             else if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
             else if(interfaces)assertTrue(p.emitOwnGameplayEvent(interfaceEvent(0)));
             else if(states)assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.goalEvent()));
@@ -96,7 +98,7 @@ public class PublicEventOutboxLocalSiteTest
             p.emitEvent("ge_progress",new LinkedHashMap<>(Map.of("item",2,"qty",1,"state","INVALID")));
             List<Map<String,Object>> rows=new ArrayList<>();
             for(int i=0;i<90;i++) rows.add(Map.of("id",1000+i,"qty",2000000000));
-            if(signals) {for(int i=1;i<signalFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(OwnSignalEventTest.event(signalFamilies.get(i))));}
+            if(signals) {for(int i=1;i<signalFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(signalEvent(signalFamilies.get(i))));}
             else if(vars) {
                 for(int i=1;i<varFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(i))));
             }
@@ -144,7 +146,7 @@ public class PublicEventOutboxLocalSiteTest
             }
             command("/test/drain-two");
             command("/test/erase");
-            if(signals)assertTrue(p.emitOwnGameplayEvent(OwnSignalEventTest.event(signalFamilies.get(0))));
+            if(signals)assertTrue(p.emitOwnGameplayEvent(signalEvent(signalFamilies.get(0))));
             else if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
             else if(interfaces)assertTrue(p.emitOwnGameplayEvent(interfaceEvent(0)));
             else p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
