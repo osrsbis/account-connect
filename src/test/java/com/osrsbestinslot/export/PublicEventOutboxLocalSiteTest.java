@@ -23,6 +23,7 @@ public class PublicEventOutboxLocalSiteTest
     private OkHttpClient http;
     private final List<AccountConnectPlugin> instances = new ArrayList<>();
     private final boolean combat = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT"));
+    private final boolean vars = "1".equals(System.getenv("OSRSBIS_CHECK_VARS"));
     private final boolean states = "1".equals(System.getenv("OSRSBIS_CHECK_STATE"));
 
     private static void set(AccountConnectPlugin p, String name, Object value) throws Exception
@@ -40,8 +41,8 @@ public class PublicEventOutboxLocalSiteTest
         p.setSpoolDataRootForTest(data);
         // Synthetic policy receipt is scoped to this local test identity, never a live grant.
         Response policy = new Response.Builder().request(new Request.Builder().url(base).build())
-            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue",states?"own-state-v1":combat?"own-combat-v1":"own-history-v1")
-            .header("X-Own-Gameplay",combat||states?"on":"off").build();
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue",vars?"own-vars-v1":states?"own-state-v1":combat?"own-combat-v1":"own-history-v1")
+            .header("X-Own-Gameplay",combat||states||vars?"on":"off").build();
         p.applyServerPolicy(policy,TOKEN); p.awaitSpoolIdleForTest(); return p;
     }
 
@@ -68,7 +69,8 @@ public class PublicEventOutboxLocalSiteTest
         try
         {
             AccountConnectPlugin p=fresh();
-            if(states)assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.goalEvent()));
+            if(vars)assertTrue(p.emitOwnGameplayEvent(OwnVarsEventTest.event()));
+            else if(states)assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.goalEvent()));
             else if(combat)assertTrue(p.emitOwnCombat(new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
                 "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
                 "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","received","amount",0,"hitsplat_type",16))));
@@ -76,10 +78,19 @@ public class PublicEventOutboxLocalSiteTest
             p.emitEvent("ge_progress",new LinkedHashMap<>(Map.of("item",2,"qty",1,"state","INVALID")));
             List<Map<String,Object>> rows=new ArrayList<>();
             for(int i=0;i<90;i++) rows.add(Map.of("id",1000+i,"qty",2000000000));
-            if(states) { assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.pouchEvent()));
+            if(vars) {
+                for(Map.Entry<String,List<String>> entry:OwnVarsEvent.FIELDS.entrySet()) {
+                    if(entry.getKey().equals("effects.surge"))continue;
+                    Map<String,Object> event=OwnVarsEventTest.event();event.put("var_family",entry.getKey());
+                    Map<String,Object> values=new LinkedHashMap<>();for(String key:entry.getValue())values.put(key,null);
+                    if(!entry.getKey().equals("combat.raid_points"))values.put(entry.getValue().get(0),0);
+                    event.put("values",values);assertTrue(p.emitOwnGameplayEvent(event));
+                }
+            }
+            else if(states) { assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.pouchEvent()));
                 assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.bankEvent())); }
             else p.emitEvent("bank_session",new LinkedHashMap<>(Map.of("deposited",rows,"withdrawn",rows,"complete",true)));
-            int valid=states?3:2,total=valid+1;
+            int valid=vars?12:states?3:2,total=valid+1;
             p.awaitSpoolIdleForTest(); assertEquals(total,p.pendingEvents.size());
             List<String> ids=new ArrayList<>();
             for(Map<String,Object> event:p.pendingEvents) ids.add((String)event.get("event_id"));
@@ -103,9 +114,17 @@ public class PublicEventOutboxLocalSiteTest
                     assertEquals(0L,counts.get("capture_handoffs"));
                 }
             }
+            if(vars) {
+                Map<?,?> families=(Map<?,?>)((Map<?,?>)p.captureHealthSnapshot().get("queue_delivery")).get("by_family");
+                for(String family:OwnVarsEvent.FIELDS.keySet()) {
+                    Map<?,?> counts=(Map<?,?>)families.get("own_vars_"+family);
+                    assertEquals(1L,counts.get("archive_receipts"));assertEquals(0L,counts.get("capture_handoffs"));
+                }
+            }
             command("/test/drain-two");
             command("/test/erase");
-            p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
+            if(vars)assertTrue(p.emitOwnGameplayEvent(OwnVarsEventTest.event()));
+            else p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
             p.awaitSpoolIdleForTest(); p.flushEvents(); done(p);
             assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
             assertEquals((long)valid,p.captureHealthSnapshot().get("events_sent_total"));

@@ -57,10 +57,29 @@ public class OwnGameplayCaptureTest
         NPC n = mock(NPC.class); when(n.getId()).thenReturn(id); return n;
     }
 
+    @Test public void rawOwnVarSourcesHandoffTwelveBaselinesThenOnlyObservedChanges()
+    {
+        List<Map<String,Object>> sent=new ArrayList<>();
+        capture=new OwnGameplayCapture(e->{if(!"own_vars".equals(e.get("type")))return false;sent.add(e);return true;});settle();
+        long at=OwnStateEventTest.AT;capture.poll(client,at);assertEquals(12,sent.size());
+        for(Map<String,Object> event:sent)assertNotNull(OwnVarsEvent.wire(event));
+        Map<String,Object> surge=sent.stream().filter(e->"effects.surge".equals(e.get("var_family"))).findFirst().get();
+        assertNull(((Map<?,?>)surge.get("values")).get("timer_raw"));String session=(String)surge.get("gameplay_session");
+        tick++;capture.poll(client,at+600);assertEquals(12,sent.size());
+        vars[300]=100;tick++;capture.poll(client,at+1200);assertEquals(13,sent.size());
+        assertEquals("combat.special_attack",sent.get(12).get("var_family"));
+        assertEquals(100L,((Map<?,?>)sent.get(12).get("values")).get("energy_raw"));
+        assertEquals("absolute_update",sent.get(12).get("observation"));
+        when(client.getAccountHash()).thenReturn(99L);assertFalse(capture.ready(client,TOKEN));tick+=2;assertTrue(capture.ready(client,TOKEN));
+        assertEquals(0L,capture.snapshot().get("vars_events_observed"));capture.poll(client,at+2400);assertEquals(25,sent.size());
+        assertNotEquals(session,sent.get(13).get("gameplay_session"));assertEquals("baseline",sent.get(13).get("observation"));
+        verify(client,never()).getPlayers();
+    }
+
     @Test public void auditedStateSourcesHandoffOncePerChangeAndExposeFailuresWithoutCallingThemAcknowledged()
     {
         List<Map<String,Object>> sent = new ArrayList<>();
-        capture = new OwnGameplayCapture(e -> { sent.add(e); return sent.size() != 2; }); settle();
+        capture = new OwnGameplayCapture(e -> { if(!"own_state".equals(e.get("type")))return false; sent.add(e); return sent.size() != 2; }); settle();
         long at = OwnStateEventTest.AT;
         capture.poll(client,at); tick++; capture.poll(client,at+600);
         assertEquals(2,sent.size());

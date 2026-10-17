@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.26 candidate)
+## Own-event provenance (0.7.27 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -57,6 +57,22 @@ relog, hop and disconnect; old-account timestamps cannot label a new cache.
 Source-specific callback and actual-client acceptance remain separate.
 
 ## Own-state journal candidate
+
+The separate future `own-vars-v1` scope journals twelve closed own-player raw
+counter/settings families: Surge, Death Charge, escape crystal settings, arena,
+Barrows, personal raid points, Tears, own brewing contribution, restaurant order,
+Pyramid Plunder, Sailing trials and special energy. Schema6 requires an explicit
+current-token `own_vars` grant in addition to the existing gameplay/combat/state
+grants. Older scopes pause these rows; they never use the legacy writer. Missing
+numeric fields stay unknown through JSON/restart; zero and negative raw values
+remain distinct. Only fixed fields are retained, with session, observation time
+and baseline/update provenance. No reward, completion or duration is inferred.
+
+This is LOCAL tested transport, not activated capture or whole-intake coverage.
+The existing outbox bounds and counted overflow still apply. Natural per-family
+rates and cost need measurement before enabling this scope; the existing pilot
+cap and spending gates are unchanged. An active timer can change every game tick,
+so the earlier14-family budget must not be presented as a whole-gameplay quote.
 
 The future `own-state-v1` Queue scope adds one closed `own_state` event type for
 skill goal settings, carried rune-pouch cache and inferred bank-tab currency.
@@ -387,8 +403,7 @@ No new permission toggle or account action is introduced here.
 ### Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The three own-state
-kinds have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The three own-state kinds and twelve own-vars families have separate counters. It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue

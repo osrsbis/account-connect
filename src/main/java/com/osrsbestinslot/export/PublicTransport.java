@@ -37,6 +37,7 @@ final class PublicTransport
         allow("xp_gain", "gains total");
         allow("bank_session", "deposited withdrawn complete truncated");
         allow("combat_hit combat_npc_end", "combat_schema gameplay_session source_sequence source_tick observed_at_ms source direction amount hitsplat_type npc_id target_key first_own_hit_tick end kill_credit");
+        allow("own_vars", "");
         allow("own_state", ""); // the nested body uses the closed OwnStateEvent projection below
         allow("bank_visit_open", "visit_id opened_at_ms read_at_ms bank_state item_stacks manifest_sha256 plugin_version");
         allow("bank_visit_close", "visit_id closed_at_ms close_reason manifest_complete moves_complete deposited_sha256 withdrawn_sha256 end_manifest_sha256 end_chunks deposited withdrawn deposited_chunks withdrawn_chunks moves_chunks");
@@ -100,6 +101,12 @@ final class PublicTransport
         if ("loot".equals(type) && !"npc".equals(input.get("source_type")) && !"event".equals(input.get("source_type")))
             out.remove("source_name");
         if ("ground_removed".equals(type)) out.put("recipient", "UNKNOWN");
+        if ("own_vars".equals(type))
+        {
+            Map<String,Object> vars = OwnVarsEvent.wire(input);
+            if (vars == null) return null;
+            out.putAll(vars);
+        }
         if ("own_state".equals(type))
         {
             Map<String,Object> state = OwnStateEvent.wire(input);

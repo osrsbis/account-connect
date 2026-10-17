@@ -30,7 +30,7 @@ dependencies {
 }
 
 group = 'com.osrsbestinslot.export'
-version = '0.7.26'
+version = '0.7.27'
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'

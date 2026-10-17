@@ -153,7 +153,7 @@ final class PublicEventOutbox
             try { event = PublicTransport.event(gson.fromJson(row.eventJson, Map.class)); }
             catch (RuntimeException invalid) { event = null; }
             if (event == null || !owner.owns(event) || !row.eventId.equals(event.get("event_id"))
-                || !EventQueueProtocol.allows("own-state-v1", event))
+                || !EventQueueProtocol.allows("own-vars-v1", event))
             {
                 rejected.add(row.eventId);
                 continue;

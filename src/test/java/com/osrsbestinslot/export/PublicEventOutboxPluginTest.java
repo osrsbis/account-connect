@@ -90,6 +90,37 @@ public class PublicEventOutboxPluginTest
             .header("X-Own-Gameplay",gameplay?"on":"off").build();
         p.applyServerPolicy(r,responseToken);p.awaitSpoolIdleForTest();
     }
+    private void varsGrant(boolean gameplay,String responseToken) throws Exception
+    {
+        Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-vars-v1")
+            .header("X-Own-Gameplay",gameplay?"on":"off").build();
+        p.applyServerPolicy(r,responseToken);p.awaitSpoolIdleForTest();
+    }
+    @Test public void rawVarsRequireCurrentScopeAndSurviveRollbackRestartWithUnknownFields() throws Exception
+    {
+        Map<String,Object> event=OwnVarsEventTest.event();
+        stateGrant(true,token.get());assertFalse(p.emitOwnGameplayEvent(event));
+        varsGrant(false,token.get());assertFalse(p.emitOwnGameplayEvent(event));
+        varsGrant(true,"f".repeat(32));assertFalse(p.emitOwnGameplayEvent(event));
+        varsGrant(true,token.get());assertTrue(p.emitOwnGameplayEvent(event));p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());String id=(String)p.pendingEvents.get(0).get("event_id");
+        p.crashSpoolForTest();p=fresh("STANDARD",7);stateGrant(true,token.get());p.pumpPublicOutbox();p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        varsGrant(true,token.get());p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertEquals(1,p.pendingEvents.size());
+        assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+        assertNull(((Map<?,?>)p.pendingEvents.get(0).get("values")).get("timer_raw"));
+        server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();request();done();
+        assertTrue(p.pendingEvents.isEmpty());
+        Map<?,?> health=(Map<?,?>)p.captureHealthSnapshot().get("queue_delivery");
+        assertEquals(1L,((Map<?,?>)((Map<?,?>)health.get("by_family")).get("own_vars_effects.surge")).get("broker_receipts"));
+    }
+    @Test public void rawVarsScopeRaceCannotFallBackToLegacy() throws Exception
+    {
+        varsGrant(true,token.get());Map<String,Object> fields=OwnVarsEventTest.event();fields.remove("type");
+        stateGrant(true,token.get());p.emitEvent("own_vars",fields);p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());assertEquals(1L,p.captureHealthSnapshot().get("events_lost_total"));
+    }
     @Test public void stateRequiresCurrentExplicitGrantAndKeepsOldRowsAcrossScopeRollback() throws Exception
     {
         Map<String,Object> event=OwnStateEventTest.goalEvent();

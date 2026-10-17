@@ -40,6 +40,7 @@ final class OwnGameplayCapture
     private final java.util.function.Predicate<Map<String,Object>> eventSink;
     private long combatObserved, combatHandedOff, combatNotHandedOff;
     private long stateObserved, stateHandedOff, stateNotHandedOff;
+    private long varsObserved, varsHandedOff, varsNotHandedOff;
     OwnGameplayCapture() { this(row -> false); }
     OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { eventSink = sink; }
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
@@ -69,6 +70,7 @@ final class OwnGameplayCapture
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         combatObserved = combatHandedOff = combatNotHandedOff = 0;
         stateObserved = stateHandedOff = stateNotHandedOff = 0;
+        varsObserved = varsHandedOff = varsNotHandedOff = 0;
         gapReason = "not_observed";
     }
 
@@ -139,6 +141,14 @@ final class OwnGameplayCapture
             try { handedOff = event != null && eventSink.test(event); }
             catch (RuntimeException failure) { /* snapshot remains; a handoff is not a durable ACK */ }
             if (handedOff) stateHandedOff++; else stateNotHandedOff++;
+        }
+        if (OwnVarsEvent.supports(kind))
+        {
+            varsObserved++; boolean handedOff = false;
+            Map<String,Object> event = OwnVarsEvent.from(session,row);
+            try { handedOff = event != null && eventSink.test(event); }
+            catch (RuntimeException failure) { /* Retain the snapshot and count the missing handoff. */ }
+            if (handedOff) varsHandedOff++; else varsNotHandedOff++;
         }
     }
 
@@ -281,6 +291,8 @@ final class OwnGameplayCapture
         out.put("combat_events_not_handed_off", combatNotHandedOff);
         out.put("state_events_observed", stateObserved); out.put("state_events_handed_off", stateHandedOff);
         out.put("state_events_not_handed_off", stateNotHandedOff);
+        out.put("vars_events_observed",varsObserved); out.put("vars_events_handed_off",varsHandedOff);
+        out.put("vars_events_not_handed_off",varsNotHandedOff);
         out.put("states", new LinkedHashMap<>(states)); out.put("observations", new ArrayList<>(observations));
         return out;
     }
