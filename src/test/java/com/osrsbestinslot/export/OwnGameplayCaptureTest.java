@@ -325,6 +325,25 @@ public class OwnGameplayCaptureTest
         inject(p,"config",config); inject(p,"client",client); inject(p,"gson",new com.google.gson.Gson());
         return p;
     }
+
+    @Test public void bankBuildNeedsOwnCurrentGrantAndPacketAndRevocationClearsItsCache() throws Exception
+    {
+        AccountConnectPlugin p = plugin(); ScriptPostFired build = new ScriptPostFired(ScriptID.BANKMAIN_BUILD);
+        p.onScriptPostFired(build); verify(client, never()).getWidget(net.runelite.api.gameval.InterfaceID.Bankmain.ITEMS);
+        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
+        ItemContainer bank = mock(ItemContainer.class); when(bank.getItems()).thenReturn(new Item[]{new Item(995, 100)});
+        when(client.getItemContainer(95)).thenReturn(bank);
+        net.runelite.api.widgets.Widget widget = mock(net.runelite.api.widgets.Widget.class);
+        when(client.getWidget(net.runelite.api.gameval.InterfaceID.Bankmain.ITEMS)).thenReturn(widget);
+        bit(4150, 1); for (int i = 0; i < 9; i++) bit(4171 + i, 2 + i); vars[2] = 1;
+        p.onItemContainerChanged(new ItemContainerChanged(95, bank)); p.onScriptPostFired(build);
+        Map<?,?> states = (Map<?,?>)p.gameplayBlock().get("states");
+        assertEquals("observed_cache_ranges", ((Map<?,?>)((Map<?,?>)states.get("storage.bank_tab_currency")).get("value")).get("status"));
+        p.applyServerPolicy(policy("X-Own-Gameplay", "off", 200), TOKEN); assertNull(p.gameplayBlock());
+        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
+        p.onScriptPostFired(build); states = (Map<?,?>)p.gameplayBlock().get("states");
+        assertEquals("own_bank_packet_unavailable", ((Map<?,?>)((Map<?,?>)states.get("storage.bank_tab_currency")).get("value")).get("status"));
+    }
     private Response policy(String key,String value,int status)
     {
         return new Response.Builder().request(new Request.Builder().url("http://localhost").build())

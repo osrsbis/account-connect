@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.21";
+	private static final String PLUGIN_VERSION = "0.7.22";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -6263,6 +6263,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onScriptPostFired(ScriptPostFired event)
 	{
+		if (event.getScriptId() == net.runelite.api.ScriptID.BANKMAIN_BUILD && gameplayReady())
+			ownGameplay.bankTabs.built(client, System.currentTimeMillis());
 		if (event.getScriptId() == 7797 && progressReady())
 		{
 			accountProgress.collectionSetup(client, System.currentTimeMillis());
@@ -6472,6 +6474,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
+		if (event.getContainerId() == BANK_CONTAINER_ID && gameplayReady())
+			ownGameplay.bankTabs.container(event.getContainerId(), event.getItemContainer(), client.getTickCount(), System.currentTimeMillis());
 		if (progressReady()) accountProgress.storageRecovery.container(client, event.getContainerId(),
 			event.getItemContainer(), System.currentTimeMillis());
 		containerObservedAtMs.put(event.getContainerId(), System.currentTimeMillis());

@@ -48,6 +48,7 @@ final class OwnGameplayCapture
     final OwnConsumptionCapture consumption = new OwnConsumptionCapture(this);
     final OwnActivityCapture activities = new OwnActivityCapture(this);
     final OwnGroundClueCapture groundClues = new OwnGroundClueCapture(this);
+    final OwnBankTabsCapture bankTabs = new OwnBankTabsCapture(this);
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -63,7 +64,7 @@ final class OwnGameplayCapture
         identity = session = profile = null;
         accountType = null;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
+        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         combatObserved = combatHandedOff = combatNotHandedOff = 0;
         gapReason = "not_observed";
@@ -98,7 +99,7 @@ final class OwnGameplayCapture
     void gap()
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
+        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset();
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -133,6 +134,11 @@ final class OwnGameplayCapture
 
     void state(String kind, String source, Map<String,Object> value, int tick, long at)
     {
+        state(kind, source, value, tick, at, true);
+    }
+
+    void state(String kind, String source, Map<String,Object> value, int tick, long at, boolean direct)
+    {
         Map<String,Object> previous = states.get(kind);
         if (previous == null || !Objects.equals(previous.get("value"), value))
         {
@@ -142,7 +148,7 @@ final class OwnGameplayCapture
             states.put(kind, sample);
             Map<String,Object> change = new LinkedHashMap<>(value);
             change.put("observation", previous == null ? "baseline" : "absolute_update");
-            append(kind, source, tick, at, change);
+            append(kind, source, tick, at, change, direct);
         }
     }
 
