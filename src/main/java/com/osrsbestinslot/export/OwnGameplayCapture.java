@@ -199,6 +199,7 @@ final class OwnGameplayCapture
             goals.put(GOAL_SKILLS[i].name(), goal);
         }
         state("skills.goal_xp", "varps:1229-1251,1253-1275", goals, tick, at);
+        state("storage.rune_pouch", "own_inventory,varbits,enum:982", OwnRunePouchCapture.read(client,vars), tick, at);
         activities.poll(client, vars, at);
         interfaces.poll(client, at);
         sequences.poll(client, at, System.nanoTime());

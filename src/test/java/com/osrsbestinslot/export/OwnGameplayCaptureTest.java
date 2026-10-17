@@ -57,6 +57,25 @@ public class OwnGameplayCaptureTest
         NPC n = mock(NPC.class); when(n.getId()).thenReturn(id); return n;
     }
 
+    @Test public void carriedPouchStateChangesRemainAbsoluteAndResetAfterSceneGap()
+    {
+        settle();ItemContainer inventory=mock(ItemContainer.class);
+        when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inventory);
+        when(inventory.getItems()).thenReturn(new Item[]{new Item(ItemID.RUNE_POUCH,1)});
+        capture.poll(client,1000);tick++;capture.poll(client,1600);
+        List<Map<String,Object>> pouch=new ArrayList<>();
+        for(Map<String,Object> r:rows())if("storage.rune_pouch".equals(r.get("kind")))pouch.add(r);
+        assertEquals(1,pouch.size());assertEquals("baseline",((Map<?,?>)pouch.get(0).get("value")).get("observation"));
+        when(inventory.getItems()).thenReturn(new Item[0]);tick++;capture.poll(client,2200);
+        assertEquals("not_observed_carried",state("storage.rune_pouch").get("possession"));
+        Map<?,?> last=rows().get(rows().size()-1); // Find the pouch update independently of other activity decoders.
+        for(Map<String,Object> r:rows())if("storage.rune_pouch".equals(r.get("kind")))last=r;
+        assertEquals("absolute_update",((Map<?,?>)last.get("value")).get("observation"));
+        capture.gap();tick++;capture.poll(client,2800);
+        for(Map<String,Object> r:rows())if("storage.rune_pouch".equals(r.get("kind")))last=r;
+        assertEquals("baseline",((Map<?,?>)last.get("value")).get("observation"));
+    }
+
     @Test public void rejectsOtherPlayersAndOtherPlayersNpcHitsBeforeReadingTheirFields()
     {
         settle(); Player other = mock(Player.class); NPC n = npc(1);

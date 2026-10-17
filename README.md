@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.19 candidate)
+## Own-event provenance (0.7.20 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -16,6 +16,15 @@ unsettled identity, clock reversal and context older than ten seconds stay
 unknown. No raw local profile ID, token or player name enters this context.
 Backend projection support and exact-client QA remain release prerequisites;
 older projected archives do not acquire this metadata retroactively.
+
+The granted own-gameplay snapshot also decodes carried rune-pouch cache slots.
+Only four recognized unnoted pouch items in the player's inventory enable the
+read. Missing inventory, absent varbits and unknown rune mappings stay unknown;
+duplicate rune slots use 64-bit totals. These are cached absolute observations,
+not consumption events, complete storage or a wealth valuation. The original
+raw snapshot remains raw. This new decoder is local and still needs game-client
+verification; its recent snapshot history is not the durable combat event path.
+Source: [RuneLite1.13.1 rune-pouch overlay](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/runepouch/RunepouchOverlay.java).
 
 ## Own-combat journal candidate
 
