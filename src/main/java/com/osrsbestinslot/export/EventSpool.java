@@ -1103,7 +1103,9 @@ final class EventSpool
 		}
 		finally
 		{
-			il.releaseAndDelete();
+			// Keep a stable inode: unlinking after unlock lets a concurrent waiter acquire
+			// the old file while a third process locks a newly created replacement.
+			il.close();
 		}
 	}
 

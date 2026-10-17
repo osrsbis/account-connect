@@ -67,6 +67,70 @@ public class PublicEventOutboxTest
         PublicEventOutbox.Context profile = new PublicEventOutbox.Context(TOKEN, "123", "LEAGUE", "profile-b");
         assertTrue(box.pending(profile, "ge-v1", 100).isEmpty());
     }
+    @Test public void ordinaryIdentitySwitchRetainsUnackedRowsForMatchingReturnAfterCrash() throws Exception
+    {
+        assertTrue(box.append(owner,"ge-v1",event(A)));
+        PublicEventOutbox.Context other=new PublicEventOutbox.Context(TOKEN,"456","STANDARD","profile-b");
+        assertTrue(box.pending(other,"ge-v1",100).isEmpty());
+        Map<String,Object> e=event(B);e.put("account_hash","456");assertTrue(box.append(other,"ge-v1",e));
+        box.crashForTest();box=fresh();
+        List<Map<String,Object>> restored=box.pending(owner,"ge-v1",100);
+        assertEquals(1,restored.size());assertEquals(A,restored.get(0).get("event_id"));
+        restored=box.pending(other,"ge-v1",100);assertEquals(1,restored.size());assertEquals(B,restored.get(0).get("event_id"));
+        assertEquals(0,box.counters.purged.get());
+    }
+    @Test public void retainedIdentityBoundEvictsOnlyOldestIdleAndCountsTheGap() throws Exception
+    {
+        List<PublicEventOutbox.Context> owners=new ArrayList<>();
+        for(int i=0;i<=EventSpool.MAX_INDEX;i++)
+        {
+            PublicEventOutbox.Context c=new PublicEventOutbox.Context(TOKEN,"123","STANDARD","bounded-"+i);owners.add(c);
+            assertTrue(box.append(c,"ge-v1",event(A)));box.close();
+        }
+        assertEquals(1,box.counters.purged.get());
+        assertTrue(box.pending(owners.get(0),"ge-v1",100).isEmpty()); // a read probe evicts no further owner
+        for(int i=1;i<owners.size();i++)assertEquals(1,box.pending(owners.get(i),"ge-v1",100).size());
+        assertEquals(1,box.counters.purged.get());
+        box.purge();
+        for(PublicEventOutbox.Context c:owners)assertTrue(box.pending(c,"ge-v1",100).isEmpty());
+    }
+    @Test public void incompleteIndexDoesNotTurnAnAppendIntoBulkRetirement() throws Exception
+    {
+        assertTrue(box.append(owner, "ge-v1", event(A)));
+        box.close();
+        Path root = dir.resolve("osrsbis/public-events-v1");
+        Files.write(root.resolve(EventSpool.POINTER), "broken index".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        PublicEventOutbox.Context other = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-b");
+        assertTrue(box.append(other, "ge-v1", event(B)));
+        assertEquals(1, EventSpool.readIndex(root).size());
+        assertEquals(1, box.pending(owner, "ge-v1", 100).size());
+        assertEquals(0, box.counters.purged.get());
+        box.purge(); // explicit withdrawal still finds the unindexed directory
+        assertTrue(box.pending(other, "ge-v1", 100).isEmpty());
+    }
+    @Test public void indexLockStaysOnTheSameInodeAcrossUpdatesAndRefusesConcurrentWriters() throws Exception
+    {
+        assertTrue(box.append(owner, "ge-v1", event(A)));
+        Path root = dir.resolve("osrsbis/public-events-v1");
+        try (java.nio.channels.FileChannel waiter = java.nio.channels.FileChannel.open(
+            root.resolve(EventSpool.INDEX_LOCK), StandardOpenOption.CREATE, StandardOpenOption.WRITE))
+        {
+            assertTrue(box.append(owner, "ge-v1", event(B)));
+            try (java.nio.channels.FileLock held = waiter.tryLock())
+            {
+                assertNotNull(held);
+                EventSpool.Locked contender = EventSpool.lock(root.resolve(EventSpool.INDEX_LOCK));
+                try { assertNull("a waiter on the old inode still excludes new index writers", contender); }
+                finally { if (contender != null) contender.close(); }
+                PublicEventOutbox.Context other = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-b");
+                try { box.append(other, "ge-v1", event(A)); fail("index contention must defer append"); }
+                catch (java.io.IOException expected) { assertEquals("index lock unavailable", expected.getMessage()); }
+                assertEquals(Collections.singletonList(owner.identity), EventSpool.readIndex(root));
+            }
+        }
+        assertEquals(2, box.pending(owner, "ge-v1", 100).size());
+        assertEquals(0, box.counters.purged.get());
+    }
     @Test public void explicitErasurePreventsRestartReplayButDoesNotMarkAnotherLiveIdentity() throws Exception
     {
         box.append(owner, "ge-v1", event(A));

@@ -79,14 +79,8 @@ final class PublicEventOutbox
             // writer and recover under the same still-valid context, as the staff adapter does.
         }
         close();
-        // As in the staff journal, retire idle prior identities, never another live writer.
-        // This is bounded local retry storage, not the durable server history.
-        for (String old : knownIdentities())
-            if (!old.equals(next.identity) && EventSpool.purgeIfIdle(root.resolve(old)))
-            {
-                EventSpool.deletePointerIf(root, old);
-                counters.purged.incrementAndGet();
-            }
+        // A normal account/profile change is not an erasure or ACK. Retain recent
+        // identities for a later matching grant; age and append-time index bounds still apply.
         EventSpool.sweepAged(root, clock, limits.maxAgeMs, counters);
         Path dir = root.resolve(next.identity);
         if (Files.exists(dir.resolve(EventSpool.MARKER))) return false;
@@ -119,7 +113,31 @@ final class PublicEventOutbox
         long created = Math.min(((Number) timestamp).longValue(), clock.getAsLong());
         boolean appended = journal.append(id, String.valueOf(event.get("type")), created, json);
         journal.maybeCompact();
-        return appended && journal.get(id) != null;
+        boolean retained = appended && journal.get(id) != null;
+        if (retained) retireOutsideIndex(owner.identity);
+        return retained;
+    }
+
+    private void retireOutsideIndex(String active) throws IOException
+    {
+        // writePointer has already forced this identity into the existing newest16 index.
+        // Do not evict for an empty pending() probe, or if index integrity is unavailable.
+        EventSpool.Locked index = EventSpool.lock(root.resolve(EventSpool.INDEX_LOCK));
+        if (index == null) return; // retry cleanup on a later append; this row is already durable
+        try
+        {
+            Set<String> retained = new HashSet<>(EventSpool.readIndex(root));
+            // A missing/short index is not evidence that unknown older directories exceeded
+            // the bound. Keep them until a complete recent index or explicit withdrawal.
+            if (retained.size() != EventSpool.MAX_INDEX || !retained.contains(active)) return;
+            for (String old : knownIdentities())
+                if (!retained.contains(old)
+                    && Files.isDirectory(root.resolve(old), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    && EventSpool.purgeIfIdle(root.resolve(old)))
+                    counters.purged.incrementAndGet();
+        }
+        finally { index.close(); }
+        // Live sibling locks are never overridden; they may temporarily exceed the index bound.
     }
 
     /** Re-project recovered rows and re-check ownership before exposing any payload. */

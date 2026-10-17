@@ -361,9 +361,15 @@ not a durable completeness denominator.
 Only exact per-ID Queue receipts settle durable rows. Generic 2xx and retryable
 failures retain them; permanent rejected rows become metadata-only quarantine.
 Restart needs a fresh grant for the same identity; logout pauses delivery. Changing
-account/mode/profile cannot replay old rows into the new identity. Idle prior retry
-identities are retired; another live writer is preserved. Token withdrawal or 403
-purges the current identity and idle indexed retry files, including a cold start
+account/mode/profile cannot replay old rows into the new identity. Unacknowledged
+rows remain for a later matching identity and grant. After a successful append,
+idle identities outside the newest 16 are retired and counted as gaps. A missing
+or incomplete index and an empty read never cause identity retirement. Live
+sibling writers remain protected and may temporarily exceed the identity bound.
+The index lock keeps a stable file and covers the retirement decision. Older
+binaries that delete that lock file must not share this root during rollout.
+Token withdrawal or 403 purges the current identity and idle retry files (including
+unindexed directories), including a cold start
 before any grant. An account-erased receipt targets only the sent identity. Purge
 markers and age bounds are checked again before dispatch; restored rows still need
 a valid fresh server grant and are subject to the server's deletion tombstones.

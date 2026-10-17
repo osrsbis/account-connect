@@ -134,7 +134,8 @@ public class PublicEventOutboxPluginTest
         p.emitEvent("pickup",Map.of("item",2,"qty",1,"observation_context",Map.of("other_player","must-not-send")));
         p.awaitSpoolIdleForTest();Map<?,?> before=(Map<?,?>)p.pendingEvents.get(0).get("observation_context");
         assertEquals("IRONMAN",before.get("account_mode"));assertEquals("varbit_1777",before.get("account_mode_source"));
-        assertEquals("0.7.19",before.get("plugin_version"));
+        Field version = AccountConnectPlugin.class.getDeclaredField("PLUGIN_VERSION"); version.setAccessible(true);
+        assertEquals(version.get(null), before.get("plugin_version")); // artifact equality is covered by VersionDriftTest
         assertEquals("STANDARD",p.pendingEvents.get(0).get("profile_type"));
         assertFalse(before.toString().contains("must-not-send"));
         String session=(String)before.get("collector_session");Object sequence=before.get("sequence");
@@ -169,9 +170,17 @@ public class PublicEventOutboxPluginTest
     }
     @Test public void logoutPausesAndModeOrRuneLiteProfileCannotReplayPriorRows() throws Exception
     {
-        grant(); emit(); set(p, "sessionActive", false); p.flushEvents(); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+        grant(); emit(); String standardId = (String)p.pendingEvents.get(0).get("event_id");
+        set(p, "sessionActive", false); p.flushEvents(); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
         p.crashSpoolForTest(); p = fresh("LEAGUE", 7); grant(); assertTrue(p.pendingEvents.isEmpty());
-        emit(); p.crashSpoolForTest(); p = fresh("LEAGUE", 8); grant(); assertTrue(p.pendingEvents.isEmpty());
+        emit(); String leagueId = (String)p.pendingEvents.get(0).get("event_id");
+        p.crashSpoolForTest(); p = fresh("LEAGUE", 8); grant(); assertTrue(p.pendingEvents.isEmpty());
+        p.crashSpoolForTest(); p = fresh("STANDARD", 7); grant();
+        assertEquals(1, p.pendingEvents.size()); assertEquals(standardId, p.pendingEvents.get(0).get("event_id"));
+        server.enqueue(new MockResponse().setBody(receipt(standardId))); p.flushEvents();
+        assertEquals(standardId, request().getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString()); done();
+        p.crashSpoolForTest(); p = fresh("LEAGUE", 7); grant();
+        assertEquals(1, p.pendingEvents.size()); assertEquals(leagueId, p.pendingEvents.get(0).get("event_id"));
     }
     @Test public void revokedTokenPurgesBeforeAnyRestartReplay() throws Exception
     {
