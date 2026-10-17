@@ -2,7 +2,7 @@ package com.osrsbestinslot.export;
 
 import java.util.*;
 
-/** Closed projection of three audited own-state families. Unknown is never an empty balance or gain. */
+/** Closed projections of audited own-state families. Unknown is never an empty balance or gain. */
 final class OwnStateEvent
 {
     private OwnStateEvent() {}
@@ -11,14 +11,17 @@ final class OwnStateEvent
         "SMITHING", "FISHING", "COOKING", "FIREMAKING", "WOODCUTTING", "FLETCHING", "SLAYER", "FARMING",
         "CONSTRUCTION", "HUNTER", "SAILING");
     private static final Map<String,String> KINDS = Map.of("skills.goal_xp", "skill_goals",
-        "storage.rune_pouch", "rune_pouch", "storage.bank_tab_currency", "bank_tabs");
+        "storage.rune_pouch", "rune_pouch", "storage.bank_tab_currency", "bank_tabs",
+        "travel.fairy_destinations","fairy_favourites","minigame.mixology_orders","mixology_orders",
+        "travel.spirit_destinations","spirit_destinations","combat.raid_context","raid_context");
+    static boolean supportsWireKind(Object kind) { return kind instanceof String && KINDS.containsValue(kind); }
     static boolean supports(Object kind) { return kind instanceof String && KINDS.containsKey(kind); }
     static Map<String,Object> wire(Map<String,Object> input)
     {
         try
         {
             if (number(input.get("state_schema"), 1, 1) != 1 || !"own_client_state".equals(input.get("source"))) return null;
-            String kind = choice(input.get("state_kind"), Arrays.asList("skill_goals", "rune_pouch", "bank_tabs"));
+            String kind = choice(input.get("state_kind"), new ArrayList<>(KINDS.values()));
             Object session = input.get("gameplay_session");
             if (!(session instanceof String) || !((String)session).matches("[a-f0-9]{32}")) return null;
             boolean direct = !"bank_tabs".equals(kind);
@@ -156,6 +159,43 @@ final class OwnStateEvent
                     range.put("tab", i + 1); tabs.add(range);
                 }
                 out.put("tabs", tabs); out.put("untabbed", range(map(p.get("untabbed")), start));
+            }
+            else if("fairy_favourites".equals(kind))
+            {
+                List<?> raw=list(p.get("favourite_codes_visible"),10);if(raw.size()!=10)throw new IllegalArgumentException();
+                List<Object> codes=new ArrayList<>();for(Object code:raw)
+                {if(code!=null&&(!(code instanceof String)||!((String)code).matches("[ABCD][IJKL][PQRS]")))throw new IllegalArgumentException();codes.add(code);}
+                out.put("favourite_codes_visible",codes);out.put("authority","visible_ui_not_unlock_proof");
+            }
+            else if("mixology_orders".equals(kind))
+            {
+                List<Object> codes=null;
+                if(p.get("orders_observed")!=null)
+                {
+                    List<?> raw=list(p.get("orders_observed"),3);if(raw.size()!=3)throw new IllegalArgumentException();
+                    codes=new ArrayList<>();for(Object code:raw){if(!OwnInterfaceCapture.mixologyCode(code))throw new IllegalArgumentException();codes.add(code);}
+                }
+                out.put("orders_observed",codes);out.put("authority","visible_ui_not_completion");
+            }
+            else if("spirit_destinations".equals(kind))
+            {
+                List<Map<String,Object>> destinations=null;
+                if(p.get("visible_destinations")!=null)
+                {
+                    destinations=new ArrayList<>();for(Object row:list(p.get("visible_destinations"),32))
+                    {
+                        Map<?,?> r=map(row);Object name=r.get("destination"),disabled=r.get("disabled_style_observed");
+                        if(!OwnInterfaceCapture.spiritDestination(name)||!(disabled instanceof Boolean))throw new IllegalArgumentException();
+                        destinations.add(Map.of("destination",name,"disabled_style_observed",disabled));
+                    }
+                }
+                out.put("visible_destinations",destinations);out.put("authority","classic_ui_not_unlock_proof");
+            }
+            else if("raid_context".equals(kind))
+            {
+                Long status=nullable(p.get("party_status_raw"));Object room=p.get("room_observed");
+                if(room!=null&&(!Long.valueOf(2).equals(status)||!OwnActivityCapture.raidRoom(room)))throw new IllegalArgumentException();
+                out.put("party_status_raw",status);out.put("room_observed",room);
             }
             else throw new IllegalArgumentException();
             return out;

@@ -26,6 +26,8 @@ final class OwnInterfaceCapture
     private static final Pattern FISH_COUNT=Pattern.compile("([0-9]{1,2}) x ");
     private static final Set<String> TREES=new HashSet<>(Arrays.asList("Tree Gnome Village","Gnome Stronghold","Battlefield of Khazard",
         "Grand Exchange","Feldip Hills","Prifddinas","Port Sarim","Etceteria","Brimhaven","Hosidius","Farming Guild","Your house","Poison Waste","Laguna Aurorae"));
+    static boolean mixologyCode(Object value) { return value instanceof String && Arrays.asList(CODES).contains(value); }
+    static boolean spiritDestination(Object value) { return value instanceof String && TREES.contains(value); }
     OwnInterfaceCapture(OwnGameplayCapture out) { this.out=out; }
     void reset() { checkEpisode=null; }
     static boolean visible(Widget widget) { return widget!=null && !widget.isHidden(); }

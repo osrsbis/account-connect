@@ -40,6 +40,42 @@ public class OwnStateEventTest
             "pouch_item_ids",List.of(12791),"slots",slots,"observed_items",List.of(Map.of("id",999,"qty",999)))));
     }
 
+    static Map<String,Map<String,Object>> interfaceExamples()
+    {
+        Map<String,Map<String,Object>> all=new LinkedHashMap<>();
+        List<String> codes=new ArrayList<>(Collections.nCopies(10,null));codes.set(0,"BKS");
+        all.put("travel.fairy_destinations",Map.of("favourite_codes_visible",codes));
+        all.put("minigame.mixology_orders",Map.of("orders_observed",List.of("AAA","AAA","MAL")));
+        all.put("travel.spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","Your house","disabled_style_observed",false),Map.of("destination","Grand Exchange","disabled_style_observed",true))));
+        all.put("combat.raid_context",Map.of("party_status_raw",2,"room_observed","Verzik Vitur"));return all;
+    }
+    @Test public void fixedInterfaceStatesPreserveUnknownsDuplicatesAndQualifiersWithoutPrivateLabels()
+    {
+        Gson gson=new Gson();
+        for(Map.Entry<String,Map<String,Object>> entry:interfaceExamples().entrySet())
+        {
+            Map<String,Object> event=from(entry.getKey(),entry.getValue());assertNotNull(event);event.put("event_id","a".repeat(32));event.put("ts",AT);
+            ((Map<String,Object>)event.get("state_value")).put("name","PRIVATE");Map<String,Object> projected=PublicTransport.event(event);
+            assertNotNull(projected);assertFalse(gson.toJson(projected).contains("PRIVATE"));
+            assertEquals(OwnStateEvent.wire(projected),OwnStateEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
+        }
+        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of()).get("orders_observed"));
+        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of()).get("visible_destinations"));
+        assertEquals(List.of(),OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of())).get("visible_destinations"));
+        assertNull(OwnStateEvent.projectValue("raid_context",Map.of()).get("room_observed"));
+    }
+    @Test public void malformedInterfaceShapesAndStaleRaidRoomNeverBecomeState()
+    {
+        assertNull(OwnStateEvent.projectValue("fairy_favourites",Map.of("favourite_codes_visible",List.of("BKS"))));
+        assertNull(OwnStateEvent.projectValue("fairy_favourites",Map.of("favourite_codes_visible",Collections.nCopies(10,"PRIVATE"))));
+        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of("orders_observed",List.of("AAA","AAA","PRIVATE"))));
+        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of("orders_observed",List.of("AAA","MAL"))));
+        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","PRIVATE house","disabled_style_observed",false)))));
+        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","Grand Exchange")))));
+        assertNull(OwnStateEvent.projectValue("raid_context",Map.of("party_status_raw",0,"room_observed","Verzik Vitur")));
+        assertNull(OwnStateEvent.projectValue("raid_context",Map.of("party_status_raw",2,"room_observed","PRIVATE")));
+    }
+
     @Test public void threeTypedFamiliesSurviveJsonReplayWithoutPrivateExtrasOrFalseGains()
     {
         Gson gson = new Gson();

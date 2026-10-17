@@ -37,7 +37,10 @@ public class PublicEventOutboxLocalSiteTest
         if(!family.equals("combat.raid_points")&&!family.equals("effects.surge")&&!family.equals("sailing.charting"))values.put(OwnVarsEvent.FIELDS.get(family).get(0),0);
         event.put("values",values);return event;
     }
-    private final boolean states = "1".equals(System.getenv("OSRSBIS_CHECK_STATE"));
+    private final boolean interfaces = "1".equals(System.getenv("OSRSBIS_CHECK_INTERFACE_STATE"));
+    private final List<String> interfaceFamilies=new ArrayList<>(OwnStateEventTest.interfaceExamples().keySet());
+    private Map<String,Object> interfaceEvent(int i) { String kind=interfaceFamilies.get(i);return OwnStateEventTest.from(kind,OwnStateEventTest.interfaceExamples().get(kind)); }
+    private final boolean states = interfaces || "1".equals(System.getenv("OSRSBIS_CHECK_STATE"));
 
     private static void set(AccountConnectPlugin p, String name, Object value) throws Exception
     { Field f = AccountConnectPlugin.class.getDeclaredField(name); f.setAccessible(true); f.set(p, value); }
@@ -84,6 +87,7 @@ public class PublicEventOutboxLocalSiteTest
             AccountConnectPlugin p=fresh();
             if(signals)assertTrue(p.emitOwnGameplayEvent(OwnSignalEventTest.event(signalFamilies.get(0))));
             else if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
+            else if(interfaces)assertTrue(p.emitOwnGameplayEvent(interfaceEvent(0)));
             else if(states)assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.goalEvent()));
             else if(combat)assertTrue(p.emitOwnCombat(new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
                 "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
@@ -96,10 +100,11 @@ public class PublicEventOutboxLocalSiteTest
             else if(vars) {
                 for(int i=1;i<varFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(i))));
             }
+            else if(interfaces) {for(int i=1;i<interfaceFamilies.size();i++)assertTrue(p.emitOwnGameplayEvent(interfaceEvent(i)));}
             else if(states) { assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.pouchEvent()));
                 assertTrue(p.emitOwnGameplayEvent(OwnStateEventTest.bankEvent())); }
             else p.emitEvent("bank_session",new LinkedHashMap<>(Map.of("deposited",rows,"withdrawn",rows,"complete",true)));
-            int valid=signals?signalFamilies.size():vars?varFamilies.size():states?3:2,total=valid+1;
+            int valid=signals?signalFamilies.size():vars?varFamilies.size():interfaces?4:states?3:2,total=valid+1;
             p.awaitSpoolIdleForTest(); assertEquals(total,p.pendingEvents.size());
             List<String> ids=new ArrayList<>();
             for(Map<String,Object> event:p.pendingEvents) ids.add((String)event.get("event_id"));
@@ -116,7 +121,7 @@ public class PublicEventOutboxLocalSiteTest
             if(states)
             {
                 Map<?,?> health=(Map<?,?>)p.captureHealthSnapshot().get("queue_delivery");
-                for(String kind:Arrays.asList("skill_goals","rune_pouch","bank_tabs"))
+                for(String kind:interfaces?Arrays.asList("fairy_favourites","mixology_orders","spirit_destinations","raid_context"):Arrays.asList("skill_goals","rune_pouch","bank_tabs"))
                 {
                     Map<?,?> counts=(Map<?,?>)((Map<?,?>)health.get("by_family")).get("own_state_"+kind);
                     assertEquals(1L,counts.get("archive_receipts"));assertEquals(0L,counts.get("broker_receipts"));
@@ -141,6 +146,7 @@ public class PublicEventOutboxLocalSiteTest
             command("/test/erase");
             if(signals)assertTrue(p.emitOwnGameplayEvent(OwnSignalEventTest.event(signalFamilies.get(0))));
             else if(vars)assertTrue(p.emitOwnGameplayEvent(varsEvent(varFamilies.get(0))));
+            else if(interfaces)assertTrue(p.emitOwnGameplayEvent(interfaceEvent(0)));
             else p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
             p.awaitSpoolIdleForTest(); p.flushEvents(); done(p);
             assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());

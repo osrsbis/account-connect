@@ -120,17 +120,17 @@ public class OwnGameplayCaptureTest
         capture = new OwnGameplayCapture(e -> { if(!"own_state".equals(e.get("type")))return false; sent.add(e); return sent.size() != 2; }); settle();
         long at = OwnStateEventTest.AT;
         capture.poll(client,at); tick++; capture.poll(client,at+600);
-        assertEquals(2,sent.size());
-        assertEquals(new HashSet<>(Arrays.asList("skill_goals","rune_pouch")),
-            new HashSet<>(Arrays.asList(sent.get(0).get("state_kind"),sent.get(1).get("state_kind"))));
+        assertEquals(6,sent.size());
+        Set<Object> kinds=new HashSet<>();for(Map<String,Object> event:sent)kinds.add(event.get("state_kind"));
+        assertEquals(Set.of("skill_goals","rune_pouch","fairy_favourites","mixology_orders","spirit_destinations","raid_context"),kinds);
         ItemContainer bank=mock(ItemContainer.class);when(bank.getItems()).thenReturn(new Item[]{new Item(995,100)});
         when(client.getItemContainer(95)).thenReturn(bank);
         when(client.getWidget(net.runelite.api.gameval.InterfaceID.Bankmain.ITEMS)).thenReturn(mock(net.runelite.api.widgets.Widget.class));
         bit(4150,1);for(int i=0;i<9;i++)bit(4171+i,2+i);vars[2]=1;
         capture.bankTabs.container(95,bank,tick,at+600);capture.bankTabs.built(client,at+601);
-        assertEquals(3,sent.size());assertEquals(false,sent.get(2).get("direct"));
-        assertEquals(3L,capture.snapshot().get("state_events_observed"));
-        assertEquals(2L,capture.snapshot().get("state_events_handed_off"));
+        assertEquals(7,sent.size());assertEquals(false,sent.get(6).get("direct"));
+        assertEquals(7L,capture.snapshot().get("state_events_observed"));
+        assertEquals(6L,capture.snapshot().get("state_events_handed_off"));
         assertEquals(1L,capture.snapshot().get("state_events_not_handed_off"));
         for(Map<String,Object> e:sent)assertNotNull(OwnStateEvent.wire(e));
         capture.reset();assertEquals(0L,capture.snapshot().get("state_events_observed"));

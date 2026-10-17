@@ -37,6 +37,8 @@ final class OwnActivityCapture
     }
     private static final String[] ROOMS = {"The Maiden of Sugadinti", "Pestilent Bloat", "Nylocas Prinkipas", "Nylocas Vasilias", "Sotetseg", "Xarpus", "Verzik Vitur"};
 
+    static boolean raidRoom(Object value) { return value instanceof String && Arrays.asList(ROOMS).contains(value); }
+
     OwnActivityCapture(OwnGameplayCapture out) { this.out = out; }
     void reset() { messageTick = deathTick = -1; messages.clear(); }
 
