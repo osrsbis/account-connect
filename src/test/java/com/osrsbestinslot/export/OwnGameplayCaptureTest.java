@@ -79,6 +79,27 @@ public class OwnGameplayCaptureTest
         assertNotEquals(rows().get(0).get("event_id"), rows().get(1).get("event_id"));
     }
 
+    @Test public void onlyOwnCombatHandsOffTypedEventsWithExplicitNonAckCounters()
+    {
+        List<Map<String,Object>> handed = new ArrayList<>();
+        capture = new OwnGameplayCapture(row -> { handed.add(row); return handed.size() == 1; });
+        settle(); Player other=mock(Player.class); NPC n=npc(42);
+        capture.hit(client,other,splat(8,true),1000);capture.hit(client,n,splat(8,false),1000);
+        assertTrue(handed.isEmpty());
+        capture.hit(client,self,splat(0,false),1000);capture.hit(client,n,splat(8,true),1001);
+        capture.endNpc(client,n,false,1002);
+        assertEquals(3,handed.size());assertEquals("combat_hit",handed.get(0).get("type"));
+        assertEquals("received",handed.get(0).get("direction"));assertFalse(handed.get(0).containsKey("npc_id"));
+        assertEquals(0,handed.get(0).get("amount"));
+        assertEquals(handed.get(1).get("target_key"),handed.get(2).get("target_key"));
+        assertEquals("despawn_not_death",handed.get(2).get("end"));assertEquals("unknown",handed.get(2).get("kill_credit"));
+        assertEquals(3L,capture.snapshot().get("combat_events_observed"));
+        assertEquals(1L,capture.snapshot().get("combat_events_handed_off"));
+        assertEquals(2L,capture.snapshot().get("combat_events_not_handed_off"));
+        verifyNoInteractions(other);verify(n,never()).getName();
+        capture.reset();assertEquals(0L,capture.snapshot().get("combat_events_observed"));
+    }
+
     @Test public void despawnIsNotKillAndReusedNpcIndexGetsNewIdentity()
     {
         settle(); NPC first = npc(1), second = npc(1);

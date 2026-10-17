@@ -22,6 +22,7 @@ public class PublicEventOutboxLocalSiteTest
     private Path data;
     private OkHttpClient http;
     private final List<AccountConnectPlugin> instances = new ArrayList<>();
+    private final boolean combat = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT"));
 
     private static void set(AccountConnectPlugin p, String name, Object value) throws Exception
     { Field f = AccountConnectPlugin.class.getDeclaredField(name); f.setAccessible(true); f.set(p, value); }
@@ -38,7 +39,8 @@ public class PublicEventOutboxLocalSiteTest
         p.setSpoolDataRootForTest(data);
         // Synthetic policy receipt is scoped to this local test identity, never a live grant.
         Response policy = new Response.Builder().request(new Request.Builder().url(base).build())
-            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-history-v1").build();
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue",combat?"own-combat-v1":"own-history-v1")
+            .header("X-Own-Gameplay",combat?"on":"off").build();
         p.applyServerPolicy(policy,TOKEN); p.awaitSpoolIdleForTest(); return p;
     }
 
@@ -65,7 +67,10 @@ public class PublicEventOutboxLocalSiteTest
         try
         {
             AccountConnectPlugin p=fresh();
-            p.emitEvent("ge_progress",new LinkedHashMap<>(Map.of("item",2,"qty",1,"state","BUYING")));
+            if(combat)assertTrue(p.emitOwnCombat(new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
+                "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
+                "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","received","amount",0,"hitsplat_type",16))));
+            else p.emitEvent("ge_progress",new LinkedHashMap<>(Map.of("item",2,"qty",1,"state","BUYING")));
             p.emitEvent("ge_progress",new LinkedHashMap<>(Map.of("item",2,"qty",1,"state","INVALID")));
             List<Map<String,Object>> rows=new ArrayList<>();
             for(int i=0;i<90;i++) rows.add(Map.of("id",1000+i,"qty",2000000000));

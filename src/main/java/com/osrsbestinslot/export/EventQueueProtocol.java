@@ -15,9 +15,11 @@ final class EventQueueProtocol
     static boolean allows(String scope, Map<String,Object> event)
     {
         Object id = event.get("event_id");
+        boolean combat = "own-combat-v1".equals(scope);
         return id instanceof String && ((String) id).matches("[a-f0-9]{32}")
-            && (("ge-v1".equals(scope) || "own-history-v1".equals(scope)) && GE.contains(event.get("type"))
-                || "own-history-v1".equals(scope) && HISTORY.contains(event.get("type")));
+            && ((combat || "ge-v1".equals(scope) || "own-history-v1".equals(scope)) && GE.contains(event.get("type"))
+                || (combat || "own-history-v1".equals(scope)) && HISTORY.contains(event.get("type"))
+                || combat && ("combat_hit".equals(event.get("type")) || "combat_npc_end".equals(event.get("type"))));
     }
     enum Outcome { RETRY, DURABLE, ERASED, REJECTED }
 

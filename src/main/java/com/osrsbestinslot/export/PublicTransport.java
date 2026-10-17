@@ -36,6 +36,7 @@ final class PublicTransport
         allow("level_up", "skill level xp");
         allow("xp_gain", "gains total");
         allow("bank_session", "deposited withdrawn complete truncated");
+        allow("combat_hit combat_npc_end", "combat_schema gameplay_session source_sequence source_tick observed_at_ms source direction amount hitsplat_type npc_id target_key first_own_hit_tick end kill_credit");
         allow("bank_visit_open", "visit_id opened_at_ms read_at_ms bank_state item_stacks manifest_sha256 plugin_version");
         allow("bank_visit_close", "visit_id closed_at_ms close_reason manifest_complete moves_complete deposited_sha256 withdrawn_sha256 end_manifest_sha256 end_chunks deposited withdrawn deposited_chunks withdrawn_chunks moves_chunks");
         allow("bank_visit_manifest_chunk", "visit_id phase chunk chunks manifest_sha256 items");

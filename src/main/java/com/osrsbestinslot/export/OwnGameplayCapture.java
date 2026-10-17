@@ -36,6 +36,10 @@ final class OwnGameplayCapture
     private final Deque<Map<String,Object>> observations = new ArrayDeque<>();
     private final Deque<Integer> observationBytes = new ArrayDeque<>();
     private int bufferedBytes;
+    private final java.util.function.Predicate<Map<String,Object>> combatSink;
+    private long combatObserved, combatHandedOff, combatNotHandedOff;
+    OwnGameplayCapture() { this(row -> false); }
+    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { combatSink = sink; }
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
     final OwnInterfaceCapture interfaces = new OwnInterfaceCapture(this);
     final OwnSequenceCapture sequences = new OwnSequenceCapture(this);
@@ -60,6 +64,7 @@ final class OwnGameplayCapture
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
         states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
+        combatObserved = combatHandedOff = combatNotHandedOff = 0;
         gapReason = "not_observed";
     }
 
@@ -114,6 +119,15 @@ final class OwnGameplayCapture
             observations.removeFirst(); bufferedBytes -= observationBytes.removeFirst(); evicted++;
         }
         observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
+        Map<String,Object> combat = OwnCombatEvent.from(session, row);
+        if (combat != null)
+        {
+            combatObserved++;
+            boolean handedOff = false;
+            try { handedOff = combatSink.test(combat); }
+            catch (RuntimeException failure) { /* The snapshot still contains the observation. */ }
+            if (handedOff) combatHandedOff++; else combatNotHandedOff++;
+        }
     }
 
     void state(String kind, String source, Map<String,Object> value, int tick, long at)
@@ -242,6 +256,9 @@ final class OwnGameplayCapture
         out.put("completeness_scope", "bounded_recent_observations"); out.put("complete", false);
         out.put("gap_reason", evicted > 0 ? "buffer_eviction" : gapReason); out.put("evicted", evicted);
         out.put("buffered_bytes", bufferedBytes);
+        // Handoff is not disk durability or server ACK. Scope is this capture session only.
+        out.put("combat_events_observed", combatObserved);out.put("combat_events_handed_off", combatHandedOff);
+        out.put("combat_events_not_handed_off", combatNotHandedOff);
         out.put("states", new LinkedHashMap<>(states)); out.put("observations", new ArrayList<>(observations));
         return out;
     }

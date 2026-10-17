@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.18";
+	private static final String PLUGIN_VERSION = "0.7.19";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -156,7 +156,7 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
 	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
-	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture();
+	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnCombat);
 	private volatile String gameplayGrantToken;
 	private volatile long gameplayGrantEpoch;
 
@@ -164,6 +164,17 @@ public class AccountConnectPlugin extends Plugin
 	{
 		String token = currentLinkToken();
 		return token != null && token.matches("[a-f0-9]{32}") && token.equals(gameplayGrantToken);
+	}
+
+	boolean emitOwnCombat(Map<String,Object> observation)
+	{
+		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
+		if (!gameplayGranted() || !"own-combat-v1".equals(eventQueueScope) || publicQueueContext(true) == null)
+			return false;
+		String type = String.valueOf(observation.get("type"));
+		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)) return false;
+		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
+		emitEvent(type, fields); return true;
 	}
 
 	boolean gameplayReady()
@@ -3882,6 +3893,11 @@ public class AccountConnectPlugin extends Plugin
 		{
 			maybeForceSnapshotForEvent(type);
 			return;
+		}
+		if ("combat_hit".equals(type) || "combat_npc_end".equals(type))
+		{
+			// A grant/identity race cannot send this future scope to the legacy writer.
+			healthEventsLost.incrementAndGet(); return;
 		}
 		spoolOnEmit(type, ev, eventId);
 		synchronized (pendingEvents)
@@ -11910,7 +11926,8 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
 		String queueScope = response.header("X-Event-Queue");
-		if (response.isSuccessful() && ("ge-v1".equals(queueScope) || "own-history-v1".equals(queueScope)))
+		if (response.isSuccessful() && ("ge-v1".equals(queueScope) || "own-history-v1".equals(queueScope)
+			|| "own-combat-v1".equals(queueScope)))
 		{
 			eventQueueScope = queueScope;
 			eventQueueGrantToken = sentToken;

@@ -75,6 +75,34 @@ public class PublicEventOutboxPluginTest
     }
     private String receipt(String id)
     { return "{\"receipt_version\":1,\"results\":[{\"index\":0,\"event_id\":\""+id+"\",\"status\":\"queued\",\"broker_ack\":true}]}"; }
+
+    private void combatGrant(boolean gameplay) throws Exception
+    {
+        Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-combat-v1")
+            .header("X-Own-Gameplay",gameplay?"on":"off").build();
+        p.applyServerPolicy(r,token.get());p.awaitSpoolIdleForTest();
+    }
+    @Test public void combatRequiresBothGrantsAndSurvivesRestartAndScopeRollbackUntilOwnAck() throws Exception
+    {
+        Map<String,Object> event=new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
+            "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
+            "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","received","amount",0,"hitsplat_type",16));
+        combatGrant(false);assertFalse(p.emitOwnCombat(event));assertTrue(p.pendingEvents.isEmpty());
+        combatGrant(true);assertTrue(p.emitOwnCombat(event));p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());String id=(String)p.pendingEvents.get(0).get("event_id");
+        p.crashSpoolForTest();p=fresh("STANDARD",7);grant();p.pumpPublicOutbox();p.awaitSpoolIdleForTest();
+        assertTrue("narrow scope must hold rather than discard combat",p.pendingEvents.isEmpty());
+        combatGrant(true);p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertEquals(1,p.pendingEvents.size());
+        assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+        server.enqueue(new MockResponse().setResponseCode(500).setBody("fault"));p.flushEvents();
+        assertEquals(id,request().getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString());done();
+        assertEquals(1,p.pendingEvents.size());
+        assertTrue(p.queueRetryBackoffUntilMs>0);p.flushEvents();assertEquals(1,server.getRequestCount());
+        p.queueRetryBackoffUntilMs=0;
+        server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();request();done();
+        p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
+    }
     @Test public void ownVarbitContextSurvivesCrashAndCannotBeForgedByCallerFields() throws Exception
     {
         net.runelite.api.Client client=mock(net.runelite.api.Client.class);
@@ -94,7 +122,7 @@ public class PublicEventOutboxPluginTest
         p.emitEvent("pickup",Map.of("item",2,"qty",1,"observation_context",Map.of("other_player","must-not-send")));
         p.awaitSpoolIdleForTest();Map<?,?> before=(Map<?,?>)p.pendingEvents.get(0).get("observation_context");
         assertEquals("IRONMAN",before.get("account_mode"));assertEquals("varbit_1777",before.get("account_mode_source"));
-        assertEquals("0.7.18",before.get("plugin_version"));
+        assertEquals("0.7.19",before.get("plugin_version"));
         assertEquals("STANDARD",p.pendingEvents.get(0).get("profile_type"));
         assertFalse(before.toString().contains("must-not-send"));
         String session=(String)before.get("collector_session");Object sequence=before.get("sequence");

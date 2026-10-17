@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.18 candidate)
+## Own-event provenance (0.7.19 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -16,6 +16,19 @@ unsettled identity, clock reversal and context older than ten seconds stay
 unknown. No raw local profile ID, token or player name enters this context.
 Backend projection support and exact-client QA remain release prerequisites;
 older projected archives do not acquire this metadata retroactively.
+
+## Own-combat journal candidate
+
+With both the own-gameplay grant and explicit `own-combat-v1` Queue scope, own
+incoming hits and own hits on NPCs enter the bounded public journal. Observed NPC
+death and despawn remain distinct; neither establishes kill credit. No attacker,
+other-player name or player target is recorded. The existing snapshot remains.
+Restart and narrower Queue scopes retain pending records; explicit erasure keeps
+its tombstones. Session counters distinguish observations from event handoff;
+handoff does not prove disk persistence or server acceptance.
+This extension is local, default off and separate from the frozen public build.
+Exact-source review, the matched backend, disclosure, client QA and normal release
+are still required. It does not make all snapshot families durable.
 
 ## How it works
 
