@@ -172,6 +172,33 @@ public class PublicEventOutboxPluginTest
         Map<?,?> health=(Map<?,?>)p.captureHealthSnapshot().get("queue_delivery");
         assertEquals(1L,((Map<?,?>)((Map<?,?>)health.get("by_family")).get("own_vars_effects.surge")).get("broker_receipts"));
     }
+    private void signalGrant(String responseToken) throws Exception
+    {
+        Response response=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-signals-v1").header("X-Own-Gameplay","on").build();
+        p.applyServerPolicy(response,responseToken);p.awaitSpoolIdleForTest();
+    }
+    @Test public void signalsRequireNewScopeAndPreserveExactIdsThroughOldScopeRestartAndAck() throws Exception
+    {
+        Map<String,Object> event=OwnSignalEventTest.event("combat.chompy_kc");
+        varsGrant(true,token.get());assertFalse(p.emitOwnGameplayEvent(event));signalGrant("f".repeat(32));assertFalse(p.emitOwnGameplayEvent(event));
+        signalGrant(token.get());assertTrue(p.emitOwnGameplayEvent(event));p.awaitSpoolIdleForTest();assertEquals(1,p.pendingEvents.size());
+        String id=(String)p.pendingEvents.get(0).get("event_id");p.crashSpoolForTest();p=fresh("STANDARD",7);
+        varsGrant(true,token.get());p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
+        signalGrant(token.get());p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertEquals(1,p.pendingEvents.size());
+        assertEquals(id,p.pendingEvents.get(0).get("event_id"));assertNull(((Map<?,?>)p.pendingEvents.get(0).get("signal_value")).get("total_kills"));
+        server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();request();done();assertTrue(p.pendingEvents.isEmpty());
+        Map<?,?> family=(Map<?,?>)((Map<?,?>)((Map<?,?>)p.captureHealthSnapshot().get("queue_delivery")).get("by_family")).get("own_signal_combat.chompy_kc");
+        assertEquals(1L,family.get("broker_receipts"));
+    }
+    @Test public void signalScopeRaceCannotReachLegacyAndMalformedProjectionCannotThrow() throws Exception
+    {
+        signalGrant(token.get());Map<String,Object> event=OwnSignalEventTest.event("storage.coal_bag");event.put("signal_kind",null);
+        assertFalse(p.emitOwnGameplayEvent(event));
+        Map<String,Object> fields=OwnSignalEventTest.event("storage.coal_bag");fields.remove("type");varsGrant(true,token.get());
+        p.emitEvent("own_signal",fields);p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());assertEquals(1L,p.captureHealthSnapshot().get("events_lost_total"));
+    }
+
     @Test public void rawVarsScopeRaceCannotFallBackToLegacy() throws Exception
     {
         varsGrant(true,token.get());Map<String,Object> fields=OwnVarsEventTest.event();fields.remove("type");

@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.30";
+	private static final String PLUGIN_VERSION = "0.7.31";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -177,11 +177,12 @@ public class AccountConnectPlugin extends Plugin
 		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
 		String scope = ownGameplayQueueScope();
 		if (!gameplayGranted() || scope == null) return false;
-		boolean vars = "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope);
+		boolean signals = "own-signals-v1".equals(scope), vars = signals || "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope);
 		String type = String.valueOf(observation.get("type"));
 		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)
 			&& !(states && "own_state".equals(type) && OwnStateEvent.wire(observation) != null)
-			&& !(vars && "own_vars".equals(type) && OwnVarsEvent.wire(observation) != null)) return false;
+			&& !(vars && "own_vars".equals(type) && OwnVarsEvent.wire(observation) != null)
+			&& !(signals && "own_signal".equals(type) && OwnSignalEvent.wire(observation) != null)) return false;
 		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
 		emitEvent(type, fields); return true;
 	}
@@ -190,7 +191,7 @@ public class AccountConnectPlugin extends Plugin
 	private String ownGameplayQueueScope()
 	{
 		String scope = eventQueueScope;
-		if (!("own-combat-v1".equals(scope) || "own-state-v1".equals(scope) || "own-vars-v1".equals(scope))
+		if (!("own-combat-v1".equals(scope) || "own-state-v1".equals(scope) || "own-vars-v1".equals(scope) || "own-signals-v1".equals(scope))
 			|| publicQueueContext(true) == null) return null;
 		// Capture can settle before the slower snapshot/session task catches an account switch.
 		if (client != null && (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
@@ -3920,7 +3921,7 @@ public class AccountConnectPlugin extends Plugin
 			maybeForceSnapshotForEvent(type);
 			return;
 		}
-		if ("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_state".equals(type) || "own_vars".equals(type))
+		if ("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_state".equals(type) || "own_vars".equals(type) || "own_signal".equals(type))
 		{
 			// A grant/identity race cannot send this future scope to the legacy writer.
 			healthEventsLost.incrementAndGet(); return;
@@ -12010,7 +12011,7 @@ public class AccountConnectPlugin extends Plugin
 		if (sentToken == null || !sentToken.equals(currentLinkToken())) return;
 		String queueScope = response.header("X-Event-Queue");
 		if (response.isSuccessful() && ("ge-v1".equals(queueScope) || "own-history-v1".equals(queueScope)
-			|| "own-combat-v1".equals(queueScope) || "own-state-v1".equals(queueScope) || "own-vars-v1".equals(queueScope)))
+			|| "own-combat-v1".equals(queueScope) || "own-state-v1".equals(queueScope) || "own-vars-v1".equals(queueScope) || "own-signals-v1".equals(queueScope)))
 		{
 			eventQueueScope = queueScope;
 			eventQueueGrantToken = sentToken;

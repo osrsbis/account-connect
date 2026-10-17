@@ -29,6 +29,12 @@ final class OwnActivityCapture
         "red chinchompa", "chinchompa", "sabre-toothed kyatt", "dark kebbit", "pyre fox", "red salamander",
         "sunlight moth", "sunlight antelope", "dashing kebbit", "moonlight moth", "tecu salamander",
         "herbiboar", "moonlight antelope")));
+    static boolean rumourTargetCode(Object code)
+    {
+        if(!(code instanceof String))return false;
+        for(String name:RUMOUR_TARGETS)if(name.replace(' ','_').replace('-','_').equals(code))return true;
+        return false;
+    }
     private static final String[] ROOMS = {"The Maiden of Sugadinti", "Pestilent Bloat", "Nylocas Prinkipas", "Nylocas Vasilias", "Sotetseg", "Xarpus", "Verzik Vitur"};
 
     OwnActivityCapture(OwnGameplayCapture out) { this.out = out; }

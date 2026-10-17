@@ -15,13 +15,14 @@ final class EventQueueProtocol
     static boolean allows(String scope, Map<String,Object> event)
     {
         Object id = event.get("event_id");
-        boolean vars = "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope), combat = states || "own-combat-v1".equals(scope);
+        boolean signals = "own-signals-v1".equals(scope), vars = signals || "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope), combat = states || "own-combat-v1".equals(scope);
         return id instanceof String && ((String) id).matches("[a-f0-9]{32}")
             && ((combat || "ge-v1".equals(scope) || "own-history-v1".equals(scope)) && GE.contains(event.get("type"))
                 || (combat || "own-history-v1".equals(scope)) && HISTORY.contains(event.get("type"))
                 || combat && ("combat_hit".equals(event.get("type")) || "combat_npc_end".equals(event.get("type")))
                 || states && "own_state".equals(event.get("type"))
-                || vars && "own_vars".equals(event.get("type")));
+                || vars && "own_vars".equals(event.get("type"))
+                || signals && "own_signal".equals(event.get("type")));
     }
     enum Outcome { RETRY, DURABLE, ERASED, REJECTED }
     enum Stage { NONE, BROKER, ARCHIVE }

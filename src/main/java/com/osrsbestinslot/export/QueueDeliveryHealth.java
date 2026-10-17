@@ -17,6 +17,7 @@ final class QueueDeliveryHealth
         Object type = event.get("type");
         if (TYPES.contains(type)) return (String)type;
         Object kind = event.get("state_kind");
+        if("own_signal".equals(type)&&OwnSignalEvent.supports(event.get("signal_kind")))return "own_signal_"+event.get("signal_kind");
         if ("own_vars".equals(type) && OwnVarsEvent.supports(event.get("var_family")))
             return "own_vars_" + event.get("var_family");
         if ("own_state".equals(type) && Arrays.asList("skill_goals", "rune_pouch", "bank_tabs").contains(kind))

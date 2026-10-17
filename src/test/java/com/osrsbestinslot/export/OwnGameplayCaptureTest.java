@@ -57,6 +57,25 @@ public class OwnGameplayCaptureTest
         NPC n = mock(NPC.class); when(n.getId()).thenReturn(id); return n;
     }
 
+    @Test public void auditedSystemAndVisibleCheckSignalsHandoffOnlyTheirClosedValues()
+    {
+        List<Map<String,Object>> sent=new ArrayList<>();capture=new OwnGameplayCapture(e->{if("own_signal".equals(e.get("type")))sent.add(e);return true;});settle();
+        String[] texts={"The coal bag is empty.","The grape barrel is partially full.","You've scratched up a total of 9,000 chompy bird kills.",
+            "You have completed 12 contracts with a total of 99 points.","You treat the patch with ultracompost.",
+            "Your current rumour target is a red chinchompa. You'll need to find it."};
+        for(String text:texts){ChatMessage message=new ChatMessage();message.setType(ChatMessageType.GAMEMESSAGE);message.setMessage(text);
+            capture.activities.chat(client,message,OwnSignalEventTest.AT);capture.activities.chat(client,message,OwnSignalEventTest.AT);}
+        assertEquals(6,sent.size());
+        ItemContainer inv=mock(ItemContainer.class);when(inv.getItems()).thenReturn(new Item[]{new Item(25582,1)});when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
+        net.runelite.api.widgets.Widget dialog=mock(net.runelite.api.widgets.Widget.class);when(dialog.getText()).thenReturn("The barrel is empty.");when(client.getWidget(193,2)).thenReturn(dialog);
+        capture.interfaces.clientTick(client,OwnSignalEventTest.AT);capture.interfaces.clientTick(client,OwnSignalEventTest.AT);assertEquals(7,sent.size());
+        assertEquals(7L,capture.snapshot().get("signal_events_handed_off"));
+        for(Map<String,Object> e:sent){assertNotNull(OwnSignalEvent.wire(e));assertFalse(new com.google.gson.Gson().toJson(e).contains("Your current"));}
+        ChatMessage privateChat=new ChatMessage();privateChat.setType(ChatMessageType.PUBLICCHAT);privateChat.setMessage(texts[0]);capture.activities.chat(client,privateChat,OwnSignalEventTest.AT);assertEquals(7,sent.size());
+        capture.reset();assertEquals(0L,capture.snapshot().get("signal_events_observed"));
+        verify(client,never()).getPlayers();
+    }
+
     @Test public void rawOwnVarSourcesHandoffAuditedBaselinesThenOnlyObservedChanges()
     {
         List<Map<String,Object>> sent=new ArrayList<>();
