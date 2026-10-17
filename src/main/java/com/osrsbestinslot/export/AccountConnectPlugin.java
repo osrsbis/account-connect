@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.23";
+	private static final String PLUGIN_VERSION = "0.7.24";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -687,6 +687,7 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.concurrent.atomic.AtomicLong healthEventsQueued = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsSent = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsLost = new java.util.concurrent.atomic.AtomicLong();
+	private final QueueDeliveryHealth queueDeliveryHealth = new QueueDeliveryHealth();
 	// Memory overflow by priority class. Journal-backed evictions remain replayable, not lost.
 	private final java.util.concurrent.atomic.AtomicLongArray healthOverflowByClass = new java.util.concurrent.atomic.AtomicLongArray(3);
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsSent = new java.util.concurrent.atomic.AtomicLong();
@@ -3899,6 +3900,7 @@ public class AccountConnectPlugin extends Plugin
 			((Number)ev.get("ts")).longValue());
 		if (context != null) ev.put("observation_context", context);
 		ev = PublicTransport.event(ev);
+		if (ev == null) { healthEventsLost.incrementAndGet(); return; }
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
 		if (capturePublicOutbox(ev))
@@ -3906,7 +3908,7 @@ public class AccountConnectPlugin extends Plugin
 			maybeForceSnapshotForEvent(type);
 			return;
 		}
-		if ("combat_hit".equals(type) || "combat_npc_end".equals(type))
+		if ("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_state".equals(type))
 		{
 			// A grant/identity race cannot send this future scope to the legacy writer.
 			healthEventsLost.incrementAndGet(); return;
@@ -4195,6 +4197,7 @@ public class AccountConnectPlugin extends Plugin
 		PublicEventOutbox.Context owner = publicQueueContext(true);
 		String scope = eventQueueScope;
 		if (owner == null || !owner.owns(event) || !EventQueueProtocol.allows(scope, event)) return false;
+		queueDeliveryHealth.handoff(event);
 		if (publicOutboxWrites.incrementAndGet() > MAX_PENDING_EVENTS)
 		{
 			publicOutboxWrites.decrementAndGet();
@@ -4210,9 +4213,11 @@ public class AccountConnectPlugin extends Plugin
 					|| !publicOutboxOnDiskThread().append(owner, scope, event))
 				{
 					publicOutboxUndurable.incrementAndGet();
+					queueDeliveryHealth.undurable(event);
 					healthEventsLost.incrementAndGet();
 					return;
 				}
+				queueDeliveryHealth.forced(event);
 				stagePublicOutbox(owner, scope);
 			}
 			catch (IOException | RuntimeException failure)
@@ -4234,6 +4239,7 @@ public class AccountConnectPlugin extends Plugin
 	private void stageUndurablePublicEvent(PublicEventOutbox.Context owner, Map<String, Object> event)
 	{
 		publicOutboxUndurable.incrementAndGet();
+		queueDeliveryHealth.undurable(event);
 		PublicEventOutbox.Context current = publicQueueContext(true);
 		if (current == null || !owner.identity.equals(current.identity))
 		{
@@ -4590,9 +4596,10 @@ public class AccountConnectPlugin extends Plugin
 						&& response.code() != 403)
 					{
 						String queueBody = readBody(response);
-						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.terminalError(response.code(), queueBody)
-							? java.util.Collections.nCopies(batch.size(), EventQueueProtocol.Outcome.REJECTED)
-							: EventQueueProtocol.receipts(queueBody, batch);
+						EventQueueProtocol.ReceiptSet parsed = EventQueueProtocol.terminalError(response.code(), queueBody)
+							? EventQueueProtocol.ReceiptSet.rejected(batch.size()) : EventQueueProtocol.parseReceipts(queueBody, batch);
+						List<EventQueueProtocol.Outcome> receipts = parsed.outcomes;
+						queueDeliveryHealth.response(batch, parsed);
 						settlePublicOutbox(batch, receipts, sentToken);
 						List<Map<String, Object>> retry = new ArrayList<>();
 						for (int i = 0; i < batch.size(); i++)
@@ -11283,6 +11290,8 @@ public class AccountConnectPlugin extends Plugin
 		h.put("events_queued_total", healthEventsQueued.get());
 		h.put("events_sent_total", healthEventsSent.get());
 		h.put("events_lost_total", healthEventsLost.get());
+		h.put("events_sent_semantics", "legacy_success_or_queue_ownership_not_archive_total");
+		h.put("queue_delivery", queueDeliveryHealth.snapshot());
 		h.put("events_overflow_p0_total", healthOverflowByClass.get(EventPriority.P0));
 		h.put("events_overflow_p1_total", healthOverflowByClass.get(EventPriority.P1));
 		h.put("events_overflow_p2_total", healthOverflowByClass.get(EventPriority.P2));

@@ -106,6 +106,20 @@ public class PublicEventOutboxPluginTest
         JsonObject uploaded=request().getAsJsonArray("events").get(0).getAsJsonObject();
         assertEquals("skill_goals",uploaded.get("state_kind").getAsString());done();
         p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
+        Map<?,?> health=(Map<?,?>)p.captureHealthSnapshot().get("queue_delivery");
+        Map<?,?> counters=(Map<?,?>)((Map<?,?>)health.get("by_family")).get("own_state_skill_goals");
+        assertEquals(1L,counters.get("broker_receipts"));assertEquals(0L,counters.get("archive_receipts"));
+        assertEquals("restart can acknowledge prior-process rows",0L,counters.get("capture_handoffs"));
+    }
+    @Test public void stateLosingItsScopeBeforeFinalEmitCannotFallBackToLegacyOrThrow() throws Exception
+    {
+        stateGrant(true,token.get());Map<String,Object> fields=OwnStateEventTest.goalEvent();fields.remove("type");
+        // Reproduce the final emitter boundary after the prior source-level check.
+        grant();p.emitEvent("own_state",fields);p.awaitSpoolIdleForTest();
+        assertTrue("a scope race must not queue state on the legacy writer",p.pendingEvents.isEmpty());
+        assertEquals(1L,p.captureHealthSnapshot().get("events_lost_total"));
+        stateGrant(true,token.get());p.emitEvent("own_state",Map.of("state_schema",1));p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());assertEquals(2L,p.captureHealthSnapshot().get("events_lost_total"));
     }
     @Test public void combatRequiresBothGrantsAndSurvivesRestartAndScopeRollbackUntilOwnAck() throws Exception
     {

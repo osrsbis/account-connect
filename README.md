@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.23 candidate)
+## Own-event provenance (0.7.24 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -365,6 +365,25 @@ regardless of remote grants. Private staff/Ops capture remains a separate distri
 and disclosure obligation. The currently published Hub warning has not been changed;
 this draft and the expanded artifact still need release-owner and Hub acceptance.
 No new permission toggle or account action is introduced here.
+
+### Queue delivery health (local candidate)
+
+`source.capture_health.queue_delivery` separates valid broker-acceptance receipts
+from archive-plus-D1 receipts, by a fixed event-family list. The three own-state
+kinds have separate counters. It also reports source-to-journal handoffs, confirmed
+forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
+rows. No token, account, event ID or arbitrary source label is retained in these
+counters. The older `events_sent_total` combines legacy HTTP success and Queue
+ownership acceptance; it must not be described as an archive count.
+
+These are process-local operation counts, not unique event totals or a partition
+of gameplay. Recovered rows can predate the process; retry responses repeat rows,
+and a broker-accepted event may archive later without another client response.
+Network failures are not response rows. Handoff is not persistence, fallback may
+follow a successful append but failed staging, and no completeness percentage is
+inferred. Existing snapshot hashing excludes capture health, so changing counters
+alone does not trigger an upload. This telemetry remains release-gated with the
+expanded client and is not measured production coverage.
 
 ### Public Queue retry contract (local candidate)
 

@@ -58,6 +58,10 @@ public class EventQueueDeliveryTest
         plugin.queueRetryBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody(receipt(row(0,B,"stored",",\"archive_receipt\":true,\"d1_receipt\":true"))));
         plugin.flushEvents();assertEquals("queue-v1",sent().get("ack_protocol").getAsString());done();assertTrue(plugin.pendingEvents.isEmpty());
+        Map<?,?> health=(Map<?,?>)plugin.captureHealthSnapshot().get("queue_delivery");
+        Map<?,?> family=(Map<?,?>)((Map<?,?>)health.get("by_family")).get("ge_progress");
+        assertEquals(1L,family.get("broker_receipts"));assertEquals(1L,family.get("archive_receipts"));
+        assertEquals(2L,family.get("retry_response_rows"));
     }
     @Test public void generic200AndHtmlNeverAcknowledgeQueueMemory() throws Exception
     {

@@ -93,6 +93,16 @@ public class PublicEventOutboxLocalSiteTest
             assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
             assertEquals((long)valid,p.captureHealthSnapshot().get("events_sent_total"));
             assertEquals(1L,p.captureHealthSnapshot().get("events_lost_total"));
+            if(states)
+            {
+                Map<?,?> health=(Map<?,?>)p.captureHealthSnapshot().get("queue_delivery");
+                for(String kind:Arrays.asList("skill_goals","rune_pouch","bank_tabs"))
+                {
+                    Map<?,?> counts=(Map<?,?>)((Map<?,?>)health.get("by_family")).get("own_state_"+kind);
+                    assertEquals(1L,counts.get("archive_receipts"));assertEquals(0L,counts.get("broker_receipts"));
+                    assertEquals(0L,counts.get("capture_handoffs"));
+                }
+            }
             command("/test/drain-two");
             command("/test/erase");
             p.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));

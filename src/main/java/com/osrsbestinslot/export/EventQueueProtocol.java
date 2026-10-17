@@ -23,6 +23,21 @@ final class EventQueueProtocol
                 || states && "own_state".equals(event.get("type")));
     }
     enum Outcome { RETRY, DURABLE, ERASED, REJECTED }
+    enum Stage { NONE, BROKER, ARCHIVE }
+    static final class ReceiptSet
+    {
+        final List<Outcome> outcomes;
+        final List<Stage> stages;
+        ReceiptSet(int size)
+        {
+            outcomes = new ArrayList<>(Collections.nCopies(size, Outcome.RETRY));
+            stages = new ArrayList<>(Collections.nCopies(size, Stage.NONE));
+        }
+        static ReceiptSet rejected(int size)
+        {
+            ReceiptSet r = new ReceiptSet(size); Collections.fill(r.outcomes, Outcome.REJECTED); return r;
+        }
+    }
 
     static boolean terminalError(int status, String body)
     {
@@ -37,11 +52,16 @@ final class EventQueueProtocol
 
     static List<Outcome> receipts(String body, List<Map<String,Object>> batch)
     {
-        List<Outcome> out = new ArrayList<>(Collections.nCopies(batch.size(), Outcome.RETRY));
+        return parseReceipts(body, batch).outcomes;
+    }
+
+    static ReceiptSet parseReceipts(String body, List<Map<String,Object>> batch)
+    {
+        ReceiptSet parsed = new ReceiptSet(batch.size()); List<Outcome> out = parsed.outcomes;
         try
         {
             JsonObject root = new JsonParser().parse(body).getAsJsonObject();
-            if (!root.has("receipt_version") || !"1".equals(root.get("receipt_version").toString())) return out;
+            if (!root.has("receipt_version") || !"1".equals(root.get("receipt_version").toString())) return parsed;
             JsonArray rows = root.getAsJsonArray("results");
             Set<Integer> seen = new HashSet<>();
             for (JsonElement element : rows)
@@ -52,12 +72,15 @@ final class EventQueueProtocol
                 int i = rawIndex.getAsInt();
                 if (i < 0 || i >= batch.size() || !Integer.toString(i).equals(rawIndex.toString())) continue;
                 // Duplicate/contradictory rows invalidate the response; no ambiguous event is settled.
-                if (!seen.add(i)) return new ArrayList<>(Collections.nCopies(batch.size(), Outcome.RETRY));
+                if (!seen.add(i)) return new ReceiptSet(batch.size());
                 if (!Objects.equals(batch.get(i).get("event_id"), string(row, "event_id"))) continue;
                 String status = string(row, "status");
                 if ("queued".equals(status) && flag(row, "broker_ack")
                     || "stored".equals(status) && flag(row, "archive_receipt") && flag(row, "d1_receipt"))
+                {
                     out.set(i, Outcome.DURABLE);
+                    parsed.stages.set(i, "queued".equals(status) ? Stage.BROKER : Stage.ARCHIVE);
+                }
                 else if ("rejected".equals(status) && string(row, "reason") != null && !string(row, "reason").isEmpty())
                     out.set(i, "erased".equals(string(row, "reason")) ? Outcome.ERASED : Outcome.REJECTED);
             }
@@ -65,9 +88,9 @@ final class EventQueueProtocol
         catch (RuntimeException ignored)
         {
             // A malformed/HTML/truncated answer is not permission to discard any memory event.
-            return new ArrayList<>(Collections.nCopies(batch.size(), Outcome.RETRY));
+            return new ReceiptSet(batch.size());
         }
-        return out;
+        return parsed;
     }
     private static String string(JsonObject row, String key)
     {
