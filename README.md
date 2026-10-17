@@ -279,19 +279,55 @@ sources, not copied source or datasets:
 
 ### Release disclosure and outstanding field gates
 
-One proposed installation disclosure, to be reviewed against the complete release:
-“This plugin sends linked game-account data to osrsbestinslot.com, a server not
-controlled or verified by RuneLite: account name/hash/type, world/location,
-skills and progress, own collection-log items and quantities, equipment,
-inventory, bank and other observed storage (including shared group storage),
-GE offers and displayed recent GE history, game settings and activity including
-GE/shop transactions, trades with counterparty names/items, loot, drops, pickups,
-alchemy, deaths, levels and session times. Delivery-proof trade screenshots and
-shop screen clips may contain chat and other players' names. Your IP address
-reaches the service. It does not receive your Jagex credentials.”
-This is a draft for the release owner, not a claim that the current Hub warning
-was updated. The currently approved link-token help text remains unchanged until release;
-no in-plugin consent screen or new toggle is added.
+Proposed public installation disclosure, pending review against the exact expanded artifact:
+“This plugin sends your linked game-account data to osrsbestinslot.com, a service
+not controlled or verified by RuneLite: your account name/hash/type, world/location,
+skills, quests, diaries, own collection-log progress, equipment, inventory, bank
+and other observed own storage; GE offers and displayed recent GE history;
+own trades and item movements, loot, deaths, session times and gameplay observations.
+Separately enabled progress/gameplay uploads include own combat/NPC encounters,
+skilling, travel and raw settings/progress observations. Observations can be partial
+or unknown. Your IP address reaches the service. Eligible event retries are stored
+locally for up to 48 hours, 5,000 rows or 5 MiB per journal, whichever bound is reached.
+It does not receive your Jagex credentials.”
+
+This public artifact removes counterparty/nearby-player context and shared group
+storage before transport, and disables screenshots, clips and broad firehose uploads
+regardless of remote grants. Private staff/Ops capture remains a separate distribution
+and disclosure obligation. The currently published Hub warning has not been changed;
+this draft and the expanded artifact still need release-owner and Hub acceptance.
+No new permission toggle or account action is introduced here.
+
+### Public Queue retry contract (local candidate)
+
+A successful token-bound `X-Event-Queue: ge-v1` or `own-history-v1` response,
+a settled own account/mode and a known RuneLite profile are required. Only the
+14 Queue-supported event types enter the public journal: six GE types plus
+bank_session, equip_change, loot, kill_count, level_up, xp_gain, alch and pickup.
+The existing first-party field projection runs before disk, during recovery and
+before POST. Other public families and snapshots retain their existing memory
+path; this is not whole-intake crash durability.
+
+The separate `osrsbis/public-events-v1` journal uses hashed token/account/mode/profile
+identities and the existing forced-write/CRC journal core. No raw token or profile
+identifier is persisted. A row becomes durable after its forced append, before it
+can enter HTTP delivery. There can be up to 500 not-yet-durable append jobs; process
+death before force, disk failure and bound eviction remain explicit gaps.
+`public_outbox_not_durable_total`, `public_outbox_append_pending`,
+`public_outbox_dropped_total`, pending rows/bytes and retired-identity counters expose
+these limits. Counters are process-local, not a durable completeness denominator.
+
+Only exact per-ID Queue receipts settle durable rows. Generic 2xx and retryable
+failures retain them; permanent rejected rows become metadata-only quarantine.
+Restart needs a fresh grant for the same identity; logout pauses delivery. Changing
+account/mode/profile cannot replay old rows into the new identity. Idle prior retry
+identities are retired; another live writer is preserved. Token withdrawal or 403
+purges the current identity and idle indexed retry files, including a cold start
+before any grant. An account-erased receipt targets only the sent identity. Purge
+markers and age bounds are checked again before dispatch; restored rows still need
+a valid fresh server grant and are subject to the server's deletion tombstones.
+The 48-hour local retry bound does not change indefinite eligible server history
+or explicit account erasure. Actual-client restart/fault QA remains outstanding.
 
 Remaining real-account checks, using the existing authorized manually operated
 client and a local sink:

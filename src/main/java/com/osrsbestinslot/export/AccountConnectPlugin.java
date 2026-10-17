@@ -417,6 +417,7 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		publicOutboxPaused = false;
 		clientClosing = false;
 		removeOrphanedKeys();
 		// Started while already in the world: the GE slots were replayed before we were listening, so the
@@ -640,17 +641,29 @@ public class AccountConnectPlugin extends Plugin
 	private static final String EVENT_QUEUE = "__delivery_queue_v1";
 	private volatile String eventQueueGrantToken;
 	private volatile String eventQueueScope;
+	private static final String EVENT_PUBLIC_OUTBOX = "__public_outbox_context";
+	private final java.util.Set<String> publicOutboxMemoryIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private final java.util.concurrent.atomic.AtomicInteger publicOutboxWrites = new java.util.concurrent.atomic.AtomicInteger();
+	private final java.util.concurrent.atomic.AtomicBoolean publicOutboxPumpQueued = new java.util.concurrent.atomic.AtomicBoolean();
+	private final java.util.concurrent.atomic.AtomicLong publicOutboxUndurable = new java.util.concurrent.atomic.AtomicLong();
+	private PublicEventOutbox publicOutbox; // disk executor only
+	private volatile int publicOutboxPending;
+	private volatile long publicOutboxBytes;
+	private volatile long publicOutboxDropped;
+	private volatile long publicOutboxPurged;
+	private volatile boolean publicOutboxPaused;
+
 	/** Server ingest limits: at most 100 events and under 256 KiB of UTF-8 per request. */
 	static final int EVENT_BATCH_MAX_EVENTS = 100;
 	static final long EVENT_BATCH_MAX_BYTES = 256L * 1024L;
 	// Cumulative capture-health counters for this plugin process. They intentionally live outside
 	// pendingEvents so the health record can ride in ordinary snapshots without recursively generating
-	// another event. Restart loss remains a separate, explicitly planned durability problem.
+	// another event. Public journal gaps/bounds are separate counters; other public families remain volatile.
 	private final long healthProcessStartedAtMs = System.currentTimeMillis();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsQueued = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsSent = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthEventsLost = new java.util.concurrent.atomic.AtomicLong();
-	// Overflow drops by priority class (EventPriority). healthEventsLost still counts every lost row.
+	// Memory overflow by priority class. Journal-backed evictions remain replayable, not lost.
 	private final java.util.concurrent.atomic.AtomicLongArray healthOverflowByClass = new java.util.concurrent.atomic.AtomicLongArray(3);
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsSent = new java.util.concurrent.atomic.AtomicLong();
 	private final java.util.concurrent.atomic.AtomicLong healthDropSegmentsRefused = new java.util.concurrent.atomic.AtomicLong();
@@ -1778,6 +1791,7 @@ public class AccountConnectPlugin extends Plugin
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
 			spoolOnTokenChangedWithoutAccount();
+			revokePublicOutbox(null);
 			eventQueueGrantToken = null;
 			eventQueueScope = null;
 			progressGrantToken = null;
@@ -3807,7 +3821,7 @@ public class AccountConnectPlugin extends Plugin
 		Object t = gone.get("type");
 		healthOverflowByClass.incrementAndGet(EventPriority.classOf(t == null ? null : String.valueOf(t)));
 		spoolReleaseFromMemory(gone);
-		healthEventsLost.incrementAndGet();
+		if (!gone.containsKey(EVENT_PUBLIC_OUTBOX)) healthEventsLost.incrementAndGet();
 	}
 
 	void emitEvent(String type, Map<String, Object> fields)
@@ -3854,6 +3868,11 @@ public class AccountConnectPlugin extends Plugin
 		ev = PublicTransport.event(ev);
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
+		if (capturePublicOutbox(ev))
+		{
+			maybeForceSnapshotForEvent(type);
+			return;
+		}
 		spoolOnEmit(type, ev, eventId);
 		synchronized (pendingEvents)
 		{
@@ -4070,6 +4089,183 @@ public class AccountConnectPlugin extends Plugin
 		return "manual";
 	}
 
+	/** Public journal gate: a settled game identity and a known RuneLite profile. */
+	private PublicEventOutbox.Context publicQueueContext(boolean requireGrant)
+	{
+		String token = currentLinkToken();
+		if (publicOutboxPaused || config == null || !uploadAllowed() || !sessionActive || token.equals(spoolGrantToken)
+			|| requireGrant && !token.equals(eventQueueGrantToken)
+			|| configManager == null || configManager.getProfile() == null) return null;
+		try
+		{
+			return new PublicEventOutbox.Context(token, activeHash, activeProfileType,
+				Long.toString(configManager.getProfile().getId()));
+		}
+		catch (IllegalArgumentException unknown) { return null; }
+	}
+
+	private PublicEventOutbox publicOutboxOnDiskThread()
+	{
+		if (publicOutbox == null) publicOutbox = new PublicEventOutbox(spoolDataRoot(), gson, () -> wallClock.getAsLong());
+		return publicOutbox;
+	}
+
+	private void publicOutboxHealth()
+	{
+		if (publicOutbox == null) return;
+		publicOutboxPending = publicOutbox.size();
+		publicOutboxBytes = publicOutbox.bytes();
+		publicOutboxDropped = publicOutbox.counters.dropped.get();
+		publicOutboxPurged = publicOutbox.counters.purged.get();
+	}
+
+	private static String publicOutboxIdentity(Map<String, Object> event)
+	{
+		Object owner = event.get(EVENT_PUBLIC_OUTBOX);
+		return owner instanceof PublicEventOutbox.Context ? ((PublicEventOutbox.Context) owner).identity : null;
+	}
+
+	/** Capture before transmission; a bounded executor backlog is an explicit non-durable gap. */
+	private boolean capturePublicOutbox(Map<String, Object> event)
+	{
+		PublicEventOutbox.Context owner = publicQueueContext(true);
+		String scope = eventQueueScope;
+		if (owner == null || !owner.owns(event) || !EventQueueProtocol.allows(scope, event)) return false;
+		if (publicOutboxWrites.incrementAndGet() > MAX_PENDING_EVENTS)
+		{
+			publicOutboxWrites.decrementAndGet();
+			publicOutboxUndurable.incrementAndGet();
+			healthEventsLost.incrementAndGet();
+			return true;
+		}
+		boolean submitted = onSpoolThread(() ->
+		{
+			try
+			{
+				PublicEventOutbox.Context current = publicQueueContext(true);
+				if (current == null || !owner.identity.equals(current.identity)
+					|| !publicOutboxOnDiskThread().append(owner, scope, event))
+				{
+					publicOutboxUndurable.incrementAndGet();
+					healthEventsLost.incrementAndGet();
+					return;
+				}
+				stagePublicOutbox(owner, scope);
+			}
+			catch (IOException | RuntimeException failure)
+			{
+				publicOutboxUndurable.incrementAndGet();
+				healthEventsLost.incrementAndGet();
+				log.debug("OSRS BiS public event journal append failed", failure);
+			}
+			finally { publicOutboxWrites.decrementAndGet(); publicOutboxHealth(); }
+		});
+		if (!submitted)
+		{
+			publicOutboxWrites.decrementAndGet();
+			publicOutboxUndurable.incrementAndGet();
+			healthEventsLost.incrementAndGet();
+		}
+		return true;
+	}
+
+	private void stagePublicOutbox(PublicEventOutbox.Context owner, String scope) throws IOException
+	{
+		List<Map<String, Object>> recovered = publicOutboxOnDiskThread().pending(owner, scope, MAX_PENDING_EVENTS);
+		PublicEventOutbox.Context current = publicQueueContext(true);
+		if (current == null || !owner.identity.equals(current.identity)) return;
+		synchronized (pendingEvents)
+		{
+			for (Map<String, Object> event : recovered)
+			{
+				if (pendingEvents.size() >= MAX_PENDING_EVENTS) break;
+				if (!publicOutboxMemoryIds.add(String.valueOf(event.get("event_id")))) continue;
+				event.put(EVENT_TOKEN_FP, currentEventTokenFingerprint());
+				event.put(EVENT_QUEUE, true);
+				event.put(EVENT_PUBLIC_OUTBOX, owner);
+				pendingEvents.add(event);
+			}
+		}
+		scheduleCoalescedFlush();
+	}
+
+	/** One coalesced disk read, never file IO on the client tick. */
+	void pumpPublicOutbox()
+	{
+		PublicEventOutbox.Context owner = publicQueueContext(true);
+		String scope = eventQueueScope;
+		if (owner == null || !publicOutboxPumpQueued.compareAndSet(false, true)) return;
+		if (!onSpoolThread(() ->
+		{
+			try
+			{
+				PublicEventOutbox.Context current = publicQueueContext(true);
+				if (current != null && owner.identity.equals(current.identity)) stagePublicOutbox(owner, scope);
+			}
+			catch (IOException | RuntimeException failure) { log.debug("OSRS BiS public event recovery failed", failure); }
+			finally { publicOutboxPumpQueued.set(false); publicOutboxHealth(); }
+		})) publicOutboxPumpQueued.set(false);
+	}
+
+	private void settlePublicOutbox(List<Map<String, Object>> batch,
+		List<EventQueueProtocol.Outcome> outcomes, String sentToken)
+	{
+		Object bound = batch.get(0).get(EVENT_PUBLIC_OUTBOX);
+		if (!(bound instanceof PublicEventOutbox.Context)) return;
+		PublicEventOutbox.Context owner = (PublicEventOutbox.Context) bound;
+		if (outcomes.contains(EventQueueProtocol.Outcome.ERASED))
+		{
+			PublicEventOutbox.Context current = publicQueueContext(false);
+			if (sentToken.equals(currentLinkToken()) && (current == null || owner.identity.equals(current.identity)))
+			{
+				eventQueueGrantToken = null;
+				eventQueueScope = null;
+			}
+			synchronized (pendingEvents)
+			{
+				pendingEvents.removeIf(event -> owner.identity.equals(publicOutboxIdentity(event)));
+				for (Map<String, Object> event : batch) publicOutboxMemoryIds.remove(String.valueOf(event.get("event_id")));
+			}
+			onSpoolThread(() ->
+			{
+				try { publicOutboxOnDiskThread().erase(owner); }
+				catch (IOException failure) { log.debug("OSRS BiS public identity erase incomplete", failure); }
+				finally { publicOutboxHealth(); }
+			});
+			return;
+		}
+		onSpoolThread(() ->
+		{
+			try { if (publicOutbox != null) publicOutbox.settle(owner, batch, outcomes); }
+			catch (IOException failure) { log.debug("OSRS BiS public event settlement failed; retain for replay", failure); }
+			finally
+			{
+				for (int i = 0; i < batch.size(); i++)
+					if (outcomes.get(i) != EventQueueProtocol.Outcome.RETRY)
+						publicOutboxMemoryIds.remove(String.valueOf(batch.get(i).get("event_id")));
+				publicOutboxHealth();
+			}
+		});
+	}
+
+	private void revokePublicOutbox(String sentToken)
+	{
+		if (sentToken != null && !sentToken.equals(currentLinkToken())) return;
+		eventQueueGrantToken = null;
+		eventQueueScope = null;
+		synchronized (pendingEvents)
+		{
+			pendingEvents.removeIf(event -> event.containsKey(EVENT_PUBLIC_OUTBOX));
+			publicOutboxMemoryIds.clear();
+		}
+		onSpoolThread(() ->
+		{
+			try { publicOutboxOnDiskThread().purge(); }
+			catch (IOException failure) { log.debug("OSRS BiS public event purge incomplete", failure); }
+			finally { publicOutboxHealth(); }
+		});
+	}
+
 	/**
 	 * POST buffered activity events to /event-ingest, then clear them. Runs on every @Schedule tick
 	 * (including at the login screen) so a logout event flushes promptly. Own-account data only;
@@ -4090,15 +4286,9 @@ public class AccountConnectPlugin extends Plugin
 	 * in-flight POST at a time ({@link #eventPostInFlight}), so ticks cannot pile concurrent retries of
 	 * the same batch on top of each other. A 429 carrying Retry-After is honoured up to the ceiling.
 	 *
-	 * <p><b>SCOPE LIMIT — retry is IN-MEMORY ONLY and does not survive a client restart.</b> There is no
-	 * on-disk spool: {@link #pendingEvents} is a plain in-memory list, nothing writes it to config or to
-	 * a file, and {@code shutDown()} does not flush it. So events buffered or awaiting retry when
-	 * RuneLite closes (or crashes, or the plugin is disabled) are LOST — unchanged from previous
-	 * versions. What this release fixes is the far more common case: a transient 429/5xx/timeout while
-	 * the client keeps running, which previously destroyed the batch instantly and now recovers. A
-	 * durable spool would be the next step if restart-loss ever proves material; it is deliberately NOT
-	 * in 0.7.4, because writing game-activity data to disk is a larger design and privacy question than
-	 * this release should decide.
+	 * <p>Public queue-v1 rows captured under a settled identity and a current Queue grant are forced to
+	 * a separate bounded journal before memory staging. Other public event families and snapshots keep
+	 * their existing memory-only delivery. The staff journal remains under its separate grant.
 	 */
 	void flushEvents()
 	{
@@ -4150,6 +4340,18 @@ public class AccountConnectPlugin extends Plugin
 					it.remove();
 					continue;
 				}
+				Object durableOwner = ev.get(EVENT_PUBLIC_OUTBOX);
+				if (durableOwner instanceof PublicEventOutbox.Context)
+				{
+					PublicEventOutbox.Context current = publicQueueContext(true);
+					if (current == null) continue; // logout/unknown mode pauses replay
+					if (!current.identity.equals(((PublicEventOutbox.Context) durableOwner).identity))
+					{
+						spoolReleaseFromMemory(ev);
+						it.remove();
+						continue; // never send a previous account/profile under the new one
+					}
+				}
 				Object bound = ev.get(EVENT_TOKEN_FP);
 				if (bound == null || tokenFingerprint.equals(bound))
 				{
@@ -4162,6 +4364,7 @@ public class AccountConnectPlugin extends Plugin
 					boolean queue = Boolean.TRUE.equals(ev.get(EVENT_QUEUE));
 					if (nowMs() < (queue ? queueRetryBackoffUntilMs : eventRetryBackoffUntilMs)) continue;
 					if (!batch.isEmpty() && !java.util.Objects.equals(batch.get(0).get(EVENT_QUEUE), ev.get(EVENT_QUEUE))) break;
+					if (!batch.isEmpty() && !java.util.Objects.equals(publicOutboxIdentity(batch.get(0)), publicOutboxIdentity(ev))) break;
 					batch.add(ev);
 				}
 				else
@@ -4177,6 +4380,51 @@ public class AccountConnectPlugin extends Plugin
 			}
 			eventPostInFlight = true;
 		}
+		if (publicOutboxIdentity(batch.get(0)) != null)
+		{
+			final List<Map<String, Object>> selected = batch;
+			if (!onSpoolThread(() -> dispatchPublicOutbox(selected, token))) requeueEvents(selected, 0);
+			return;
+		}
+		dispatchEventBatch(batch, token);
+	}
+
+	/** Disk bounds, cross-process purge markers and current grant are checked again before sending. */
+	private void dispatchPublicOutbox(List<Map<String, Object>> selected, String token)
+	{
+		try
+		{
+			PublicEventOutbox.Context owner = (PublicEventOutbox.Context) selected.get(0).get(EVENT_PUBLIC_OUTBOX);
+			PublicEventOutbox.Context current = publicQueueContext(true);
+			if (current == null || !owner.identity.equals(current.identity))
+			{
+				requeueEvents(selected, 0);
+				return;
+			}
+			java.util.Set<String> retained = new java.util.HashSet<>();
+			if (publicOutbox != null)
+				for (Map<String, Object> event : publicOutbox.pending(owner, eventQueueScope, EventSpool.Limits.DEFAULT.maxRecords))
+					retained.add(String.valueOf(event.get("event_id")));
+			List<Map<String, Object>> ready = new ArrayList<>();
+			for (Map<String, Object> event : selected)
+			{
+				if (retained.contains(String.valueOf(event.get("event_id")))) ready.add(event);
+				else publicOutboxMemoryIds.remove(String.valueOf(event.get("event_id")));
+			}
+			if (ready.isEmpty())
+			{
+				eventPostInFlight = false;
+				completeFinalFlush();
+				return;
+			}
+			dispatchEventBatch(ready, token);
+		}
+		catch (IOException | RuntimeException failure) { requeueEvents(selected, 0); }
+		finally { publicOutboxHealth(); }
+	}
+
+	private void dispatchEventBatch(List<Map<String, Object>> batch, String token)
+	{
 		// Everything from here to enqueue() must be guarded. The batch has already left the buffer and
 		// the in-flight flag is set, so ANY throw in this window loses the batch AND wedges delivery
 		// permanently: flushEvents would early-return on eventPostInFlight forever after, with no further
@@ -4217,6 +4465,13 @@ public class AccountConnectPlugin extends Plugin
 				.url(base + "/event-ingest")
 				.post(RequestBody.create(JSON, body))
 				.build();
+			String outboxIdentity = publicOutboxIdentity(batch.get(0));
+			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicQueueContext(true);
+			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)))
+			{
+				requeueEvents(batch, 0);
+				return;
+			}
 			okHttpClient.newCall(request).enqueue(buildEventCallback(batch, token));
 		}
 		catch (Throwable t)
@@ -4252,6 +4507,7 @@ public class AccountConnectPlugin extends Plugin
 						List<EventQueueProtocol.Outcome> receipts = EventQueueProtocol.terminalError(response.code(), queueBody)
 							? java.util.Collections.nCopies(batch.size(), EventQueueProtocol.Outcome.REJECTED)
 							: EventQueueProtocol.receipts(queueBody, batch);
+						settlePublicOutbox(batch, receipts, sentToken);
 						List<Map<String, Object>> retry = new ArrayList<>();
 						for (int i = 0; i < batch.size(); i++)
 						{
@@ -4730,6 +4986,7 @@ public class AccountConnectPlugin extends Plugin
 		if (sentToken != null && sentToken.equals(currentLinkToken()))
 		{
 			spoolRevoke(sentToken);
+			revokePublicOutbox(sentToken);
 		}
 	}
 
@@ -5025,6 +5282,8 @@ public class AccountConnectPlugin extends Plugin
 	/** The memory path dropped this event (cap or identity change). Its durable row, if any, can replay. */
 	private void spoolReleaseFromMemory(Map<String, Object> ev)
 	{
+		if (ev != null && ev.containsKey(EVENT_PUBLIC_OUTBOX))
+			publicOutboxMemoryIds.remove(String.valueOf(ev.get("event_id")));
 		Object id = ev == null ? null : ev.get("event_id");
 		if (id != null)
 		{
@@ -5550,6 +5809,7 @@ public class AccountConnectPlugin extends Plugin
 	/** shutDown: close the shard. Its rows stay on disk for the next process of the same identity. */
 	private void closeSpool()
 	{
+		publicOutboxPaused = true;
 		// A re-enable is treated like a cold start: nothing is written or replayed until the server
 		// sends X-Event-Spool again for the configured token.
 		synchronized (spoolStateLock)
@@ -5565,6 +5825,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		onSpoolThread(() ->
 		{
+			if (publicOutbox != null) publicOutbox.close();
 			if (spool != null)
 			{
 				spool.close();
@@ -5597,6 +5858,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		e.submit(() ->
 		{
+			if (publicOutbox != null) publicOutbox.crashForTest();
 			if (spool != null)
 			{
 				spool.crashForTest();
@@ -5693,6 +5955,7 @@ public class AccountConnectPlugin extends Plugin
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
 	public void eventFlushTask()
 	{
+		pumpPublicOutbox();
 		flushEvents();
 		replaySpoolTick();
 	}
@@ -10948,6 +11211,12 @@ public class AccountConnectPlugin extends Plugin
 		if (eventAt > 0) h.put("last_event_upload_at", eventAt / 1000L);
 		if (mediaAt > 0) h.put("last_media_upload_at", mediaAt / 1000L);
 		if (snapshotAt > 0) h.put("last_snapshot_upload_at", snapshotAt / 1000L);
+		h.put("public_outbox_pending", publicOutboxPending);
+		h.put("public_outbox_bytes", publicOutboxBytes);
+		h.put("public_outbox_dropped_total", publicOutboxDropped);
+		h.put("public_outbox_retired_identities_total", publicOutboxPurged);
+		h.put("public_outbox_not_durable_total", publicOutboxUndurable.get());
+		h.put("public_outbox_append_pending", publicOutboxWrites.get());
 		addSpoolHealth(h);
 		return h;
 	}
@@ -11720,6 +11989,7 @@ public class AccountConnectPlugin extends Plugin
 				// malformed directive — keep the current cadence
 			}
 		}
+		pumpPublicOutbox();
 	}
 
 	/**

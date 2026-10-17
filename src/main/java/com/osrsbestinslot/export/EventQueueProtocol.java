@@ -3,7 +3,7 @@ package com.osrsbestinslot.export;
 import com.google.gson.*;
 import java.util.*;
 
-/** Public memory transport only. A receipt proves durable ownership, not a market fill. */
+/** Public queue-v1 receipts. A receipt proves durable ownership, not a market fill. */
 final class EventQueueProtocol
 {
     private EventQueueProtocol() {}
