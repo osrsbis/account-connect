@@ -22,10 +22,11 @@ public class PublicEventOutboxLocalSiteTest
     private Path data;
     private OkHttpClient http;
     private final List<AccountConnectPlugin> instances = new ArrayList<>();
+    private final boolean combatSignals = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT_SIGNALS"));
     private final boolean inferred = "1".equals(System.getenv("OSRSBIS_CHECK_INFERRED"));
-    private final boolean signals = inferred || "1".equals(System.getenv("OSRSBIS_CHECK_SIGNALS"));
-    private final List<String> signalFamilies=new ArrayList<>((inferred?OwnInferredSignalTest.examples():OwnSignalEventTest.examples()).keySet());
-    private Map<String,Object> signalEvent(String family) { return inferred?OwnInferredSignalTest.event(family):OwnSignalEventTest.event(family); }
+    private final boolean signals = combatSignals || inferred || "1".equals(System.getenv("OSRSBIS_CHECK_SIGNALS"));
+    private final List<String> signalFamilies=new ArrayList<>((combatSignals?OwnCombatSignalTest.examples():inferred?OwnInferredSignalTest.examples():OwnSignalEventTest.examples()).keySet());
+    private Map<String,Object> signalEvent(String family) { return combatSignals?OwnCombatSignalTest.event(family):inferred?OwnInferredSignalTest.event(family):OwnSignalEventTest.event(family); }
     private final boolean combat = "1".equals(System.getenv("OSRSBIS_CHECK_COMBAT"));
     private final boolean additionalVars = "1".equals(System.getenv("OSRSBIS_CHECK_VARS_ADDITIONAL"));
     private final boolean vars = additionalVars || "1".equals(System.getenv("OSRSBIS_CHECK_VARS"));

@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.33 candidate)
+## Own-event provenance (0.7.34 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -84,7 +84,15 @@ change within two ticks. Missing position or sample gaps cannot close a stationa
 interval as movement. These records never prove input idleness, an aura, a cast,
 consumption effect, cooldown or income. No coordinates, input-device activity,
 menu target text or other-player fields are journaled. This extends the same
-unreleased own-signals contract to ten families, not an activated capture scope.
+unreleased own-signals contract; no capture scope is activated.
+
+Two own combat callbacks also enter that future journal, for twelve signal
+families in total: own ActorDeath with the observed ToB status and a fixed HUD
+room label (or unknown), and own tile overlap with a previously observed ToA
+acid object. Other actors and names are excluded. The death observation does not
+prove encounter membership or a team wipe; the overlap does not prove damage or
+a mistake. No location is uploaded in these events. Existing scene/account/grant
+gaps clear source continuity. Exact game-client timing and release remain open.
 
 
 A change in the effective gameplay Queue scope or settlement of its current
@@ -449,7 +457,7 @@ No new permission toggle or account action is introduced here.
 ### Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The seven own-state kinds, seventeen own-vars families and ten own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The seven own-state kinds, seventeen own-vars families and twelve own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue

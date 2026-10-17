@@ -7,7 +7,7 @@ final class OwnSignalEvent
 {
     private OwnSignalEvent() {}
     static final Set<String> KINDS=Set.of("storage.coal_bag","storage.fish_barrel","storage.grape_barrel",
-        "combat.chompy_kc","minigame.construction_contract","farming.compost","hunter.rumour");
+        "combat.chompy_kc","minigame.construction_contract","farming.compost","hunter.rumour","combat.tob_room_death","combat.toa_hazards");
     static boolean supports(Object kind) { return kind instanceof String && (KINDS.contains(kind)||OwnInferredSignal.supports(kind)); }
     static Map<String,Object> value(String kind,Object raw)
     {
@@ -17,6 +17,15 @@ final class OwnSignalEvent
             if(OwnInferredSignal.supports(kind))return OwnInferredSignal.value(kind,p);
             switch(kind)
             {
+                case "combat.tob_room_death":
+                    out.put("party_status_raw",number(p.get("party_status_raw"),2,2));
+                    if(!"self".equals(p.get("actor"))||!"observed_own_death_not_team_wipe".equals(p.get("classification")))return null;
+                    Object room=p.get("room_observed");if(room!=null&&!OwnActivityCapture.raidRoom(room))return null;
+                    out.put("room_observed",room);out.put("actor","self");out.put("classification","observed_own_death_not_team_wipe");break;
+                case "combat.toa_hazards":
+                    out.put("object_id",number(p.get("object_id"),45570,45576));out.put("spawn_tick",number(p.get("spawn_tick"),0,Integer.MAX_VALUE));
+                    if(!"own_tile_overlap_not_proven_damage_or_mistake".equals(p.get("classification")))return null;
+                    out.put("classification","own_tile_overlap_not_proven_damage_or_mistake");break;
                 case "storage.coal_bag":case "storage.fish_barrel":
                     out.put("count_observed",number(p.get("count_observed"),0,kind.equals("storage.coal_bag")?54:28));break;
                 case "storage.grape_barrel":out.put("fill_observed",choice(p.get("fill_observed"),List.of("empty","partial","full")));break;
@@ -59,15 +68,19 @@ final class OwnSignalEvent
             boolean inferred=OwnInferredSignal.supports(p.get("signal_kind"));
             if(!Boolean.valueOf(!inferred).equals(p.get("direct"))||!(inferred?"inferred_observation":"observed_signal").equals(p.get("observation")))return null;
             Object session=p.get("gameplay_session");if(!(session instanceof String)||!((String)session).matches("[a-f0-9]{32}"))return null;
-            String source=choice(p.get("source"),inferred?List.of("own_client_sequence"):List.of("own_client_system","own_client_dialog"));
             String kind=(String)p.get("signal_kind");
+            String source=choice(p.get("source"),inferred?List.of("own_client_sequence")
+                :kind.equals("combat.tob_room_death")?List.of("own_client_actor")
+                :kind.equals("combat.toa_hazards")?List.of("own_client_scene"):List.of("own_client_system","own_client_dialog"));
             if(source.equals("own_client_dialog")&&!List.of("storage.coal_bag","storage.fish_barrel").contains(kind))return null;
             if(kind.equals("storage.fish_barrel")&&!source.equals("own_client_dialog"))return null;
             Map<String,Object> value=value(kind,p.get("signal_value"));if(value==null)return null;
             Map<String,Object> out=new LinkedHashMap<>();out.put("signal_schema",1);out.put("signal_kind",kind);
             out.put("source",source);out.put("direct",!inferred);out.put("observation",p.get("observation"));out.put("gameplay_session",session);
             out.put("source_sequence",number(p.get("source_sequence"),1,9007199254740991L));
-            long tick=number(p.get("source_tick"),0,Integer.MAX_VALUE);if(inferred)OwnInferredSignal.checkTick(kind,value,tick);out.put("source_tick",tick);
+            long tick=number(p.get("source_tick"),0,Integer.MAX_VALUE);
+            if(kind.equals("combat.toa_hazards")&&(Long)value.get("spawn_tick")>=tick)return null;
+            if(inferred)OwnInferredSignal.checkTick(kind,value,tick);out.put("source_tick",tick);
             out.put("observed_at_ms",number(p.get("observed_at_ms"),1000000000000L,9007199254740991L));out.put("signal_value",value);return out;
         }
         catch(IllegalArgumentException invalid) { return null; }
@@ -78,6 +91,8 @@ final class OwnSignalEvent
         Object rawSource=row.get("source");String source;
         boolean inferred=OwnInferredSignal.supports(row.get("kind"));
         if(inferred) {if(!OwnInferredSignal.source((String)row.get("kind")).equals(rawSource))return null;source="own_client_sequence";}
+        else if("combat.tob_room_death".equals(row.get("kind"))&&"ActorDeath:self".equals(rawSource))source="own_client_actor";
+        else if("combat.toa_hazards".equals(row.get("kind"))&&"own_tile+observed_acid_object".equals(rawSource))source="own_client_scene";
         else if("ChatMessage:GAMEMESSAGE:exact_english_projection".equals(rawSource)||"ChatMessage:SPAM:exact_english_projection".equals(rawSource))source="own_client_system";
         else if("ClientTick:widget:193.2;own_inventory_possession".equals(rawSource))source="own_client_dialog";
         else return null;
