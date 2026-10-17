@@ -18,9 +18,12 @@ final class OwnLootKeysCapture
     private final IntToLongFunction prices;
     private final Map<Integer,int[][]> packets=new HashMap<>();
     private final Map<Integer,Long> times=new HashMap<>();
+    // Six fixed keys: one visibility state and five slot states. Never serialized into the snapshot.
+    private final Map<String,Map<String,Object>> journalStates=new HashMap<>();
     OwnLootKeysCapture(OwnGameplayCapture out,IntToLongFunction prices) { this.out=out;this.prices=prices; }
     static boolean supports(int id) { for(int known:IDS)if(id==known)return true;return false; }
-    void reset() { packets.clear();times.clear(); }
+    private void clearPackets() { packets.clear();times.clear(); }
+    void reset() { clearPackets();journalStates.clear(); }
     private static boolean visible(Client client)
     {
         Widget tabs=client.getWidget(InterfaceID.WildyLootChest.TABS);
@@ -29,7 +32,7 @@ final class OwnLootKeysCapture
     void container(Client client,int id,ItemContainer container,long at)
     {
         if(!supports(id))return;
-        if(!visible(client)){reset();return;}
+        if(!visible(client)){clearPackets();return;}
         int[][] copy=copy(id,container);
         if(copy==null){packets.remove(id);times.remove(id);return;}
         packets.put(id,copy);times.put(id,at);
@@ -53,7 +56,7 @@ final class OwnLootKeysCapture
     {
         Map<String,Object> value=new LinkedHashMap<>();value.put("basis","own_visible_key_cache");
         value.put("complete",false);value.put("new_loot_verified",false);
-        if(!visible(client)) { reset();value.put("status","interface_unavailable");value.put("slots",null); }
+        if(!visible(client)) { clearPackets();value.put("status","interface_unavailable");value.put("slots",null); }
         else
         {
             List<Map<String,Object>> slots=new ArrayList<>();
@@ -91,5 +94,26 @@ final class OwnLootKeysCapture
             value.put("status","visible_key_slots");value.put("slots",slots);value.put("valuation_basis","client_reference_price_estimate");
         }
         out.state("loot.owned_key_contents","own_key_packet+visible_fixed_chest",value,client.getTickCount(),at);
+        journal(value,client.getTickCount(),at);
+    }
+
+    private void journal(Map<String,Object> value,int tick,long at)
+    {
+        boolean available="visible_key_slots".equals(value.get("status"));
+        emitChanged("interface","loot.key_interface",Map.of("status",available?"visible_key_slots":"interface_unavailable"),tick,at);
+        if(!available) { journalStates.keySet().removeIf(key->!key.equals("interface"));return; }
+        for(Object raw:(List<?>)value.get("slots"))
+        {
+            Map<?,?> row=(Map<?,?>)raw;Map<String,Object> part=new LinkedHashMap<>();
+            part.put("slot",row.get("slot"));part.put("status",row.get("status"));part.put("items",row.get("items"));
+            part.put("container_observed_at_ms",row.get("observed_at_ms"));
+            // Reference-price changes do not rewrite raw item history or imply new income.
+            emitChanged("slot_"+row.get("slot"),"loot.key_slot",part,tick,at);
+        }
+    }
+    private void emitChanged(String key,String kind,Map<String,Object> value,int tick,long at)
+    {
+        Map<String,Object> prior=journalStates.get(key);if(Objects.equals(prior,value))return;
+        journalStates.put(key,value);out.journalState(kind,value,prior==null?"baseline":"absolute_update",tick,at);
     }
 }

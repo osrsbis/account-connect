@@ -13,7 +13,8 @@ final class OwnStateEvent
     private static final Map<String,String> KINDS = Map.of("skills.goal_xp", "skill_goals",
         "storage.rune_pouch", "rune_pouch", "storage.bank_tab_currency", "bank_tabs",
         "travel.fairy_destinations","fairy_favourites","minigame.mixology_orders","mixology_orders",
-        "travel.spirit_destinations","spirit_destinations","combat.raid_context","raid_context","clues.destination","clue_inventory");
+        "travel.spirit_destinations","spirit_destinations","combat.raid_context","raid_context","clues.destination","clue_inventory",
+        "loot.key_interface","loot_key_interface","loot.key_slot","loot_key_slot");
     static boolean supportsWireKind(Object kind) { return kind instanceof String && KINDS.containsValue(kind); }
     static boolean supports(Object kind) { return kind instanceof String && KINDS.containsKey(kind); }
     static Map<String,Object> wire(Map<String,Object> input)
@@ -34,7 +35,7 @@ final class OwnStateEvent
             out.put("source_tick", number(input.get("source_tick"), 0, Integer.MAX_VALUE));
             long at = number(input.get("observed_at_ms"), 1000000000000L, 9007199254740991L);
             out.put("observed_at_ms", at); out.put("state_value", value);
-            if ("bank_tabs".equals(kind) && value.get("container_observed_at_ms") != null
+            if (("bank_tabs".equals(kind)||"loot_key_slot".equals(kind)) && value.get("container_observed_at_ms") != null
                 && (Long)value.get("container_observed_at_ms") > at) return null;
             return out;
         }
@@ -82,6 +83,7 @@ final class OwnStateEvent
         try
         {
             Map<?,?> p = map(input); Map<String,Object> out = new LinkedHashMap<>();
+            if("loot_key_interface".equals(kind)||"loot_key_slot".equals(kind))return OwnStorageProjection.value((String)kind,p);
             if ("skill_goals".equals(kind))
             {
                 List<?> values = list(p.get("goals"), 24); if (values.size() != 24) throw new IllegalArgumentException();

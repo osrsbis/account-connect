@@ -4,7 +4,7 @@ A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
 
-## Own-event provenance (0.7.35 candidate)
+## Own-event provenance (0.7.36 candidate)
 
 Own events carry a random collector-session identifier, emit sequence and plugin
 version. These identifiers rotate on login, account, world profile, link, local
@@ -24,7 +24,7 @@ distinct. Duplicate item quantities use long totals; unpriced or unsafe referenc
 values stay unknown. No labels, victim fields or original-owner information are
 read. This is a cache valuation, not new loot or realized income. Closing the UI,
 a scene gap, account switch or grant reset clears the source cache. Exact-client
-verification and durable transport for this new snapshot family remain open.
+verification remains open. The future own-state scope now adds bounded journal transport below.
 Source: [pinned personal-key container mapping](https://github.com/pk-enjoyer/real-loot-key-value/blob/938d5157fb8202f3766b358466743048e0ce44c4/src/main/java/com/reallootkeyvalue/LootKeyValueCalculator.java).
 
 The granted hunter snapshot history records a whistle's observed target from a
@@ -135,7 +135,7 @@ so the earlier14-family budget must not be presented as a whole-gameplay quote.
 The future `own-state-v1` Queue scope adds one closed `own_state` event type for
 skill goal settings, carried rune-pouch cache, inferred bank-tab currency, visible
 fairy-ring favourites, mixology orders, Spirit Tree options, own raid context and
-carried clue-library references.
+carried clue-library references, plus personal key visibility and slot caches.
 The four interface/context additions extend an unreleased scope. Missing values
 remain unknown, repeated orders survive, and only fixed game codes/destinations
 are retained. Visible options do not prove permanent unlocks or house ownership;
@@ -143,9 +143,19 @@ raid context excludes team details and completion claims.
 It requires current-token own-gameplay permission plus the explicit scope. The
 matched backend additionally requires `own_state`, `own_gameplay` and `own_combat`
 permissions before advertising this superset. Old grants do not enable it.
-Only these eight typed projections enter the journal; raw snapshots keep their
+Only these ten typed projections enter the journal; raw snapshots keep their
 existing path. Unknown values stay unknown, goals remain settings rather than XP
 earned, and bank ranges remain inferred rather than a complete wealth balance.
+
+Personal loot-key journal records use one visibility state and up to five separate
+slot states, each bounded to the source's 128-entry limit. Unchanged slots and
+reference-price changes do not append new raw item records. Closing the chest
+marks visibility unavailable; reopening requires fresh packet evidence. The
+original snapshot is preserved without duplicating split item arrays in its
+recent-history buffer. Unknown and empty remain distinct. Journal records keep
+item IDs, long quantities and packet time; estimates, victim fields and income
+claims are excluded. Scene/account/grant resets clear the six bounded dedupe
+states. These additions are unreleased and require exact-client acceptance.
 
 Each source baseline/change uses the existing per-ID journal and ACK path.
 Restart or scope rollback retains pending rows until the matching scope returns;
@@ -467,7 +477,7 @@ No new permission toggle or account action is introduced here.
 ### Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The eight own-state kinds, seventeen own-vars families and fifteen own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The ten own-state kinds, seventeen own-vars families and fifteen own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue

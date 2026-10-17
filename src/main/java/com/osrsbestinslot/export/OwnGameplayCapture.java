@@ -119,17 +119,33 @@ final class OwnGameplayCapture
 
     void append(String kind, String source, int tick, long at, Map<String,Object> value, boolean direct)
     {
+        append(kind,source,tick,at,value,direct,true);
+    }
+
+    // A large source snapshot already retains these values. Its smaller journal parts must not
+    // duplicate the same arrays in snapshot history or expose handoff as an archival receipt.
+    void journalState(String kind,Map<String,Object> value,String observation,int tick,long at)
+    {
+        Map<String,Object> change=new LinkedHashMap<>(value);change.put("observation",observation);
+        append(kind,"own_key_packet+visible_fixed_chest",tick,at,change,true,false);
+    }
+
+    private void append(String kind,String source,int tick,long at,Map<String,Object> value,boolean direct,boolean keepSnapshot)
+    {
         Map<String,Object> row = new LinkedHashMap<>();
         row.put("sequence", ++sequence); row.put("event_id", session + ":" + sequence);
         row.put("kind", kind); row.put("source", source); row.put("tick", tick);
         row.put("observed_at_ms", at); row.put("direct", direct); row.put("value", value);
         int bytes = JSON.toJson(row).getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
         if (bytes > MAX_OBSERVATION_BYTES) { evicted++; return; }
-        while (observations.size() >= MAX_OBSERVATIONS || bufferedBytes + bytes > MAX_OBSERVATION_BYTES)
+        if(keepSnapshot)
         {
-            observations.removeFirst(); bufferedBytes -= observationBytes.removeFirst(); evicted++;
+            while (observations.size() >= MAX_OBSERVATIONS || bufferedBytes + bytes > MAX_OBSERVATION_BYTES)
+            {
+                observations.removeFirst(); bufferedBytes -= observationBytes.removeFirst(); evicted++;
+            }
+            observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
         }
-        observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
         Map<String,Object> combat = OwnCombatEvent.from(session, row);
         if (combat != null)
         {
