@@ -32,7 +32,10 @@ public class LoadoutRevisionTest
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("item_id", id);
             m.put("answer", answers.getOrDefault(id, "unknown"));
-            m.put("unknown_locations", java.util.Collections.singletonList("bank"));
+            m.put("unknown_locations", new java.util.ArrayList<>(java.util.Arrays.asList("bank")));
+            m.put("stale_locations", new java.util.ArrayList<String>());
+            m.put("bounded_locations", new java.util.ArrayList<>(java.util.Arrays.asList("ge_collect")));
+            m.put("unsupported_locations", java.util.Arrays.asList("rune_pouch", "poh_storage"));
             return m;
         };
     }
@@ -116,6 +119,12 @@ public class LoadoutRevisionTest
         assertEquals("owned_observed", ((Map<?, ?>) slots.get("weapon")).get("current_holdings"));
         assertEquals("not_seen_in_observed", ((Map<?, ?>) slots.get("body")).get("current_holdings"));
         assertEquals("unknown", ((Map<?, ?>) slots.get("head")).get("current_holdings"));
+        assertEquals(java.util.Arrays.asList("rune_pouch", "poh_storage"),
+            ((Map<?, ?>) slots.get("body")).get("unsupported_locations"));
+        assertEquals(java.util.Collections.singletonList("ge_collect"), ((Map<?, ?>) slots.get("body")).get("bounded_locations"));
+        Map<?, ?> none = (Map<?, ?>) ((Map<?, ?>) LoadoutRevision.ownership(r, null).get("slots")).get("body");
+        assertEquals("unknown", none.get("current_holdings"));
+        assertNull(none.get("stale_locations"));
         assertEquals("unavailable", LoadoutRevision.ownership(r, null).get("holdings_source"));
     }
 

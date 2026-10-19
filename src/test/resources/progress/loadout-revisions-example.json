@@ -66,6 +66,14 @@
         "current_holdings": "unknown",
         "unknown_locations": [
           "bank"
+        ],
+        "stale_locations": [],
+        "bounded_locations": [
+          "ge_collect"
+        ],
+        "unsupported_locations": [
+          "rune_pouch",
+          "poh_storage"
         ]
       },
       "weapon": {
@@ -74,6 +82,14 @@
         "current_holdings": "owned_observed",
         "unknown_locations": [
           "bank"
+        ],
+        "stale_locations": [],
+        "bounded_locations": [
+          "ge_collect"
+        ],
+        "unsupported_locations": [
+          "rune_pouch",
+          "poh_storage"
         ]
       },
       "body": {
@@ -82,6 +98,14 @@
         "current_holdings": "not_seen_in_observed",
         "unknown_locations": [
           "bank"
+        ],
+        "stale_locations": [],
+        "bounded_locations": [
+          "ge_collect"
+        ],
+        "unsupported_locations": [
+          "rune_pouch",
+          "poh_storage"
         ]
       },
       "ammo": {
@@ -90,6 +114,14 @@
         "current_holdings": "unknown",
         "unknown_locations": [
           "bank"
+        ],
+        "stale_locations": [],
+        "bounded_locations": [
+          "ge_collect"
+        ],
+        "unsupported_locations": [
+          "rune_pouch",
+          "poh_storage"
         ]
       }
     },

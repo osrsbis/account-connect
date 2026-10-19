@@ -26,6 +26,8 @@ final class LoadoutRevision
     private static final String[] SLOT_NAMES = {"head", "cape", "amulet", "weapon", "body", "shield", null, "legs",
         null, "gloves", "boots", null, "ring", "ammo"};
     static final int MAX_REVISIONS = 256;
+    /** C4 WealthLedger.owns location lists that qualify a "no" answer. */
+    static final String[] HOLDINGS_GAPS = {"unknown_locations", "stale_locations", "bounded_locations", "unsupported_locations"};
 
     private final String generation;
     private final List<Map<String, Object>> revisions = new ArrayList<>();
@@ -176,7 +178,9 @@ final class LoadoutRevision
             slot.put("item_id", item);
             slot.put("worn_at_revision", true);
             slot.put("current_holdings", state);
-            slot.put("unknown_locations", answer == null ? null : answer.get("unknown_locations"));
+            // not_seen_in_observed can hold while a store is stale, bounded (GE collect box) or unsupported, so
+            // every C4 gap list is carried. A null list means no C4 answer, not "nothing missing".
+            for (String gap : HOLDINGS_GAPS) slot.put(gap, answer == null ? null : answer.get(gap));
             out.put((String) e.getKey(), slot);
         }
         Map<String, Object> result = new LinkedHashMap<>();
