@@ -10734,6 +10734,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onActorDeath(ActorDeath event)
 	{
 		if (gameplayReady()) ownGameplay.activities.death(client, event.getActor(), System.currentTimeMillis());
+		if (gameplayReady()) ownGameplay.ownDeath(client, event.getActor(), System.currentTimeMillis());
 		if (gameplayReady() && event.getActor() instanceof NPC)
 			ownGameplay.endNpc(client, (NPC) event.getActor(), true, System.currentTimeMillis());
 		if (event.getActor() != null && event.getActor() == client.getLocalPlayer())
@@ -11124,6 +11125,13 @@ public class AccountConnectPlugin extends Plugin
 	{
 		NPCComposition comp = event.getComposition();
 		emitLoot(comp == null ? null : comp.getName(), "npc", event.getItems());
+		// Derived local encounter input; existing loot transport stays unchanged.
+		if (gameplayReady())
+		{
+			ownGameplay.loot(client, comp == null ? -1 : comp.getId(), event.getItems(), System.currentTimeMillis());
+			if (log.isDebugEnabled() && gson != null)
+				log.debug("OSRS BiS encounter summary {}", gson.toJson(ownGameplay.encounterSummary(client.getTickCount())));
+		}
 	}
 
 	/**

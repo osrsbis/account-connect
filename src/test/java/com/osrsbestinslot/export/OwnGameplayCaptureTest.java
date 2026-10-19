@@ -405,6 +405,60 @@ public class OwnGameplayCaptureTest
         return p;
     }
 
+    private OwnGameplayCapture pluginCapture(AccountConnectPlugin p) throws Exception
+    {
+        Field f = AccountConnectPlugin.class.getDeclaredField("ownGameplay");
+        f.setAccessible(true); return (OwnGameplayCapture) f.get(p);
+    }
+
+    @Test public void actualDeathHandlerClosesOnlyOwnEncounterAndRevocationClearsIt() throws Exception
+    {
+        AccountConnectPlugin p = plugin();
+        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
+        p.gameplayBlock(); tick += 2;
+        HitsplatApplied hit = new HitsplatApplied(); hit.setActor(npc(123)); hit.setHitsplat(splat(4, true));
+        p.onHitsplatApplied(hit);
+        p.onActorDeath(new ActorDeath(mock(Player.class)));
+        OwnGameplayCapture own = pluginCapture(p);
+        Map<?,?> encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
+        assertEquals("open", encounter.get("status"));
+        p.onActorDeath(new ActorDeath(self));
+        encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
+        assertEquals("own_death", encounter.get("outcome"));
+        assertFalse("local death input is not a new wire row", new com.google.gson.Gson().toJson(p.gameplayBlock()).contains("combat.own_death"));
+        p.applyServerPolicy(policy("X-Own-Gameplay", "off", 200), TOKEN);
+        p.onActorDeath(new ActorDeath(self));
+        assertTrue(((List<?>)own.encounterSummary(tick).get("encounters")).isEmpty());
+    }
+
+    @Test public void actualNpcLootHandlerLinksLocalEncounterWithoutAddingWireRows() throws Exception
+    {
+        AccountConnectPlugin p = plugin();
+        NPCComposition comp = mock(NPCComposition.class); when(comp.getId()).thenReturn(123);
+        when(comp.getName()).thenReturn("fixture NPC");
+        net.runelite.client.events.ServerNpcLoot loot = new net.runelite.client.events.ServerNpcLoot(comp,
+            List.of(new net.runelite.client.game.ItemStack(526, 1)));
+        p.onServerNpcLoot(loot); // no gameplay grant: ordinary loot behavior only
+        OwnGameplayCapture own = pluginCapture(p);
+        assertTrue(((List<?>)own.encounterSummary(tick).get("loot_not_matched")).isEmpty());
+        p.pendingEvents.clear();
+        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
+        p.gameplayBlock(); tick += 2;
+        NPC target = npc(123);
+        HitsplatApplied hit = new HitsplatApplied(); hit.setActor(target); hit.setHitsplat(splat(4, true));
+        p.onHitsplatApplied(hit); tick++;
+        p.onActorDeath(new ActorDeath(target));
+        int rawCount = ((List<?>)p.gameplayBlock().get("observations")).size();
+        p.onServerNpcLoot(loot);
+        Map<?,?> encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
+        assertEquals("matched", encounter.get("loot_status"));
+        assertEquals(1, ((List<?>)encounter.get("loot")).size());
+        assertEquals("local input does not increment the uploaded observation sequence", rawCount,
+            ((List<?>)p.gameplayBlock().get("observations")).size());
+        assertFalse(new com.google.gson.Gson().toJson(encounter).contains("fixture NPC"));
+        assertEquals(1L, p.pendingEvents.stream().filter(e -> "loot".equals(e.get("type"))).count());
+    }
+
     @Test public void lootKeyContainerHandlerReadsOnlyWithCurrentGameplayGrantAndClearsAfterRevocation() throws Exception
     {
         AccountConnectPlugin p=plugin();ItemContainer c=mock(ItemContainer.class);when(c.getId()).thenReturn(558);
