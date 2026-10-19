@@ -15,10 +15,11 @@ final class GeHistoryCapture
 {
     private static final String NUMBER = "([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)";
     private static final Pattern TOTAL = Pattern.compile("^" + NUMBER + " coins?(?:\\s|$)");
-    private static final Pattern EACH = Pattern.compile("(?:^|\\s)>= " + NUMBER + " each(?:\\s|$)");
+    // 0.7.42 actual client renders "= 11,203 each"; the historic format was ">= N each".
+    private static final Pattern EACH = Pattern.compile("(?:^|\\s)>?= " + NUMBER + " each(?:\\s|$)");
     private static final String STRICT_NUMBER = "(0|[1-9][0-9]{0,2}(?:,[0-9]{3})+|[1-9][0-9]*)";
     private static final Pattern DEDUCTION = Pattern.compile(STRICT_NUMBER + " coins?(?:<br>| )\\("
-        + STRICT_NUMBER + " - " + STRICT_NUMBER + " tax\\)");
+        + STRICT_NUMBER + " - " + STRICT_NUMBER + "(?: tax)?\\)");
     private static final Pattern COLOUR_WRAPPER = Pattern.compile("<col=[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?>(.*)</col>");
     private final List<Map<String, Object>> observations = new ArrayList<>();
     private List<Map<String, Object>> previous;
@@ -114,8 +115,9 @@ final class GeHistoryCapture
     }
 
     /**
-     * Historic format reference: Flipping Utilities GeHistoryTabExtractor.getPrice.
-     * This independently validated UI evidence is NOT field verification of current RuneLite.
+     * Historic format reference: Flipping Utilities GeHistoryTabExtractor.getPrice ("(gross - tax tax)").
+     * The 0.7.42 actual client (2026-10-19 screenshot) renders "2,646 coins (2,700 - 54)" with no
+     * "tax" word, so both forms are accepted. The raw widget markup itself is not yet field-read.
      * Unlike that extractor, retain offer totals: division cannot recover exact fills, and
      * displayed net must never have tax deducted again. Missing tax is not evidence of zero tax.
      */

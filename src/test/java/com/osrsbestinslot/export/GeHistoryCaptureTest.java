@@ -34,6 +34,19 @@ public class GeHistoryCaptureTest
         assertEquals("displayed_values_tax_and_rounding_unresolved", r.get("price_semantics"));
     }
 
+    @Test public void currentClientDeductionWithoutTheTaxWordIsRead()
+    {
+        // 0.7.42 actual client, Varrock GE 2026-10-19: "Sold: Mithril platebody 2,646 coins (2,700 - 54)".
+        assertDeduction(GeHistoryCapture.read(row("Sold", 1, "2,646 coins<br>(2,700 - 54)")).get(0), 2700, 54, 2646);
+        assertDeduction(GeHistoryCapture.read(row("Sold", 1, "11,939 coins<br>(12,182 - 243)")).get(0), 12182, 243, 11939);
+        Map<String, Object> bought = GeHistoryCapture.read(row("Bought", 57, "638,571 coins<br>= 11,203 each")).get(0);
+        assertEquals(638571L, bought.get("displayed_total_gp"));
+        assertEquals(11203L, bought.get("displayed_each_gp"));
+        assertNull(bought.get("explicit_tax_gp"));
+        // Arithmetic still binds: a mismatched triple stays unknown.
+        assertNull(GeHistoryCapture.read(row("Sold", 1, "2,600 coins (2,700 - 54)")).get(0).get("explicit_tax_gp"));
+    }
+
     @Test public void explicitDeductionIsAnOfferTotalRegardlessOfQuantity()
     {
         for (int quantity : new int[] {1, 3, Integer.MAX_VALUE})
@@ -74,7 +87,7 @@ public class GeHistoryCaptureTest
     @Test public void rejectsAmbiguousMalformedInconsistentAndOverflowDeductionAtomically()
     {
         String[] invalid = {
-            "unknown", "", "98 coins", "98 coins (100 - 2)", "98 coins (100 - 2 tax",
+            "unknown", "", "98 coins", "98 coins (100 - 2", "98 coins (100 - 2 tax", "98 coins (100 - 2 tx)",
             "98 coins (100 - 3 tax)", "0 coins (1 - 2 tax)", "-1 coins (1 - 2 tax)",
             "98 coins (100 - -2 tax)", "98 coins (0100 - 2 tax)", "98 coins (1,00 - 2 tax)",
             "98 coins (100 - 2 tax) extra", "98 coins (100 - 2 tax) (100 - 2 tax)",
