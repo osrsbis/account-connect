@@ -223,6 +223,23 @@ public class ActivityRecordTest
         assertEquals(916L, v.get("input_cost_gp")); assertEquals(2L * 3809, v.get("output_value_gp"));
     }
 
+    @Test public void replayAcceptsSnapshotRowsAndWireEventsAndSkipsInvalidRows()
+    {
+        String uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        List<String> lines = List.of(
+            "{\"collector_session\":\"" + uuid + "\",\"event_id\":\"r1\",\"sequence\":3,\"kind\":\"effects.consumption\",\"source\":\"MenuOptionClicked:149.0+own_inventory\",\"tick\":101,\"observed_at_ms\":" + (START + 1000) + ",\"direct\":false,\"value\":{\"item_id_before\":385,\"quantity_before\":1,\"item_id_after\":-1,\"quantity_after\":0,\"action\":\"eat\",\"intent_tick\":100,\"inference\":\"own_menu_and_slot_change_not_confirmed_effect_or_cooldown\"}}",
+            // A claimed consumption whose slot did not change fails the projection and is skipped.
+            "{\"collector_session\":\"" + uuid + "\",\"event_id\":\"r2\",\"sequence\":4,\"kind\":\"effects.consumption\",\"source\":\"MenuOptionClicked:149.0+own_inventory\",\"tick\":102,\"observed_at_ms\":" + (START + 2000) + ",\"direct\":false,\"value\":{\"item_id_before\":385,\"quantity_before\":1,\"item_id_after\":385,\"quantity_after\":1,\"action\":\"eat\",\"intent_tick\":101,\"inference\":\"own_menu_and_slot_change_not_confirmed_effect_or_cooldown\"}}",
+            "{\"type\":\"loot\",\"event_id\":\"w1\",\"ts\":" + (START + 3000) + ",\"account_hash\":\"42\",\"profile_type\":\"STANDARD\",\"source_type\":\"npc\",\"items\":[{\"id\":536,\"qty\":1}]}");
+        List<Map<String,Object>> events = ActivityReplay.read(lines);
+        assertEquals(2, events.size());
+        Map<String,Object> s = m("activity_type", "combat_encounter", "account_hash", "42", "profile_type", "STANDARD",
+            "gameplay_session", SESSION, "start_ms", (double)START, "end_ms", (double)END);
+        Map<String,Object> r = ActivityRecord.derive(s, events, prices);
+        assertEquals(List.of("r1", "w1"), r.get("contributing_event_ids"));
+        assertEquals(3809L - 916L, ((Map<?,?>)r.get("result")).get("net_gp"));
+    }
+
     /** Writes the derived example for the handoff; the build directory is not committed. */
     @Test public void writeDerivedExample() throws Exception
     {
