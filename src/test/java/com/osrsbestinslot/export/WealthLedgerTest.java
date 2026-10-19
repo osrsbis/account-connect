@@ -470,13 +470,14 @@ public class WealthLedgerTest
 	}
 
 	@Test
-	public void storageWithoutObservedAtIsUnknownAndBadRowsAreRejected()
+	public void storageWithoutObservedAtIsUndatedAndBadRowsAreRejected()
 	{
 		Snap s = new Snap(T0).bank(T0 - 5, 995, 1);
 		Map<String, Object> quiver = Snap.block(T0, RUNE_ARROW, 500);
 		quiver.put("observed_at", null);
 		s.m.put("quiver_ammo", quiver);
-		assertEquals(WealthLedger.UNKNOWN, s.h().locations.get("quiver_ammo").state);
+		assertEquals(WealthLedger.UNDATED, s.h().locations.get("quiver_ammo").state);
+		assertNotEquals(WealthLedger.OBSERVED, s.h().locations.get("quiver_ammo").state);
 		s.inv.add(item(-1, 5));
 		try
 		{
@@ -506,6 +507,78 @@ public class WealthLedgerTest
 			WealthLedger.fromSnapshot(WealthLedgerReplay.load(fb.toString())), null, null, null, null);
 		assertEquals(direct.get("items"), replay.get("items"));
 		assertEquals(Long.valueOf(30L), classes(replay, SHARK).get(WealthReconciliation.TRADE));
+	}
+
+	/**
+	 * Shape of the real 0.7.39 run (retained166, 2026-10-19, djinn, five snapshots): bank absent, then present with no
+	 * observed_at on first open, then dated after a deposit, then absent again after the bank closed. Synthetic values.
+	 */
+	@Test
+	public void realRunShapeBankUndatedThenObservedThenCarried()
+	{
+		Snap s1 = new Snap(T0).inv(995, 735_517).inv(1511, 1).worn("weapon", 1353, 1);
+		Snap s2 = new Snap(T0 + 29).inv(995, 735_517).inv(1511, 1).worn("weapon", 1353, 1).bank(T0 + 29, 1511, 23);
+		@SuppressWarnings("unchecked") Map<String, Object> bank2 = (Map<String, Object>) s2.m.get("bank");
+		bank2.put("observed_at", null);
+		Snap s3 = new Snap(T0 + 125).inv(995, 735_512).worn("weapon", 1353, 1).bank(T0 + 81, 995, 5, 1511, 24);
+		Snap s4 = new Snap(T0 + 250).inv(995, 735_513).inv(1353, 1);
+		Snap s5 = new Snap(T0 + 372).inv(995, 735_513).worn("weapon", 1353, 1);
+		WealthLedger.Holdings h1 = s1.h(), h2 = s2.h().carryForward(h1), h3 = s3.h().carryForward(h2);
+		WealthLedger.Holdings h4 = s4.h().carryForward(h3), h5 = s5.h().carryForward(h4);
+		assertEquals(WealthLedger.UNKNOWN, h1.locations.get("bank").state);
+		assertEquals(WealthLedger.UNDATED, h2.locations.get("bank").state);
+		assertEquals(WealthLedger.OBSERVED, h3.locations.get("bank").state);
+		assertEquals(WealthLedger.CARRIED, h4.locations.get("bank").state);
+		assertFalse(h4.coreComplete());
+		// The withdrawn coin is in the inventory now; the carried bank still says 5. Never add them together.
+		assertEquals(735_513L, h4.knownCoins());
+		assertEquals(5L, h4.toMap().get("carried_coins_last_read"));
+		assertEquals("yes", h4.owns(1511).get("answer"));	// last seen in the carried bank, state carried
+
+		// Deposit seen in both locations: transfer only.
+		Map<String, Object> r23 = WealthReconciliation.reconcile(h2, h3, null, null, null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER, 5L), classes(r23, 995));
+		assertEquals(Map.of(WealthReconciliation.TRANSFER, 1L), classes(r23, 1511));
+		assertEquals(Collections.singletonList("bank"), r23.get("stale_locations"));	// undated at one end
+		assertEquals(false, r23.get("core_complete"));
+
+		// Withdraw 1 coin, then the bank closed: inferred transfer from the carried bank; the unequip is a transfer.
+		Map<String, Object> r34 = WealthReconciliation.reconcile(h3, h4, null, null, null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER_INFERRED_CARRIED, 1L), classes(r34, 995));
+		assertEquals(Map.of(WealthReconciliation.TRANSFER, 1L), classes(r34, 1353));
+		assertEquals(false, r34.get("explained"));
+		Map<String, Object> r45 = WealthReconciliation.reconcile(h4, h5, null, null, null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER, 1L), classes(r45, 1353));
+		assertTrue(classes(r45, 995).isEmpty());
+
+		// More coins out of a carried bank than its last reading held: the excess stays unexplained. The bound is the
+		// last real reading (5), not reduced by earlier inferred withdrawals, so it is loose by design.
+		Snap s6 = new Snap(T0 + 400).inv(995, 735_613).worn("weapon", 1353, 1);
+		Map<String, Object> r56 = WealthReconciliation.reconcile(h5, s6.h().carryForward(h5), null, null, null, null);
+		assertEquals(Long.valueOf(5L), classes(r56, 995).get(WealthReconciliation.TRANSFER_INFERRED_CARRIED));
+		assertEquals(Long.valueOf(95L), classes(r56, 995).get(WealthReconciliation.UNEXPLAINED));
+	}
+
+	@Test
+	public void conflictingCopiesOfOneFlowIdAreDroppedAndListedNotFirstWins()
+	{
+		Snap a = new Snap(T0).inv(SHARK, 20).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).inv(SHARK, 12).bank(T0 - 5, 995, 1);
+		List<WealthReconciliation.Flow> flows = List.of(
+			new WealthReconciliation.Flow("e1:0", SHARK, -8, "consumed_inferred", "inferred"),
+			new WealthReconciliation.Flow("e1:0", SHARK, -3, "consumed_inferred", "inferred"));
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, flows, null, null);
+		assertEquals(List.of("e1:0"), r.get("conflicting_flow_ids"));
+		assertEquals(Map.of(WealthReconciliation.UNEXPLAINED, -8L), classes(r, SHARK));
+		assertEquals(false, r.get("explained"));
+	}
+
+	@Test
+	public void carryForwardNeverCrossesAccounts()
+	{
+		WealthLedger.Holdings a = new Snap(T0).bank(T0 - 5, 995, 1_000).h();
+		WealthLedger.Holdings b = new Snap(T0 + 60).account("987654321", "STANDARD").h().carryForward(a);
+		assertEquals(WealthLedger.UNKNOWN, b.locations.get("bank").state);
 	}
 
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */

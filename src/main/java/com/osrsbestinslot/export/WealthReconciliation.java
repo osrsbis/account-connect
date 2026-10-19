@@ -25,6 +25,7 @@ final class WealthReconciliation
 	static final String REWARD = "reward";
 	static final String TRANSFORM = "transform";
 	static final String TRANSFER_OUT_OF_VIEW = "transfer_out_of_view";
+	static final String TRANSFER_INFERRED_CARRIED = "transfer_inferred_carried";
 	static final String UNEXPLAINED = "unexplained";
 
 	private WealthReconciliation()
@@ -234,9 +235,10 @@ final class WealthReconciliation
 				// Same reading carried forward: the game did not resend it, so changes made out of view are unseen.
 				carried.add(name);
 			}
-			if (WealthLedger.STALE.equals(a.state) || WealthLedger.STALE.equals(b.state))
+			if (WealthLedger.STALE.equals(a.state) || WealthLedger.STALE.equals(b.state)
+				|| WealthLedger.UNDATED.equals(a.state) || WealthLedger.UNDATED.equals(b.state))
 			{
-				stale.add(name);
+				stale.add(name);	// readable but not freshly dated at one end
 			}
 		}
 
@@ -287,13 +289,31 @@ final class WealthReconciliation
 		List<String> unknownFlows = new ArrayList<>();
 		Set<String> seenFlows = new HashSet<>();
 		int duplicateFlows = 0;
+		List<String> conflictingFlows = new ArrayList<>();
 		if (flows != null)
 		{
+			// Group by flow_id first. Identical copies (a replayed upload) count once. Copies that disagree (one
+			// event_id with different contents) are all dropped and listed, so first-wins can never hide a conflict.
+			Map<String, Flow> byId = new LinkedHashMap<>();
+			Set<String> conflicted = new LinkedHashSet<>();
 			for (Flow f : flows)
 			{
-				if (!seenFlows.add(f.flowId))
+				Flow first = byId.putIfAbsent(f.flowId, f);
+				if (first != null)
 				{
-					duplicateFlows++;	// a replayed or duplicated upload must not count twice
+					duplicateFlows++;
+					if (first.itemId != f.itemId || first.qtyDelta != f.qtyDelta || !first.flowClass.equals(f.flowClass))
+					{
+						conflicted.add(f.flowId);
+					}
+				}
+			}
+			conflictingFlows.addAll(conflicted);
+			for (Flow f : byId.values())
+			{
+				seenFlows.add(f.flowId);
+				if (conflicted.contains(f.flowId))
+				{
 					continue;
 				}
 				if (f.itemId <= 0)
@@ -314,6 +334,22 @@ final class WealthReconciliation
 					add(facts, id, cls, q);
 				}
 			}
+		}
+		// Carried locations: an item can move into or out of them while they are out of view.
+		Map<Integer, Long> carriedHeld = new HashMap<>();
+		boolean anyCarried = false;
+		for (String name : comparable)
+		{
+			if (WealthLedger.CARRIED.equals(to.locations.get(name).state))
+			{
+				anyCarried = true;
+				to.locations.get(name).items.forEach((id, q) -> carriedHeld.merge(id, q, Long::sum));
+			}
+		}
+		Long tokens = carriedHeld.remove(WealthLedger.PLATINUM_TOKEN);
+		if (tokens != null)
+		{
+			carriedHeld.merge(WealthLedger.COINS, tokens * WealthLedger.PLATINUM_TOKEN_COINS, Long::sum);
 		}
 
 		Set<Integer> items = new TreeSet<>(moves.keySet());
@@ -369,6 +405,17 @@ final class WealthReconciliation
 				cls.merge(TRANSFER_OUT_OF_VIEW, take, Long::sum);
 				remaining -= take;
 			}
+			if (remaining != 0 && anyCarried)
+			{
+				// Withdrawn from (remaining > 0, at most what the carried reading held) or deposited into (remaining < 0)
+				// a location that was not resent. Inferred, never proof.
+				long take = remaining > 0 ? Math.min(remaining, carriedHeld.getOrDefault(id, 0L)) : remaining;
+				if (take != 0)
+				{
+					cls.merge(TRANSFER_INFERRED_CARRIED, take, Long::sum);
+					remaining -= take;
+				}
+			}
 			if (remaining != 0)
 			{
 				cls.put(UNEXPLAINED, remaining);
@@ -387,7 +434,8 @@ final class WealthReconciliation
 				for (Map.Entry<String, Long> e : cls.entrySet())
 				{
 					// Transfers and collect-box moves stay inside the account: they move value, they never create it.
-					boolean internal = e.getKey().equals(TRANSFER) || e.getKey().equals(GE_COLLECT_BOX);
+					boolean internal = e.getKey().equals(TRANSFER) || e.getKey().equals(GE_COLLECT_BOX)
+						|| e.getKey().equals(TRANSFER_INFERRED_CARRIED);
 					long v = internal ? 0 : e.getValue() * pa;
 					classValue.merge(e.getKey(), v, Long::sum);
 				}
@@ -449,8 +497,9 @@ final class WealthReconciliation
 		}
 		out.put("conservation_holds", conserved);
 		out.put("unknown_flows", unknownFlows);
+		out.put("conflicting_flow_ids", conflictingFlows);
 		boolean explained = rowsHave(rows, UNEXPLAINED) == 0 && rowsHave(rows, GE_SETTLEMENT_INFERRED) == 0
-			&& unknownFlows.isEmpty();
+			&& rowsHave(rows, TRANSFER_INFERRED_CARRIED) == 0 && unknownFlows.isEmpty() && conflictingFlows.isEmpty();
 		boolean core = true;
 		for (String name : WealthLedger.CORE)
 		{

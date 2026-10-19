@@ -29,6 +29,10 @@ final class WealthLedger
 	static final String UNKNOWN = "unknown";
 	static final String UNSUPPORTED = "unsupported";
 	static final String BOUNDED = "bounded";
+	/** Container present at capture but the plugin recorded no send time (seen on a real 0.7.39 first bank open). */
+	static final String UNDATED = "undated";
+	/** Not present in this snapshot; the reading is carried from an earlier snapshot of the same account. */
+	static final String CARRIED = "carried";
 
 	/** The four core locations. The account view is "core complete" only when all four are observed and exact. */
 	static final List<String> CORE = List.of("inventory", "equipment", "bank", "ge_escrow");
@@ -68,7 +72,8 @@ final class WealthLedger
 		/** Items are present. For BOUNDED escrow they are the provably locked part; more may sit in the collect box. */
 		boolean readable()
 		{
-			return OBSERVED.equals(state) || STALE.equals(state) || BOUNDED.equals(state);
+			return OBSERVED.equals(state) || STALE.equals(state) || BOUNDED.equals(state) || UNDATED.equals(state)
+				|| CARRIED.equals(state);
 		}
 	}
 
@@ -145,13 +150,28 @@ final class WealthLedger
 			return true;
 		}
 
-		/** Known item totals over readable locations (stale and bounded ones are listed separately). */
+		/**
+		 * Known item totals over locations read in THIS snapshot (observed, stale, undated, bounded escrow). Carried
+		 * readings are left out: the real 0.7.39 run withdrew a coin after the bank closed, so adding the carried bank
+		 * would count that coin twice.
+		 */
 		SortedMap<Integer, Long> knownItems()
+		{
+			return itemsWhere(false);
+		}
+
+		/** Items in carried locations only: last readings from earlier snapshots, possibly out of date. */
+		SortedMap<Integer, Long> carriedItems()
+		{
+			return itemsWhere(true);
+		}
+
+		private SortedMap<Integer, Long> itemsWhere(boolean carried)
 		{
 			SortedMap<Integer, Long> out = new TreeMap<>();
 			for (Location l : locations.values())
 			{
-				if (l.readable())
+				if (l.readable() && CARRIED.equals(l.state) == carried)
 				{
 					l.items.forEach((id, qty) -> out.merge(id, qty, Long::sum));
 				}
@@ -159,10 +179,14 @@ final class WealthLedger
 			return out;
 		}
 
-		/** Coins plus platinum tokens at 1000 each, over readable locations only. */
+		/** Coins plus platinum tokens at 1000 each, over locations read in this snapshot only. */
 		long knownCoins()
 		{
-			SortedMap<Integer, Long> items = knownItems();
+			return coins(knownItems());
+		}
+
+		static long coins(SortedMap<Integer, Long> items)
+		{
 			return items.getOrDefault(COINS, 0L) + items.getOrDefault(PLATINUM_TOKEN, 0L) * PLATINUM_TOKEN_COINS;
 		}
 
@@ -200,7 +224,35 @@ final class WealthLedger
 			out.put("stale_locations", inState(STALE));
 			out.put("bounded_locations", inState(BOUNDED));
 			out.put("unsupported_locations", inState(UNSUPPORTED));
+			out.put("undated_locations", inState(UNDATED));
+			out.put("carried_locations", inState(CARRIED));
 			return out;
+		}
+
+		/**
+		 * Fill locations this snapshot did not read (bank closed, storage not opened) with the earlier reading of
+		 * the same account, marked CARRIED with its original time. A carried reading can be out of date: the game
+		 * does not resend a closed bank, and play on another client or on mobile between the two snapshots is not
+		 * visible. It is never OBSERVED, so it never makes a view core-complete.
+		 */
+		Holdings carryForward(Holdings earlier)
+		{
+			if (earlier == null || accountKey == null || !accountKey.equals(earlier.accountKey) || earlier.asOfMs >= asOfMs)
+			{
+				return this;
+			}
+			Map<String, Location> locs = new LinkedHashMap<>(locations);
+			for (Location now : locations.values())
+			{
+				Location before = earlier.locations.get(now.name);
+				if (UNKNOWN.equals(now.state) && before != null && before.readable() && !now.name.equals("ge_escrow")
+					&& !now.name.equals("inventory") && !now.name.equals("equipment"))
+				{
+					locs.put(now.name, new Location(now.name, CARRIED, before.observedAtMs, before.items,
+						"carried from snapshot at " + earlier.asOfMs + " (" + before.state + "); may be out of date"));
+				}
+			}
+			return new Holdings(accountKey, accountKeySource, asOfMs, Collections.unmodifiableMap(locs), escrow);
 		}
 
 		/** Compact JSON-ready view: the derived result other lanes and the site read. */
@@ -246,6 +298,7 @@ final class WealthLedger
 			}
 			out.put("ge_escrow", esc);
 			out.put("known_coins", knownCoins());
+			out.put("carried_coins_last_read", coins(carriedItems()));
 			out.put("ge_possibly_uncollected_coins_max", maxCoins);
 			out.put("core_complete", coreComplete());
 			out.put("account_total_claimed", false);
@@ -253,6 +306,8 @@ final class WealthLedger
 			out.put("stale_locations", inState(STALE));
 			out.put("bounded_locations", inState(BOUNDED));
 			out.put("unsupported_locations", inState(UNSUPPORTED));
+			out.put("undated_locations", inState(UNDATED));
+			out.put("carried_locations", inState(CARRIED));
 			return out;
 		}
 	}
@@ -412,8 +467,10 @@ final class WealthLedger
 		Long observedS = asLong(block.get("observed_at"));
 		if (observedS == null)
 		{
-			// A container with no observation time cannot be dated; it is not evidence of the current state.
-			return new Location(name, UNKNOWN, null, null, "container present without observed_at");
+			// The container was present when the snapshot was built, so its items are the client's copy at that moment,
+			// but the plugin has no send time for it. Real 0.7.39 run: first bank open after login had no observed_at.
+			return new Location(name, UNDATED, asOf, list(block.get("items")),
+				"present at capture, game send time not recorded");
 		}
 		long at = observedS * 1000L;
 		String state = asOf - at > staleAfterMs ? STALE : OBSERVED;
