@@ -514,6 +514,39 @@ public class CombatEncounterTrackerTest
         assertEquals(false, gear.get("changed_during")); assertEquals(1, ((List<?>) gear.get("revisions_observed")).size());
     }
 
+    @Test public void firstSplatAfterDeathOnAnInactivityClosedTargetIsThatDeath()
+    {
+        // 0.7.46 real client (try 3): one bow hit, no ammo for 105 ticks, then ActorDeath and the first axe splat.
+        NPC rat = npc(2860);
+        tick = 582; dealt(rat, 1);
+        worn[3] = new Item(1353, 1); worn[13] = new Item(-1, 0);
+        tick = 687; capture.endNpc(client, rat, true, AT); dealt(rat, 5);
+        tick = 689; capture.loot(client, 2860, Collections.singletonList(new ItemStack(526, 1)), AT);
+        Map<String,Object> s = capture.encounterSummary(tick);
+        List<Map<String,Object>> list = encounters(s);
+        assertEquals(2, list.size());
+        assertEquals("unobserved_end_inactivity", list.get(0).get("outcome"));
+        Map<String,Object> kill = list.get(1);
+        assertEquals("observed_death", kill.get("outcome")); assertEquals(0, kill.get("elapsed_ticks"));
+        assertEquals(5L, m(kill.get("own_attacks")).get("total_own_damage")); assertEquals("matched", kill.get("loot_status"));
+        assertTrue(((List<?>) s.get("loot_not_matched")).isEmpty());
+        // Wire replay of the same rows gives the same outcome.
+        List<Map<String,Object>> wire = new ArrayList<>();
+        for (Map<String,Object> h : handed) wire.add(PublicTransport.event(withEnvelope(h)));
+        List<Map<String,Object>> server = encounters(CombatEncounterTracker.deriveFromEvents((String) wire.get(0).get("gameplay_session"), wire, tick));
+        assertEquals("observed_death", server.get(server.size() - 1).get("outcome"));
+    }
+
+    @Test public void deathOfAnInactivityClosedTargetIsNotJoinedByALaterTickSplat()
+    {
+        NPC rat = npc(2860), other = npc(2860);
+        tick = 582; dealt(rat, 1);
+        tick = 687; capture.endNpc(client, rat, true, AT);
+        tick = 688; dealt(other, 3);
+        List<Map<String,Object>> list = encounters(capture.encounterSummary(tick));
+        assertEquals("open", list.get(list.size() - 1).get("outcome"));
+    }
+
     @Test public void deathOfAnotherNpcInSameTickDoesNotCaptureANewTarget()
     {
         NPC dead = npc(2861), other = npc(2861);

@@ -28,6 +28,9 @@ final class CombatEncounterTracker
     private Map<String,Object> worn; // latest observed worn revision in this session, or null = unknown
     private long receivedNoOpenHits, receivedNoOpenDamage, receivedOverlapHits, receivedOverlapDamage, droppedClosed, droppedLoot;
     private int lastTick = -1;
+    // Deaths of targets with no open encounter, kept for their tick: a first own splat can arrive after ActorDeath.
+    private final Map<String,long[]> pendingDeaths = new LinkedHashMap<>();
+    private int pendingDeathTick = -1;
 
     CombatEncounterTracker(String gameplaySession) { session = gameplaySession == null ? null : gameplaySession.replace("-", ""); }
     String session() { return session; }
@@ -166,6 +169,8 @@ final class CombatEncounterTracker
             if (e.wornAtStart != null) e.revisions.add(e.wornAtStart);
         }
         count(e, v, tick, at, seq);
+        long[] death = tick == pendingDeathTick ? pendingDeaths.remove(target) : null;
+        if (death != null) { e.contributes(death[1]); close(e, "observed_death", "ActorDeath", tick, death[0]); }
     }
 
     private void count(Encounter e, Map<?,?> v, int tick, long at, long seq)
@@ -185,9 +190,19 @@ final class CombatEncounterTracker
     {
         if (!(v.get("target_observation_id") instanceof String)) return;
         Encounter e = open.get(((String) v.get("target_observation_id")).replace("-", ""));
-        if (e == null) return; // Not observed from its first own hit in this tracker.
-        e.contributes(seq);
         String end = String.valueOf(v.get("end"));
+        if (e == null)
+        {
+            // Not open in this tracker (for example closed by inactivity). A same-tick own splat may still follow.
+            if ("observed_death".equals(end))
+            {
+                if (tick != pendingDeathTick) { pendingDeaths.clear(); pendingDeathTick = tick; }
+                if (pendingDeaths.size() < MAX_OPEN)
+                    pendingDeaths.put(((String) v.get("target_observation_id")).replace("-", ""), new long[] {at, seq});
+            }
+            return;
+        }
+        e.contributes(seq);
         close(e, "observed_death".equals(end) ? "observed_death" : "despawn_not_death",
             "observed_death".equals(end) ? "ActorDeath" : "NpcDespawned", tick, at);
     }
@@ -243,6 +258,7 @@ final class CombatEncounterTracker
     void interrupt(String reason, int tick)
     {
         worn = null; // gear across a gap is not known until it is read again
+        pendingDeaths.clear();
         // The caller's tick can be older than the last hit (poll tick, or -1 after a gap). Never end before it.
         for (Encounter e : new ArrayList<>(open.values())) { e.gaps.add(reason); close(e, reason, reason, Math.max(tick, e.lastHitTick), -1); }
     }
