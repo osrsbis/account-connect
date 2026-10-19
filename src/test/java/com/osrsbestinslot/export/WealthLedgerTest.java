@@ -958,6 +958,25 @@ public class WealthLedgerTest
 		assertEquals(true, r45.get("explained"));
 	}
 
+	/** Shape from the real 0.7.46 run (retained166): rat loot drops to the ground; only some is picked up. */
+	@Test
+	public void real0746GroundLootIsRewardOnlyWhenItReachesTheInventory()
+	{
+		Snap a = new Snap(T0).inv(BONES, 1).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 120).inv(BONES, 2).bank(T0 - 5, 995, 1);
+		List<WealthReconciliation.Flow> flows = List.of(
+			new WealthReconciliation.Flow("l1:0", BONES, 1, "output_reward", "observed", "server_loot_npc"),
+			new WealthReconciliation.Flow("l1:1", 2134, 1, "output_reward", "observed", "server_loot_npc"),
+			new WealthReconciliation.Flow("l2:0", BONES, 1, "output_reward", "observed", "server_loot_npc"));
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, flows, null, null);
+		assertEquals(Map.of(WealthReconciliation.REWARD, 1L), classes(r, BONES));
+		assertTrue(classes(r, 2134).isEmpty());	// left on the ground: not wealth, not unexplained
+		// Loot that reached the inventory directly (not a server_loot origin) stays a plain reward fact.
+		Map<String, Object> r2 = WealthReconciliation.reconcile(a.h(), b.h(), null, List.of(
+			new WealthReconciliation.Flow("c:0", BONES, 1, "output_reward", "observed", null)), null, null);
+		assertEquals(Map.of(WealthReconciliation.REWARD, 1L), classes(r2, BONES));
+	}
+
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */
 	@Test
 	public void derivedResultExample() throws Exception

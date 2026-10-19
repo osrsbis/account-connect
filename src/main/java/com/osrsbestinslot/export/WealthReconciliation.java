@@ -79,6 +79,12 @@ final class WealthReconciliation
 			this.origin = origin;
 		}
 
+		/** NPC/chest loot (C3 origin server_loot_*) lands on the ground or in a reward interface, not in a read location. */
+		boolean groundLoot()
+		{
+			return origin != null && origin.startsWith("server_loot");
+		}
+
 		/** C3 marks bank deposits/withdrawals as transferred with origin bank_deposit / bank_withdraw. */
 		boolean ownBankMove()
 		{
@@ -340,7 +346,8 @@ final class WealthReconciliation
 				}
 			}
 		}
-		Map<Integer, Long> outOfView = new HashMap<>(), outOfViewFull = new HashMap<>(), ownUnread = new HashMap<>();
+		Map<Integer, Long> outOfView = new HashMap<>(), outOfViewFull = new HashMap<>(), ownUnread = new HashMap<>(),
+			groundLoot = new HashMap<>();
 		boolean bankFresh = comparable.contains("bank") && !carried.contains("bank")
 			&& WealthLedger.OBSERVED.equals(from.locations.get("bank").state)
 			&& WealthLedger.OBSERVED.equals(to.locations.get("bank").state);
@@ -405,6 +412,12 @@ final class WealthReconciliation
 						outOfView.merge(id, q, Long::sum);	// origin unknown: only the part not seen in view
 					}
 				}
+				else if (cls.equals(REWARD) && f.groundLoot())
+				{
+					// Real 0.7.46 run: rat loot dropped to the ground; only the part picked up in this window reaches the
+					// inventory. Use the loot only for an inventory gain it can explain; loot left on the ground is not wealth.
+					groundLoot.merge(id, q, Long::sum);
+				}
 				else
 				{
 					add(facts, id, cls, q);
@@ -433,6 +446,7 @@ final class WealthReconciliation
 		items.addAll(outOfView.keySet());
 		items.addAll(ownUnread.keySet());
 		items.addAll(outOfViewFull.keySet());
+		items.addAll(groundLoot.keySet());
 		// Items first, coins last: a coin settlement must follow the items its vanished offers actually settled.
 		List<Integer> order = new ArrayList<>(items);
 		if (order.remove(Integer.valueOf(WealthLedger.COINS)))
@@ -469,6 +483,7 @@ final class WealthReconciliation
 			// Out-of-view flows first. A transferred flow whose other side is already seen in view was used up as the
 			// in-view transfer, so only the part beyond the in-view moves on that side can explain a residual.
 			remaining = applyFull(cls, remaining, ownUnread.get(id), TRANSFER_OWN_UNREAD);
+			remaining = applyFull(cls, remaining, groundLoot.get(id), REWARD);
 			remaining = applyFull(cls, remaining, outOfViewFull.get(id), TRANSFER_OUT_OF_VIEW);
 			remaining = applyOutOfView(cls, remaining, outOfView.get(id), pn, TRANSFER_OUT_OF_VIEW);
 			long[] box = boxBounds.get(id);
