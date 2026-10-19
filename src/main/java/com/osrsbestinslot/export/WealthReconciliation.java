@@ -1,6 +1,7 @@
 package com.osrsbestinslot.export;
 
 import java.util.*;
+import java.util.function.IntUnaryOperator;
 
 /**
  * Item ledger between two holdings of the same account (C4 wealth lane, contract v1). Pure derivation.
@@ -181,6 +182,11 @@ final class WealthReconciliation
 		}
 		for (Map<?, ?> f : c3Flows)
 		{
+			if (f.get("flow_id") == null || f.get("flow_class") == null)
+			{
+				excluded.add("row" + out.size() + ":missing_flow_id_or_class");
+				continue;
+			}
 			String id = String.valueOf(f.get("flow_id"));
 			Long at = WealthLedger.asLong(f.get("observed_at_ms"));
 			if (at == null)
@@ -265,7 +271,8 @@ final class WealthReconciliation
 				continue;
 			}
 			comparable.add(name);
-			if (b.observedAtMs != null && b.observedAtMs <= from.asOfMs && !name.equals("ge_escrow")
+			if ((WealthLedger.CARRIED.equals(a.state) || WealthLedger.CARRIED.equals(b.state)
+				|| b.observedAtMs != null && b.observedAtMs <= from.asOfMs) && !name.equals("ge_escrow")
 				&& !name.equals("inventory") && !name.equals("equipment"))
 			{
 				// The TO reading was taken at or before the FROM snapshot: nothing in this window was read there, so
@@ -304,15 +311,17 @@ final class WealthReconciliation
 		Map<Integer, long[]> settleBounds = new HashMap<>();	// item -> [min, max] for vanished/replaced offers
 		Map<Integer, long[]> boxBounds = new HashMap<>();		// item -> [max collected out, max collected in]
 		List<String> inferredTrades = new ArrayList<>();
+		Map<Integer, long[]> settlePrice = new HashMap<>();	// item -> [max buy price, max ask] of vanished open offers
+		IntUnaryOperator canon = to.canonical;
 		if (geComparable)
 		{
-			geFacts(from, to, tradeFacts == null, facts, settleBounds, boxBounds, tradeSources, inferredTrades);
+			geFacts(from, to, tradeFacts == null, facts, settleBounds, boxBounds, tradeSources, inferredTrades, settlePrice);
 		}
 		if (tradeFacts != null)
 		{
 			for (TradeFact t : tradeFacts)
 			{
-				add(facts, t.itemId, TRADE, t.qtyDelta);
+				add(facts, canon.applyAsInt(t.itemId), TRADE, t.qtyDelta);
 				if (t.coinsDelta != null)
 				{
 					add(facts, WealthLedger.COINS, TRADE, t.coinsDelta);
@@ -323,7 +332,10 @@ final class WealthReconciliation
 				}
 			}
 		}
-		Map<Integer, Long> outOfView = new HashMap<>(), ownUnread = new HashMap<>();
+		Map<Integer, Long> outOfView = new HashMap<>(), outOfViewFull = new HashMap<>(), ownUnread = new HashMap<>();
+		boolean bankFresh = comparable.contains("bank") && !carried.contains("bank")
+			&& WealthLedger.OBSERVED.equals(from.locations.get("bank").state)
+			&& WealthLedger.OBSERVED.equals(to.locations.get("bank").state);
 		List<String> unknownFlows = new ArrayList<>();
 		Set<String> seenFlows = new HashSet<>();
 		int duplicateFlows = 0;
@@ -340,7 +352,8 @@ final class WealthReconciliation
 				if (first != null)
 				{
 					duplicateFlows++;
-					if (first.itemId != f.itemId || first.qtyDelta != f.qtyDelta || !first.flowClass.equals(f.flowClass))
+					if (first.itemId != f.itemId || first.qtyDelta != f.qtyDelta || !first.flowClass.equals(f.flowClass)
+						|| !Objects.equals(first.origin, f.origin))
 					{
 						conflicted.add(f.flowId);
 					}
@@ -359,13 +372,30 @@ final class WealthReconciliation
 					unknownFlows.add(f.flowId + ":" + f.flowClass);	// e.g. a death with no trusted item diff
 					continue;
 				}
-				int id = f.itemId == WealthLedger.PLATINUM_TOKEN ? WealthLedger.COINS : f.itemId;
-				long q = f.itemId == WealthLedger.PLATINUM_TOKEN ? f.qtyDelta * WealthLedger.PLATINUM_TOKEN_COINS : f.qtyDelta;
+				int base = canon.applyAsInt(f.itemId);
+				int id = base == WealthLedger.PLATINUM_TOKEN ? WealthLedger.COINS : base;
+				long q = base == WealthLedger.PLATINUM_TOKEN ? f.qtyDelta * WealthLedger.PLATINUM_TOKEN_COINS : f.qtyDelta;
 				String cls = ledgerClass(f.flowClass);
 				if (cls.equals(TRANSFER_OUT_OF_VIEW))
 				{
-					// Used only for the part no in-view location shows (see the per-item netting below).
-					(f.ownBankMove() ? ownUnread : outOfView).merge(id, q, Long::sum);
+					if (f.ownBankMove())
+					{
+						// A bank read freshly at both ends shows this move in view already; the flow adds nothing and
+						// must not absorb an unrelated residual. Only an unread or carried bank needs it.
+						if (!bankFresh)
+						{
+							ownUnread.merge(id, q, Long::sum);
+						}
+					}
+					else if (f.origin != null)
+					{
+						// Trade, drop and pickup never land in a read own location: apply in full.
+						outOfViewFull.merge(id, q, Long::sum);
+					}
+					else
+					{
+						outOfView.merge(id, q, Long::sum);	// origin unknown: only the part not seen in view
+					}
 				}
 				else
 				{
@@ -394,13 +424,21 @@ final class WealthReconciliation
 		items.addAll(facts.keySet());
 		items.addAll(outOfView.keySet());
 		items.addAll(ownUnread.keySet());
+		items.addAll(outOfViewFull.keySet());
+		// Items first, coins last: a coin settlement must follow the items its vanished offers actually settled.
+		List<Integer> order = new ArrayList<>(items);
+		if (order.remove(Integer.valueOf(WealthLedger.COINS)))
+		{
+			order.add(WealthLedger.COINS);
+		}
+		long[] coinSettle = new long[2];
 		List<Map<String, Object>> rows = new ArrayList<>();
 		Map<String, Long> classValue = new LinkedHashMap<>();
 		Map<String, Long> classQtyItems = new LinkedHashMap<>();
 		List<Integer> unpriced = new ArrayList<>();
-		long revaluation = 0;
+		long revaluation = 0, atRisk = 0;
 		boolean priced = priceFrom != null && priceTo != null;
-		for (int id : items)
+		for (int id : order)
 		{
 			long[] pn = moves.getOrDefault(id, new long[2]);
 			long net = pn[0] + pn[1];
@@ -422,7 +460,8 @@ final class WealthReconciliation
 			}
 			// Out-of-view flows first. A transferred flow whose other side is already seen in view was used up as the
 			// in-view transfer, so only the part beyond the in-view moves on that side can explain a residual.
-			remaining = applyOutOfView(cls, remaining, ownUnread.get(id), pn, TRANSFER_OWN_UNREAD);
+			remaining = applyFull(cls, remaining, ownUnread.get(id), TRANSFER_OWN_UNREAD);
+			remaining = applyFull(cls, remaining, outOfViewFull.get(id), TRANSFER_OUT_OF_VIEW);
 			remaining = applyOutOfView(cls, remaining, outOfView.get(id), pn, TRANSFER_OUT_OF_VIEW);
 			long[] box = boxBounds.get(id);
 			if (remaining != 0 && box != null)
@@ -435,7 +474,7 @@ final class WealthReconciliation
 					remaining -= take;
 				}
 			}
-			long[] settle = settleBounds.get(id);
+			long[] settle = id == WealthLedger.COINS ? coinSettle : settleBounds.get(id);
 			if (remaining != 0 && settle != null)
 			{
 				// Only the part the vanished offer's terms can justify; any excess stays unexplained.
@@ -444,6 +483,19 @@ final class WealthReconciliation
 				{
 					cls.merge(GE_SETTLEMENT_INFERRED, take, Long::sum);
 					remaining -= take;
+					long[] pr = settlePrice.get(id);
+					if (pr != null && id != WealthLedger.COINS)
+					{
+						// Bought items cost at most the bid; sold items bring at least the ask (counted up to the ask).
+						if (take > 0)
+						{
+							coinSettle[0] -= Math.multiplyExact(take, pr[0]);
+						}
+						else
+						{
+							coinSettle[1] += Math.multiplyExact(-take, pr[1]);
+						}
+					}
 				}
 			}
 			if (remaining != 0 && anyCarried)
@@ -475,10 +527,22 @@ final class WealthReconciliation
 				for (Map.Entry<String, Long> e : cls.entrySet())
 				{
 					// Transfers and collect-box moves stay inside the account: they move value, they never create it.
-					boolean internal = e.getKey().equals(TRANSFER) || e.getKey().equals(GE_COLLECT_BOX)
-						|| e.getKey().equals(TRANSFER_INFERRED_CARRIED) || e.getKey().equals(TRANSFER_OWN_UNREAD);
-					long v = internal ? 0 : e.getValue() * pa;
-					classValue.merge(e.getKey(), v, Long::sum);
+					if (e.getKey().equals(GE_SETTLEMENT_INFERRED))
+					{
+						// The item and coin sides of an out-of-view settlement cannot be paired, so no GP value is claimed.
+						atRisk = Math.addExact(atRisk, Math.multiplyExact(Math.abs(e.getValue()), pa));
+						continue;
+					}
+					boolean inferredInternal = e.getKey().equals(GE_COLLECT_BOX) || e.getKey().equals(TRANSFER_INFERRED_CARRIED)
+						|| e.getKey().equals(TRANSFER_OWN_UNREAD);
+					boolean internal = e.getKey().equals(TRANSFER) || inferredInternal;
+					if (inferredInternal)
+					{
+						// Valued 0 as an own move, but it is inferred: report how much value it could be hiding.
+						atRisk = Math.addExact(atRisk, Math.multiplyExact(Math.abs(e.getValue()), pa));
+					}
+					long v = internal ? 0 : Math.multiplyExact(e.getValue(), pa);
+					classValue.merge(e.getKey(), v, Math::addExact);
 				}
 			}
 			rows.add(row);
@@ -502,7 +566,7 @@ final class WealthReconciliation
 					}
 					continue;
 				}
-				revaluation += e.getValue() * (pb - pa);
+				revaluation = Math.addExact(revaluation, Math.multiplyExact(e.getValue(), pb - pa));
 			}
 		}
 
@@ -519,6 +583,8 @@ final class WealthReconciliation
 		if (priced)
 		{
 			out.put("value_by_class_gp_at_from_prices", classValue);
+			out.put("unvalued_classes", Collections.singletonList(GE_SETTLEMENT_INFERRED));
+			out.put("inferred_value_at_risk_gp", atRisk);
 			out.put("revaluation_gp", revaluation);
 			out.put("unpriced_item_ids", unpriced);
 		}
@@ -543,6 +609,7 @@ final class WealthReconciliation
 		// The collect box is never read: its use is inferred from slot counters, so it never counts as explained.
 		boolean explained = rowsHave(rows, UNEXPLAINED) == 0 && rowsHave(rows, GE_SETTLEMENT_INFERRED) == 0
 			&& rowsHave(rows, TRANSFER_INFERRED_CARRIED) == 0 && rowsHave(rows, GE_COLLECT_BOX) == 0
+			&& rowsHave(rows, TRANSFER_OWN_UNREAD) == 0
 			&& unknownFlows.isEmpty() && conflictingFlows.isEmpty() && inferredTrades.isEmpty();
 		boolean core = true;
 		for (String name : WealthLedger.CORE)
@@ -572,7 +639,7 @@ final class WealthReconciliation
 	 */
 	private static void geFacts(WealthLedger.Holdings from, WealthLedger.Holdings to, boolean deriveFills,
 		Map<Integer, Map<String, Long>> facts, Map<Integer, long[]> settle, Map<Integer, long[]> box, List<String> sources,
-		List<String> inferredTrades)
+		List<String> inferredTrades, Map<Integer, long[]> settlePrice)
 	{
 		Map<Integer, WealthLedger.Escrow> fromSlot = new HashMap<>(), toSlot = new HashMap<>();
 		for (WealthLedger.Escrow a : from.escrow)
@@ -598,7 +665,7 @@ final class WealthReconciliation
 			{
 				continue;
 			}
-			if (!same && a == null && b.done > 0)
+			if (deriveFills && !same && a == null && b.done > 0)
 			{
 				inferredTrades.add("slot" + b.slot + ":placement_not_observed");
 			}
@@ -635,17 +702,17 @@ final class WealthReconciliation
 			{
 				continue;	// a finished or cancelled offer has nothing left to fill; its box contents are box room above
 			}
+			// Item side only. The coin side is derived per item from what actually settled (see reconcile).
+			long[] pr = settlePrice.computeIfAbsent(a.itemId, k -> new long[2]);
 			if (a.side.equals("buy"))
 			{
-				// Fills after FROM: items arrive, and they cost at most the locked price.
 				range(settle, a.itemId, 0, remaining);
-				range(settle, WealthLedger.COINS, -Math.multiplyExact(remaining, a.price), 0);
+				pr[0] = Math.max(pr[0], a.price);
 			}
 			else
 			{
-				// A sell can fill above its ask. Only the part up to the ask is justified; more stays unexplained.
 				range(settle, a.itemId, -remaining, 0);
-				range(settle, WealthLedger.COINS, 0, Math.multiplyExact(remaining, a.price));
+				pr[1] = Math.max(pr[1], a.price);
 			}
 		}
 	}
@@ -673,6 +740,18 @@ final class WealthReconciliation
 			return remaining;
 		}
 		long take = remaining > 0 ? Math.min(remaining, away) : Math.max(remaining, away);
+		cls.merge(name, take, Long::sum);
+		return remaining - take;
+	}
+
+	/** Use a flow that never lands in a read location for the residual, in full, when the signs agree. */
+	private static long applyFull(Map<String, Long> cls, long remaining, Long flow, String name)
+	{
+		if (remaining == 0 || flow == null || flow == 0 || Long.signum(flow) != Long.signum(remaining))
+		{
+			return remaining;
+		}
+		long take = remaining > 0 ? Math.min(remaining, flow) : Math.max(remaining, flow);
 		cls.merge(name, take, Long::sum);
 		return remaining - take;
 	}

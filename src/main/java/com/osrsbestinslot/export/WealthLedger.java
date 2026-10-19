@@ -115,9 +115,18 @@ final class WealthLedger
 		final long asOfMs;
 		final Map<String, Location> locations;
 		final List<Escrow> escrow;
+		/** The id map the snapshot was read with; reconcile applies the same map to flows and trade facts. */
+		final IntUnaryOperator canonical;
 
 		Holdings(String accountKey, String accountKeySource, long asOfMs, Map<String, Location> locations, List<Escrow> escrow)
 		{
+			this(accountKey, accountKeySource, asOfMs, locations, escrow, IntUnaryOperator.identity());
+		}
+
+		Holdings(String accountKey, String accountKeySource, long asOfMs, Map<String, Location> locations, List<Escrow> escrow,
+			IntUnaryOperator canonical)
+		{
+			this.canonical = canonical;
 			this.accountKey = accountKey;
 			this.accountKeySource = accountKeySource;
 			this.asOfMs = asOfMs;
@@ -254,7 +263,7 @@ final class WealthLedger
 						"carried from snapshot at " + earlier.asOfMs + " (" + before.state + "); may be out of date"));
 				}
 			}
-			return new Holdings(accountKey, accountKeySource, asOfMs, Collections.unmodifiableMap(locs), escrow);
+			return new Holdings(accountKey, accountKeySource, asOfMs, Collections.unmodifiableMap(locs), escrow, canonical);
 		}
 
 		/** Compact JSON-ready view: the derived result other lanes and the site read. */
@@ -396,7 +405,7 @@ final class WealthLedger
 		String key = callerIdentity != null ? callerIdentity : accountKey(asMap(snap.get("account")));
 		return new Holdings(key, callerIdentity != null ? "caller" : "snapshot_account_block", asOf,
 			Collections.unmodifiableMap(locs),
-			Collections.unmodifiableList(escrow));
+			Collections.unmodifiableList(escrow), canon);
 	}
 
 	/**
