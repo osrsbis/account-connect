@@ -430,7 +430,8 @@ final class GeOfferLifecycle
                     continue;
                 }
                 Long start = num(u.get("first_seen_at_ms")), end = num(u.get("as_of_observed_ms"));
-                boolean latest = start != null;
+                // A key whose own clock ran backwards cannot be ordered against anything.
+                boolean latest = start != null && end != null && end >= start;
                 Map<String, Object> next = null;
                 boolean nextTied = false, contradicted = false;
                 for (Map<String, Object> o : fence)
@@ -757,6 +758,13 @@ final class GeOfferLifecycle
         if (aEnd != null && bStart != null && aEnd < bStart) { earlier = a; later = b; }
         else if (bEnd != null && aStart != null && bEnd < aStart) { earlier = b; later = a; }
         else return false;
+        if ("observed".equals(later.get("placement"))
+            && ("completed".equals(earlier.get("phase")) || "cancelled".equals(earlier.get("phase"))))
+        {
+            // A finished offer never becomes active again: an observed placement after it is a new
+            // identical offer (a relist), so its zero baseline is expected.
+            return true;
+        }
         Long base = num(later.get("baseline_qty_uncredited")), counter = num(earlier.get("counter_qty"));
         return base != null && counter != null && base >= counter;
     }

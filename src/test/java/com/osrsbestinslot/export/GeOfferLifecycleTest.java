@@ -378,6 +378,47 @@ public class GeOfferLifecycleTest
     }
 
     @Test
+    public void identicalRelistAfterAnUncollectedFinishedOfferKeepsLiveEscrow()
+    {
+        // Flipping pattern: a finished buy is collected unseen (mobile), then the same offer is relisted.
+        empty(3, 1);
+        obs(3, BUYING, 560, 0, 100, 300, 0, 2);
+        obs(3, BOUGHT, 560, 100, 100, 300, 29_000, 110);
+        tracker.gap();
+        tracker.clear();
+        empty(3, 400);
+        obs(3, BUYING, 560, 0, 100, 300, 0, 401);
+        obs(3, BUYING, 560, 25, 100, 300, 7_400, 600);
+        List<Map<String, Object>> offers = offers(GeOfferLifecycle.reduce(wire, null));
+        Map<String, Object> old = offers.get(0), live = offers.get(1);
+        assertEquals("observed", m(live.get("escrow")).get("escrow_state"));
+        assertEquals(22_500L, m(live.get("escrow")).get("locked_coins"));
+        assertEquals(live.get("offer_key"), old.get("superseded_by"));
+        assertEquals("unknown", m(old.get("escrow")).get("escrow_state"));
+    }
+
+    @Test
+    public void keyWhoseClockRunsBackwardsIsNeverTheLatest()
+    {
+        empty(3, 100);
+        obs(3, BUYING, 560, 0, 100, 300, 0, 101);
+        Map<String, Object> later = obs(3, BUYING, 560, 10, 100, 300, 2_900, 300);
+        Map<String, Object> o = new LinkedHashMap<>(m(later.get("ge_observation")));
+        o.put("observed_at_ms", 500L);
+        later.put("ge_observation", o);
+        empty(5, 1);
+        obs(5, SELLING, 4151, 0, 4, 1_000_000, 0, 2);
+        for (Map<String, Object> r : wire) if (Integer.valueOf(5).equals(r.get("slot"))) r.put("slot", 3);
+        for (Map<String, Object> x : offers(GeOfferLifecycle.reduce(wire, null)))
+        {
+            if ("buy".equals(x.get("side")))
+            {
+                assertEquals("unknown", m(x.get("escrow")).get("escrow_state"));
+            }
+        }
+    }
+
+    @Test
     public void unusableCopyUnderAUsedEventIdStillQuarantines()
     {
         empty(0, 1);
