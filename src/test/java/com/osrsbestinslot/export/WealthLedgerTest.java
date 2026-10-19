@@ -938,6 +938,26 @@ public class WealthLedgerTest
 		assertEquals(100L, e.maxUncollectedCoins);
 	}
 
+	/** Shape from the real 0.7.43 run (retained166): withdraw, bank closes, bank reopens with a reading from before. */
+	@Test
+	public void real0743RefreshedCarriedBankIsNotCountedTwice()
+	{
+		Snap s3 = new Snap(T0).bank(T0 - 25, LOBSTER, 92, 841, 1);
+		Snap s4 = new Snap(T0 + 121).inv(LOBSTER, 2).inv(841, 1);
+		Snap s5 = new Snap(T0 + 124).inv(LOBSTER, 2).inv(841, 1).bank(T0 + 44, LOBSTER, 90);
+		WealthLedger.Holdings h3 = s3.h(), h4 = s4.h().carryForward(h3), h5 = s5.h().carryForward(h4);
+		List<WealthReconciliation.Flow> flows = List.of(
+			new WealthReconciliation.Flow("b:0", 841, 1, "transferred", "observed", "bank_withdraw"),
+			new WealthReconciliation.Flow("b:1", LOBSTER, 2, "transferred", "observed", "bank_withdraw"));
+		Map<String, Object> r34 = WealthReconciliation.reconcile(h3, h4, null, flows, null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER_OWN_UNREAD, 2L), classes(r34, LOBSTER));
+		Map<String, Object> r45 = WealthReconciliation.reconcile(h4, h5, null, null, null, null);
+		assertTrue(classes(r45, LOBSTER).isEmpty());
+		assertTrue(classes(r45, 841).isEmpty());
+		assertTrue(((Map<?, ?>) r45.get("not_comparable_locations")).containsKey("bank"));
+		assertEquals(true, r45.get("explained"));
+	}
+
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */
 	@Test
 	public void derivedResultExample() throws Exception

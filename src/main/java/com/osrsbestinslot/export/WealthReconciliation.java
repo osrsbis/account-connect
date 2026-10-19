@@ -270,6 +270,14 @@ final class WealthReconciliation
 				}
 				continue;
 			}
+			if (WealthLedger.CARRIED.equals(a.state) && !WealthLedger.CARRIED.equals(b.state))
+			{
+				// A carried reading replaced by a new one (real 0.7.43 run: bank reopened, new reading dated before FROM).
+				// The difference spans earlier windows whose moves were already counted from flows or left unexplained
+				// there, so it is not a change of this window.
+				notComparable.put(name, "from=carried to=" + b.state + " (carried reading refreshed)");
+				continue;
+			}
 			comparable.add(name);
 			if ((WealthLedger.CARRIED.equals(a.state) || WealthLedger.CARRIED.equals(b.state)
 				|| b.observedAtMs != null && b.observedAtMs <= from.asOfMs) && !name.equals("ge_escrow")
