@@ -523,4 +523,33 @@ public class OwnGameplayCaptureTest
         p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); assertNull(p.gameplayBlock());
         p.onChatMessage(msg); assertNull(p.gameplayBlock());
     }
+
+    @Test public void loadoutRevisionsFollowWornContainerPerSession()
+    {
+        settle();
+        capture.poll(client, 1000L); // worn container not loaded: no revision, gear unknown
+        assertTrue(capture.loadouts.revisions().isEmpty());
+        ItemContainer worn = mock(ItemContainer.class);
+        Item[] items = new Item[14]; items[3] = new Item(4151, 1); items[13] = new Item(11212, 50);
+        when(worn.getItems()).thenAnswer(i -> items.clone());
+        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
+        tick++; capture.poll(client, 2000L);
+        tick++; items[13] = new Item(11212, 49); capture.poll(client, 3000L); // ammo shot: same gear
+        tick++; items[3] = new Item(12006, 1); capture.poll(client, 4000L);
+        List<Map<String,Object>> revs = capture.loadouts.revisions();
+        assertEquals(2, revs.size());
+        assertEquals("baseline", revs.get(0).get("provenance"));
+        assertEquals("observed_change", revs.get(1).get("provenance"));
+        assertEquals(12006, ((Map<?,?>) revs.get(1).get("slots")).get("weapon"));
+        capture.gap(); // scene reload keeps the worn container and the tracker
+        tick++; capture.poll(client, 5000L);
+        assertEquals(2, capture.loadouts.revisions().size());
+        String generation = capture.loadouts.generation();
+        tick = 5; capture.poll(client, 6000L); // tick counter went back: new generation, new baseline
+        assertNotEquals(generation, capture.loadouts.generation());
+        assertEquals("baseline", capture.loadouts.revisions().get(0).get("provenance"));
+        when(client.getAccountHash()).thenReturn(43L);
+        assertFalse(capture.ready(client, TOKEN)); // account switch resets the tracker
+        assertNull(capture.loadouts);
+    }
 }

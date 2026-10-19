@@ -55,6 +55,12 @@ final class OwnGameplayCapture
     final OwnGroundClueCapture groundClues = new OwnGroundClueCapture(this);
     final OwnLootKeysCapture lootKeys;
     final OwnBankTabsCapture bankTabs = new OwnBankTabsCapture(this);
+    /**
+     * Worn-equipment revisions for this capture session (loadout.revision.v1), read in-process by encounter code.
+     * Null until the first settled poll. Generation = session plus a restart count for a tick-counter reset.
+     */
+    LoadoutRevision loadouts;
+    private int loadoutRestarts;
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -69,6 +75,7 @@ final class OwnGameplayCapture
     {
         identity = session = profile = null;
         accountType = null;
+        loadouts = null; loadoutRestarts = 0;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
         states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
@@ -204,8 +211,13 @@ final class OwnGameplayCapture
     {
         int tick = client.getTickCount();
         if (tick == lastTick) return;
-        if (lastTick >= 0 && tick < lastTick) gap();
+        if (lastTick >= 0 && tick < lastTick) { gap(); loadouts = null; loadoutRestarts++; }
         lastTick = tick; lastReadAt = at;
+        // A scene reload keeps the worn container, so gap() does not end gear knowledge. Unchanged gear is a no-op.
+        String generation = session + "/" + loadoutRestarts;
+        if (loadouts == null || !loadouts.generation().equals(generation)) loadouts = new LoadoutRevision(generation);
+        net.runelite.api.ItemContainer worn = client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN);
+        loadouts.observe(worn == null ? null : LoadoutRevision.slotsOf(worn.getItems()), tick, at);
         int[] live = client.getVarps(), vars = live == null ? null : live.clone();
         Map<String,Object> barrows = new LinkedHashMap<>();
         String[] brothers = {"ahrim", "dharok", "guthan", "karil", "torag", "verac"};
