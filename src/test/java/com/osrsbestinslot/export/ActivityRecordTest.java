@@ -32,7 +32,8 @@ public class ActivityRecordTest
 
     static Map<String,Object> eat(String id, long at, int item, int qty, int after, int qtyAfter, String action, String session)
     {
-        return m("type", "own_signal", "event_id", id, "gameplay_session", session, "signal_kind", "effects.consumption",
+        return m("type", "own_signal", "event_id", id, "account_hash", "42", "profile_type", "STANDARD",
+            "gameplay_session", session, "signal_kind", "effects.consumption",
             "observed_at_ms", at, "source_sequence", at / 600, "signal_value", m("item_id_before", item, "quantity_before", qty,
             "item_id_after", after, "quantity_after", qtyAfter, "action", action, "intent_tick", 1,
             "inference", "own_menu_and_slot_change_not_confirmed_effect_or_cooldown"));
@@ -164,7 +165,8 @@ public class ActivityRecordTest
             "gameplay_session", SESSION, "start_ms", START, "end_ms", END);
         List<Map<String,Object>> events = new ArrayList<>();
         for (int i = 0; i < 4; i++)
-            events.add(m("type", "own_signal", "event_id", "e" + i, "gameplay_session", SESSION, "signal_kind", "skills.item_transformation",
+            events.add(m("type", "own_signal", "event_id", "e" + i, "account_hash", "42", "profile_type", "STANDARD",
+                "gameplay_session", SESSION, "signal_kind", "skills.item_transformation",
                 "observed_at_ms", START + i * 2_000L, "signal_value", m("input_item_id", 9340, "output_item_id", 9243,
                 "matched_quantity", 10L, "magic_xp_change", 67L, "inference", "inventory_xp_coincidence_not_confirmed_cast")));
         Map<String,Object> r = ActivityRecord.derive(s, events, prices);
@@ -209,7 +211,8 @@ public class ActivityRecordTest
             "inference", "own_menu_and_slot_change_not_confirmed_effect_or_cooldown"));
         Map<String,Object> signal = OwnSignalEvent.from(uuid, row);
         assertNotNull(signal);
-        signal.put("event_id", "s1"); // assigned by the shared emitter, never by the domain
+        // The shared emitter assigns event_id and the account/profile envelope, never the domain.
+        signal.put("event_id", "s1"); signal.put("account_hash", "42"); signal.put("profile_type", "STANDARD");
         Map<String,Object> loot = PublicTransport.event(pub("loot", "l1", START + 2_000, "source_type", "npc",
             "items", List.of(m("id", 536, "qty", 2)), "value", 7618));
         assertNotNull(loot);
@@ -231,13 +234,71 @@ public class ActivityRecordTest
             // A claimed consumption whose slot did not change fails the projection and is skipped.
             "{\"collector_session\":\"" + uuid + "\",\"event_id\":\"r2\",\"sequence\":4,\"kind\":\"effects.consumption\",\"source\":\"MenuOptionClicked:149.0+own_inventory\",\"tick\":102,\"observed_at_ms\":" + (START + 2000) + ",\"direct\":false,\"value\":{\"item_id_before\":385,\"quantity_before\":1,\"item_id_after\":385,\"quantity_after\":1,\"action\":\"eat\",\"intent_tick\":101,\"inference\":\"own_menu_and_slot_change_not_confirmed_effect_or_cooldown\"}}",
             "{\"type\":\"loot\",\"event_id\":\"w1\",\"ts\":" + (START + 3000) + ",\"account_hash\":\"42\",\"profile_type\":\"STANDARD\",\"source_type\":\"npc\",\"items\":[{\"id\":536,\"qty\":1}]}");
-        List<Map<String,Object>> events = ActivityReplay.read(lines);
+        // Snapshot rows carry no account/profile: without an explicit binding they are refused.
+        assertEquals("unbound", ActivityRecord.identity("42", "STANDARD", ActivityReplay.read(lines, false).get(0), SESSION));
+        List<Map<String,Object>> events = ActivityReplay.read(lines, true);
         assertEquals(2, events.size());
         Map<String,Object> s = m("activity_type", "combat_encounter", "account_hash", "42", "profile_type", "STANDARD",
             "gameplay_session", SESSION, "start_ms", (double)START, "end_ms", (double)END);
         Map<String,Object> r = ActivityRecord.derive(s, events, prices);
         assertEquals(List.of("r1", "w1"), r.get("contributing_event_ids"));
         assertEquals(3809L - 916L, ((Map<?,?>)r.get("result")).get("net_gp"));
+        assertEquals("low", ((Map<?,?>)r.get("result")).get("confidence")); // adapter-bound rows lower confidence
+    }
+
+    static Map<String,Object> lootFor(String id, String account, String profile, int qty)
+    {
+        Map<String,Object> e = pub("loot", id, START + 5_000, "source_type", "npc", "items", List.of(m("id", 536, "qty", qty)));
+        e.put("gameplay_session", SESSION);
+        if (account == null) e.remove("account_hash"); else e.put("account_hash", account);
+        if (profile == null) e.remove("profile_type"); else e.put("profile_type", profile);
+        return e;
+    }
+
+    /** Integrator probe a7d0d50: a matching gameplay_session must not bypass the account/profile check. */
+    @Test public void matchingSessionDoesNotOverrideOtherAccountOrProfile()
+    {
+        for (Map<String,Object> e : List.of(lootFor("o1", "77", "SEASONAL", 1), lootFor("o2", "42", "SEASONAL", 1), lootFor("o3", "77", "STANDARD", 1)))
+        {
+            Map<String,Object> r = ActivityRecord.derive(scope(), List.of(e), prices);
+            assertEquals(1, ((Map<?,?>)r.get("quality")).get("identity_mismatch_excluded"));
+            assertNull(((Map<?,?>)r.get("result")).get("net_gp"));
+        }
+    }
+
+    /** Integrator probe a7d0d50: absent identity on both sides is not a match. */
+    @Test public void missingIdentityNeverMatches()
+    {
+        Map<String,Object> noScope = scope(); noScope.remove("account_hash"); noScope.remove("profile_type");
+        Map<String,Object> r = ActivityRecord.derive(noScope, List.of(lootFor("n1", null, null, 1)), prices);
+        Map<?,?> res = (Map<?,?>)r.get("result");
+        assertNull(res.get("net_gp"));
+        assertTrue(((List<?>)res.get("unavailable_reasons")).contains("scope_identity_missing"));
+        r = ActivityRecord.derive(scope(), List.of(lootFor("n2", null, null, 1)), prices);
+        assertEquals(1, ((Map<?,?>)r.get("quality")).get("identity_unbound_excluded"));
+        // A capture-side row cannot bind itself; only own_* rows marked by a trusted adapter are accepted.
+        Map<String,Object> forged = lootFor("n3", null, null, 1); forged.put("identity_binding", "adapter");
+        assertEquals("unbound", ActivityRecord.identity("42", "STANDARD", forged, SESSION));
+    }
+
+    /** Integrator probe a7d0d50: one event_id with different contents is quarantined in either order. */
+    @Test public void conflictingCopiesOfOneEventIdMakeTheNetUnavailableInAnyOrder()
+    {
+        Map<String,Object> one = lootFor("same", "42", "STANDARD", 1), ten = lootFor("same", "42", "STANDARD", 10);
+        for (List<Map<String,Object>> order : List.of(List.of(one, ten), List.of(ten, one)))
+        {
+            Map<String,Object> r = ActivityRecord.derive(scope(), order, prices);
+            Map<?,?> res = (Map<?,?>)r.get("result");
+            assertNull(res.get("net_gp")); assertEquals("unavailable", res.get("confidence"));
+            assertTrue(((List<?>)res.get("unavailable_reasons")).contains("conflicting_event_ids:1"));
+            assertEquals(List.of("same"), ((Map<?,?>)r.get("quality")).get("conflicting_event_ids"));
+        }
+        // An identical replay, including after a JSON round trip, is still an ordinary duplicate.
+        Gson gson = new Gson();
+        Map<String,Object> replayed = gson.fromJson(gson.toJson(one), Map.class);
+        Map<String,Object> r = ActivityRecord.derive(scope(), List.of(one, replayed), prices);
+        assertEquals(3809L, ((Map<?,?>)r.get("result")).get("net_gp"));
+        assertEquals(1, ((Map<?,?>)r.get("quality")).get("duplicates_dropped"));
     }
 
     /** Writes the derived example for the handoff; the build directory is not committed. */

@@ -11,6 +11,9 @@ import java.util.*;
  * Wiki /latest response, then prints one derived activity record. A line may be a wire event, or an
  * own_gameplay snapshot observation row with "collector_session" added; rows go through the real
  * OwnSignalEvent projection, so an invalid row is skipped exactly as the emitter would skip it.
+ * Snapshot rows carry no account or profile. They count only when the operator states that the whole
+ * capture came from the scope's account and profile (scope.bind_snapshot_rows_to_scope = true); the record
+ * then shows adapter_bound_events and low confidence. Wire lines can never bind themselves.
  *
  * args: events.jsonl latest.json latest_available_at_s scope.json
  */
@@ -18,7 +21,7 @@ public final class ActivityReplay
 {
     private ActivityReplay() {}
 
-    static List<Map<String,Object>> read(List<String> lines)
+    static List<Map<String,Object>> read(List<String> lines, boolean bindSnapshotRows)
     {
         Gson gson = new Gson(); List<Map<String,Object>> out = new ArrayList<>();
         for (String line : lines)
@@ -32,9 +35,10 @@ public final class ActivityReplay
                 Map<String,Object> signal = OwnSignalEvent.from((String)row.remove("collector_session"), row);
                 if (signal == null) continue;
                 signal.put("event_id", String.valueOf(row.get("event_id")));
+                if (bindSnapshotRows) signal.put("identity_binding", "adapter");
                 out.add(gson.fromJson(gson.toJson(signal), Map.class));
             }
-            else out.add(e);
+            else { e.remove("identity_binding"); out.add(e); }
         }
         return out;
     }
@@ -42,11 +46,12 @@ public final class ActivityReplay
     public static void main(String[] args) throws Exception
     {
         Gson gson = new Gson();
-        List<Map<String,Object>> events = read(Files.readAllLines(Paths.get(args[0]), StandardCharsets.UTF_8));
+        @SuppressWarnings("unchecked") Map<String,Object> scope = gson.fromJson(Files.readString(Paths.get(args[3])), Map.class);
+        boolean bind = Boolean.TRUE.equals(scope.remove("bind_snapshot_rows_to_scope"));
+        List<Map<String,Object>> events = read(Files.readAllLines(Paths.get(args[0]), StandardCharsets.UTF_8), bind);
         byte[] raw = Files.readAllBytes(Paths.get(args[1]));
         String sha = String.format("%064x", new java.math.BigInteger(1, java.security.MessageDigest.getInstance("SHA-256").digest(raw)));
         ActivityPrices prices = ActivityPrices.wikiLatest(gson.fromJson(new String(raw, StandardCharsets.UTF_8), Map.class), sha, Long.parseLong(args[2]));
-        @SuppressWarnings("unchecked") Map<String,Object> scope = gson.fromJson(Files.readString(Paths.get(args[3])), Map.class);
         System.out.println(new GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(ActivityRecord.derive(scope, events, prices)));
     }
 }

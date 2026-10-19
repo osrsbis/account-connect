@@ -37,7 +37,23 @@ final class ActivityRecord
         }
         String session = scope.get("gameplay_session") instanceof String ? (String)scope.get("gameplay_session") : null;
         List<String> gaps = new ArrayList<>();
-        int duplicates = 0, identityMismatch = 0, outside = 0;
+        int duplicates = 0, identityMismatch = 0, unbound = 0, outside = 0, adapterBound = 0;
+        String account = scope.get("account_hash") instanceof String ? (String)scope.get("account_hash") : null;
+        String profile = scope.get("profile_type") instanceof String ? (String)scope.get("profile_type") : null;
+        if (account == null || account.isEmpty() || profile == null || profile.isEmpty()) gaps.add("scope_identity_missing");
+
+        // One event_id must name one observation. Identical copies are duplicates; different copies are
+        // quarantined, because keeping either one would make the result depend on delivery order.
+        Map<String,String> firstForm = new HashMap<>();
+        Set<String> conflicting = new TreeSet<>();
+        for (Map<String,Object> e : events)
+            if (e.get("event_id") instanceof String)
+            {
+                String form = canonical(e), seen = firstForm.putIfAbsent((String)e.get("event_id"), form);
+                if (seen != null && !seen.equals(form)) conflicting.add((String)e.get("event_id"));
+            }
+        int conflictsInWindow = 0;
+        Set<String> conflictCounted = new HashSet<>();
 
         // Queue delivery can duplicate and reorder; dedupe on event_id, then order by observed time.
         Map<String,Map<String,Object>> unique = new LinkedHashMap<>();
@@ -45,9 +61,13 @@ final class ActivityRecord
         {
             Object id = e.get("event_id"); Long at = ActivityFlows.at(e);
             if (!(id instanceof String) || at == null) { gaps.add("event_without_id_or_time"); continue; }
-            if (!identityMatches(scope, e, session)) { identityMismatch++; continue; }
+            String identity = identity(account, profile, e, session);
+            if (identity.equals("unbound")) { unbound++; continue; }
+            if (identity.equals("mismatch")) { identityMismatch++; continue; }
             if (start == null || at < start || (end != null && at > end)) { outside++; continue; }
+            if (conflicting.contains(id)) { if (conflictCounted.add((String)id)) conflictsInWindow++; continue; }
             if (unique.putIfAbsent((String)id, e) != null) duplicates++;
+            else if (identity.equals("adapter_bound")) adapterBound++;
         }
         List<Map<String,Object>> ordered = new ArrayList<>(unique.values());
         ordered.sort(Comparator.comparingLong((Map<String,Object> e) -> ActivityFlows.at(e))
@@ -150,6 +170,8 @@ final class ActivityRecord
         r.put("valuation", v);
 
         List<String> reasons = new ArrayList<>();
+        if (gaps.contains("scope_identity_missing")) reasons.add("scope_identity_missing");
+        if (conflictsInWindow > 0) reasons.add("conflicting_event_ids:" + conflictsInWindow);
         if (end == null) reasons.add("window_open");
         if (unpriced > 0) reasons.add("unpriced_flows:" + unpriced);
         if (unknownLoss > 0) reasons.add("unknown_loss:" + unknownLoss);
@@ -166,13 +188,15 @@ final class ActivityRecord
         result.put("gp_per_xp_basis", gpXpBase == null ? null : xpFromFlush ? "xp_gain_total" : "magic_xp_from_transformations");
         result.put("unobserved_cost_classes", UNOBSERVED_COSTS.get(type));
         result.put("net_bound", !ok ? null : UNOBSERVED_COSTS.get(type).isEmpty() ? "point" : "upper_bound_excludes_unobserved_costs");
-        result.put("confidence", !ok ? "unavailable" : stale > 0 || boundary || xpFromFlush ? "low" : "medium");
+        result.put("confidence", !ok ? "unavailable" : stale > 0 || boundary || xpFromFlush || adapterBound > 0 ? "low" : "medium");
         result.put("unavailable_reasons", reasons);
         r.put("result", result);
 
         Map<String,Object> quality = new LinkedHashMap<>();
         quality.put("events_received", events.size()); quality.put("events_used", contributing.size());
         quality.put("duplicates_dropped", duplicates); quality.put("identity_mismatch_excluded", identityMismatch);
+        quality.put("identity_unbound_excluded", unbound); quality.put("adapter_bound_events", adapterBound);
+        quality.put("conflicting_event_ids", new ArrayList<>(conflicting));
         quality.put("outside_window_excluded", outside); quality.put("stale_prices_used", stale);
         quality.put("gaps", gaps);
         r.put("quality", quality);
@@ -192,12 +216,40 @@ final class ActivityRecord
         return new LinkedHashMap<>(byClass);
     }
 
-    private static boolean identityMatches(Map<String,Object> scope, Map<String,Object> e, String session)
+    /**
+     * Every used event must name the scope's account and profile. own_* events must also carry the scope's
+     * gameplay_session. A row without account/profile is accepted only when a trusted adapter bound it
+     * explicitly (identity_binding=adapter, which the caller sets, never the capture); absence never matches.
+     */
+    static String identity(String account, String profile, Map<String,Object> e, String session)
     {
-        if (String.valueOf(e.get("type")).startsWith("own_") || e.get("gameplay_session") != null)
-            return session != null && session.equals(e.get("gameplay_session"));
-        return Objects.equals(scope.get("account_hash"), e.get("account_hash"))
-            && Objects.equals(scope.get("profile_type"), e.get("profile_type"));
+        if (account == null || profile == null) return "unbound";
+        boolean ownType = String.valueOf(e.get("type")).startsWith("own_"), own = ownType || e.get("gameplay_session") != null;
+        if (own && (session == null || !session.equals(e.get("gameplay_session")))) return "mismatch";
+        Object a = e.get("account_hash"), p = e.get("profile_type");
+        if (a == null && p == null) return ownType && "adapter".equals(e.get("identity_binding")) ? "adapter_bound" : "unbound";
+        return account.equals(a) && profile.equals(p) ? "bound" : "mismatch";
+    }
+
+    /** Order-independent form; JSON replay turns integers into doubles, so whole numbers compare as longs. */
+    static String canonical(Object x)
+    {
+        if (x instanceof Map)
+        {
+            TreeMap<String,String> sorted = new TreeMap<>();
+            for (Map.Entry<?,?> e : ((Map<?,?>)x).entrySet()) sorted.put(String.valueOf(e.getKey()), canonical(e.getValue()));
+            return sorted.toString();
+        }
+        if (x instanceof List)
+        {
+            List<String> out = new ArrayList<>(); for (Object v : (List<?>)x) out.add(canonical(v)); return out.toString();
+        }
+        if (x instanceof Number)
+        {
+            double d = ((Number)x).doubleValue();
+            return d == Math.rint(d) && Math.abs(d) < 9.007199254740991E15 ? "n" + (long)d : "d" + d;
+        }
+        return x == null ? "null" : x instanceof String ? "s" + x : String.valueOf(x);
     }
 
     private static Long asLong(Object x)
