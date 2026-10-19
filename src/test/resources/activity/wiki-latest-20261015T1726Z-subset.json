@@ -1,0 +1,100 @@
+{
+ "subset_of": "projects/osrsbis-market-telemetry-20261015/evidence/wiki-live/09-latest.json",
+ "subset_of_file_sha256": "caa66aa8dbb7eb41bf96548ecaec3fa9ea753f4415d7c39b68ebb58582898c37",
+ "response_sha256": "8a026e4a9fce89e3d92b2e15bb0d32ec89095009759552f42f53ea5c6e0d88f6",
+ "source": "https://prices.runescape.wiki/api/v1/osrs/latest",
+ "available_at": 1792085211,
+ "note": "available_at = request at + duration, rounded up to whole seconds",
+ "data": {
+  "385": {
+   "high": 916,
+   "highTime": 1792085157,
+   "low": 914,
+   "lowTime": 1792085151
+  },
+  "2434": {
+   "high": 9599,
+   "highTime": 1792085158,
+   "low": 9522,
+   "lowTime": 1792085147
+  },
+  "139": {
+   "high": 7194,
+   "highTime": 1792085150,
+   "low": 7193,
+   "lowTime": 1792085157
+  },
+  "141": {
+   "high": 4804,
+   "highTime": 1792084820,
+   "low": 4771,
+   "lowTime": 1792084927
+  },
+  "143": {
+   "high": 2411,
+   "highTime": 1792084841,
+   "low": 2359,
+   "lowTime": 1792084703
+  },
+  "12695": {
+   "high": 12500,
+   "highTime": 1792085149,
+   "low": 12432,
+   "lowTime": 1792085095
+  },
+  "12697": {
+   "high": 10315,
+   "highTime": 1792084231,
+   "low": 10250,
+   "lowTime": 1792085127
+  },
+  "536": {
+   "high": 3863,
+   "highTime": 1792085130,
+   "low": 3809,
+   "lowTime": 1792085156
+  },
+  "532": {
+   "high": 338,
+   "highTime": 1792085151,
+   "low": 324,
+   "lowTime": 1792085064
+  },
+  "9340": {
+   "high": 343,
+   "highTime": 1792084061,
+   "low": 327,
+   "lowTime": 1792084147
+  },
+  "9243": {
+   "high": 132,
+   "highTime": 1792085019,
+   "low": 125,
+   "lowTime": 1792085084
+  },
+  "561": {
+   "high": 138,
+   "highTime": 1792085149,
+   "low": 137,
+   "lowTime": 1792085146
+  },
+  "1513": {
+   "high": 704,
+   "highTime": 1792085148,
+   "low": 693,
+   "lowTime": 1792085151
+  },
+  "1515": {
+   "high": 91,
+   "highTime": 1792085150,
+   "low": 90,
+   "lowTime": 1792085151
+  },
+  "229": {
+   "high": 3,
+   "highTime": 1792084988,
+   "low": 2,
+   "lowTime": 1792084968
+  }
+ }
+}
