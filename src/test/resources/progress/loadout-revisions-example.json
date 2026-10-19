@@ -63,24 +63,36 @@
       "head": {
         "item_id": 10828,
         "worn_at_revision": true,
-        "current_holdings": "unknown"
+        "current_holdings": "unknown",
+        "unknown_locations": [
+          "bank"
+        ]
       },
       "weapon": {
         "item_id": 12006,
         "worn_at_revision": true,
-        "current_holdings": "owned_observed"
+        "current_holdings": "owned_observed",
+        "unknown_locations": [
+          "bank"
+        ]
       },
       "body": {
         "item_id": 10551,
         "worn_at_revision": true,
-        "current_holdings": "not_seen_in_observed"
+        "current_holdings": "not_seen_in_observed",
+        "unknown_locations": [
+          "bank"
+        ]
       },
       "ammo": {
         "item_id": 11212,
         "worn_at_revision": true,
-        "current_holdings": "unknown"
+        "current_holdings": "unknown",
+        "unknown_locations": [
+          "bank"
+        ]
       }
     },
-    "holdings_source": "c4_owns_v1"
+    "holdings_source": "c4_wealth_ledger_owns"
   }
 }

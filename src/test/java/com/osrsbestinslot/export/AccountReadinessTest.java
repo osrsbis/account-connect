@@ -231,4 +231,32 @@ public class AccountReadinessTest
         }
         assertEquals(new String(Files.readAllBytes(fixture), StandardCharsets.UTF_8), actual);
     }
+
+    @Test
+    public void replayReadsSentBodiesWithoutPrintingIdentity() throws Exception
+    {
+        bit(5451, 1429, 1, 1);
+        vars[1429] = 2;
+        Gson gson = new Gson();
+        Map<String, Object> snap = new LinkedHashMap<>();
+        snap.put("captured_at", 1760880000L);
+        snap.put("account", Collections.singletonMap("rsn", "SECRET_NAME"));
+        snap.put("account_progress", capture.snapshot(client));
+        snap.put("equipment", Collections.singletonMap("weapon", Collections.singletonMap("id", 4151)));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("token", "0123456789abcdef0123456789abcdef");
+        body.put("snapshot", snap);
+        Path dir = Files.createTempDirectory("readiness-replay");
+        Path a = dir.resolve("a.json"), b = dir.resolve("b.json");
+        Files.write(a, gson.toJson(body).getBytes(StandardCharsets.UTF_8));
+        Files.write(b, "{\"captured_at\":1760880060}".getBytes(StandardCharsets.UTF_8));
+        Map<String, Object> out = ReadinessReplay.replay(a.toString(), b.toString());
+        String json = gson.toJson(out);
+        assertFalse(json.contains("SECRET_NAME"));
+        assertFalse(json.contains("0123456789abcdef"));
+        List<?> snaps = (List<?>) out.get("snapshots");
+        assertEquals("unlocked", at((Map<?, ?>) snaps.get(0), "readiness", "unlocks", "prayer.rigour").get("state"));
+        assertEquals(false, ((Map<?, ?>) snaps.get(1)).get("account_progress_present"));
+        assertEquals(1, ((List<?>) out.get("loadout_revisions")).size());
+    }
 }

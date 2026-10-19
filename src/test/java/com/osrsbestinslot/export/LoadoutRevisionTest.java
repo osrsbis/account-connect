@@ -25,6 +25,18 @@ public class LoadoutRevisionTest
         return m;
     }
 
+    /** Shape of C4 WealthLedger.owns at da11975: answer plus location lists. Absent item = unknown answer. */
+    private static java.util.function.IntFunction<Map<String, Object>> c4(Map<Integer, String> answers)
+    {
+        return id -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("item_id", id);
+            m.put("answer", answers.getOrDefault(id, "unknown"));
+            m.put("unknown_locations", java.util.Collections.singletonList("bank"));
+            return m;
+        };
+    }
+
     @Test
     public void firstObservationIsBaselineAndUnknownIsNotEmpty()
     {
@@ -96,10 +108,10 @@ public class LoadoutRevisionTest
     public void ownershipUsesC4AnswersAndNeverTurnsUnknownIntoNotOwned()
     {
         Map<String, Object> r = new LoadoutRevision("gen-a").observe(gear(WEAPON, 4151, BODY, 10551, HEAD, 10828), 1, 1L);
-        Map<Integer, String> owns = new HashMap<>();
-        owns.put(4151, "yes");
-        owns.put(10551, "no_in_observed_locations");
-        Map<String, Object> o = LoadoutRevision.ownership(r, owns);
+        Map<Integer, String> answers = new HashMap<>();
+        answers.put(4151, "yes");
+        answers.put(10551, "no_in_observed_locations");
+        Map<String, Object> o = LoadoutRevision.ownership(r, c4(answers));
         Map<?, ?> slots = (Map<?, ?>) o.get("slots");
         assertEquals("owned_observed", ((Map<?, ?>) slots.get("weapon")).get("current_holdings"));
         assertEquals("not_seen_in_observed", ((Map<?, ?>) slots.get("body")).get("current_holdings"));
@@ -146,10 +158,10 @@ public class LoadoutRevisionTest
             queries.put("tick_" + t, rev == null ? "unknown" : rev.get("revision_seq"));
         }
         example.put("active_at", queries);
-        Map<Integer, String> owns = new HashMap<>();
-        owns.put(12006, "yes");
-        owns.put(10551, "no_in_observed_locations");
-        example.put("ownership_of_latest", LoadoutRevision.ownership(l.revisions().get(2), owns));
+        Map<Integer, String> answers = new HashMap<>();
+        answers.put(12006, "yes");
+        answers.put(10551, "no_in_observed_locations");
+        example.put("ownership_of_latest", LoadoutRevision.ownership(l.revisions().get(2), c4(answers)));
         Gson gson = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
         String actual = gson.toJson(example) + "\n";
         Path fixture = Paths.get("src/test/resources/progress/loadout-revisions-example.json");

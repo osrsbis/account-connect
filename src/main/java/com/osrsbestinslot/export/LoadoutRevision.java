@@ -157,29 +157,33 @@ final class LoadoutRevision
     }
 
     /**
-     * Ownership context for one revision from a C4 holdings answer. Worn items are observed as worn at that time.
-     * owns.get(itemId) is C4's answer: "yes", "no_in_observed_locations" or "unknown"; absent means unknown.
+     * Ownership context for one revision from C4 holdings. owns is C4 WealthLedger.owns (item id -> answer map
+     * with "answer" yes|no_in_observed_locations|unknown and location lists). Worn at the revision is observed;
+     * current holdings come only from C4. A null holdings source or a missing answer stays unknown.
      */
-    static Map<String, Object> ownership(Map<String, Object> revision, Map<Integer, String> owns)
+    static Map<String, Object> ownership(Map<String, Object> revision, java.util.function.IntFunction<? extends Map<?, ?>> owns)
     {
         Map<String, Object> out = new LinkedHashMap<>();
         Map<?, ?> slots = (Map<?, ?>) revision.get("slots");
         for (Map.Entry<?, ?> e : slots.entrySet())
         {
-            Object answer = owns == null ? null : owns.get(e.getValue());
-            String state = "yes".equals(answer) ? "owned_observed"
-                : "no_in_observed_locations".equals(answer) ? "not_seen_in_observed" : "unknown";
+            int item = ((Number) e.getValue()).intValue();
+            Map<?, ?> answer = owns == null ? null : owns.apply(item);
+            Object a = answer == null ? null : answer.get("answer");
+            String state = "yes".equals(a) ? "owned_observed"
+                : "no_in_observed_locations".equals(a) ? "not_seen_in_observed" : "unknown";
             Map<String, Object> slot = new LinkedHashMap<>();
-            slot.put("item_id", e.getValue());
+            slot.put("item_id", item);
             slot.put("worn_at_revision", true);
             slot.put("current_holdings", state);
+            slot.put("unknown_locations", answer == null ? null : answer.get("unknown_locations"));
             out.put((String) e.getKey(), slot);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("content_id", revision.get("content_id"));
         result.put("revision_seq", revision.get("revision_seq"));
         result.put("slots", out);
-        result.put("holdings_source", owns == null ? "unavailable" : "c4_owns_v1");
+        result.put("holdings_source", owns == null ? "unavailable" : "c4_wealth_ledger_owns");
         return result;
     }
 }
