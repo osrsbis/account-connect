@@ -74,7 +74,8 @@ public class ActivityRecordTest
         e.add(pub("xp_gain", "x1", END - 500, "gains", List.of(m("skill", "HITPOINTS", "xp", 1200L), m("skill", "SLAYER", "xp", 900L)), "total", 2100L));
         // Noise: a duplicate delivery, another gameplay session, another profile and an event after the encounter.
         e.add(eat("c1", START + 40_000, 385, 1, -1, 0, "eat", SESSION));
-        e.add(eat("z1", START + 50_000, 385, 1, -1, 0, "eat", OTHER));
+        Map<String,Object> otherAccount = eat("z1", START + 50_000, 385, 1, -1, 0, "eat", OTHER);
+        otherAccount.put("account_hash", "77"); e.add(otherAccount);
         Map<String,Object> seasonal = pub("loot", "z2", START + 60_000, "source_type", "npc", "items", List.of(m("id", 536, "qty", 99)));
         seasonal.put("profile_type", "SEASONAL"); e.add(seasonal);
         e.add(eat("z3", END + 5_000, 385, 1, -1, 0, "eat", SESSION));
@@ -117,8 +118,7 @@ public class ActivityRecordTest
         {
             List<Map<String,Object>> shuffled = new ArrayList<>(events); Collections.shuffle(shuffled, new Random(seed));
             Map<String,Object> got = ActivityRecord.derive(scope(), shuffled, prices);
-            assertEquals(expected.get("result"), got.get("result"));
-            assertEquals(expected.get("valuation"), got.get("valuation"));
+            assertEquals(expected, got); // the whole record, including flow and contributing-ID order
         }
     }
 
@@ -309,6 +309,80 @@ public class ActivityRecordTest
         Map<?,?> res = (Map<?,?>)ActivityRecord.derive(s, encounterEvents(), prices).get("result");
         assertNull(res.get("net_gp_per_elapsed_hour"));
         assertEquals(List.of("encounter_end_time_unobserved:unobserved_end_inactivity"), res.get("unavailable_reasons"));
+    }
+
+    /** Review a7d0d50 #1: a snapshot available 999 ms after the window end must not be used. */
+    @Test public void snapshotJustAfterTheWindowEndIsNotUsed()
+    {
+        long end = prices.availableAt * 1000 - 999;
+        Map<String,Object> s = m("activity_type", "generic", "account_hash", "42", "profile_type", "STANDARD",
+            "gameplay_session", SESSION, "start_ms", end - 60_000, "end_ms", end);
+        Map<String,Object> r = ActivityRecord.derive(s, List.of(eat("c1", end - 1_000, 385, 1, -1, 0, "eat", SESSION)), prices);
+        assertNull(((Map<?,?>)r.get("result")).get("net_gp"));
+        assertEquals("snapshot_not_yet_available", ((Map<?,?>)((List<?>)((Map<?,?>)r.get("valuation")).get("quotes")).get(0)).get("freshness"));
+    }
+
+    /** Review a7d0d50 #2: a scope without activity_type falls back to generic instead of throwing. */
+    @Test public void missingActivityTypeIsGeneric()
+    {
+        Map<String,Object> s = scope(); s.remove("activity_type");
+        assertEquals("generic", ActivityRecord.derive(s, encounterEvents(), prices).get("activity_type"));
+    }
+
+    /** Review a7d0d50 #3: own costs dropped for a missing or malformed session make the net unavailable. */
+    @Test public void ownCostsExcludedForSessionMakeTheNetUnavailable()
+    {
+        for (Object session : Arrays.asList(null, "01234567-89ab-cdef-0123-456789abcdef", OTHER))
+        {
+            Map<String,Object> s = scope(); s.put("gameplay_session", session);
+            Map<String,Object> r = ActivityRecord.derive(s, encounterEvents(), prices);
+            Map<?,?> res = (Map<?,?>)r.get("result");
+            assertNull(String.valueOf(session), res.get("net_gp"));
+            assertTrue(String.valueOf(session), String.valueOf(res.get("unavailable_reasons")).contains("own_events_excluded_without_session:"));
+        }
+        Map<String,Object> s = scope(); s.put("gameplay_session", "01234567-89ab-cdef-0123-456789abcdef");
+        assertTrue(((List<?>)((Map<?,?>)ActivityRecord.derive(s, encounterEvents(), prices).get("quality")).get("gaps")).contains("gameplay_session_invalid"));
+    }
+
+    /** Review a7d0d50 #4: an unpriced transfer makes the transfer totals unknown, not a smaller number. */
+    @Test public void unpricedTransferLeavesTransferTotalsUnknown()
+    {
+        Map<String,Object> bank = pub("bank_session", "b1", START + 1_000, "deposited", List.of(m("id", 385, "qty", 1L), m("id", 11286, "qty", 1L)), "withdrawn", List.of());
+        Map<?,?> v = (Map<?,?>)ActivityRecord.derive(scope(), List.of(bank), prices).get("valuation");
+        assertNull(v.get("transfers_out_gp")); assertEquals(1, v.get("unpriced_transfers"));
+    }
+
+    /** Review a7d0d50 #5: public events at the same time keep one order whatever the delivery order. */
+    @Test public void sameTimeEventsHaveOneOrder()
+    {
+        Map<String,Object> a = pub("loot", "A", START + 1_000, "source_type", "npc", "items", List.of(m("id", 536, "qty", 1)));
+        Map<String,Object> b = pub("drop", "B", START + 1_000, "item", 385, "qty", 1);
+        assertEquals(ActivityRecord.derive(scope(), List.of(a, b), prices), ActivityRecord.derive(scope(), List.of(b, a), prices));
+    }
+
+    /** Review a7d0d50 #6: the cap reports a real truncation only, and events_used counts every used event. */
+    @Test public void contributingCapReportsOnlyRealTruncation()
+    {
+        List<Map<String,Object>> events = new ArrayList<>();
+        for (int i = 0; i < ActivityRecord.MAX_CONTRIBUTING; i++)
+            events.add(pub("drop", "d" + i, START + i, "item", 385, "qty", 1));
+        events.add(pub("region", "r", START + 1_000, "from", 1, "to", 2));
+        Map<?,?> q = (Map<?,?>)ActivityRecord.derive(scope(), events, prices).get("quality");
+        assertFalse(((List<?>)q.get("gaps")).contains("contributing_ids_truncated"));
+        events.add(pub("drop", "extra", START + 2_000, "item", 385, "qty", 1));
+        q = (Map<?,?>)ActivityRecord.derive(scope(), events, prices).get("quality");
+        assertTrue(((List<?>)q.get("gaps")).contains("contributing_ids_truncated"));
+        assertEquals(ActivityRecord.MAX_CONTRIBUTING + 1, q.get("events_used"));
+    }
+
+    /** Review a7d0d50 minor: an end before the start is an invalid window, not a negative elapsed time. */
+    @Test public void endBeforeStartIsInvalid()
+    {
+        Map<String,Object> s = m("activity_type", "generic", "account_hash", "42", "profile_type", "STANDARD",
+            "gameplay_session", SESSION, "start_ms", END, "end_ms", START);
+        Map<String,Object> r = ActivityRecord.derive(s, encounterEvents(), prices);
+        assertNull(((Map<?,?>)r.get("time")).get("elapsed_ms"));
+        assertTrue(((List<?>)((Map<?,?>)r.get("result")).get("unavailable_reasons")).contains("invalid_window"));
     }
 
     /** Writes the derived example for the handoff; the build directory is not committed. */

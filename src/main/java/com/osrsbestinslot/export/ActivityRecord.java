@@ -28,16 +28,19 @@ final class ActivityRecord
      */
     static Map<String,Object> derive(Map<String,Object> scope, List<Map<String,Object>> events, ActivityPrices prices)
     {
-        String type = UNOBSERVED_COSTS.containsKey(scope.get("activity_type")) ? (String)scope.get("activity_type") : "generic";
+        Object requested = scope.get("activity_type");
+        String type = requested instanceof String && UNOBSERVED_COSTS.containsKey(requested) ? (String)requested : "generic";
         Long start = asLong(scope.get("start_ms")), end = asLong(scope.get("end_ms"));
         Map<?,?> encounter = scope.get("encounter") instanceof Map ? (Map<?,?>)scope.get("encounter") : null;
         if (encounter != null)
         {
             start = asLong(encounter.get("start_observed_at_ms")); end = asLong(encounter.get("end_observed_at_ms"));
         }
-        String session = scope.get("gameplay_session") instanceof String ? (String)scope.get("gameplay_session") : null;
+        Object rawSession = scope.get("gameplay_session");
+        String session = rawSession instanceof String && ((String)rawSession).matches("[a-f0-9]{32}") ? (String)rawSession : null;
         List<String> gaps = new ArrayList<>();
-        int duplicates = 0, identityMismatch = 0, unbound = 0, outside = 0, adapterBound = 0;
+        int duplicates = 0, identityMismatch = 0, unbound = 0, outside = 0, adapterBound = 0, ownWithoutSession = 0;
+        if (rawSession != null && session == null) gaps.add("gameplay_session_invalid");
         String account = scope.get("account_hash") instanceof String ? (String)scope.get("account_hash") : null;
         String profile = scope.get("profile_type") instanceof String ? (String)scope.get("profile_type") : null;
         if (account == null || account.isEmpty() || profile == null || profile.isEmpty()) gaps.add("scope_identity_missing");
@@ -63,21 +66,28 @@ final class ActivityRecord
             if (!(id instanceof String) || at == null) { gaps.add("event_without_id_or_time"); continue; }
             String identity = identity(account, profile, e, session);
             if (identity.equals("unbound")) { unbound++; continue; }
-            if (identity.equals("mismatch")) { identityMismatch++; continue; }
-            if (start == null || at < start || (end != null && at > end)) { outside++; continue; }
+            if (identity.equals("mismatch"))
+            {
+                identityMismatch++;
+                // An own row of the right account dropped only for a missing or wrong session hides real costs.
+                if (inWindow(at, start, end) && account != null && account.equals(e.get("account_hash")) && Objects.equals(profile, e.get("profile_type"))) ownWithoutSession++;
+                continue;
+            }
+            if (!inWindow(at, start, end)) { outside++; continue; }
             if (conflicting.contains(id)) { if (conflictCounted.add((String)id)) conflictsInWindow++; continue; }
             if (unique.putIfAbsent((String)id, e) != null) duplicates++;
             else if (identity.equals("adapter_bound")) adapterBound++;
         }
         List<Map<String,Object>> ordered = new ArrayList<>(unique.values());
         ordered.sort(Comparator.comparingLong((Map<String,Object> e) -> ActivityFlows.at(e))
-            .thenComparingLong(e -> asLong(e.get("source_sequence")) == null ? 0 : asLong(e.get("source_sequence"))));
+            .thenComparingLong(e -> asLong(e.get("source_sequence")) == null ? 0 : asLong(e.get("source_sequence")))
+            .thenComparing(e -> (String)e.get("event_id")));
 
         List<Map<String,Object>> flows = new ArrayList<>();
         Map<String,Long> xp = new TreeMap<>();
         long transformationXp = 0; boolean xpFromFlush = false, boundary = false;
         List<Long> activityTimes = new ArrayList<>();
-        List<String> contributing = new ArrayList<>();
+        List<String> contributing = new ArrayList<>(); int usedCount = 0;
         for (Map<String,Object> e : ordered)
         {
             String t = String.valueOf(e.get("type")); long at = ActivityFlows.at(e);
@@ -100,14 +110,14 @@ final class ActivityRecord
             if (SESSION_BOUNDARIES.contains(t)) { boundary = true; used = true; }
             if (t.equals("combat_hit")) used = true;
             if (used && !t.equals("xp_gain") && !SESSION_BOUNDARIES.contains(t)) activityTimes.add(at);
-            if (used && contributing.size() < MAX_CONTRIBUTING) contributing.add((String)e.get("event_id"));
+            if (used) { usedCount++; if (contributing.size() < MAX_CONTRIBUTING) contributing.add((String)e.get("event_id")); }
         }
-        if (contributing.size() >= MAX_CONTRIBUTING && unique.size() > MAX_CONTRIBUTING) gaps.add("contributing_ids_truncated");
+        if (usedCount > MAX_CONTRIBUTING) gaps.add("contributing_ids_truncated");
 
         // Valuation: inputs at the Wiki instant-buy (replacement) price, outputs at instant-sell, before GE tax.
-        long asOf = end == null ? 0 : (end + 999) / 1000;
+        long asOf = end == null ? 0 : Math.floorDiv(end, 1000L); // never later than the window end
         long inputs = 0, outputs = 0, transfersOut = 0, transfersIn = 0;
-        int unpriced = 0, stale = 0, unknownLoss = 0;
+        int unpriced = 0, unpricedTransfers = 0, stale = 0, unknownLoss = 0;
         Map<Integer,Map<String,Object>> quotes = new TreeMap<>();
         for (Map<String,Object> f : flows)
         {
@@ -121,7 +131,8 @@ final class ActivityRecord
             f.put("unit_gp", unit); f.put("price_side", side);
             if (cls.equals("transferred"))
             {
-                if (unit != null) { if (delta < 0) transfersOut += -delta * unit; else transfersIn += delta * unit; }
+                if (unit == null) unpricedTransfers++;
+                else if (delta < 0) transfersOut += -delta * unit; else transfersIn += delta * unit;
                 continue;
             }
             if (unit == null) { unpriced++; continue; }
@@ -139,7 +150,8 @@ final class ActivityRecord
 
         Map<String,Object> time = new LinkedHashMap<>();
         time.put("start_ms", start); time.put("end_ms", end);
-        time.put("elapsed_ms", start == null || end == null ? null : end - start);
+        boolean invalidWindow = start != null && end != null && end < start;
+        time.put("elapsed_ms", start == null || end == null || invalidWindow ? null : end - start);
         long active = 0; for (int i = 1; i < activityTimes.size(); i++)
         {
             long gap = activityTimes.get(i) - activityTimes.get(i-1); if (gap <= IDLE_GAP_MS) active += gap;
@@ -165,12 +177,16 @@ final class ActivityRecord
         v.put("basis", "inputs_instant_buy_outputs_instant_sell_before_ge_tax");
         v.put("quotes", new ArrayList<>(quotes.values()));
         v.put("input_cost_gp", inputs); v.put("output_value_gp", outputs);
-        v.put("transfers_out_gp", transfersOut); v.put("transfers_in_gp", transfersIn);
+        // A missing transfer price leaves the transfer totals unknown; transfers never enter the net.
+        v.put("transfers_out_gp", unpricedTransfers > 0 ? null : transfersOut); v.put("transfers_in_gp", unpricedTransfers > 0 ? null : transfersIn);
+        v.put("unpriced_transfers", unpricedTransfers);
         v.put("transfers_in_net", false);
         r.put("valuation", v);
 
         List<String> reasons = new ArrayList<>();
         if (gaps.contains("scope_identity_missing")) reasons.add("scope_identity_missing");
+        if (invalidWindow) reasons.add("invalid_window");
+        if (ownWithoutSession > 0) reasons.add("own_events_excluded_without_session:" + ownWithoutSession);
         if (conflictsInWindow > 0) reasons.add("conflicting_event_ids:" + conflictsInWindow);
         // C2 sets end_observed_at_ms null for inferred ends (scene_gap, tick_reversal, inactivity): the end time is unknown.
         Object outcome = encounter == null ? null : encounter.get("outcome");
@@ -195,7 +211,7 @@ final class ActivityRecord
         r.put("result", result);
 
         Map<String,Object> quality = new LinkedHashMap<>();
-        quality.put("events_received", events.size()); quality.put("events_used", contributing.size());
+        quality.put("events_received", events.size()); quality.put("events_used", usedCount);
         quality.put("duplicates_dropped", duplicates); quality.put("identity_mismatch_excluded", identityMismatch);
         quality.put("identity_unbound_excluded", unbound); quality.put("adapter_bound_events", adapterBound);
         quality.put("conflicting_event_ids", new ArrayList<>(conflicting));
@@ -223,6 +239,11 @@ final class ActivityRecord
      * gameplay_session. A row without account/profile is accepted only when a trusted adapter bound it
      * explicitly (identity_binding=adapter, which the caller sets, never the capture); absence never matches.
      */
+    private static boolean inWindow(long at, Long start, Long end)
+    {
+        return start != null && at >= start && (end == null || at <= end);
+    }
+
     static String identity(String account, String profile, Map<String,Object> e, String session)
     {
         if (account == null || profile == null) return "unbound";
