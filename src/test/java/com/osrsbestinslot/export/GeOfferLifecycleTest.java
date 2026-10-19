@@ -301,16 +301,209 @@ public class GeOfferLifecycleTest
     }
 
     @Test
-    public void instantFillFromAnObservedEmptySlotIsCredited()
+    public void instantFillIsCreditedButPlacementStaysUnconfirmed()
     {
+        // On the wire an instant fill after an empty slot looks the same as a fill after an unseen
+        // zero-counter replay seed, so the fill counts but placement and duration are not claimed.
         empty(3, 1);
         obs(3, BOUGHT, 1511, 100, 100, 5, 400, 2);
         empty(3, 3);
         Map<String, Object> o = offers(GeOfferLifecycle.reduce(wire, null)).get(0);
-        assertEquals("observed", o.get("placement"));
+        assertEquals("not_observed", o.get("placement"));
         assertEquals("completed", o.get("phase"));
         assertEquals(100L, o.get("filled_qty_observed"));
-        assertEquals(Arrays.asList(1_000_600L, 1_001_200L), o.get("completion_interval_ms"));
+        assertNull(o.get("completion_interval_ms"));
+        assertTrue(((List<?>) o.get("gaps")).contains("placement_unconfirmed_zero_baseline"));
+        assertEquals("partial", o.get("completeness"));
+    }
+
+    @Test
+    public void replaySeedThenLiveFillIsNotAnObservedPlacement()
+    {
+        tracker.observe(3, BUYING, new long[]{1511, 0, 100, 5, 0}, true, 1, 1_000_000L);
+        obs(3, BOUGHT, 1511, 100, 100, 5, 400, 200);
+        empty(3, 201);
+        Map<String, Object> o = offers(GeOfferLifecycle.reduce(wire, null)).get(0);
+        assertEquals("not_observed", o.get("placement"));
+        assertEquals("partial", o.get("completeness"));
+    }
+
+    @Test
+    public void restartRekeyNeverLeavesTheOldKeyHoldingEscrow()
+    {
+        empty(3, 1);
+        obs(3, BUYING, 560, 0, 100, 300, 0, 2);
+        obs(3, BUYING, 560, 40, 100, 300, 12_000, 110);
+        Map<String, Object> oldKey = wire.get(wire.size() - 1);
+        tracker.clear();	// plugin restart or profile change; the same live offer gets a new key
+        tracker.observe(3, BUYING, new long[]{560, 40, 100, 300, 12_000}, true, 300, 1_180_000L);
+        Map<String, Object> newKey = obs(3, BOUGHT, 560, 100, 100, 300, 30_000, 400);
+        List<Map<String, Object>> offers = offers(GeOfferLifecycle.reduce(wire, null));
+        assertEquals(2, offers.size());
+        Map<String, Object> first = offers.get(0), second = offers.get(1);
+        assertEquals(oldKey.get("offer_key"), first.get("offer_key"));
+        assertEquals(newKey.get("offer_key"), first.get("superseded_by"));
+        assertEquals("unknown", first.get("phase"));
+        assertEquals("unknown", m(first.get("escrow")).get("escrow_state"));
+        assertNull(m(first.get("escrow")).get("locked_coins"));
+        assertEquals("fills before the restart stay credited once", 40L, first.get("filled_qty_observed"));
+        assertEquals("the new key credits only what came after", 60L, second.get("filled_qty_observed"));
+        assertEquals(40L, second.get("baseline_qty_uncredited"));
+        assertEquals("observed", m(second.get("escrow")).get("escrow_state"));
+    }
+
+    @Test
+    public void historyMatchOnNetNeverTaxesTheNetAgain()
+    {
+        empty(1, 1);
+        obs(1, SELLING, 4151, 0, 3, 1_000_000, 0, 2);
+        obs(1, SOLD, 4151, 3, 3, 1_000_000, 2_998_800, 120);
+        Map<String, Object> history = new LinkedHashMap<>();
+        history.put("item_id", 4151);
+        history.put("quantity", 3);
+        history.put("side", "sell");
+        history.put("original_gross_gp", 3_060_000L);
+        history.put("explicit_tax_gp", 61_200L);
+        history.put("displayed_net_gp", 2_998_800L);
+        Map<String, Object> cash = m(offers(GeOfferLifecycle.reduce(wire, Arrays.asList(history))).get(0).get("cashflow"));
+        assertEquals("matches_history_net_one_offer", cash.get("gp_counter_semantics"));
+        assertEquals(61_200L, cash.get("tax_gp"));
+        assertEquals(2_998_800L, cash.get("net_gp"));
+        assertEquals(2_998_800L, cash.get("net_gp_rule_low"));
+        assertEquals(2_998_802L, cash.get("net_gp_rule_high"));
+        assertNull(cash.get("tax_rule_disagrees_with_history"));
+    }
+
+    @Test
+    public void shuffledDuplicatedInputGivesTheIdenticalResult()
+    {
+        empty(2, 1);
+        obs(2, BUYING, 560, 0, 1000, 250, 0, 2);
+        obs(2, BUYING, 560, 400, 1000, 250, 98_000, 110);
+        obs(2, CANCELLED_BUY, 560, 400, 1000, 250, 98_000, 140);
+        empty(2, 150);
+        empty(5, 150);
+        obs(5, SELLING, 4151, 0, 2, 1_000_000, 0, 150);	// same first_seen as nothing else, tie on time below
+        obs(2, BUYING, 560, 0, 1000, 250, 0, 151);
+        wire.add(copyWithId(wire.get(2), "ffffffffffffffffffffffffffffffff"));
+        wire.add(new LinkedHashMap<>(wire.get(3)));
+        Map<String, Object> history = new LinkedHashMap<>();
+        history.put("item_id", 1);
+        history.put("side", "buy");
+        Map<String, Object> history2 = new LinkedHashMap<>(history);
+        history2.put("item_id", 2);
+        Map<String, Object> expected = GeOfferLifecycle.reduce(wire, Arrays.asList(history, history2));
+        java.util.Random random = new java.util.Random(7);
+        for (int i = 0; i < 20; i++)
+        {
+            List<Map<String, Object>> shuffled = new ArrayList<>(wire);
+            java.util.Collections.shuffle(shuffled, random);
+            List<Map<String, Object>> hs = new ArrayList<>(Arrays.asList(history, history2));
+            java.util.Collections.shuffle(hs, random);
+            assertEquals(expected, GeOfferLifecycle.reduce(shuffled, hs));
+        }
+    }
+
+    @Test
+    public void conflictQuarantinesEveryKeyTheIdNamesWhicheverArrivesFirst()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        Map<String, Object> real = obs(0, BOUGHT, 560, 10, 10, 250, 2_400, 50);
+        Map<String, Object> variant = new LinkedHashMap<>(real);
+        variant.put("offer_key", "other-key");
+        for (boolean variantFirst : new boolean[]{false, true})
+        {
+            List<Map<String, Object>> rows = new ArrayList<>(wire);
+            rows.add(variantFirst ? 0 : rows.size(), variant);
+            for (Map<String, Object> o : offers(GeOfferLifecycle.reduce(rows, null)))
+            {
+                assertEquals(o.get("offer_key") + " variantFirst=" + variantFirst, true, o.get("quarantined"));
+            }
+        }
+    }
+
+    @Test
+    public void missingOfferTermsQuarantineInsteadOfBecomingZero()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 100, 300, 0, 2);
+        obs(0, BUYING, 560, 30, 100, 300, 8_700, 200);
+        for (String field : new String[]{"side", "price", "qty_total", "item"})
+        {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (Map<String, Object> r : wire)
+            {
+                Map<String, Object> c = new LinkedHashMap<>(r);
+                c.remove(field);
+                rows.add(c);
+            }
+            Map<String, Object> o = offers(GeOfferLifecycle.reduce(rows, null)).get(0);
+            assertEquals(field, true, o.get("quarantined"));
+            assertEquals(field, "unknown", m(o.get("escrow")).get("escrow_state"));
+        }
+    }
+
+    @Test
+    public void gsonRoundTripOfTheSameRowIsADuplicateNotAConflict()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        Map<String, Object> done = obs(0, BOUGHT, 560, 10, 10, 250, 2_400, 50);
+        com.google.gson.Gson gson = new com.google.gson.Gson();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> parsed = gson.fromJson(gson.toJson(done), Map.class);
+        wire.add(parsed);
+        Map<String, Object> out = GeOfferLifecycle.reduce(wire, null);
+        assertEquals(false, offers(out).get(0).get("quarantined"));
+        assertEquals(1L, m(out.get("diagnostics")).get("duplicate_event_id_dropped"));
+    }
+
+    @Test
+    public void malformedRowsAreSkippedNotFatal()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        Map<String, Object> bad = new LinkedHashMap<>(wire.get(0));
+        Map<Object, Object> weird = new LinkedHashMap<>(m(bad.get("ge_observation")));
+        weird.put(7, "x");
+        bad.put("ge_observation", weird);
+        bad.put("event_id", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        wire.add(bad);
+        List<Map<String, Object>> history = new ArrayList<>();
+        history.add(null);
+        Map<String, Object> out = GeOfferLifecycle.reduce(wire, history);
+        assertEquals(1L, m(out.get("diagnostics")).get("history_row_invalid"));
+    }
+
+    @Test
+    public void negativeOrInconsistentDeltaIsNeverAFill()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        Map<String, Object> fill = obs(0, BUYING, 560, 5, 10, 250, 1_200, 200);
+        Map<String, Object> obs = new LinkedHashMap<>(m(fill.get("ge_observation")));
+        obs.put("delta_gp", -1_500L);
+        fill.put("ge_observation", obs);
+        Map<String, Object> o = offers(GeOfferLifecycle.reduce(wire, null)).get(0);
+        assertEquals(true, o.get("quarantined"));
+        assertTrue(((List<?>) o.get("quarantine_reasons")).contains("inconsistent_counter_pair"));
+    }
+
+    @Test
+    public void strippedFirstRowCreditsNothingAndUnknownTimesStayNull()
+    {
+        obs(5, SELLING, 4151, 3, 10, 1_500_000, 4_480_000, 10);
+        Map<String, Object> obs = new LinkedHashMap<>(m(wire.get(0).get("ge_observation")));
+        obs.remove("delta_from_qty");
+        obs.remove("delta_from_gp");
+        obs.remove("delta_status");
+        obs.remove("observed_at_ms");
+        wire.get(0).put("ge_observation", obs);
+        Map<String, Object> o = offers(GeOfferLifecycle.reduce(wire, null)).get(0);
+        assertEquals(true, o.get("quarantined"));
+        assertNull(o.get("filled_qty_observed"));
+        assertNull(o.get("first_seen_at_ms"));
     }
 
     @Test
