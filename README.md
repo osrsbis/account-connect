@@ -228,8 +228,8 @@ andmcadams (BSD-2-Clause). The data model is original.
 The additive `account_progress` snapshot block retains `schema_v: 1`. It requires a
 successful response with **`X-Account-Progress: on` for the current link token**.
 Batch1's `X-Broad-Capture` does not enable it. This header must remain disabled
-until the single-install disclosure covers the new capture and ingestion is approved; this change does
-not activate a server policy, change the Hub warning, or add settings.
+until its backend support and field checks are accepted. This change does not
+activate a server policy, change the existing Hub warning, or add settings.
 
 | Field | First-party source and interpretation |
 |---|---|
@@ -319,11 +319,9 @@ partition by profile. Repeated terminal counter corrections must not become
 additional completed offers. Gaps/unknown intervals must remain visible.
 
 No new configuration, consent screen, grant or external data source is added.
-The product policy is one truthful Plugin Hub install disclosure. Existing broad
-capture server grants are operational rollout controls, intended to default on
-for everyone after the updated warning and backend support are approved; they
-are not separate user choices. This local change does not approve or activate
-that rollout.
+The existing Plugin Hub install warning remains unchanged. Broad-capture server
+grants are operational rollout controls; this local change does not approve or
+activate their rollout. They are not separate user choices.
 
 Implementation is independently authored. GE-specific references were checked
 in the existing 95-plugin audit corpus (2026-10-14/15): Flipping Copilot
@@ -379,7 +377,7 @@ not a user toggle. Both GE history and collection scanning use that token-bound
 grant, account/profile identity, two-tick login settlement and existing snapshot
 writer. Revocation strips the entire block from cached uploads. No server, Hub,
 release configuration or production writer is changed. Keep this grant disabled
-until the installation disclosure, ingestion and field checks below are approved.
+until the backend support and field checks below are accepted.
 
 `account_progress.ge_history` contains:
 
@@ -453,28 +451,6 @@ sources, not copied source or datasets:
 - WikiSync `1ff4ea0653395b552844d658d3668815d82e0a79`,
   `SyncButtonManager.java`: Search plus script 2240. No WikiSync button or extra
   consent workflow is introduced.
-
-### Release disclosure and outstanding field gates
-
-Proposed public installation disclosure, pending review against the exact expanded artifact:
-“This plugin sends your linked game-account data to osrsbestinslot.com, a service
-not controlled or verified by RuneLite: your account name/hash/type, world/location,
-skills, quests, diaries, own collection-log progress, equipment, inventory, bank
-and other observed own storage; GE offers and displayed recent GE history;
-own trades and item movements, loot, deaths, session times and gameplay observations.
-Separately enabled progress/gameplay uploads include own combat/NPC encounters,
-skilling, travel and raw settings/progress observations. Observations can be partial
-or unknown. Your IP address reaches the service. Eligible events can replay from a bounded local journal for up to 48 hours,
-with at most 5,000 rows or 5 MiB per journal. Local files are cleaned on journal
-access or token withdrawal; files can remain while the client or grant is inactive.
-It does not receive your Jagex credentials.”
-
-This public artifact removes counterparty/nearby-player context and shared group
-storage before transport, and disables screenshots, clips and broad firehose uploads
-regardless of remote grants. Private staff/Ops capture remains a separate distribution
-and disclosure obligation. The currently published Hub warning has not been changed;
-this draft and the expanded artifact still need release-owner and Hub acceptance.
-No new permission toggle or account action is introduced here.
 
 ### Queue delivery health (local candidate)
 
@@ -586,8 +562,8 @@ These real-account and backend checks have not been performed in this worktree.
 ## Bank recovery and plank sack (local, inactive)
 
 `account_progress.storage_recovery.schema_v: 1` uses the existing token-bound
-`X-Account-Progress: on` grant. Keep it OFF until the single installation disclosure,
-backend storage, mixed-client ingestion and capacity/rollout are accepted. No new
+`X-Account-Progress: on` grant. Keep it OFF until backend storage, mixed-client
+ingestion and capacity/rollout are accepted. The existing Hub warning is unchanged. No new
 consent screen, settings, server change or release is included.
 
 - `bank` and `inventory`: raw item-ID quantity maps, `last_seen_ms`,
