@@ -71,7 +71,8 @@ final class WealthReconciliation
 	/**
 	 * Trade facts from C1's derived offer records (GeOfferLifecycle.reduce output, record_schema_v 1). Only fills
 	 * whose observation interval lies inside (fromMs, toMs] count. A fill interval that crosses either end cannot be
-	 * placed in this window, so it is excluded and listed; the snapshot residual then stays visible. Quarantined
+	 * placed in this window, so it is excluded and listed; the snapshot residual then stays visible. Fill quantity with
+	 * no interval (untimed_fill_qty, after a lost row) is listed too, never spread over a guessed time. Quarantined
 	 * offers and offers of another account/profile are excluded too. Sell gp is RuneLite's counter, tax unknown.
 	 */
 	static List<TradeFact> tradeFactsFromC1(Map<?, ?> reduced, String accountHash, String profileType, long fromMs,
@@ -133,6 +134,16 @@ final class WealthReconciliation
 				}
 				out.add(new TradeFact(item.intValue(), buy ? qty : -qty, gp == null ? null : buy ? -gp : gp,
 					"c1_offer_lifecycle"));
+			}
+			// A lost middle row: the offer total is right but part of it has no interval (C1 untimed_fill_qty). That part
+			// cannot be placed in any window, so it is listed and the snapshot residual for it stays unexplained.
+			Long untimed = WealthLedger.asLong(offer.get("untimed_fill_qty"));
+			Long first = WealthLedger.asLong(offer.get("first_seen_at_ms"));
+			Long last = WealthLedger.asLong(offer.get("as_of_observed_ms"));
+			boolean overlaps = (first == null || first <= toMs) && (last == null || last > fromMs);
+			if (untimed != null && untimed > 0 && overlaps)
+			{
+				excluded.add(key + ":untimed_fill_qty=" + untimed);
 			}
 		}
 		return out;

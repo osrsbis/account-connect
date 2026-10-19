@@ -285,6 +285,17 @@ public class WealthLedgerTest
 		assertEquals(30L, facts.get(0).qtyDelta);
 		assertEquals(Long.valueOf(-5_700L), facts.get(0).coinsDelta);
 		assertEquals(List.of("k1:fill_straddles_window", "k2:quarantined"), excluded);
+		// C1 lost-middle-row shape: total 100, timed fills 60, untimed 40. The 40 is listed, never placed in the window.
+		offer.put("fills", List.of(fillIn));
+		offer.put("untimed_fill_qty", 40);
+		offer.put("first_seen_at_ms", T0 * 1000 + 1_000);
+		offer.put("as_of_observed_ms", T0 * 1000 + 30_000);
+		List<String> ex2 = new ArrayList<>();
+		List<WealthReconciliation.TradeFact> f2 = WealthReconciliation.tradeFactsFromC1(Map.of("offers", List.of(offer)),
+			"123456789", "STANDARD", T0 * 1000 + 10_000, T0 * 1000 + 20_000, ex2);
+		assertEquals(1, f2.size());
+		assertEquals(30L, f2.get(0).qtyDelta);
+		assertEquals(List.of("k1:untimed_fill_qty=40"), ex2);
 		assertTrue(WealthReconciliation.tradeFactsFromC1(reduced, "999", "STANDARD", 0, Long.MAX_VALUE / 2,
 			new ArrayList<>()).isEmpty());
 	}
