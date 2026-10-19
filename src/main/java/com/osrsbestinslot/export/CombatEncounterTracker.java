@@ -140,6 +140,14 @@ final class CombatEncounterTracker
         Encounter e = open.get(target);
         if (e == null)
         {
+            // A killing splat that the client delivers after ActorDeath in the same tick belongs to that death.
+            Encounter dead = null;
+            for (Encounter c : closed)
+                if (c.targetKey.equals(target) && "observed_death".equals(c.outcome) && c.endTick == tick) dead = c;
+            if (dead != null) { count(dead, v, tick, at, seq); return; }
+        }
+        if (e == null)
+        {
             if (open.size() >= MAX_OPEN)
             {
                 Encounter oldest = open.values().iterator().next();
@@ -149,6 +157,12 @@ final class CombatEncounterTracker
             if (open.size() > 1) for (Encounter o : open.values()) o.gaps.add("overlapping_targets");
             if (e.wornAtStart != null) e.revisions.add(e.wornAtStart);
         }
+        count(e, v, tick, at, seq);
+    }
+
+    private void count(Encounter e, Map<?,?> v, int tick, long at, long seq)
+    {
+        long amount = ((Number) v.get("amount")).longValue(); int type = ((Number) v.get("hitsplat_type")).intValue();
         e.lastHitTick = tick; e.lastHitAt = at; e.contributes(seq); e.phase(((Number) v.get("npc_id")).intValue(), tick);
         if (ATTACK.contains(type))
         {

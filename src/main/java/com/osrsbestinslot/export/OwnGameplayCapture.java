@@ -68,6 +68,10 @@ final class OwnGameplayCapture
     private int loadoutLastTick = -1;
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
+    // NPCs whose ActorDeath was observed on deathTick. In the real client the killing splat can arrive in the
+    // same tick AFTER ActorDeath; that hit belongs to the dying target, not to a new target.
+    private final Map<NPC,Target> deaths = new IdentityHashMap<>();
+    private int deathTick = -1;
     private CombatEncounterTracker encounters = new CombatEncounterTracker(null);
 
     private static final class Target
@@ -83,7 +87,7 @@ final class OwnGameplayCapture
         accountType = null;
         loadouts = null; loadoutRestarts = 0; loadoutLastTick = -1;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
+        states.clear(); targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
         combatObserved = combatHandedOff = combatNotHandedOff = 0;
         stateObserved = stateHandedOff = stateNotHandedOff = 0;
@@ -121,7 +125,7 @@ final class OwnGameplayCapture
     void gap()
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
+        targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         encounters.interrupt("scene_gap", lastTick); wornSlots = null; wornSession = null;
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
@@ -306,14 +310,22 @@ final class OwnGameplayCapture
         if (!incoming)
         {
             NPC npc = (NPC) actor;
-            Target target = targets.get(npc);
+            if (tick != deathTick) deaths.clear();
+            boolean dying = deathTick == tick && deaths.containsKey(npc);
+            Target target = dying ? deaths.get(npc) : targets.get(npc);
+            boolean deathWithoutEarlierHit = dying && target == null;
             if (target == null)
             {
-                if (targets.size() >= MAX_TARGETS) { targets.clear(); gapReason = "target_capacity_gap"; }
-                target = new Target(npc, tick); targets.put(npc, target);
+                if (!dying && targets.size() >= MAX_TARGETS) { targets.clear(); gapReason = "target_capacity_gap"; }
+                target = new Target(npc, tick);
+                if (dying) deaths.put(npc, target); else targets.put(npc, target);
             }
             value.put("npc_id", npc.getId()); value.put("target_observation_id", target.id);
             worn(client, tick, at);
+            append("combat.own_hits", "HitsplatApplied", tick, at, value);
+            // The NPC died this tick before our only observed hit: record its death for that new target.
+            if (deathWithoutEarlierHit) npcEnd(target, true, "actor_death_before_own_hit_same_tick", tick, at);
+            return;
         }
         append("combat.own_hits", "HitsplatApplied", tick, at, value);
     }
@@ -414,15 +426,29 @@ final class OwnGameplayCapture
 
     void endNpc(Client client, NPC npc, boolean death, long at)
     {
+        int tick = client.getTickCount();
         Target target = targets.remove(npc);
+        if (death)
+        {
+            // Remember the death for the rest of this tick, so a late killing splat joins this target.
+            if (tick != deathTick) { deaths.clear(); deathTick = tick; }
+            if (deaths.size() < MAX_TARGETS) deaths.put(npc, target);
+        }
+        else deaths.remove(npc);
         if (target == null) return;
+        npcEnd(target, death, null, tick, at);
+    }
+
+    private void npcEnd(Target target, boolean death, String order, int tick, long at)
+    {
         Map<String,Object> value = new LinkedHashMap<>();
         value.put("npc_id", target.npcId); value.put("target_observation_id", target.id);
         value.put("first_own_hit_tick", target.firstTick);
         value.put("end", death ? "observed_death" : "despawn_not_death");
         value.put("kill_credit", "unknown");
+        if (order != null) value.put("event_order", order);
         // Observation interval only: spawn, encounter start, ownership and kill time are not implied.
-        append("combat.npc_lifecycle", death ? "ActorDeath" : "NpcDespawned", client.getTickCount(), at, value);
+        append("combat.npc_lifecycle", death ? "ActorDeath" : "NpcDespawned", tick, at, value);
     }
 
     Map<String,Object> snapshot()

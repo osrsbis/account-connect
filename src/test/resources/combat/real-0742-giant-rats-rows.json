@@ -1,0 +1,144 @@
+[
+ {
+  "sequence": 58,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:58",
+  "kind": "combat.own_hits",
+  "source": "HitsplatApplied",
+  "tick": 1041,
+  "observed_at_ms": 1792424892101,
+  "direct": true,
+  "value": {
+   "direction": "dealt_to_npc",
+   "amount": 5,
+   "hitsplat_type": 16,
+   "npc_id": 2861,
+   "target_observation_id": "2993f299-fbbc-4d89-b105-f2eb536dd1c9"
+  }
+ },
+ {
+  "sequence": 59,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:59",
+  "kind": "combat.npc_lifecycle",
+  "source": "NpcDespawned",
+  "tick": 1048,
+  "observed_at_ms": 1792424896309,
+  "direct": true,
+  "value": {
+   "npc_id": 2861,
+   "target_observation_id": "2993f299-fbbc-4d89-b105-f2eb536dd1c9",
+   "first_own_hit_tick": 1041,
+   "end": "despawn_not_death",
+   "kill_credit": "unknown"
+  }
+ },
+ {
+  "sequence": 60,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:60",
+  "kind": "combat.own_hits",
+  "source": "HitsplatApplied",
+  "tick": 1132,
+  "observed_at_ms": 1792424946720,
+  "direct": true,
+  "value": {
+   "direction": "dealt_to_npc",
+   "amount": 5,
+   "hitsplat_type": 16,
+   "npc_id": 2859,
+   "target_observation_id": "c21ec62a-032a-4fbe-b1e9-6da4318b2d9e"
+  }
+ },
+ {
+  "sequence": 61,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:61",
+  "kind": "combat.npc_lifecycle",
+  "source": "NpcDespawned",
+  "tick": 1139,
+  "observed_at_ms": 1792424950922,
+  "direct": true,
+  "value": {
+   "npc_id": 2859,
+   "target_observation_id": "c21ec62a-032a-4fbe-b1e9-6da4318b2d9e",
+   "first_own_hit_tick": 1132,
+   "end": "despawn_not_death",
+   "kill_credit": "unknown"
+  }
+ },
+ {
+  "sequence": 62,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:62",
+  "kind": "combat.own_hits",
+  "source": "HitsplatApplied",
+  "tick": 1222,
+  "observed_at_ms": 1792425000742,
+  "direct": true,
+  "value": {
+   "direction": "dealt_to_npc",
+   "amount": 1,
+   "hitsplat_type": 16,
+   "npc_id": 2861,
+   "target_observation_id": "c305418f-4895-4bad-bbb3-fa74011dd058"
+  }
+ },
+ {
+  "sequence": 63,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:63",
+  "kind": "combat.own_hits",
+  "source": "HitsplatApplied",
+  "tick": 1224,
+  "observed_at_ms": 1792425001921,
+  "direct": true,
+  "value": {
+   "direction": "received",
+   "amount": 0,
+   "hitsplat_type": 12
+  }
+ },
+ {
+  "sequence": 64,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:64",
+  "kind": "combat.npc_lifecycle",
+  "source": "ActorDeath",
+  "tick": 1227,
+  "observed_at_ms": 1792425003732,
+  "direct": true,
+  "value": {
+   "npc_id": 2861,
+   "target_observation_id": "c305418f-4895-4bad-bbb3-fa74011dd058",
+   "first_own_hit_tick": 1222,
+   "end": "observed_death",
+   "kill_credit": "unknown"
+  }
+ },
+ {
+  "sequence": 65,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:65",
+  "kind": "combat.own_hits",
+  "source": "HitsplatApplied",
+  "tick": 1227,
+  "observed_at_ms": 1792425003733,
+  "direct": true,
+  "value": {
+   "direction": "dealt_to_npc",
+   "amount": 4,
+   "hitsplat_type": 16,
+   "npc_id": 2861,
+   "target_observation_id": "e5aeea7b-8c78-4ea6-84e7-8bbdf53699ca"
+  }
+ },
+ {
+  "sequence": 66,
+  "event_id": "99b076d5-2c21-4e89-bb57-e6c77a85d1ae:66",
+  "kind": "combat.npc_lifecycle",
+  "source": "NpcDespawned",
+  "tick": 1234,
+  "observed_at_ms": 1792425007921,
+  "direct": true,
+  "value": {
+   "npc_id": 2861,
+   "target_observation_id": "e5aeea7b-8c78-4ea6-84e7-8bbdf53699ca",
+   "first_own_hit_tick": 1227,
+   "end": "despawn_not_death",
+   "kill_credit": "unknown"
+  }
+ }
+]

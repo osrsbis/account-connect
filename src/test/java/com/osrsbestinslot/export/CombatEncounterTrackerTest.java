@@ -457,6 +457,52 @@ public class CombatEncounterTrackerTest
         assertTrue(((List<?>) e.get("gaps")).contains("equipment_unreadable"));
     }
 
+    // Real 0.7.42 client order (C3 run 2026-10-19, giant rats): ActorDeath arrives BEFORE the killing splat in the same tick.
+    @Test public void realOrderOneHitKillIsObservedDeathNotDespawn()
+    {
+        NPC rat = npc(2861);
+        tick = 1041; capture.endNpc(client, rat, true, AT); dealt(rat, 5); // death callback, then the only hit
+        tick = 1048; capture.endNpc(client, rat, false, AT);                // later despawn adds nothing
+        capture.loot(client, 2861, Collections.singletonList(new ItemStack(526, 1)), AT);
+        List<Map<String,Object>> list = encounters(capture.encounterSummary(tick));
+        assertEquals(1, list.size());
+        assertEquals("observed_death", list.get(0).get("outcome")); assertEquals(5L, m(list.get(0).get("own_attacks")).get("total_own_damage"));
+        assertEquals(0, list.get(0).get("elapsed_ticks"));
+        long ends = handed.stream().filter(h -> "combat_npc_end".equals(h.get("type"))).count();
+        assertEquals(1, ends); assertEquals("observed_death", handed.stream().filter(h -> "combat_npc_end".equals(h.get("type"))).findFirst().get().get("end"));
+    }
+
+    @Test public void realOrderKillingSplatAfterDeathJoinsTheDyingEncounter()
+    {
+        NPC rat = npc(2861);
+        tick = 1222; dealt(rat, 1);
+        tick = 1227; capture.endNpc(client, rat, true, AT); dealt(rat, 4);   // killing splat after ActorDeath
+        tick = 1234; capture.endNpc(client, rat, false, AT);
+        tick = 1236; capture.loot(client, 2861, Collections.singletonList(new ItemStack(526, 1)), AT);
+        Map<String,Object> s = capture.encounterSummary(tick);
+        assertEquals(1, encounters(s).size());
+        Map<String,Object> e = encounters(s).get(0);
+        assertEquals("observed_death", e.get("outcome")); assertEquals(5, e.get("elapsed_ticks"));
+        assertEquals(5L, m(e.get("own_attacks")).get("total_own_damage")); assertEquals("matched", e.get("loot_status"));
+        // Wire: the late hit carries the same target_key as the death, so a server replay joins it too.
+        List<Map<String,Object>> wire = new ArrayList<>();
+        for (Map<String,Object> h : handed) wire.add(PublicTransport.event(withEnvelope(h)));
+        assertEquals(wire.get(0).get("target_key"), wire.get(wire.size() - 1).get("target_key"));
+        Map<String,Object> server = encounters(CombatEncounterTracker.deriveFromEvents((String) wire.get(0).get("gameplay_session"), wire, tick)).get(0);
+        assertEquals(5L, m(server.get("own_attacks")).get("total_own_damage")); assertEquals("observed_death", server.get("outcome"));
+    }
+
+    @Test public void deathOfAnotherNpcInSameTickDoesNotCaptureANewTarget()
+    {
+        NPC dead = npc(2861), other = npc(2861);
+        tick = 500; capture.endNpc(client, dead, true, AT); dealt(other, 3);
+        tick = 501; dealt(dead, 2); // a later tick is never joined to an old death
+        List<Map<String,Object>> list = encounters(capture.encounterSummary(tick));
+        assertEquals(2, list.size()); // other at 500, dead at 501; neither is joined to the earlier death
+        for (Map<String,Object> e : list) assertEquals("open", e.get("outcome"));
+        assertTrue(handed.stream().noneMatch(h -> "combat_npc_end".equals(h.get("type"))));
+    }
+
     @Test public void contentIdMatchesLoadoutRevisionFixture()
     {
         // loadout.revision.v1 fixture loadout-revisions-example.json (commit 6fd299f), revisions 1 and 2.
