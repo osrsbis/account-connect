@@ -661,6 +661,13 @@ final class WealthReconciliation
 				bound(box, WealthLedger.COINS, 0, releasedCoins);
 				bound(box, b.itemId, 0, releasedItems);
 			}
+			else
+			{
+				// Placed inside the window (real 0.7.42 run: a buy placed and cancelled between two snapshots). All of
+				// its collect-box contents entered the box inside the window, fills and released escrow alike.
+				bound(box, WealthLedger.COINS, 0, b.maxUncollectedCoins);
+				bound(box, b.itemId, 0, b.maxUncollectedItems);
+			}
 			if (q <= 0 && s <= 0)
 			{
 				continue;
@@ -677,6 +684,10 @@ final class WealthReconciliation
 				{
 					sources.add("snapshot_slot_counter");
 				}
+			}
+			if (!same)
+			{
+				continue;	// box room for a new offer is its whole collect box, counted above
 			}
 			if (buy)
 			{

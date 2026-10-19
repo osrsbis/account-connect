@@ -923,6 +923,21 @@ public class WealthLedgerTest
 		assertEquals(2, ex.size());
 	}
 
+	/** Shape from the real 0.7.42 run (retained166, 2026-10-19): feather buy placed and cancelled between snapshots. */
+	@Test
+	public void real0742BuyPlacedAndCancelledInsideTheWindowIsACollectBoxMove()
+	{
+		Snap a = new Snap(T0).inv(995, 735_427).bank(T0 - 5, 995, 4);
+		Snap b = new Snap(T0 + 67).inv(995, 731_427).offer(0, 314, "CANCELLED_BUY", 2_000, 0, 2, 0).bank(T0 - 5, 995, 4);
+		Map<String, Object> r = rec(a, b);
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, -4_000L), classes(r, 995));
+		// A new offer that filled inside the window still gets exactly its own box contents as room, not double.
+		Snap c = new Snap(T0 + 67).offer(0, LOBSTER, "BOUGHT", 10, 10, 200, 1_900).bank(T0 - 5, 995, 4);
+		WealthLedger.Escrow e = c.h().escrow.get(0);
+		assertEquals(10L, e.maxUncollectedItems);
+		assertEquals(100L, e.maxUncollectedCoins);
+	}
+
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */
 	@Test
 	public void derivedResultExample() throws Exception
