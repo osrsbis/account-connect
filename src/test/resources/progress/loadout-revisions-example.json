@@ -1,0 +1,86 @@
+{
+  "revisions": [
+    {
+      "schema": "loadout.revision.v1",
+      "generation": "caller-generation-1",
+      "revision_seq": 1,
+      "tick": 1000,
+      "observed_at_ms": 1760880000000,
+      "provenance": "baseline",
+      "content_id": "6cd9c6ed233e4fea4ca79ab44714cbf1389faf07bb25df876fe77dd08b32976d",
+      "slots": {
+        "head": 10828,
+        "weapon": 4151,
+        "body": 10551,
+        "ammo": 11212
+      },
+      "previous_content_id": null
+    },
+    {
+      "schema": "loadout.revision.v1",
+      "generation": "caller-generation-1",
+      "revision_seq": 2,
+      "tick": 1010,
+      "observed_at_ms": 1760880006000,
+      "provenance": "observed_change",
+      "content_id": "bee9e86817610841690a5a491249bf4e3447d3acdecda497e7da931ae2cdb74e",
+      "slots": {
+        "head": 10828,
+        "weapon": 12006,
+        "body": 10551,
+        "ammo": 11212
+      },
+      "previous_content_id": "6cd9c6ed233e4fea4ca79ab44714cbf1389faf07bb25df876fe77dd08b32976d"
+    },
+    {
+      "schema": "loadout.revision.v1",
+      "generation": "caller-generation-1",
+      "revision_seq": 3,
+      "tick": 1300,
+      "observed_at_ms": 1760880180000,
+      "provenance": "baseline",
+      "content_id": "bee9e86817610841690a5a491249bf4e3447d3acdecda497e7da931ae2cdb74e",
+      "slots": {
+        "head": 10828,
+        "weapon": 12006,
+        "body": 10551,
+        "ammo": 11212
+      },
+      "previous_content_id": null
+    }
+  ],
+  "active_at": {
+    "tick_999": "unknown",
+    "tick_1005": 1,
+    "tick_1050": 2,
+    "tick_1200": "unknown",
+    "tick_1300": 3
+  },
+  "ownership_of_latest": {
+    "content_id": "bee9e86817610841690a5a491249bf4e3447d3acdecda497e7da931ae2cdb74e",
+    "revision_seq": 3,
+    "slots": {
+      "head": {
+        "item_id": 10828,
+        "worn_at_revision": true,
+        "current_holdings": "unknown"
+      },
+      "weapon": {
+        "item_id": 12006,
+        "worn_at_revision": true,
+        "current_holdings": "owned_observed"
+      },
+      "body": {
+        "item_id": 10551,
+        "worn_at_revision": true,
+        "current_holdings": "not_seen_in_observed"
+      },
+      "ammo": {
+        "item_id": 11212,
+        "worn_at_revision": true,
+        "current_holdings": "unknown"
+      }
+    },
+    "holdings_source": "c4_owns_v1"
+  }
+}

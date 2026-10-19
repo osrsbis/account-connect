@@ -1,0 +1,136 @@
+{
+  "readiness": {
+    "schema": "progress.readiness.v1",
+    "derived_from": "account_progress",
+    "unlocks": {
+      "prayer.augury": {
+        "state": "locked",
+        "source": "varbit:5452",
+        "basis": "observed_var"
+      },
+      "prayer.chivalry": {
+        "state": "unknown",
+        "source": "varbit:3909",
+        "basis": "threshold_unverified",
+        "raw": 8.0
+      },
+      "prayer.deadeye": {
+        "state": "unknown",
+        "source": "varbit:16097",
+        "basis": "var_unavailable"
+      },
+      "prayer.mystic_vigour": {
+        "state": "unknown",
+        "source": "varbit:16098",
+        "basis": "var_unavailable"
+      },
+      "prayer.piety": {
+        "state": "unknown",
+        "source": "varbit:3909",
+        "basis": "threshold_unverified",
+        "raw": 8.0
+      },
+      "prayer.preserve": {
+        "state": "unknown",
+        "source": "varbit:5453",
+        "basis": "var_unavailable"
+      },
+      "prayer.rigour": {
+        "state": "unlocked",
+        "source": "varbit:5451",
+        "basis": "observed_var"
+      }
+    },
+    "tasks": {
+      "clue.watson_easy_handed_in": {
+        "state": "done",
+        "source": "varbit:5186",
+        "basis": "observed_var_current"
+      },
+      "clue.watson_elite_handed_in": {
+        "state": "not_done",
+        "source": "varbit:5189",
+        "basis": "observed_var_current"
+      },
+      "clue.watson_hard_handed_in": {
+        "state": "not_done",
+        "source": "varbit:5188",
+        "basis": "observed_var_current"
+      },
+      "clue.watson_medium_handed_in": {
+        "state": "not_done",
+        "source": "varbit:5187",
+        "basis": "observed_var_current"
+      }
+    },
+    "slayer_task": {
+      "state": "active",
+      "source": "varp:394,395",
+      "target_id": 12.0,
+      "remaining": 40.0,
+      "original": 120.0,
+      "boss_id": null,
+      "area_id": 0.0
+    },
+    "combat_achievements": {
+      "points": 115.0,
+      "points_source": "varbit:14815",
+      "task_source": "varp CA_TASK_COMPLETED_0..20, task_id \u003d 32*word + bit",
+      "state": "observed",
+      "completed_task_ids": [
+        0.0,
+        3.0,
+        40.0,
+        71.0
+      ],
+      "catalog": "game_cache_enums_3981_3986",
+      "catalog_sha256": "d498525904d92f224f5ac41155cc2f8ec4f8003dd14686170ec59727f7165ff6",
+      "completed_by_tier": {
+        "easy": [
+          0.0
+        ],
+        "medium": [],
+        "hard": [],
+        "elite": [
+          3.0,
+          40.0
+        ],
+        "master": [],
+        "grandmaster": [],
+        "uncatalogued": [
+          71.0
+        ]
+      },
+      "catalog_task_totals": {
+        "easy": 1.0,
+        "medium": 1.0,
+        "hard": 2.0,
+        "elite": 2.0,
+        "master": 1.0,
+        "grandmaster": 1.0
+      }
+    },
+    "saved_setups": {
+      "state": "unsupported_ownership",
+      "reason": "inventory_setups_global_config_no_account_binding"
+    }
+  },
+  "advice_ranged_prayer": {
+    "goal": "ranged_prayer_rigour",
+    "state": "ready",
+    "missing": [],
+    "unknown": [],
+    "schema": "progress.readiness.v1"
+  },
+  "advice_hybrid_prayers": {
+    "goal": "hybrid_rigour_augury_piety",
+    "state": "not_ready",
+    "missing": [
+      "prayer.augury"
+    ],
+    "unknown": [
+      "prayer.piety"
+    ],
+    "schema": "progress.readiness.v1"
+  }
+}

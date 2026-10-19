@@ -8,7 +8,9 @@ import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.runelite.api.Client;
+import net.runelite.api.EnumComposition;
 import net.runelite.api.GameState;
+import net.runelite.api.StructComposition;
 import net.runelite.api.Skill;
 import net.runelite.api.MenuAction;
 import net.runelite.api.gameval.InterfaceID;
@@ -38,6 +40,9 @@ final class AccountProgressCapture
     private Integer scanObtained, scanTotal;
     private Long scanStartedAt, scanVerifiedAt;
     private String scanStatus = "not_scanned";
+    // Static game-cache CA catalogue (task id -> tier), loaded on the client thread. Not account data.
+    private Map<Integer, String> caCatalog;
+    private int caCatalogNextTick;
 
     void reset()
     {
@@ -154,6 +159,11 @@ final class AccountProgressCapture
 
     void poll(Client client, long now)
     {
+        if (caCatalog == null && client.getTickCount() >= caCatalogNextTick)
+        {
+            caCatalog = loadCaCatalog(client);
+            if (caCatalog == null) caCatalogNextTick = client.getTickCount() + 100;
+        }
         geHistory.poll(client, now);
         storageRecovery.poll(client, now);
         if (!ownLog(client))
@@ -324,6 +334,7 @@ final class AccountProgressCapture
         }
         out.put("watson_clues", watson);
         out.put("combat_achievement_points", bit(client, vars, 14815));
+        out.put("combat_achievement_tasks", caTasks(vars, caCatalog));
         Map<String, Object> log = new LinkedHashMap<>();
         boolean own = Integer.valueOf(0).equals(bit(client, vars, 12061));
         Integer total = own ? varp(vars, 2944) : null;
@@ -353,6 +364,81 @@ final class AccountProgressCapture
         out.put("recent_signals", new ArrayList<>(signals.values()));
         out.put("signals_evicted", evicted);
         return out;
+    }
+
+    /**
+     * Raw CA completion words plus game-cache catalogue metadata. completed_by_tier lists only completed ids whose
+     * tier the cache catalogue states; the bit position alone is the task id. Unknown word = whole list null.
+     */
+    static Map<String, Object> caTasks(int[] vars, Map<Integer, String> catalog)
+    {
+        Map<String, Object> out = new LinkedHashMap<>();
+        java.util.List<Integer> words = new ArrayList<>();
+        boolean known = vars != null;
+        for (int id : AccountReadiness.CA_TASK_VARPS)
+        {
+            Integer w = varp(vars, id);
+            known &= w != null;
+            words.add(w);
+        }
+        out.put("words", known ? words : null);
+        out.put("source", "varp:CA_TASK_COMPLETED_0..20");
+        out.put("catalog_status", catalog == null ? "unavailable" : "loaded");
+        if (catalog == null || !known)
+        {
+            out.put("completed_by_tier", null);
+            out.put("catalog_task_totals", null);
+            return out;
+        }
+        Map<String, Object> byTier = new LinkedHashMap<>();
+        Map<String, Integer> totals = new LinkedHashMap<>();
+        StringBuilder canon = new StringBuilder();
+        for (String tier : AccountReadiness.CA_TIERS)
+        {
+            byTier.put(tier, new ArrayList<Integer>());
+            totals.put(tier, 0);
+        }
+        for (Map.Entry<Integer, String> e : catalog.entrySet())
+        {
+            totals.put(e.getValue(), totals.get(e.getValue()) + 1);
+            canon.append(e.getKey()).append('=').append(e.getValue()).append(';');
+            int w = e.getKey() / 32, b = e.getKey() % 32;
+            if ((words.get(w) & (1 << b)) != 0) ((java.util.List<Integer>) byTier.get(e.getValue())).add(e.getKey());
+        }
+        out.put("catalog_source", "enum:3981..3986,param:1306");
+        out.put("catalog_sha256", AccountConnectPlugin.sha256Hex(canon.toString()));
+        out.put("completed_by_tier", byTier);
+        out.put("catalog_task_totals", totals);
+        return out;
+    }
+
+    /** Client thread only. Enums 3981..3986 list CA task structs by tier; struct param 1306 is the task id. */
+    static Map<Integer, String> loadCaCatalog(Client client)
+    {
+        try
+        {
+            Map<Integer, String> catalog = new TreeMap<>();
+            for (int t = 0; t < AccountReadiness.CA_TIERS.size(); t++)
+            {
+                EnumComposition tier = client.getEnum(3981 + t);
+                int[] structs = tier == null ? null : tier.getIntVals();
+                if (structs == null || structs.length == 0 || structs.length > 4096) return null;
+                for (int structId : structs)
+                {
+                    StructComposition struct = client.getStructComposition(structId);
+                    if (struct == null) return null;
+                    int task = struct.getIntValue(1306);
+                    // A duplicate or out-of-range id means the cache layout changed: refuse the whole catalogue.
+                    if (task < 0 || task >= 32 * AccountReadiness.CA_TASK_VARPS.length || catalog.containsKey(task)) return null;
+                    catalog.put(task, AccountReadiness.CA_TIERS.get(t));
+                }
+            }
+            return catalog;
+        }
+        catch (RuntimeException | LinkageError ex)
+        {
+            return null;
+        }
     }
 
     static Integer varp(int[] vars, int id)
