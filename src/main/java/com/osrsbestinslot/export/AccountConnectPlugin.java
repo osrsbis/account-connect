@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.37";
+	private static final String PLUGIN_VERSION = "0.7.38";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -341,6 +341,9 @@ public class AccountConnectPlugin extends Plugin
 	// whole bank as deposited, so no baseline is taken then. The first BANK container change while
 	// this is set becomes the baseline, and the close diffs against it.
 	private boolean bankBaselinePending;
+	// Widget unload may precede the logout state. An unreadable close waits for that state or the
+	// next world tick; reads arriving after the close must not become the old visit's end inventory.
+	private boolean bankClosePending;
 
 	// Bank-visit evidence (staff only, 0.7.17). One visit per BANKMAIN open: bank_visit_open, the item list at
 	// open and at close as bank_visit_manifest_chunk events, and bank_visit_close. Follows the server's
@@ -6637,6 +6640,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameTick(GameTick event)
 	{
 		refreshEventObservationContext();
+		finishPendingBankClose();
 		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
 		if (progressReady())
 		{
@@ -6819,6 +6823,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void handleCaptureOnOpenWidgetLoaded(int groupId)
 	{
+		if (groupId == BANK_GROUP_ID)
+		{
+			finishPendingBankClose();
+		}
 		if (groupId == BANK_GROUP_ID || groupId == COLLECTION_LOG_GROUP_ID)
 		{
 			forceSendSnapshot();
@@ -6846,6 +6854,10 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void handleBankContainerChanged(ItemContainer bank)
 	{
+		if (bankClosePending)
+		{
+			return;
+		}
 		if (bankBaselinePending)
 		{
 			Map<Integer, Long> b = new LinkedHashMap<>();
@@ -6941,12 +6953,32 @@ public class AccountConnectPlugin extends Plugin
 			endBankSession(false);
 			return;
 		}
-		if (client != null)
+		if (bankClosePending)
 		{
-			advanceBankSession(client.getItemContainer(InventoryID.BANK));
+			return;
 		}
-		closeBankVisit("closed", client == null ? null : client.getItemContainer(InventoryID.BANK));
+		ItemContainer bank = client == null ? null : client.getItemContainer(InventoryID.BANK);
+		Map<Integer, Long> read = new LinkedHashMap<>();
+		addContainerCounts(read, bank);
+		if (read.isEmpty() && (bankVisitId != null || bankAtOpen != null || bankBaselinePending))
+		{
+			bankClosePending = true;
+			return;
+		}
+		advanceBankSession(bank);
+		closeBankVisit("closed", bank);
 		endBankSession(true);
+	}
+
+	private void finishPendingBankClose()
+	{
+		if (!bankClosePending)
+		{
+			return;
+		}
+		boolean teardown = bankCloseIsTeardown();
+		closeBankVisit(teardown ? teardownReason(client == null ? null : client.getGameState()) : "closed", null);
+		endBankSession(!teardown);
 	}
 
 	/**
@@ -7095,6 +7127,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void dropBankVisit()
 	{
+		bankClosePending = false;
 		bankVisitId = null;
 		bankVisitOpenSent = false;
 		bankVisitOpenRead = false;
@@ -7157,6 +7190,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void endBankSession(boolean complete)
 	{
+		bankClosePending = false;
 		bankAtOpen = null;
 		bankBaselinePending = false;
 		if ((bankGrossDeposited.isEmpty() && bankGrossWithdrawn.isEmpty()) || !activityLogActive())

@@ -12,6 +12,8 @@ import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.WidgetClosed;
 import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -330,6 +332,7 @@ public class BankVisitEvidenceTest
 		r.grant("on");
 		r.open(bank());
 		r.close();
+		r.p.onGameTick(new GameTick());
 		Map<String, Object> open = r.of("bank_visit_open").get(0);
 		assertEquals("unloaded_unknown", open.get("bank_state"));
 		assertNull(open.get("manifest_sha256"));
@@ -388,6 +391,76 @@ public class BankVisitEvidenceTest
 	}
 
 	@Test
+	public void unreadableWidgetCloseBeforeLogoutUsesTheLaterTeardownReason() throws Exception
+	{
+		for (ItemContainer cleared : new ItemContainer[]{null, bank()})
+		{
+			Rig r = rig();
+			r.grant("on");
+			r.open(bank(new int[]{995, 10}));
+			r.change(bank(new int[]{995, 11}));
+			when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(cleared);
+			// The client unloads the widget before publishing LOGIN_SCREEN.
+			r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
+			assertTrue("an unreadable close must not prematurely claim a normal close",
+				r.of("bank_visit_close").isEmpty());
+			r.state(GameState.LOGIN_SCREEN);
+			assertEquals(1, r.of("bank_visit_close").size());
+			Map<String, Object> close = r.of("bank_visit_close").get(0);
+			assertEquals("logout", close.get("close_reason"));
+			assertEquals(true, close.get("manifest_complete")); // the OPEN manifest was read
+			assertEquals(false, close.get("moves_complete"));
+			assertNull(close.get("end_manifest_sha256"));
+			assertTrue(r.chunks("close").isEmpty());
+			assertEquals(false, r.of("bank_session").get(0).get("complete"));
+		}
+	}
+
+	@Test
+	public void unreadableNormalCloseSettlesOnNextTickWithoutBorrowingLaterInventory() throws Exception
+	{
+		Rig r = rig();
+		r.grant("on");
+		r.open(bank(new int[]{995, 10}));
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(null);
+		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
+		assertTrue(r.of("bank_visit_close").isEmpty());
+		ItemContainer laterBank = bank(new int[]{995, 999});
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(laterBank);
+		r.p.handleBankContainerChanged(laterBank);
+		r.p.onGameTick(new GameTick());
+		assertEquals(1, r.of("bank_visit_close").size());
+		Map<String, Object> close = r.of("bank_visit_close").get(0);
+		assertEquals("closed", close.get("close_reason"));
+		assertNull("a later cache is not the bank at the observed close", close.get("end_manifest_sha256"));
+		assertTrue(r.chunks("close").isEmpty());
+		assertTrue("post-close inventory must not fabricate a deposit", r.of("bank_session").isEmpty());
+		r.p.onGameTick(new GameTick());
+		assertEquals(1, r.of("bank_visit_close").size());
+	}
+
+	@Test
+	public void reopeningBeforeNextTickDoesNotApplyThePendingCloseToTheNewVisit() throws Exception
+	{
+		Rig r = rig();
+		r.grant("on");
+		r.open(bank(new int[]{995, 10}));
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(null);
+		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
+		r.open(bank(new int[]{995, 999}));
+		assertEquals(1, r.of("bank_visit_close").size());
+		assertEquals(r.of("bank_visit_open").get(0).get("visit_id"), r.of("bank_visit_close").get(0).get("visit_id"));
+		assertNull(r.of("bank_visit_close").get(0).get("end_manifest_sha256"));
+		assertTrue(r.of("bank_session").isEmpty());
+		r.p.onGameTick(new GameTick());
+		assertEquals(1, r.of("bank_visit_close").size());
+		r.close();
+		assertEquals(2, r.of("bank_visit_close").size());
+		assertEquals(r.of("bank_visit_open").get(1).get("visit_id"), r.of("bank_visit_close").get(1).get("visit_id"));
+		assertEquals(1, r.chunks("close").size());
+	}
+
+	@Test
 	public void reopenWithoutCloseStartsANewVisit() throws Exception
 	{
 		Rig r = rig();
@@ -408,7 +481,10 @@ public class BankVisitEvidenceTest
 		Rig r = rig();
 		r.grant("on");
 		r.open(bank(new int[]{995, 10}));
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(null);
+		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
 		r.p.shutDown();
+		r.p.onGameTick(new GameTick());
 		r.p.handleBankWidgetClosed(BANK_GROUP);	// a close after re-enable must not finish the old visit
 		assertTrue(r.of("bank_visit_close").isEmpty());
 	}
@@ -419,12 +495,15 @@ public class BankVisitEvidenceTest
 		Rig r = rig();
 		r.grant("on");
 		r.open(bank(new int[]{995, 10}));
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(null);
+		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
 		net.runelite.client.events.ConfigChanged c = new net.runelite.client.events.ConfigChanged();
 		c.setGroup(AccountConnectPlugin.CONFIG_GROUP);
 		c.setKey("linkToken");
 		c.setOldValue(TOKEN);
 		c.setNewValue("ffffffffffffffffffffffffffffffff");
 		r.p.onConfigChanged(c);
+		r.p.onGameTick(new GameTick());
 		r.close();
 		assertTrue(r.of("bank_visit_close").isEmpty());
 		assertFalse(r.p.bankEvidenceEnabled());
