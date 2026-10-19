@@ -425,6 +425,26 @@ public class WealthLedgerTest
 		}
 	}
 
+	@Test
+	public void replayReadsUploadBodiesAfterJsonRoundTrip() throws Exception
+	{
+		// Gson turns every number into a double. The replay tool must give the same ledger as the in-memory maps.
+		Snap a = new Snap(T0).inv(995, 300_000).inv(LOBSTER, 28).bank(T0 - 5, 995, 2_000_000)
+			.offer(1, SHARK, "BUYING", 200, 50, 1_000, 46_000);
+		Snap b = new Snap(T0 + 60).inv(995, 300_000).bank(T0 + 55, 995, 2_000_000, LOBSTER, 28)
+			.offer(1, SHARK, "BUYING", 200, 80, 1_000, 74_000);
+		Path dir = Files.createTempDirectory("wealth-replay");
+		Path fa = dir.resolve("a.json"), fb = dir.resolve("b.json");
+		Files.write(fa, new com.google.gson.Gson().toJson(Map.of("snapshot", a.m)).getBytes(StandardCharsets.UTF_8));
+		Files.write(fb, new com.google.gson.Gson().toJson(b.m).getBytes(StandardCharsets.UTF_8));
+		Map<String, Object> direct = rec(a, b);
+		Map<String, Object> replay = WealthReconciliation.reconcile(
+			WealthLedger.fromSnapshot(WealthLedgerReplay.load(fa.toString())),
+			WealthLedger.fromSnapshot(WealthLedgerReplay.load(fb.toString())), null, null, null, null);
+		assertEquals(direct.get("items"), replay.get("items"));
+		assertEquals(Long.valueOf(30L), classes(replay, SHARK).get(WealthReconciliation.TRADE));
+	}
+
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */
 	@Test
 	public void derivedResultExample() throws Exception
