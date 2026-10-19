@@ -307,7 +307,7 @@ public class BroadCaptureBatch1Test
 		when(client.getWorldType()).thenReturn(java.util.EnumSet.noneOf(net.runelite.api.WorldType.class));
 		p.onGameStateChanged(gs(GameState.LOGGED_IN));
 		p.emitEvent("loot", new HashMap<>());
-		assertFalse(p.pendingEvents.get(p.pendingEvents.size()-1).containsKey("profile_type"));
+		assertEquals("STANDARD", p.pendingEvents.get(p.pendingEvents.size()-1).get("profile_type"));
 	}
 
 	@Test
@@ -394,14 +394,16 @@ public class BroadCaptureBatch1Test
     // ------------------------------------------------------------------ profile fencing
 
 	@Test
-	public void eventsCarryProfileTypeOnlyOutsideTheMainGame() throws Exception
+	public void eventsCarryExplicitKnownProfileIncludingMainGame() throws Exception
 	{
 		setUp();
 		Field f = AccountConnectPlugin.class.getDeclaredField("activeProfileType");
 		f.setAccessible(true);
 		f.set(p, "STANDARD");
 		p.emitEvent("loot", new HashMap<>());
-		assertFalse(p.pendingEvents.get(0).containsKey("profile_type"));
+		// Since the observation-context contract (4d2bbc72), STANDARD is explicit too.
+		// Omitting it would make a known main-game event indistinguishable from unknown mode.
+		assertEquals("STANDARD", p.pendingEvents.get(0).get("profile_type"));
 		f.set(p, "SEASONAL");
 		p.emitEvent("loot", new HashMap<>());
 		assertEquals("SEASONAL", p.pendingEvents.get(1).get("profile_type"));
