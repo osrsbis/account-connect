@@ -284,4 +284,28 @@ public class AccountReadinessTest
         slayer.put("task_remaining", Double.POSITIVE_INFINITY);
         assertEquals("unknown", at(AccountReadiness.derive(raw), "slayer_task").get("state"));
     }
+
+    /**
+     * Worst case for the 512 KB snapshot body cap: the live cache catalogue (2026-10-12 cache, 655 tasks,
+     * ids 0..654: easy 41, medium 64, hard 89, elite 166, master 173, grandmaster 122) with every task done.
+     */
+    @Test
+    public void worstCaseCaBlockStaysSmallAgainstTheBodyCap()
+    {
+        int[] perTier = {41, 64, 89, 166, 173, 122};
+        java.util.Map<Integer, String> catalog = new java.util.TreeMap<>();
+        int id = 0;
+        for (int t = 0; t < perTier.length; t++)
+            for (int n = 0; n < perTier[t]; n++) catalog.put(id++, AccountReadiness.CA_TIERS.get(t));
+        int[] all = new int[6000];
+        for (int v : AccountReadiness.CA_TASK_VARPS) all[v] = -1;
+        int bytes = new Gson().toJson(AccountProgressCapture.caTasks(all, catalog)).getBytes(StandardCharsets.UTF_8).length;
+        assertTrue("combat_achievement_tasks worst case " + bytes + " bytes", bytes < 6 * 1024);
+        Map<String, Object> raw = new LinkedHashMap<>();
+        raw.put("combat_achievement_tasks", new Gson().fromJson(new Gson().toJson(AccountProgressCapture.caTasks(all, catalog)), Map.class));
+        Map<String, Object> ca = AccountReadiness.combatAchievements(raw);
+        assertEquals(672, ((java.util.List<?>) ca.get("completed_task_ids")).size()); // 655 catalogued + 17 spare bits
+        assertEquals(17, ((java.util.List<?>) ((Map<?, ?>) ca.get("completed_by_tier")).get("uncatalogued")).size());
+        System.out.println("C5_CA_WORST_CASE_BYTES=" + bytes);
+    }
 }
