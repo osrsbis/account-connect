@@ -492,6 +492,28 @@ public class CombatEncounterTrackerTest
         assertEquals(5L, m(server.get("own_attacks")).get("total_own_damage")); assertEquals("observed_death", server.get("outcome"));
     }
 
+    @Test public void gearSwapSeenOnlyAtTheKillingSplatAfterDeathIsAChange()
+    {
+        // 0.7.43 real client: bow hits, swap to axe, and the only axe splat arrives after ActorDeath.
+        NPC rat = npc(2861);
+        tick = 300; dealt(rat, 1);
+        worn[3] = new Item(1353, 1);
+        tick = 304; capture.endNpc(client, rat, true, AT); dealt(rat, 4);
+        Map<String,Object> e = encounters(capture.encounterSummary(tick)).get(0);
+        Map<?,?> gear = m(e.get("equipment"));
+        assertEquals("observed_death", e.get("outcome"));
+        assertEquals(true, gear.get("changed_during")); assertEquals(2, ((List<?>) gear.get("revisions_observed")).size());
+    }
+
+    @Test public void killingSplatAfterDeathWithSameGearAddsNoRevision()
+    {
+        NPC rat = npc(2861);
+        tick = 300; dealt(rat, 1);
+        tick = 304; capture.endNpc(client, rat, true, AT); dealt(rat, 4);
+        Map<?,?> gear = m(encounters(capture.encounterSummary(tick)).get(0).get("equipment"));
+        assertEquals(false, gear.get("changed_during")); assertEquals(1, ((List<?>) gear.get("revisions_observed")).size());
+    }
+
     @Test public void deathOfAnotherNpcInSameTickDoesNotCaptureANewTarget()
     {
         NPC dead = npc(2861), other = npc(2861);

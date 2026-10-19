@@ -144,7 +144,15 @@ final class CombatEncounterTracker
             Encounter dead = null;
             for (Encounter c : closed)
                 if (c.targetKey.equals(target) && "observed_death".equals(c.outcome) && c.endTick == tick) dead = c;
-            if (dead != null) { count(dead, v, tick, at, seq); return; }
+            if (dead != null)
+            {
+                // The worn read for this splat came after the death closed the encounter. Keep it when it is new.
+                if (worn != null && Integer.valueOf(tick).equals(worn.get("observed_tick")) && !dead.revisions.contains(worn))
+                {
+                    if (dead.revisions.size() < MAX_REVISIONS) dead.revisions.add(worn); else dead.gaps.add("revision_capacity");
+                }
+                count(dead, v, tick, at, seq); return;
+            }
         }
         if (e == null)
         {
