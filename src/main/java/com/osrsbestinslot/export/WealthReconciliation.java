@@ -137,6 +137,40 @@ final class WealthReconciliation
 		return out;
 	}
 
+	/**
+	 * Flows from C3 ActivityFlows.classify output (c3-activity-flows-v1). Only flows observed inside (fromMs, toMs]
+	 * count. A flow with no item or quantity (a death without a trusted items_lost diff) becomes an unknown flow:
+	 * it is kept with itemId 0 so the ledger reports it and never calls the window explained.
+	 */
+	static List<Flow> flowsFromC3(List<? extends Map<?, ?>> c3Flows, long fromMs, long toMs, List<String> excluded)
+	{
+		List<Flow> out = new ArrayList<>();
+		if (c3Flows == null)
+		{
+			return out;
+		}
+		for (Map<?, ?> f : c3Flows)
+		{
+			String id = String.valueOf(f.get("flow_id"));
+			Long at = WealthLedger.asLong(f.get("observed_at_ms"));
+			if (at == null)
+			{
+				excluded.add(id + ":no_time");
+				continue;
+			}
+			if (at <= fromMs || at > toMs)
+			{
+				continue;
+			}
+			Long item = WealthLedger.asLong(f.get("item_id")), qty = WealthLedger.asLong(f.get("qty_delta"));
+			String cls = String.valueOf(f.get("flow_class"));
+			out.add(item == null || qty == null || item <= 0
+				? new Flow(id, 0, 0, cls, "unknown")
+				: new Flow(id, item.intValue(), qty, cls, String.valueOf(f.get("provenance"))));
+		}
+		return out;
+	}
+
 	static String ledgerClass(String c3FlowClass)
 	{
 		switch (c3FlowClass)
@@ -250,6 +284,7 @@ final class WealthReconciliation
 			}
 		}
 		Map<Integer, Long> outOfView = new HashMap<>();
+		List<String> unknownFlows = new ArrayList<>();
 		Set<String> seenFlows = new HashSet<>();
 		int duplicateFlows = 0;
 		if (flows != null)
@@ -259,6 +294,11 @@ final class WealthReconciliation
 				if (!seenFlows.add(f.flowId))
 				{
 					duplicateFlows++;	// a replayed or duplicated upload must not count twice
+					continue;
+				}
+				if (f.itemId <= 0)
+				{
+					unknownFlows.add(f.flowId + ":" + f.flowClass);	// e.g. a death with no trusted item diff
 					continue;
 				}
 				int id = f.itemId == WealthLedger.PLATINUM_TOKEN ? WealthLedger.COINS : f.itemId;
@@ -408,7 +448,9 @@ final class WealthReconciliation
 			conserved &= sum == (long) row.get("net_change");
 		}
 		out.put("conservation_holds", conserved);
-		boolean explained = rowsHave(rows, UNEXPLAINED) == 0 && rowsHave(rows, GE_SETTLEMENT_INFERRED) == 0;
+		out.put("unknown_flows", unknownFlows);
+		boolean explained = rowsHave(rows, UNEXPLAINED) == 0 && rowsHave(rows, GE_SETTLEMENT_INFERRED) == 0
+			&& unknownFlows.isEmpty();
 		boolean core = true;
 		for (String name : WealthLedger.CORE)
 		{

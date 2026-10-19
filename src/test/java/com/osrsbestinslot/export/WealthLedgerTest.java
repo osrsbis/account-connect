@@ -362,6 +362,40 @@ public class WealthLedgerTest
 	}
 
 	@Test
+	public void c3ClassifyOutputAdapterWindowsFlowsAndKeepsUnknownDeathLoss()
+	{
+		long t = T0 * 1000;
+		Map<String, Object> eat = new LinkedHashMap<>();
+		eat.put("flow_id", "e1:0");
+		eat.put("item_id", SHARK);
+		eat.put("qty_delta", -1L);
+		eat.put("observed_at_ms", t + 5_000);
+		eat.put("flow_class", "consumed_inferred");
+		eat.put("provenance", "inferred");
+		Map<String, Object> early = new LinkedHashMap<>(eat);
+		early.put("flow_id", "e0:0");
+		early.put("observed_at_ms", t - 1);
+		Map<String, Object> death = new LinkedHashMap<>();
+		death.put("flow_id", "d1:0");
+		death.put("item_id", null);
+		death.put("qty_delta", null);
+		death.put("observed_at_ms", t + 9_000);
+		death.put("flow_class", "lost_death");
+		death.put("provenance", "unknown");
+		List<String> excluded = new ArrayList<>();
+		List<WealthReconciliation.Flow> flows = WealthReconciliation.flowsFromC3(List.of(eat, early, death), t, t + 60_000,
+			excluded);
+		assertEquals(2, flows.size());
+		assertTrue(excluded.isEmpty());
+		Snap a = new Snap(T0).inv(SHARK, 5).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).inv(SHARK, 4).bank(T0 - 5, 995, 1);
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, flows, null, null);
+		assertEquals(Map.of(WealthReconciliation.CONSUMPTION_LOSS, -1L), classes(r, SHARK));
+		assertEquals(List.of("d1:0:lost_death"), r.get("unknown_flows"));
+		assertEquals(false, r.get("explained"));
+	}
+
+	@Test
 	public void c3TransferredFlowDoesNotDoubleCountASeenBankDeposit()
 	{
 		Snap a = new Snap(T0).inv(LOBSTER, 28).bank(T0 - 5, 995, 1);
