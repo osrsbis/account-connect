@@ -95,7 +95,8 @@ public final class GeArchiveAudit
         report.put("observed_fill_intervals", fillIntervals);
         report.put("reducer_diagnostics", diagnostics);
         report.put("durable_ack", ack);
-        report.put("scope", "bounded archive observations; not independent-player coverage, actual execution times or GP/tax proof");
+        report.put("scope", "bounded archive observations; exclusion reasons overlap and are not summed; "
+            + "not independent-player coverage, actual execution times or GP/tax proof");
         return report;
     }
 
