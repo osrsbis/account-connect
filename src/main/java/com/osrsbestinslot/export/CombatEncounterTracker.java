@@ -284,8 +284,12 @@ final class CombatEncounterTracker
         Map<String,Object> gear = new LinkedHashMap<>();
         gear.put("at_start", e.wornAtStart == null ? "unknown" : e.wornAtStart);
         gear.put("revisions_observed", new ArrayList<>(e.revisions));
-        // Unknown then known is not a change: without a start revision the first one is only a baseline.
-        gear.put("changed_during", e.revisions.size() > 1);
+        // A change needs two adjacent revisions with different content. Unknown then known, or the same gear
+        // re-read as a fresh baseline after an unreadable read, is not a change.
+        boolean changed = false;
+        for (int i = 1; i < e.revisions.size(); i++)
+            changed |= !Objects.equals(e.revisions.get(i - 1).get("content_id"), e.revisions.get(i).get("content_id"));
+        gear.put("changed_during", changed);
         gear.put("timing", "observed_at_own_hits_not_exact_change_time");
         m.put("equipment", gear);
         m.put("loot", new ArrayList<>(e.loot));

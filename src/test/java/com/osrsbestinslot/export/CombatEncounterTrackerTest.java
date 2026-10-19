@@ -421,6 +421,23 @@ public class CombatEncounterTrackerTest
         when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null);
         NPC b = npc(3001); tick = 113; dealt(b, 4);
         assertEquals("unknown", m(encounters(capture.encounterSummary(tick)).get(1).get("equipment")).get("at_start"));
+        wear(worn); tick = 115; dealt(npc(3002), 4); // same gear readable again: fresh baseline, not unknown forever
+        Map<?,?> start = m(m(encounters(capture.encounterSummary(tick)).get(2).get("equipment")).get("at_start"));
+        assertEquals(861, m(start.get("slots")).get("weapon")); assertEquals(115, start.get("observed_tick"));
+    }
+
+    // Review r2 F1: unreadable between two equal readable reads is a gap, not a gear change.
+    @Test public void unreadableBetweenEqualReadsIsGapNotChange()
+    {
+        ItemContainer known = client.getItemContainer(InventoryID.EQUIPMENT);
+        NPC n = npc(3000); tick = 110; dealt(n, 4);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null); tick = 112; dealt(n, 4);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(known); tick = 114; dealt(n, 4);
+        Map<String,Object> e = encounters(capture.encounterSummary(tick)).get(0);
+        assertEquals(false, m(e.get("equipment")).get("changed_during"));
+        assertTrue(((List<?>) e.get("gaps")).contains("equipment_unreadable"));
+        worn[3] = new Item(11235, 1); tick = 116; dealt(n, 4);
+        assertEquals(true, m(encounters(capture.encounterSummary(tick)).get(0).get("equipment")).get("changed_during"));
     }
 
     @Test public void nullItemArrayIsUnknownNotEmptyLoadout()
