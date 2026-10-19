@@ -494,6 +494,29 @@ inferred. Existing snapshot hashing excludes capture health, so changing counter
 alone does not trigger an upload. This telemetry remains release-gated with the
 expanded client and is not measured production coverage.
 
+### Public bank retry contract (local candidate)
+
+A successful token-bound `X-Bank-Receipt: event-id-v1` response, bank capture enabled,
+and a settled own account/mode/RuneLite profile enable the bounded public journal
+for `bank_visit_open`, `bank_visit_manifest_chunk` and `bank_visit_close` only.
+These rows use the existing event endpoint and its exact per-ID `stored`, `duplicate`
+or `filtered` results. A generic success/count does not clear the journal. A D1
+receipt is not a Queue or archive receipt. No staff-spool or Queue grant is added.
+Its `osrsbis/public-bank-events-v1` root is separate from the Queue journal, so an
+older Queue client cannot quarantine bank rows it does not understand. Each journal
+has the existing 5,000-row, 5 MiB and 48-hour bounds; this is not indefinite local storage.
+The same identity, disk bounds, retry/backoff, revocation and tombstone protections
+below apply. Missing capability or bank opt-out pauses replay; explicit token
+withdrawal/revocation purges local retry data. Older servers retain memory-only
+behavior. No new capture fields or family are enabled.
+
+An unreadable bank close is incomplete regardless of callback order. The opening
+`manifest_complete` flag still describes the opening inventory. `moves_complete`
+and the session's `complete` flag are false without a reliable closing read.
+`close_reason: closed` records an observed widget close when its later teardown
+cause was not known; it does not establish a normal complete visit. No ending
+inventory is invented. Actual final-build account/crash acceptance remains required.
+
 ### Public Queue retry contract (local candidate)
 
 A successful token-bound `X-Event-Queue: ge-v1` or `own-history-v1` response,
@@ -501,7 +524,7 @@ a settled own account/mode and a known RuneLite profile are required. The base c
 14 Queue-supported event types: six GE types plus
 bank_session, equip_change, loot, kill_count, level_up, xp_gain, alch and pickup.
 The existing first-party field projection runs before disk, during recovery and
-before POST. Other public families and snapshots retain their existing memory
+before POST. Apart from the separately negotiated bank path above, other public families and snapshots retain their existing memory
 path; this is not whole-intake crash durability.
 
 The separate `osrsbis/public-events-v1` journal uses hashed token/account/mode/profile

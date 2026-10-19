@@ -430,6 +430,105 @@ public class PublicEventOutboxPluginTest
         Files.delete(blockedRoot); emit();
         assertEquals(1, ((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
     }
+    private void bankGrant(boolean enabled, boolean queue) throws Exception
+    {
+        Response.Builder r = new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Spool", "off")
+            .header("X-Bank-Evidence", enabled ? "on" : "off");
+        if (enabled) r.header("X-Bank-Receipt", "event-id-v1");
+        if (queue) r.header("X-Event-Queue", "own-history-v1");
+        p.applyServerPolicy(r.build(), token.get()); p.awaitSpoolIdleForTest();
+    }
+    private String emitBank() throws Exception
+    {
+        p.emitEvent("bank_visit_close", Map.of("visit_id", "a".repeat(32), "closed_at_ms", System.currentTimeMillis(),
+            "close_reason", "logout", "manifest_complete", true, "moves_complete", false));
+        p.awaitSpoolIdleForTest(); return (String)p.pendingEvents.get(p.pendingEvents.size()-1).get("event_id");
+    }
+    @Test public void publicBankSurvivesCrashAndOnlyItsOwnLegacyReceiptSettlesIt() throws Exception
+    {
+        bankGrant(true, false); String id=emitBank();
+        assertEquals(1, ((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        p.crashSpoolForTest(); p=fresh("STANDARD", 7);
+        p.pumpPublicOutbox(); p.awaitSpoolIdleForTest(); assertTrue(p.pendingEvents.isEmpty());
+        bankGrant(true, false); assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}")); p.flushEvents();
+        assertFalse("bank replay uses the existing legacy per-ID endpoint", request().has("ack_protocol")); done();
+        assertEquals(1,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        p.eventRetryBackoffUntilMs=0;
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+id+"\",\"status\":\"duplicate\"}]}"));
+        p.flushEvents(); request(); done();
+        assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);assertTrue(p.pendingEvents.isEmpty());
+    }
+    @Test public void publicBankGrantDoesNotJournalUnrelatedTrafficOrWidenQueue()
+        throws Exception
+    {
+        emitBank(); assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        emit();String bankId=emitBank();
+        assertEquals(1,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        assertEquals(1,p.pendingEvents.size());assertEquals(bankId,p.pendingEvents.get(0).get("event_id"));
+        bankGrant(false,true);p.flushEvents();done();assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
+        bankGrant(true,false);server.enqueue(new MockResponse().setBody("{\"ok\":true}"));p.flushEvents();
+        assertFalse(request().has("ack_protocol"));done();
+    }
+    @Test public void publicBankAndQueueUseSeparateBatchesAndReceiptFormats() throws Exception
+    {
+        bankGrant(true,true);emit();String geId=(String)p.pendingEvents.get(0).get("event_id");String bankId=emitBank();
+        server.enqueue(new MockResponse().setBody(receipt(geId)));p.flushEvents();
+        JsonObject ge=request();assertEquals("queue-v1",ge.get("ack_protocol").getAsString());
+        assertEquals(1,ge.getAsJsonArray("events").size());done();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+bankId+"\",\"status\":\"stored\"}]}"));
+        p.flushEvents();JsonObject bank=request();assertFalse(bank.has("ack_protocol"));assertEquals(1,bank.getAsJsonArray("events").size());done();
+        assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
+    @Test public void capturedBankCloseFinishesDiskWriteAfterLogoutButCannotReplayInAnotherMode() throws Exception
+    {
+        bankGrant(true,false);
+        Field f=AccountConnectPlugin.class.getDeclaredField("spoolExec");f.setAccessible(true);
+        java.util.concurrent.ExecutorService disk=(java.util.concurrent.ExecutorService)f.get(p);
+        java.util.concurrent.CountDownLatch started=new java.util.concurrent.CountDownLatch(1), release=new java.util.concurrent.CountDownLatch(1);
+        disk.execute(()->{started.countDown();try {release.await(3,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}});
+        assertTrue(started.await(1,TimeUnit.SECONDS));
+        try {
+            p.emitEvent("bank_visit_close",Map.of("visit_id","a".repeat(32),"closed_at_ms",System.currentTimeMillis(),
+                "close_reason","logout","manifest_complete",true,"moves_complete",false));
+            set(p,"sessionActive",false);set(p,"activeProfileType",null);
+        } finally {release.countDown();}
+        p.awaitSpoolIdleForTest();assertEquals(1,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        assertTrue(p.pendingEvents.isEmpty());p.crashSpoolForTest();p=fresh("LEAGUE",7);bankGrant(true,false);
+        assertTrue(p.pendingEvents.isEmpty());p.crashSpoolForTest();p=fresh("STANDARD",8);bankGrant(true,false);
+        assertTrue(p.pendingEvents.isEmpty());p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        assertEquals(1,p.pendingEvents.size());
+    }
+    @Test public void publicBankRevocationPurgesBeforeColdRecovery() throws Exception
+    {
+        bankGrant(true,false);emitBank();server.enqueue(new MockResponse().setResponseCode(403).setBody("{\"error\":\"revoked\"}"));
+        p.flushEvents();request();done();p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        assertTrue(p.pendingEvents.isEmpty());assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
+    @Test public void publicBankDiskFailureKeepsBoundedLegacyRetryWithoutClaimingDurability() throws Exception
+    {
+        bankGrant(true,false);Path blocked=data.resolve("osrsbis/public-bank-events-v1");
+        Files.createDirectories(blocked.getParent());Files.write(blocked,new byte[]{1});String id=emitBank();
+        assertEquals(1,((Number)p.captureHealthSnapshot().get("public_outbox_not_durable_total")).intValue());
+        assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        server.enqueue(new MockResponse().setResponseCode(429).setHeader("Retry-After","5"));p.flushEvents();
+        assertFalse(request().has("ack_protocol"));done();assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+        assertTrue(p.eventRetryBackoffUntilMs>0);assertEquals(0,p.queueRetryBackoffUntilMs);
+    }
+    @Test public void publicBankJournalIsSeparateFromAnOlderQueueClientRoot() throws Exception
+    {
+        bankGrant(true,false);String id=emitBank();p.crashSpoolForTest();
+        assertTrue(Files.isDirectory(data.resolve("osrsbis/public-bank-events-v1")));
+        PublicEventOutbox.Context owner=new PublicEventOutbox.Context(TOKEN,"123","STANDARD","7");
+        PublicEventOutbox queueOnly=new PublicEventOutbox(data,new Gson(),System::currentTimeMillis);
+        try { assertTrue(queueOnly.pending(owner,"own-history-v1",100).isEmpty()); }
+        finally { queueOnly.close(); }
+        p=fresh("STANDARD",7);bankGrant(true,false);assertEquals(id,p.pendingEvents.get(0).get("event_id"));
+    }
     @Test public void diskFailureFallbackCannotCrossTheAccountBoundary() throws Exception
     {
         grant(); Path blockedRoot = data.resolve("osrsbis/public-events-v1");

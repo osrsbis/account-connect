@@ -43,6 +43,7 @@ final class PublicEventOutbox
     private final Gson gson;
     private final LongSupplier clock;
     private final EventSpool.Limits limits;
+    private final boolean bankOnly;
     final EventSpool.Counters counters = new EventSpool.Counters();
     private EventSpool journal;
     private Context context;
@@ -54,8 +55,14 @@ final class PublicEventOutbox
 
     PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits)
     {
+        this(data,gson,clock,limits,false);
+    }
+
+    PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits, boolean bankOnly)
+    {
         this.data = data;
-        this.root = data.resolve("osrsbis").resolve("public-events-v1");
+        this.root = data.resolve("osrsbis").resolve(bankOnly ? "public-bank-events-v1" : "public-events-v1");
+        this.bankOnly = bankOnly;
         this.gson = gson;
         this.clock = clock;
         this.limits = limits;
@@ -95,7 +102,7 @@ final class PublicEventOutbox
     boolean append(Context owner, String scope, Map<String, Object> input) throws IOException
     {
         Map<String, Object> event = PublicTransport.event(input);
-        if (owner == null || event == null || !owner.owns(event) || !EventQueueProtocol.allows(scope, event))
+        if (owner == null || event == null || !owner.owns(event) || !knownType(event) || !allows(scope, event))
             return false;
         event.remove("rsn"); // account_hash and the token-bound context suffice for public Queue routing
         Object timestamp = event.get("ts");
@@ -153,16 +160,26 @@ final class PublicEventOutbox
             try { event = PublicTransport.event(gson.fromJson(row.eventJson, Map.class)); }
             catch (RuntimeException invalid) { event = null; }
             if (event == null || !owner.owns(event) || !row.eventId.equals(event.get("event_id"))
-                || !EventQueueProtocol.allows("own-signals-v1", event))
+                || !knownType(event))
             {
                 rejected.add(row.eventId);
                 continue;
             }
             // A narrower grant pauses retained broader rows; it does not acknowledge them.
-            if (EventQueueProtocol.allows(scope, event) && result.size() < maximum) result.add(event);
+            if (allows(scope, event) && result.size() < maximum) result.add(event);
         }
         journal.quarantine(rejected, -1);
         return result;
+    }
+
+    static boolean allows(String scope, Map<String,Object> event)
+    {
+        return PublicBankProtocol.SCOPE.equals(scope) ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows(scope,event);
+    }
+
+    private boolean knownType(Map<String,Object> event)
+    {
+        return bankOnly ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows("own-signals-v1",event);
     }
 
     /** Only validated per-ID queue outcomes settle rows, including partial non-2xx receipts. */

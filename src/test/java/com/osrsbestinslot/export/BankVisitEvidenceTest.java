@@ -432,11 +432,28 @@ public class BankVisitEvidenceTest
 		assertEquals(1, r.of("bank_visit_close").size());
 		Map<String, Object> close = r.of("bank_visit_close").get(0);
 		assertEquals("closed", close.get("close_reason"));
+		assertEquals("an unreadable close cannot prove all movements", false, close.get("moves_complete"));
 		assertNull("a later cache is not the bank at the observed close", close.get("end_manifest_sha256"));
 		assertTrue(r.chunks("close").isEmpty());
 		assertTrue("post-close inventory must not fabricate a deposit", r.of("bank_session").isEmpty());
 		r.p.onGameTick(new GameTick());
 		assertEquals(1, r.of("bank_visit_close").size());
+	}
+
+	@Test
+	public void worldTickBeforeLogoutCannotTurnAnUnreadableCloseIntoCompleteMoves() throws Exception
+	{
+		Rig r=rig();r.grant("on");r.open(bank(new int[]{995,10}));r.change(bank(new int[]{995,11}));
+		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(null);
+		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP,0,true));
+		r.p.onGameTick(new GameTick()); // actual RuneLite ordering reproduced on 0.7.38
+		r.state(GameState.LOGIN_SCREEN);
+		assertEquals(1,r.of("bank_visit_close").size());
+		Map<String,Object> close=r.of("bank_visit_close").get(0);
+		assertEquals(true,close.get("manifest_complete"));
+		assertEquals(false,close.get("moves_complete"));
+		assertNull(close.get("end_manifest_sha256"));
+		assertEquals(false,r.of("bank_session").get(0).get("complete"));
 	}
 
 	@Test

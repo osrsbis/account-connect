@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.38";
+	private static final String PLUGIN_VERSION = "0.7.39";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -680,6 +680,8 @@ public class AccountConnectPlugin extends Plugin
 	private static final String EVENT_QUEUE = "__delivery_queue_v1";
 	private volatile String eventQueueGrantToken;
 	private volatile String eventQueueScope;
+	private volatile String bankJournalGrantToken;
+	private static final String EVENT_PUBLIC_BANK = "__public_bank_receipt";
 	private static final String EVENT_PUBLIC_OUTBOX = "__public_outbox_context";
 	private static final String EVENT_PUBLIC_VOLATILE = "__public_outbox_volatile";
 	private final java.util.Set<String> publicOutboxMemoryIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -4176,7 +4178,7 @@ public class AccountConnectPlugin extends Plugin
 	{
 		String token = currentLinkToken();
 		if (publicOutboxPaused || config == null || !uploadAllowed() || !sessionActive || token.equals(spoolGrantToken)
-			|| requireGrant && !token.equals(eventQueueGrantToken)
+			|| requireGrant && !(token.equals(eventQueueGrantToken) || token.equals(bankJournalGrantToken))
 			|| configManager == null || configManager.getProfile() == null) return null;
 		try
 		{
@@ -4184,6 +4186,20 @@ public class AccountConnectPlugin extends Plugin
 				Long.toString(configManager.getProfile().getId()));
 		}
 		catch (IllegalArgumentException unknown) { return null; }
+	}
+
+	private PublicEventOutbox publicBankOutbox;
+
+	private PublicEventOutbox publicBankOutboxOnDiskThread()
+	{
+		if (publicBankOutbox == null) publicBankOutbox = new PublicEventOutbox(spoolDataRoot(), gson,
+			() -> wallClock.getAsLong(), EventSpool.Limits.DEFAULT, true);
+		return publicBankOutbox;
+	}
+
+	private PublicEventOutbox publicOutboxForScope(String scope)
+	{
+		return PublicBankProtocol.SCOPE.equals(scope) ? publicBankOutboxOnDiskThread() : publicOutboxOnDiskThread();
 	}
 
 	private PublicEventOutbox publicOutboxOnDiskThread()
@@ -4194,11 +4210,10 @@ public class AccountConnectPlugin extends Plugin
 
 	private void publicOutboxHealth()
 	{
-		if (publicOutbox == null) return;
-		publicOutboxPending = publicOutbox.size();
-		publicOutboxBytes = publicOutbox.bytes();
-		publicOutboxDropped = publicOutbox.counters.dropped.get();
-		publicOutboxPurged = publicOutbox.counters.purged.get();
+		publicOutboxPending = (publicOutbox == null ? 0 : publicOutbox.size()) + (publicBankOutbox == null ? 0 : publicBankOutbox.size());
+		publicOutboxBytes = (publicOutbox == null ? 0 : publicOutbox.bytes()) + (publicBankOutbox == null ? 0 : publicBankOutbox.bytes());
+		publicOutboxDropped = (publicOutbox == null ? 0 : publicOutbox.counters.dropped.get()) + (publicBankOutbox == null ? 0 : publicBankOutbox.counters.dropped.get());
+		publicOutboxPurged = (publicOutbox == null ? 0 : publicOutbox.counters.purged.get()) + (publicBankOutbox == null ? 0 : publicBankOutbox.counters.purged.get());
 	}
 
 	private static String publicOutboxIdentity(Map<String, Object> event)
@@ -4207,26 +4222,62 @@ public class AccountConnectPlugin extends Plugin
 		return owner instanceof PublicEventOutbox.Context ? ((PublicEventOutbox.Context) owner).identity : null;
 	}
 
+	private boolean publicScopeGranted(String scope)
+	{
+		String token = currentLinkToken();
+		return PublicBankProtocol.SCOPE.equals(scope) ? token.equals(bankJournalGrantToken)
+			: scope != null && scope.equals(eventQueueScope) && token.equals(eventQueueGrantToken);
+	}
+
+	private String publicScopeFor(Map<String,Object> event)
+	{
+		if (PublicBankProtocol.allows(event) && publicScopeGranted(PublicBankProtocol.SCOPE)) return PublicBankProtocol.SCOPE;
+		return publicScopeGranted(eventQueueScope) && EventQueueProtocol.allows(eventQueueScope,event) ? eventQueueScope : null;
+	}
+
+	private String stagedPublicScope(Map<String,Object> event)
+	{
+		String scope = Boolean.TRUE.equals(event.get(EVENT_PUBLIC_BANK)) ? PublicBankProtocol.SCOPE : eventQueueScope;
+		return publicScopeGranted(scope) ? scope : null;
+	}
+
+	private boolean capturedPublicOwnerStillValid(PublicEventOutbox.Context owner, String scope)
+	{
+		if (!publicScopeGranted(scope)) return false;
+		PublicEventOutbox.Context current = publicQueueContext(true);
+		if (current != null) return owner.identity.equals(current.identity);
+		// A bank close is captured before trackLogout clears the mode. Finish that already captured
+		// disk write after logout, but do not replay until a matching logged-in identity returns.
+		if (!PublicBankProtocol.SCOPE.equals(scope) || publicOutboxPaused || !uploadAllowed()
+			|| !owner.account.equals(activeHash) || activeProfileType != null && !owner.mode.equals(activeProfileType)
+			|| configManager == null || configManager.getProfile() == null) return false;
+		try
+		{
+			return owner.identity.equals(new PublicEventOutbox.Context(currentLinkToken(), activeHash, owner.mode,
+				Long.toString(configManager.getProfile().getId())).identity);
+		}
+		catch (IllegalArgumentException unknown) { return false; }
+	}
+
 	/** Capture before transmission; a bounded executor backlog is an explicit non-durable gap. */
 	private boolean capturePublicOutbox(Map<String, Object> event)
 	{
 		PublicEventOutbox.Context owner = publicQueueContext(true);
-		String scope = eventQueueScope;
-		if (owner == null || !owner.owns(event) || !EventQueueProtocol.allows(scope, event)) return false;
+		String scope = publicScopeFor(event);
+		if (owner == null || !owner.owns(event) || scope == null) return false;
 		queueDeliveryHealth.handoff(event);
 		if (publicOutboxWrites.incrementAndGet() > MAX_PENDING_EVENTS)
 		{
 			publicOutboxWrites.decrementAndGet();
-			stageUndurablePublicEvent(owner, event);
+			stageUndurablePublicEvent(owner, scope, event);
 			return true;
 		}
 		boolean submitted = onSpoolThread(() ->
 		{
 			try
 			{
-				PublicEventOutbox.Context current = publicQueueContext(true);
-				if (current == null || !owner.identity.equals(current.identity)
-					|| !publicOutboxOnDiskThread().append(owner, scope, event))
+				if (!capturedPublicOwnerStillValid(owner, scope)
+					|| !publicOutboxForScope(scope).append(owner, scope, event))
 				{
 					publicOutboxUndurable.incrementAndGet();
 					queueDeliveryHealth.undurable(event);
@@ -4238,7 +4289,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			catch (IOException | RuntimeException failure)
 			{
-				stageUndurablePublicEvent(owner, event);
+				stageUndurablePublicEvent(owner, scope, event);
 				log.debug("OSRS BiS public event journal append failed", failure);
 			}
 			finally { publicOutboxWrites.decrementAndGet(); publicOutboxHealth(); }
@@ -4246,24 +4297,25 @@ public class AccountConnectPlugin extends Plugin
 		if (!submitted)
 		{
 			publicOutboxWrites.decrementAndGet();
-			stageUndurablePublicEvent(owner, event);
+			stageUndurablePublicEvent(owner, scope, event);
 		}
 		return true;
 	}
 
 	/** IO/backlog failures retain the old bounded memory service, with no durability claim. */
-	private void stageUndurablePublicEvent(PublicEventOutbox.Context owner, Map<String, Object> event)
+	private void stageUndurablePublicEvent(PublicEventOutbox.Context owner, String scope, Map<String, Object> event)
 	{
 		publicOutboxUndurable.incrementAndGet();
 		queueDeliveryHealth.undurable(event);
 		PublicEventOutbox.Context current = publicQueueContext(true);
-		if (current == null || !owner.identity.equals(current.identity))
+		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope))
 		{
 			healthEventsLost.incrementAndGet();
 			return;
 		}
 		Map<String, Object> retry = new LinkedHashMap<>(event);
-		retry.put(EVENT_QUEUE, true);
+		retry.put(EVENT_QUEUE, !PublicBankProtocol.SCOPE.equals(scope));
+		retry.put(EVENT_PUBLIC_BANK, PublicBankProtocol.SCOPE.equals(scope));
 		retry.put(EVENT_PUBLIC_OUTBOX, owner);
 		retry.put(EVENT_PUBLIC_VOLATILE, true);
 		synchronized (pendingEvents)
@@ -4277,9 +4329,9 @@ public class AccountConnectPlugin extends Plugin
 
 	private void stagePublicOutbox(PublicEventOutbox.Context owner, String scope) throws IOException
 	{
-		List<Map<String, Object>> recovered = publicOutboxOnDiskThread().pending(owner, scope, MAX_PENDING_EVENTS);
+		List<Map<String, Object>> recovered = publicOutboxForScope(scope).pending(owner, scope, MAX_PENDING_EVENTS);
 		PublicEventOutbox.Context current = publicQueueContext(true);
-		if (current == null || !owner.identity.equals(current.identity)) return;
+		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope)) return;
 		synchronized (pendingEvents)
 		{
 			for (Map<String, Object> event : recovered)
@@ -4287,7 +4339,8 @@ public class AccountConnectPlugin extends Plugin
 				if (pendingEvents.size() >= MAX_PENDING_EVENTS) break;
 				if (!publicOutboxMemoryIds.add(String.valueOf(event.get("event_id")))) continue;
 				event.put(EVENT_TOKEN_FP, currentEventTokenFingerprint());
-				event.put(EVENT_QUEUE, true);
+				event.put(EVENT_QUEUE, !PublicBankProtocol.SCOPE.equals(scope));
+				event.put(EVENT_PUBLIC_BANK, PublicBankProtocol.SCOPE.equals(scope));
 				event.put(EVENT_PUBLIC_OUTBOX, owner);
 				pendingEvents.add(event);
 			}
@@ -4306,7 +4359,11 @@ public class AccountConnectPlugin extends Plugin
 			try
 			{
 				PublicEventOutbox.Context current = publicQueueContext(true);
-				if (current != null && owner.identity.equals(current.identity)) stagePublicOutbox(owner, scope);
+				if (current != null && owner.identity.equals(current.identity))
+				{
+					if (publicScopeGranted(scope)) stagePublicOutbox(owner, scope);
+					if (publicScopeGranted(PublicBankProtocol.SCOPE)) stagePublicOutbox(owner, PublicBankProtocol.SCOPE);
+				}
 			}
 			catch (IOException | RuntimeException failure) { log.debug("OSRS BiS public event recovery failed", failure); }
 			finally { publicOutboxPumpQueued.set(false); publicOutboxHealth(); }
@@ -4326,6 +4383,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				eventQueueGrantToken = null;
 				eventQueueScope = null;
+				bankJournalGrantToken = null;
 			}
 			synchronized (pendingEvents)
 			{
@@ -4334,7 +4392,7 @@ public class AccountConnectPlugin extends Plugin
 			}
 			onSpoolThread(() ->
 			{
-				try { publicOutboxOnDiskThread().erase(owner); }
+				try { try { publicOutboxOnDiskThread().erase(owner); } finally { publicBankOutboxOnDiskThread().erase(owner); } }
 				catch (IOException failure) { log.debug("OSRS BiS public identity erase incomplete", failure); }
 				finally { publicOutboxHealth(); }
 			});
@@ -4342,7 +4400,11 @@ public class AccountConnectPlugin extends Plugin
 		}
 		onSpoolThread(() ->
 		{
-			try { if (publicOutbox != null) publicOutbox.settle(owner, batch, outcomes); }
+			try
+			{
+				PublicEventOutbox journal = Boolean.TRUE.equals(batch.get(0).get(EVENT_PUBLIC_BANK)) ? publicBankOutbox : publicOutbox;
+				if (journal != null) journal.settle(owner, batch, outcomes);
+			}
 			catch (IOException failure) { log.debug("OSRS BiS public event settlement failed; retain for replay", failure); }
 			finally
 			{
@@ -4359,6 +4421,7 @@ public class AccountConnectPlugin extends Plugin
 		if (sentToken != null && !sentToken.equals(currentLinkToken())) return;
 		eventQueueGrantToken = null;
 		eventQueueScope = null;
+		bankJournalGrantToken = null;
 		synchronized (pendingEvents)
 		{
 			pendingEvents.removeIf(event -> event.containsKey(EVENT_PUBLIC_OUTBOX));
@@ -4366,7 +4429,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		onSpoolThread(() ->
 		{
-			try { publicOutboxOnDiskThread().purge(); }
+			try { try { publicOutboxOnDiskThread().purge(); } finally { publicBankOutboxOnDiskThread().purge(); } }
 			catch (IOException failure) { log.debug("OSRS BiS public event purge incomplete", failure); }
 			finally { publicOutboxHealth(); }
 		});
@@ -4451,6 +4514,7 @@ public class AccountConnectPlugin extends Plugin
 				{
 					PublicEventOutbox.Context current = publicQueueContext(true);
 					if (current == null) continue; // logout/unknown mode pauses replay
+					if (stagedPublicScope(ev) == null) continue; // another public capability cannot resume this path
 					if (!current.identity.equals(((PublicEventOutbox.Context) durableOwner).identity))
 					{
 						if (Boolean.TRUE.equals(ev.get(EVENT_PUBLIC_VOLATILE))) healthEventsLost.incrementAndGet();
@@ -4504,14 +4568,16 @@ public class AccountConnectPlugin extends Plugin
 		{
 			PublicEventOutbox.Context owner = (PublicEventOutbox.Context) selected.get(0).get(EVENT_PUBLIC_OUTBOX);
 			PublicEventOutbox.Context current = publicQueueContext(true);
-			if (current == null || !owner.identity.equals(current.identity))
+			String scope = stagedPublicScope(selected.get(0));
+			if (current == null || !owner.identity.equals(current.identity) || scope == null)
 			{
 				requeueEvents(selected, 0);
 				return;
 			}
 			java.util.Set<String> retained = new java.util.HashSet<>();
-			if (publicOutbox != null)
-				for (Map<String, Object> event : publicOutbox.pending(owner, eventQueueScope, EventSpool.Limits.DEFAULT.maxRecords))
+			PublicEventOutbox journal = PublicBankProtocol.SCOPE.equals(scope) ? publicBankOutbox : publicOutbox;
+			if (journal != null)
+				for (Map<String, Object> event : journal.pending(owner, scope, EventSpool.Limits.DEFAULT.maxRecords))
 					retained.add(String.valueOf(event.get("event_id")));
 			List<Map<String, Object>> ready = new ArrayList<>();
 			for (Map<String, Object> event : selected)
@@ -4575,7 +4641,8 @@ public class AccountConnectPlugin extends Plugin
 				.build();
 			String outboxIdentity = publicOutboxIdentity(batch.get(0));
 			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicQueueContext(true);
-			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)))
+			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)
+				|| stagedPublicScope(batch.get(0)) == null))
 			{
 				requeueEvents(batch, 0);
 				return;
@@ -4608,12 +4675,14 @@ public class AccountConnectPlugin extends Plugin
 			{
 				try
 				{
-					if (Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE))
+					boolean bankReceipt = Boolean.TRUE.equals(batch.get(0).get(EVENT_PUBLIC_BANK));
+					if ((Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE)) || bankReceipt)
 						&& response.code() != 403)
 					{
 						String queueBody = readBody(response);
 						EventQueueProtocol.ReceiptSet parsed = EventQueueProtocol.terminalError(response.code(), queueBody)
-							? EventQueueProtocol.ReceiptSet.rejected(batch.size()) : EventQueueProtocol.parseReceipts(queueBody, batch);
+							? EventQueueProtocol.ReceiptSet.rejected(batch.size()) : bankReceipt
+								? PublicBankProtocol.receipts(response.code(), queueBody, batch) : EventQueueProtocol.parseReceipts(queueBody, batch);
 						List<EventQueueProtocol.Outcome> receipts = parsed.outcomes;
 						queueDeliveryHealth.response(batch, parsed);
 						settlePublicOutbox(batch, receipts, sentToken);
@@ -4636,8 +4705,8 @@ public class AccountConnectPlugin extends Plugin
 						{
 							eventPostInFlight = false;
 							completeFinalFlush();
-							queueRetryBackoffMs = 0;
-							queueRetryBackoffUntilMs = 0L;
+							if (bankReceipt) { eventRetryBackoffMs = 0; eventRetryBackoffUntilMs = 0L; }
+							else { queueRetryBackoffMs = 0; queueRetryBackoffUntilMs = 0L; }
 							if (!pendingEvents.isEmpty()) scheduleCoalescedFlush();
 						}
 						return;
@@ -5919,6 +5988,7 @@ public class AccountConnectPlugin extends Plugin
 	private void closeSpool()
 	{
 		publicOutboxPaused = true;
+		bankJournalGrantToken = null;
 		// A re-enable is treated like a cold start: nothing is written or replayed until the server
 		// sends X-Event-Spool again for the configured token.
 		synchronized (spoolStateLock)
@@ -5935,6 +6005,7 @@ public class AccountConnectPlugin extends Plugin
 		onSpoolThread(() ->
 		{
 			if (publicOutbox != null) publicOutbox.close();
+			if (publicBankOutbox != null) publicBankOutbox.close();
 			if (spool != null)
 			{
 				spool.close();
@@ -5968,6 +6039,7 @@ public class AccountConnectPlugin extends Plugin
 		e.submit(() ->
 		{
 			if (publicOutbox != null) publicOutbox.crashForTest();
+			if (publicBankOutbox != null) publicBankOutbox.crashForTest();
 			if (spool != null)
 			{
 				spool.crashForTest();
@@ -6978,7 +7050,9 @@ public class AccountConnectPlugin extends Plugin
 		}
 		boolean teardown = bankCloseIsTeardown();
 		closeBankVisit(teardown ? teardownReason(client == null ? null : client.getGameState()) : "closed", null);
-		endBankSession(!teardown);
+		// A world tick can precede LOGIN_SCREEN during idle logout. No readable end inventory means
+		// movement completeness is unknown even when the teardown cause is not known yet.
+		endBankSession(false);
 	}
 
 	/**
@@ -7081,6 +7155,7 @@ public class AccountConnectPlugin extends Plugin
 			addContainerCounts(end, bankAtClose);
 		}
 		List<long[]> endList = BankVisitManifest.canonical(end);
+		boolean endRead = normal && !endList.isEmpty(); // an empty read is not evidence of an empty bank
 		List<long[]> dep = BankVisitManifest.canonical(bankGrossDeposited);
 		List<long[]> wd = BankVisitManifest.canonical(bankGrossWithdrawn);
 
@@ -7089,12 +7164,10 @@ public class AccountConnectPlugin extends Plugin
 		f.put("closed_at_ms", System.currentTimeMillis());
 		f.put("close_reason", reason);
 		f.put("manifest_complete", bankVisitOpenRead);
-		// Moves are complete only for a normal close of a visit whose open list was read: the gross totals
-		// then cover every container change from that read to the close.
-		f.put("moves_complete", normal && bankVisitOpenRead);
+		// Both boundary reads are required. A missing end can be teardown before its state callback.
+		f.put("moves_complete", normal && bankVisitOpenRead && endRead);
 		f.put("deposited_sha256", BankVisitManifest.sha256(dep));
 		f.put("withdrawn_sha256", BankVisitManifest.sha256(wd));
-		boolean endRead = normal && !endList.isEmpty();	// an empty end read is not evidence of an empty bank
 		List<List<long[]>> endChunks = endRead ? chunksFor("close", endList) : java.util.Collections.emptyList();
 		if (endRead)
 		{
@@ -12099,6 +12172,10 @@ public class AccountConnectPlugin extends Plugin
 			bankEvidenceToken = ("on".equals(v) || "enabled".equals(v) || "true".equals(v) || "1".equals(v))
 				? sentToken : null;
 		}
+		// Distinct public capability: old servers and staff grants never enable this journal.
+		bankJournalGrantToken = response.isSuccessful() && sentToken.equals(bankEvidenceToken)
+			&& !sentToken.equals(spoolGrantToken) && "event-id-v1".equals(response.header("X-Bank-Receipt"))
+			? sentToken : null;
 
 		String screenshots = response.header("X-Screenshots");
 		if (screenshots != null)
