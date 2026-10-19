@@ -90,6 +90,10 @@ final class CombatEncounterTracker
         switch (kind)
         {
             case "combat.worn_revision": worn(v, tick, seq); break;
+            case "combat.worn_unknown":
+                worn = null; // later encounters start with unknown gear
+                for (Encounter e : open.values()) e.gaps.add("equipment_unreadable");
+                break;
             case "combat.own_hits": hit(v, tick, at, seq); break;
             case "combat.npc_lifecycle": npcEnd(v, tick, at, seq); break;
             case "combat.own_death":
@@ -216,6 +220,7 @@ final class CombatEncounterTracker
     /** Scene reload, tick reversal or session end: open targets cannot be followed further. */
     void interrupt(String reason, int tick)
     {
+        worn = null; // gear across a gap is not known until it is read again
         // The caller's tick can be older than the last hit (poll tick, or -1 after a gap). Never end before it.
         for (Encounter e : new ArrayList<>(open.values())) { e.gaps.add(reason); close(e, reason, reason, Math.max(tick, e.lastHitTick), -1); }
     }

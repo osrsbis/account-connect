@@ -386,6 +386,60 @@ public class CombatEncounterTrackerTest
         assertEquals(1, list.size()); assertEquals("open", list.get(0).get("outcome"));
     }
 
+    // Integrator reproduction on 95462e6: worn tick 10, scene gap tick 11, own hit tick 12 with no readable worn.
+    @Test public void sceneGapForgetsGearSoUnreadableNextEncounterIsUnknown()
+    {
+        CombatEncounterTracker t = new CombatEncounterTracker("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        Map<String,Object> slots = new LinkedHashMap<>(); slots.put("weapon", 861);
+        Map<String,Object> wv = new LinkedHashMap<>(); wv.put("content_id", CombatEncounterTracker.contentId(slots)); wv.put("slots", slots);
+        Map<String,Object> w = new LinkedHashMap<>(); w.put("local_input_id", "local:1"); w.put("kind", "combat.worn_revision");
+        w.put("tick", 10); w.put("observed_at_ms", AT); w.put("value", wv);
+        t.accept(w); t.interrupt("scene_gap", 11);
+        t.accept(row(1, "combat.own_hits", 12, "dealt_to_npc", 3, 16, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", 3000));
+        assertEquals("unknown", m(encounters(t.summary(12)).get(0).get("equipment")).get("at_start"));
+    }
+
+    @Test public void captureGapThenUnreadableContainerGivesUnknownGear()
+    {
+        tick = 110; dealt(npc(3000), 4); capture.gap();
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null);
+        tick = 112; dealt(npc(3001), 4);
+        assertEquals("unknown", m(encounters(capture.encounterSummary(tick)).get(1).get("equipment")).get("at_start"));
+    }
+
+    @Test public void captureGapThenSameReadableGearIsFreshBaseline()
+    {
+        tick = 110; dealt(npc(3000), 4); capture.gap();
+        tick = 112; dealt(npc(3001), 4); // unchanged gear must still be re-observed after the gap
+        Map<?,?> gear = m(encounters(capture.encounterSummary(tick)).get(1).get("equipment"));
+        assertEquals(861, m(m(gear.get("at_start")).get("slots")).get("weapon")); assertEquals(112, m(gear.get("at_start")).get("observed_tick"));
+    }
+
+    @Test public void unreadableContainerMidSessionInvalidatesOldGearForLaterEncounters()
+    {
+        NPC a = npc(3000); tick = 110; dealt(a, 4); tick = 111; capture.endNpc(client, a, true, AT);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null);
+        NPC b = npc(3001); tick = 113; dealt(b, 4);
+        assertEquals("unknown", m(encounters(capture.encounterSummary(tick)).get(1).get("equipment")).get("at_start"));
+    }
+
+    @Test public void nullItemArrayIsUnknownNotEmptyLoadout()
+    {
+        ItemContainer c = mock(ItemContainer.class); when(c.getItems()).thenReturn(null);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(c);
+        tick = 110; dealt(npc(3000), 4);
+        assertEquals("unknown", m(encounters(capture.encounterSummary(tick)).get(0).get("equipment")).get("at_start"));
+    }
+
+    @Test public void gearBecomingUnreadableDuringEncounterKeepsStartAndFlagsGap()
+    {
+        NPC n = npc(3000); tick = 110; dealt(n, 4);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null); tick = 112; dealt(n, 4);
+        Map<String,Object> e = encounters(capture.encounterSummary(tick)).get(0);
+        assertTrue(m(e.get("equipment")).get("at_start") instanceof Map);
+        assertTrue(((List<?>) e.get("gaps")).contains("equipment_unreadable"));
+    }
+
     @Test public void contentIdMatchesLoadoutRevisionFixture()
     {
         // loadout.revision.v1 fixture loadout-revisions-example.json (commit 6fd299f), revisions 1 and 2.

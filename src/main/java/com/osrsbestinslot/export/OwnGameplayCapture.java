@@ -122,7 +122,7 @@ final class OwnGameplayCapture
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
         targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
-        encounters.interrupt("scene_gap", lastTick);
+        encounters.interrupt("scene_gap", lastTick); wornSlots = null; wornSession = null;
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -319,22 +319,30 @@ final class OwnGameplayCapture
     }
 
     // Own worn item IDs only, read at an own hit and recorded when the ID set changes. Quantities
-    // (ammunition) are excluded. A new session always starts a new baseline.
+    // (ammunition) are excluded. A new session, a scene gap or an unreadable read starts a new baseline.
     private String wornSession;
     private Map<String,Object> wornSlots;
     private void worn(Client client, int tick, long at)
     {
         ItemContainer container = client.getItemContainer(InventoryID.EQUIPMENT);
-        if (container == null) return; // unknown is not an empty loadout
+        Item[] items = container == null ? null : container.getItems();
+        if (items == null)
+        {
+            // Unknown is not an empty loadout, and earlier gear is no longer known to be worn.
+            if (wornSlots == null && session != null && session.equals(wornSession)) return;
+            wornSession = session; wornSlots = null;
+            Map<String,Object> value = new LinkedHashMap<>(); value.put("observation", "unreadable");
+            combatOnly("combat.worn_unknown", "own_worn_container_at_own_hit", tick, at, value);
+            return;
+        }
         Map<String,Object> slots = new LinkedHashMap<>();
-        Item[] items = container.getItems();
-        for (int i = 0; items != null && i < items.length && i < CombatEncounterTracker.SLOT_NAMES.length; i++)
+        for (int i = 0; i < items.length && i < CombatEncounterTracker.SLOT_NAMES.length; i++)
             if (CombatEncounterTracker.SLOT_NAMES[i] != null && items[i] != null && items[i].getId() > 0 && items[i].getQuantity() > 0)
                 slots.put(CombatEncounterTracker.SLOT_NAMES[i], items[i].getId());
         boolean sameSession = session != null && session.equals(wornSession);
         if (sameSession && slots.equals(wornSlots)) return;
         Map<String,Object> value = new LinkedHashMap<>();
-        value.put("observation", sameSession ? "observed_change" : "baseline");
+        value.put("observation", sameSession && wornSlots != null ? "observed_change" : "baseline");
         value.put("content_id", CombatEncounterTracker.contentId(slots)); value.put("slots", slots);
         wornSession = session; wornSlots = slots;
         combatOnly("combat.worn_revision", "own_worn_container_at_own_hit", tick, at, value);
