@@ -26,7 +26,7 @@ final class CombatEncounterTracker
     private final Deque<Encounter> closed = new ArrayDeque<>();
     private final List<Map<String,Object>> unlinkedLoot = new ArrayList<>();
     private Map<String,Object> worn; // latest observed worn revision in this session, or null = unknown
-    private long receivedNoOpenHits, receivedNoOpenDamage, receivedOverlapHits, receivedOverlapDamage, droppedClosed;
+    private long receivedNoOpenHits, receivedNoOpenDamage, receivedOverlapHits, receivedOverlapDamage, droppedClosed, droppedLoot;
     private int lastTick = -1;
 
     CombatEncounterTracker(String gameplaySession) { session = gameplaySession == null ? null : gameplaySession.replace("-", ""); }
@@ -36,7 +36,7 @@ final class CombatEncounterTracker
     {
         final String key, targetKey;
         final int startTick; final long startAt;
-        int lastHitTick, endTick = -1; long endAt; String outcome, endSource;
+        int lastHitTick, endTick = -1; long lastHitAt, endAt; String outcome, endSource;
         long attackSplats, landed, zero, attackDamage, overTimeSplats, overTimeDamage, otherSplats, otherDamage, maxHit;
         long receivedHits, receivedDamage;
         final List<Map<String,Object>> phases = new ArrayList<>();
@@ -48,7 +48,7 @@ final class CombatEncounterTracker
 
         Encounter(String target, int tick, long at)
         {
-            targetKey = target; key = session + ":" + target + ":" + tick; startTick = lastHitTick = tick; startAt = at;
+            targetKey = target; key = session + ":" + target + ":" + tick; startTick = lastHitTick = tick; startAt = lastHitAt = at;
             wornAtStart = worn;
         }
         void contributes(long sequence)
@@ -145,7 +145,7 @@ final class CombatEncounterTracker
             if (open.size() > 1) for (Encounter o : open.values()) o.gaps.add("overlapping_targets");
             if (e.wornAtStart != null) e.revisions.add(e.wornAtStart);
         }
-        e.lastHitTick = tick; e.contributes(seq); e.phase(((Number) v.get("npc_id")).intValue(), tick);
+        e.lastHitTick = tick; e.lastHitAt = at; e.contributes(seq); e.phase(((Number) v.get("npc_id")).intValue(), tick);
         if (ATTACK.contains(type))
         {
             e.attackSplats++; e.attackDamage += amount; e.maxHit = Math.max(e.maxHit, amount);
@@ -172,7 +172,8 @@ final class CombatEncounterTracker
             ? ((Number) v.get("npc_id")).intValue() : null;
         List<Encounter> candidates = new ArrayList<>();
         for (Encounter e : closed)
-            if ("observed_death".equals(e.outcome) && (npcId == null || e.hasNpc(npcId))
+            // One ServerNpcLoot per death: an encounter that already holds loot is not a candidate again.
+            if ("observed_death".equals(e.outcome) && e.loot.isEmpty() && (npcId == null || e.hasNpc(npcId))
                 && (wallClock ? e.endAt >= 0 && at >= e.endAt && at - e.endAt <= LOOT_WINDOW_TICKS * 600L
                     : tick >= e.endTick && tick - e.endTick <= LOOT_WINDOW_TICKS)) candidates.add(e);
         Map<String,Object> link = new LinkedHashMap<>();
@@ -195,7 +196,7 @@ final class CombatEncounterTracker
             List<String> keys = new ArrayList<>(); for (Encounter e : candidates) keys.add(e.key);
             link.put("candidate_encounter_keys", keys);
         }
-        if (unlinkedLoot.size() < MAX_LOOT) unlinkedLoot.add(link);
+        if (unlinkedLoot.size() < MAX_LOOT) unlinkedLoot.add(link); else droppedLoot++;
     }
 
     private void expire(int tick)
@@ -215,40 +216,47 @@ final class CombatEncounterTracker
     /** Scene reload, tick reversal or session end: open targets cannot be followed further. */
     void interrupt(String reason, int tick)
     {
-        for (Encounter e : new ArrayList<>(open.values())) { e.gaps.add(reason); close(e, reason, reason, tick, -1); }
+        // The caller's tick can be older than the last hit (poll tick, or -1 after a gap). Never end before it.
+        for (Encounter e : new ArrayList<>(open.values())) { e.gaps.add(reason); close(e, reason, reason, Math.max(tick, e.lastHitTick), -1); }
     }
 
+    /** Read-only: the same accepted rows give the same result however often this is called. */
     Map<String,Object> summary(int asOfTick)
     {
-        if (asOfTick >= 0) expire(asOfTick);
         Map<String,Object> out = new LinkedHashMap<>();
         out.put("model", MODEL); out.put("gameplay_session", session); out.put("as_of_tick", asOfTick < 0 ? null : asOfTick);
         out.put("derived", true); out.put("complete", false);
         out.put("scope", "own_hits_on_npcs_only;party_damage_not_observed;kill_credit_unknown");
         List<Map<String,Object>> list = new ArrayList<>();
-        for (Encounter e : closed) list.add(describe(e));
-        for (Encounter e : open.values()) list.add(describe(e));
+        for (Encounter e : closed) list.add(describe(e, e.outcome, e.endSource, e.endTick, e.endAt));
+        for (Encounter e : open.values())
+        {
+            // As-of view only. The tracker itself expires targets when a later row is accepted.
+            boolean inactive = asOfTick >= 0 && asOfTick - e.lastHitTick > INACTIVE_TICKS;
+            list.add(inactive ? describe(e, "unobserved_end_inactivity", "inferred_inactivity", e.lastHitTick, -1) : describe(e, null, null, -1, -1));
+        }
         out.put("encounters", list); out.put("closed_dropped", droppedClosed);
         Map<String,Object> received = new LinkedHashMap<>();
         received.put("no_open_encounter_hits", receivedNoOpenHits); received.put("no_open_encounter_damage", receivedNoOpenDamage);
         received.put("overlapping_encounters_hits", receivedOverlapHits); received.put("overlapping_encounters_damage", receivedOverlapDamage);
         out.put("received_unattributed", received);
-        out.put("loot_not_matched", new ArrayList<>(unlinkedLoot));
+        out.put("loot_not_matched", new ArrayList<>(unlinkedLoot)); out.put("loot_not_matched_dropped", droppedLoot);
         return out;
     }
 
-    private Map<String,Object> describe(Encounter e)
+    private Map<String,Object> describe(Encounter e, String outcome, String endSource, int endTick, long endAt)
     {
         Map<String,Object> m = new LinkedHashMap<>();
         m.put("encounter_key", e.key); m.put("target_key", e.targetKey);
-        m.put("status", e.outcome == null ? "open" : "closed");
+        m.put("status", outcome == null ? "open" : "closed");
         m.put("start_tick", e.startTick); m.put("start_observed_at_ms", e.startAt);
         m.put("start_provenance", "first_observed_own_hit"); m.put("true_start", "unknown");
-        m.put("end_tick", e.outcome == null ? null : e.endTick);
-        m.put("end_observed_at_ms", e.outcome == null || e.endAt < 0 ? null : e.endAt);
-        m.put("outcome", e.outcome == null ? "open" : e.outcome); m.put("end_source", e.endSource);
+        m.put("last_own_hit_tick", e.lastHitTick); m.put("last_own_hit_observed_at_ms", e.lastHitAt);
+        m.put("end_tick", outcome == null ? null : endTick);
+        m.put("end_observed_at_ms", outcome == null || endAt < 0 ? null : endAt);
+        m.put("outcome", outcome == null ? "open" : outcome); m.put("end_source", endSource);
         m.put("kill_credit", "unknown");
-        Integer elapsed = e.outcome == null ? null : e.endTick - e.startTick;
+        Integer elapsed = outcome == null ? null : endTick - e.startTick;
         m.put("elapsed_ticks", elapsed);
         m.put("elapsed_seconds_game", elapsed == null ? null : elapsed * 0.6);
         m.put("elapsed_basis", "first_observed_own_hit_to_end_tick");
@@ -271,11 +279,12 @@ final class CombatEncounterTracker
         Map<String,Object> gear = new LinkedHashMap<>();
         gear.put("at_start", e.wornAtStart == null ? "unknown" : e.wornAtStart);
         gear.put("revisions_observed", new ArrayList<>(e.revisions));
-        gear.put("changed_during", e.revisions.size() > (e.wornAtStart == null ? 0 : 1));
+        // Unknown then known is not a change: without a start revision the first one is only a baseline.
+        gear.put("changed_during", e.revisions.size() > 1);
         gear.put("timing", "observed_at_own_hits_not_exact_change_time");
         m.put("equipment", gear);
         m.put("loot", new ArrayList<>(e.loot));
-        m.put("loot_status", !e.loot.isEmpty() ? "matched" : "observed_death".equals(e.outcome) ? "none_matched" : "not_applicable");
+        m.put("loot_status", !e.loot.isEmpty() ? "matched" : "observed_death".equals(outcome) ? "none_matched" : "not_applicable");
         m.put("gaps", new ArrayList<>(e.gaps));
         m.put("contributing_sequences", new ArrayList<>(e.sequences)); m.put("contributing_truncated", e.sequencesTruncated);
         return m;
@@ -331,21 +340,24 @@ final class CombatEncounterTracker
             row.put("observed_at_ms", ev.get("observed_at_ms")); row.put("value", value);
             rows.putIfAbsent(((Number) ev.get("source_sequence")).longValue(), row);
         }
-        CombatEncounterTracker t = new CombatEncounterTracker(gameplaySession);
-        for (Map<String,Object> row : rows.values()) t.accept(row);
         // Existing loot events carry an NPC name, not an ID, and wall-clock ts, not a tick. Same account only:
-        // the caller supplies events of one account/profile. Linking is a time-window inference.
+        // the caller supplies events of one account/profile. Linking is a time-window inference. Loot is merged
+        // in time order with the combat rows, so it links before older encounters leave the bounded closed list.
         Set<Object> seenLoot = new HashSet<>();
         List<Map<String,Object>> loot = new ArrayList<>();
         for (Map<String,Object> ev : events)
             if (ev != null && "loot".equals(ev.get("type")) && "npc".equals(ev.get("source_type")) && ev.get("ts") instanceof Number
                 && ev.get("event_id") instanceof String && seenLoot.add(ev.get("event_id"))) loot.add(ev);
         loot.sort(Comparator.comparingLong(ev -> ((Number) ev.get("ts")).longValue()));
-        for (Map<String,Object> ev : loot)
+        CombatEncounterTracker t = new CombatEncounterTracker(gameplaySession);
+        int next = 0;
+        for (Map<String,Object> row : rows.values())
         {
-            Map<String,Object> v = new LinkedHashMap<>(); v.put("items", ev.get("items"));
-            t.loot(v, -1, ((Number) ev.get("ts")).longValue(), "loot_event_id", (String) ev.get("event_id"), true);
+            long at = ((Number) row.get("observed_at_ms")).longValue();
+            for (; next < loot.size() && ((Number) loot.get(next).get("ts")).longValue() < at; next++) t.replayLoot(loot.get(next));
+            t.accept(row);
         }
+        for (; next < loot.size(); next++) t.replayLoot(loot.get(next));
         Map<String,Object> out = t.summary(asOfTick);
         List<Long> gearChanges = new ArrayList<>();
         for (Map<String,Object> ev : events)
@@ -354,7 +366,9 @@ final class CombatEncounterTracker
         {
             Map<String,Object> e = (Map<String,Object>) o, gear = (Map<String,Object>) e.get("equipment");
             long from = ((Number) e.get("start_observed_at_ms")).longValue();
-            Object to = e.get("end_observed_at_ms");
+            // Open: any later change counts. Closed without an end time: bounded by the last own hit only.
+            Object to = "open".equals(e.get("status")) ? null
+                : e.get("end_observed_at_ms") != null ? e.get("end_observed_at_ms") : e.get("last_own_hit_observed_at_ms");
             boolean changed = false;
             for (long at : gearChanges) changed |= at >= from && (to == null || at <= ((Number) to).longValue());
             gear.put("changed_during", changed ? Boolean.TRUE : "not_observed");
@@ -366,6 +380,12 @@ final class CombatEncounterTracker
         out.put("input_sequence_first", rows.isEmpty() ? null : rows.firstKey());
         out.put("input_sequence_missing_between", missing); // other own families share the sequence, so not all are combat
         return out;
+    }
+
+    private void replayLoot(Map<String,Object> ev)
+    {
+        Map<String,Object> v = new LinkedHashMap<>(); v.put("items", ev.get("items"));
+        loot(v, -1, ((Number) ev.get("ts")).longValue(), "loot_event_id", (String) ev.get("event_id"), true);
     }
 
     /** Offline replay of one session's ordered rows, e.g. from a captured own_gameplay snapshot or fixture. */

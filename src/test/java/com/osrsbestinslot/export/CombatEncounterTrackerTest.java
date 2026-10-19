@@ -297,6 +297,95 @@ public class CombatEncounterTrackerTest
         Map<String,Object> projected = PublicTransport.event(ev); assertNotNull(projected); return projected;
     }
 
+    // Review r1 F1: one loot per death, so back-to-back kills of the same NPC type each keep their loot.
+    @Test public void backToBackSameNpcKillsEachLinkTheirOwnLoot()
+    {
+        NPC a = npc(3000), b = npc(3000);
+        tick = 100; dealt(a, 4); tick = 102; capture.endNpc(client, a, true, AT);
+        tick = 104; capture.loot(client, 3000, Collections.singletonList(new ItemStack(526, 1)), AT);
+        tick = 105; dealt(b, 4); tick = 110; capture.endNpc(client, b, true, AT);
+        tick = 112; capture.loot(client, 3000, Collections.singletonList(new ItemStack(526, 1)), AT);
+        Map<String,Object> s = capture.encounterSummary(tick);
+        for (Map<String,Object> e : encounters(s)) assertEquals("matched", e.get("loot_status"));
+        assertTrue(((List<?>) s.get("loot_not_matched")).isEmpty());
+    }
+
+    // Review r1 F2: replay links loot in time order before old encounters leave the bounded list; drops are counted.
+    @Test public void longReplayLinksEveryLootAndCountsDroppedUnlinked()
+    {
+        List<Map<String,Object>> events = new ArrayList<>();
+        String session = "cccccccccccccccccccccccccccccccc";
+        long seq = 1;
+        for (int i = 0; i < 40; i++)
+        {
+            String target = String.format("%032x", i + 1);
+            int t = 1000 + i * 20; long at = AT + t * 600L;
+            Map<String,Object> hit = new LinkedHashMap<>(); hit.put("type", "combat_hit"); hit.put("gameplay_session", session);
+            hit.put("source_sequence", seq++); hit.put("source_tick", t); hit.put("observed_at_ms", at); hit.put("direction", "dealt_to_npc");
+            hit.put("amount", 3); hit.put("hitsplat_type", 16); hit.put("npc_id", 3000); hit.put("target_key", target);
+            Map<String,Object> end = new LinkedHashMap<>(); end.put("type", "combat_npc_end"); end.put("gameplay_session", session);
+            end.put("source_sequence", seq++); end.put("source_tick", t + 3); end.put("observed_at_ms", at + 1800); end.put("target_key", target);
+            end.put("end", "observed_death"); end.put("first_own_hit_tick", t);
+            events.add(hit); events.add(end);
+            events.add(legacy("loot", at + 3000, String.format("%032x", 1000 + i), "source_type", "npc", "items", Collections.singletonList(item(526, 1))));
+        }
+        for (int i = 0; i < 10; i++) events.add(legacy("loot", AT + 900_000L + i, String.format("%032x", 5000 + i), "source_type", "npc", "items", Collections.singletonList(item(526, 1))));
+        Collections.shuffle(events, new Random(7));
+        Map<String,Object> s = CombatEncounterTracker.deriveFromEvents(session, events, -1);
+        assertEquals(32, encounters(s).size()); assertEquals(8L, s.get("closed_dropped"));
+        for (Map<String,Object> e : encounters(s)) assertEquals("matched", e.get("loot_status"));
+        assertEquals(8, ((List<?>) s.get("loot_not_matched")).size()); assertEquals(2L, s.get("loot_not_matched_dropped"));
+        for (Object o : (List<?>) s.get("loot_not_matched")) assertEquals("unlinked", m(o).get("link_provenance"));
+    }
+
+    // Review r1 F3: an inferred end is bounded by the last own hit, not treated as still open.
+    @Test public void replayGearChangeAfterInferredEndIsNotDuringEncounter()
+    {
+        NPC n = npc(3000); tick = 110; dealt(n, 4); tick = 112; dealt(n, 4);
+        tick = 112 + CombatEncounterTracker.INACTIVE_TICKS + 1; dealt(npc(3001), 4);
+        List<Map<String,Object>> wire = new ArrayList<>();
+        for (Map<String,Object> h : handed) wire.add(PublicTransport.event(withEnvelope(h)));
+        wire.add(legacy("equip_change", AT + 400 * 600L, "33333333333333333333333333333333", "equipped", Collections.singletonList(item(11235, 1))));
+        Map<String,Object> s = CombatEncounterTracker.deriveFromEvents((String) wire.get(0).get("gameplay_session"), wire, tick);
+        Map<String,Object> first = encounters(s).get(0);
+        assertEquals("unobserved_end_inactivity", first.get("outcome"));
+        assertEquals("not_observed", m(first.get("equipment")).get("changed_during"));
+        assertEquals(true, m(encounters(s).get(1).get("equipment")).get("changed_during")); // still open
+    }
+
+    // Review r1 F4: an interrupt never ends an encounter before its last own hit.
+    @Test public void sceneGapAfterHitBeforePollNeverGivesNegativeElapsed()
+    {
+        tick = 200; dealt(npc(3000), 4); capture.gap();
+        Map<String,Object> e = encounters(capture.encounterSummary(-1)).get(0);
+        assertEquals(200, e.get("end_tick")); assertEquals(0, e.get("elapsed_ticks"));
+        tick = 300; dealt(npc(3001), 4); capture.gap(); capture.gap();
+        assertEquals(300, encounters(capture.encounterSummary(-1)).get(1).get("end_tick"));
+    }
+
+    // Review r1 F5: unknown gear at start, then readable gear, is a baseline, not a change.
+    @Test public void firstReadableGearMidEncounterIsNotAChange()
+    {
+        ItemContainer known = client.getItemContainer(InventoryID.EQUIPMENT);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(null);
+        NPC n = npc(3000); tick = 110; dealt(n, 4);
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(known); tick = 112; dealt(n, 4);
+        Map<?,?> gear = m(encounters(capture.encounterSummary(tick)).get(0).get("equipment"));
+        assertEquals("unknown", gear.get("at_start")); assertEquals(1, ((List<?>) gear.get("revisions_observed")).size());
+        assertEquals(false, gear.get("changed_during"));
+    }
+
+    // Review r1 F6: reading the summary does not change later results.
+    @Test public void summaryIsReadOnly()
+    {
+        NPC n = npc(3000); tick = 110; dealt(n, 4);
+        Map<String,Object> peek = capture.encounterSummary(110 + CombatEncounterTracker.INACTIVE_TICKS + 5);
+        assertEquals("unobserved_end_inactivity", encounters(peek).get(0).get("outcome"));
+        tick = 150; dealt(n, 4); // the tracker never expired it, so this is the same encounter
+        List<Map<String,Object>> list = encounters(capture.encounterSummary(tick));
+        assertEquals(1, list.size()); assertEquals("open", list.get(0).get("outcome"));
+    }
+
     @Test public void contentIdMatchesLoadoutRevisionFixture()
     {
         // loadout.revision.v1 fixture loadout-revisions-example.json (commit 6fd299f), revisions 1 and 2.

@@ -388,8 +388,12 @@ final class OwnGameplayCapture
 
     private void track(Map<String,Object> row)
     {
-        if (!session.replace("-", "").equals(encounters.session())) encounters = new CombatEncounterTracker(session);
-        encounters.accept(row);
+        try
+        {
+            if (!session.replace("-", "").equals(encounters.session())) encounters = new CombatEncounterTracker(session);
+            encounters.accept(row);
+        }
+        catch (RuntimeException failure) { /* A derived-model failure must not block raw capture or handoff. */ }
     }
 
     /** Derived encounter summary for this gameplay session. Not a complete combat history. */
