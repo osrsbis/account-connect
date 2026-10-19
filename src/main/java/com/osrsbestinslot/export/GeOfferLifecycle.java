@@ -55,8 +55,9 @@ final class GeOfferLifecycle
         Map<String, Map<Long, List<Map<String, Object>>>> grouped = new TreeMap<>();
         Map<String, Set<String>> contentsById = new TreeMap<>();
         Map<String, Set<String>> keysById = new TreeMap<>();
-        for (Map<String, Object> e : events == null ? Collections.<Map<String, Object>>emptyList() : events)
+        for (Object raw : events == null ? Collections.emptyList() : (List<?>) events)
         {
+            Map<String, Object> e = stringKeyed(raw);
             if (e == null || !TYPES.contains(String.valueOf(e.get("type"))))
             {
                 count(diagnostics, "non_ge_rows_ignored");
@@ -65,16 +66,18 @@ final class GeOfferLifecycle
             Map<?, ?> o = e.get("ge_observation") instanceof Map ? (Map<?, ?>) e.get("ge_observation") : null;
             Object key = e.get("offer_key");
             Long sequence = o == null ? null : num(o.get("sequence"));
+            if (e.get("event_id") instanceof String)
+            {
+                // Before any row is dropped: an unusable copy under a used ID is still a conflict.
+                String id = (String) e.get("event_id");
+                contentsById.computeIfAbsent(id, k -> new TreeSet<>()).add(canonical(e));
+                Set<String> named = keysById.computeIfAbsent(id, k -> new TreeSet<>());
+                if (key instanceof String) named.add((String) key);
+            }
             if (!(key instanceof String) || o == null || sequence == null)
             {
                 count(diagnostics, "rows_without_versioned_observation");
                 continue;
-            }
-            if (e.get("event_id") instanceof String)
-            {
-                String id = (String) e.get("event_id");
-                contentsById.computeIfAbsent(id, k -> new TreeSet<>()).add(canonical(e));
-                keysById.computeIfAbsent(id, k -> new TreeSet<>()).add((String) key);
             }
             grouped.computeIfAbsent((String) key, k -> new TreeMap<>())
                 .computeIfAbsent(sequence, k -> new ArrayList<>()).add(e);
@@ -171,8 +174,9 @@ final class GeOfferLifecycle
 
         Long item = num(first.get("item")), totalQty = num(first.get("qty_total")), price = num(first.get("price"));
         String side = first.get("side") instanceof String ? (String) first.get("side") : null;
+        Long slot = num(first.get("slot"));
         if (item == null || item <= 0 || totalQty == null || totalQty <= 0 || price == null || price < 0
-            || !("buy".equals(side) || "sell".equals(side)))
+            || !("buy".equals(side) || "sell".equals(side)) || slot == null || slot < 0 || slot > 7)
         {
             quarantine.add("missing_offer_terms");
         }
@@ -400,35 +404,83 @@ final class GeOfferLifecycle
 
     /**
      * The tracker starts a new offer_key after a restart, account/profile/token change or a
-     * re-baseline, even for the same live offer. An earlier uncollected key in the same slot can
-     * therefore never stay "open with escrow": it ended unobserved or continues under the later key.
+     * re-baseline, even for the same live offer. An uncollected key keeps its escrow only when it
+     * started strictly after every other key in its slot was last seen. Otherwise it ended
+     * unobserved, continues under a later key, or the clocks cannot order them: escrow unknown.
      */
     @SuppressWarnings("unchecked")
     private static void supersede(List<Map<String, Object>> offers, Map<String, Object> diagnostics)
     {
-        Map<String, Map<String, Object>> lastInSlot = new TreeMap<>();
+        Map<String, List<Map<String, Object>>> fences = new TreeMap<>();
         for (Map<String, Object> offer : offers)
         {
             String fence = offer.get("account_hash") + "|" + offer.get("profile_type") + "|" + offer.get("slot");
-            Map<String, Object> earlier = lastInSlot.put(fence, offer);
-            if (earlier == null || Boolean.TRUE.equals(earlier.get("collected")))
+            fences.computeIfAbsent(fence, k -> new ArrayList<>()).add(offer);
+        }
+        for (List<Map<String, Object>> fence : fences.values())
+        {
+            if (fence.size() < 2)
             {
                 continue;
             }
-            earlier.put("superseded_by", offer.get("offer_key"));
-            if ("open".equals(earlier.get("phase")))
+            for (Map<String, Object> u : fence)
             {
-                earlier.put("phase", "unknown");
+                if (Boolean.TRUE.equals(u.get("collected")))
+                {
+                    continue;
+                }
+                Long start = num(u.get("first_seen_at_ms")), end = num(u.get("as_of_observed_ms"));
+                boolean latest = start != null;
+                Map<String, Object> next = null;
+                boolean nextTied = false, contradicted = false;
+                for (Map<String, Object> o : fence)
+                {
+                    if (o == u) continue;
+                    Long otherEnd = num(o.get("as_of_observed_ms")), otherStart = num(o.get("first_seen_at_ms"));
+                    if (start == null || otherEnd == null || otherEnd >= start)
+                    {
+                        latest = false;
+                    }
+                    if (!Boolean.TRUE.equals(o.get("collected")) && sameTerms(u, o) && !countersAgreeWithClocks(u, o))
+                    {
+                        // Same offer terms: the key the clocks call later must re-baseline at or above
+                        // the earlier key's counter. Otherwise the clocks are wrong (e.g. a step back).
+                        latest = false;
+                        contradicted = true;
+                    }
+                    if (end != null && otherStart != null && otherStart > end)
+                    {
+                        Long best = next == null ? null : num(next.get("first_seen_at_ms"));
+                        if (best == null || otherStart < best)
+                        {
+                            next = o;
+                            nextTied = false;
+                        }
+                        else if (otherStart.equals(best))
+                        {
+                            nextTied = true;
+                        }
+                    }
+                }
+                if (latest)
+                {
+                    continue;
+                }
+                boolean ordered = next != null && !nextTied && !contradicted;
+                String reason = ordered ? "superseded_by_later_offer_key_same_slot" : "slot_order_ambiguous";
+                u.put("superseded_by", ordered ? next.get("offer_key") : null);
+                if ("open".equals(u.get("phase")))
+                {
+                    u.put("phase", "unknown");
+                }
+                ((List<String>) u.get("gaps")).add(reason);
+                if (!Boolean.TRUE.equals(u.get("quarantined")))
+                {
+                    u.put("completeness", "partial");
+                }
+                u.put("escrow", unknownEscrow(end, String.valueOf(u.get("identity")), reason));
+                count(diagnostics, ordered ? "superseded_offer_keys" : "slot_order_ambiguous_offer_keys");
             }
-            List<String> gaps = (List<String>) earlier.get("gaps");
-            gaps.add("superseded_by_later_offer_key_same_slot");
-            if (!Boolean.TRUE.equals(earlier.get("quarantined")))
-            {
-                earlier.put("completeness", "partial");
-            }
-            earlier.put("escrow", unknownEscrow(num(earlier.get("as_of_observed_ms")), String.valueOf(earlier.get("identity")),
-                "superseded_by_later_offer_key_same_slot"));
-            count(diagnostics, "superseded_offer_keys");
         }
     }
 
@@ -576,8 +628,9 @@ final class GeOfferLifecycle
             return unmatched;
         }
         List<Map<String, Object>> rows = new ArrayList<>();
-        for (Map<String, Object> row : history)
+        for (Object raw : (List<?>) history)
         {
+            Map<String, Object> row = stringKeyed(raw);
             if (row == null) count(diagnostics, "history_row_invalid");
             else rows.add(row);
         }
@@ -696,6 +749,25 @@ final class GeOfferLifecycle
         return null;
     }
 
+    private static boolean countersAgreeWithClocks(Map<String, Object> a, Map<String, Object> b)
+    {
+        Long aStart = num(a.get("first_seen_at_ms")), aEnd = num(a.get("as_of_observed_ms"));
+        Long bStart = num(b.get("first_seen_at_ms")), bEnd = num(b.get("as_of_observed_ms"));
+        Map<String, Object> earlier, later;
+        if (aEnd != null && bStart != null && aEnd < bStart) { earlier = a; later = b; }
+        else if (bEnd != null && aStart != null && bEnd < aStart) { earlier = b; later = a; }
+        else return false;
+        Long base = num(later.get("baseline_qty_uncredited")), counter = num(earlier.get("counter_qty"));
+        return base != null && counter != null && base >= counter;
+    }
+
+    private static boolean sameTerms(Map<String, Object> a, Map<String, Object> b)
+    {
+        return Objects.equals(a.get("item_id"), b.get("item_id")) && Objects.equals(a.get("side"), b.get("side"))
+            && Objects.equals(a.get("total_qty"), b.get("total_qty"))
+            && Objects.equals(a.get("listing_price"), b.get("listing_price"));
+    }
+
     private static boolean sameSignature(Map<String, Object> a, Map<String, Object> b)
     {
         return Objects.equals(num(a.get("item")), num(b.get("item"))) && Objects.equals(a.get("side"), b.get("side"))
@@ -739,9 +811,9 @@ final class GeOfferLifecycle
     private static String canonical(Map<String, Object> e)
     {
         Map<String, Object> copy = new TreeMap<>();
-        for (Map.Entry<String, Object> x : e.entrySet())
+        for (Map.Entry<?, ?> x : ((Map<?, ?>) e).entrySet())
         {
-            String k = x.getKey();
+            String k = String.valueOf(x.getKey());
             // Gson omits nulls by default, so an absent field and a null field are the same content.
             if (x.getValue() != null && !"event_id".equals(k) && !"ts".equals(k) && !"received_at".equals(k)
                 && !"token_fp".equals(k) && !k.startsWith("_"))
@@ -750,6 +822,18 @@ final class GeOfferLifecycle
             }
         }
         return copy.toString();
+    }
+
+    /** A row with only String keys, or null; raw or polluted input is skipped, never fatal. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> stringKeyed(Object raw)
+    {
+        if (!(raw instanceof Map)) return null;
+        for (Object k : ((Map<?, ?>) raw).keySet())
+        {
+            if (!(k instanceof String)) return null;
+        }
+        return (Map<String, Object>) raw;
     }
 
     private static Object normal(Object v)

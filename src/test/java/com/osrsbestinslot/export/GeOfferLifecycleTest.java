@@ -353,6 +353,77 @@ public class GeOfferLifecycleTest
     }
 
     @Test
+    public void clockStepBackAcrossRestartMakesBothKeysUnknownNotTheLiveOneAlone()
+    {
+        empty(3, 1);
+        obs(3, BUYING, 560, 0, 100, 300, 0, 2);
+        obs(3, BUYING, 560, 40, 100, 300, 12_000, 110);
+        tracker.clear();
+        // The restarted client's clock is behind: the live key's times precede the stale key's.
+        Map<String, Object> f = tracker.observe(3, BUYING, new long[]{560, 40, 100, 300, 12_000}, true, 300, 900_000L);
+        assertNull(f);
+        f = tracker.observe(3, BUYING, new long[]{560, 60, 100, 300, 18_000}, false, 500, 950_000L);
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("type", f.remove("type"));
+        ev.put("event_id", String.format("%032x", ++ids));
+        ev.put("account_hash", "42");
+        ev.put("profile_type", "STANDARD");
+        ev.putAll(f);
+        wire.add(PublicTransport.event(ev));
+        for (Map<String, Object> o : offers(GeOfferLifecycle.reduce(wire, null)))
+        {
+            assertEquals(o.toString(), "unknown", m(o.get("escrow")).get("escrow_state"));
+            assertTrue(o.toString(), ((List<?>) o.get("gaps")).contains("slot_order_ambiguous"));
+        }
+    }
+
+    @Test
+    public void unusableCopyUnderAUsedEventIdStillQuarantines()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        Map<String, Object> done = obs(0, BOUGHT, 560, 10, 10, 250, 2_400, 50);
+        Map<String, Object> stripped = new LinkedHashMap<>(done);
+        stripped.remove("ge_observation");
+        wire.add(0, stripped);
+        assertEquals(true, offers(GeOfferLifecycle.reduce(wire, null)).get(0).get("quarantined"));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void rawPollutedInputIsSkipped()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        List raw = new ArrayList(wire);
+        Map bad = new LinkedHashMap();
+        bad.put(5, "x");
+        raw.add(bad);
+        raw.add("not a row");
+        List history = new ArrayList();
+        history.add(7);
+        Map<String, Object> out = GeOfferLifecycle.reduce(raw, history);
+        assertEquals(1, offers(out).size());
+        assertEquals(1L, m(out.get("diagnostics")).get("history_row_invalid"));
+        assertEquals(2L, m(out.get("diagnostics")).get("non_ge_rows_ignored"));
+    }
+
+    @Test
+    public void missingSlotQuarantines()
+    {
+        empty(0, 1);
+        obs(0, BUYING, 560, 0, 10, 250, 0, 2);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> r : wire)
+        {
+            Map<String, Object> c = new LinkedHashMap<>(r);
+            c.remove("slot");
+            rows.add(c);
+        }
+        assertEquals(true, offers(GeOfferLifecycle.reduce(rows, null)).get(0).get("quarantined"));
+    }
+
+    @Test
     public void historyMatchOnNetNeverTaxesTheNetAgain()
     {
         empty(1, 1);
