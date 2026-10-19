@@ -115,8 +115,8 @@ final class AccountReadiness
     private static Map<String, Object> slayer(Map<?, ?> s)
     {
         Map<String, Object> out = new LinkedHashMap<>();
-        Object remaining = s == null ? null : s.get("task_remaining");
-        String state = !(remaining instanceof Number) ? "unknown" : ((Number) remaining).longValue() > 0 ? "active" : "none";
+        Integer remaining = s == null ? null : wholeInt(s.get("task_remaining"));
+        String state = remaining == null ? "unknown" : remaining > 0 ? "active" : "none";
         out.put("state", state);
         out.put("source", "varp:394,395");
         boolean active = "active".equals(state);
@@ -141,7 +141,7 @@ final class AccountReadiness
         out.put("task_source", "varp CA_TASK_COMPLETED_0..20, task_id = 32*word + bit");
         Map<?, ?> ca = map(raw.get("combat_achievement_tasks"));
         List<?> words = ca == null || !(ca.get("words") instanceof List) ? null : (List<?>) ca.get("words");
-        if (words == null || words.size() != CA_TASK_VARPS.length || !words.stream().allMatch(w -> w instanceof Number))
+        if (words == null || words.size() != CA_TASK_VARPS.length || !words.stream().allMatch(w -> wholeInt(w) != null))
         {
             // Unknown words make every task unknown, including "not completed".
             out.put("state", "unknown");
@@ -153,7 +153,7 @@ final class AccountReadiness
         List<Integer> completed = new ArrayList<>();
         for (int w = 0; w < words.size(); w++)
         {
-            int value = ((Number) words.get(w)).intValue();
+            int value = wholeInt(words.get(w));
             for (int b = 0; b < 32; b++)
             {
                 if ((value & (1 << b)) != 0) completed.add(32 * w + b);
@@ -179,10 +179,8 @@ final class AccountReadiness
                 for (Object id : (List<?>) listed)
                 {
                     // Only a completed bit can carry a tier: a catalogue id without its bit is not a completion.
-                    if (id instanceof Number && completed.contains(((Number) id).intValue()) && catalogued.add(((Number) id).intValue()))
-                    {
-                        ids.add(((Number) id).intValue());
-                    }
+                    Integer task = wholeInt(id);
+                    if (task != null && completed.contains(task) && catalogued.add(task)) ids.add(task);
                 }
             }
             byTier.put(tier, ids);
@@ -195,13 +193,25 @@ final class AccountReadiness
         for (String tier : CA_TIERS)
         {
             Object n = rawTotals == null ? null : rawTotals.get(tier);
-            totals.put(tier, n instanceof Number ? ((Number) n).intValue() : null);
+            totals.put(tier, wholeInt(n));
         }
         out.put("catalog", "game_cache_enums_3981_3986");
         out.put("catalog_sha256", ca.get("catalog_sha256"));
         out.put("completed_by_tier", byTier);
         out.put("catalog_task_totals", totals);
         return out;
+    }
+
+    /**
+     * A JSON number is an int only when finite, whole and inside the int range. Lenient JSON parsing accepts NaN
+     * and huge values; they must stay unknown instead of becoming 0 or Integer.MAX_VALUE.
+     */
+    static Integer wholeInt(Object o)
+    {
+        if (!(o instanceof Number)) return null;
+        double d = ((Number) o).doubleValue();
+        if (Double.isNaN(d) || d != Math.rint(d) || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) return null;
+        return (int) d;
     }
 
     private static Map<String, Object> entry(String state, String source, String basis)

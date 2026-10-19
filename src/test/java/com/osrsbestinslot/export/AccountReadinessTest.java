@@ -259,4 +259,29 @@ public class AccountReadinessTest
         assertEquals(false, ((Map<?, ?>) snaps.get(1)).get("account_progress_present"));
         assertEquals(1, ((List<?>) out.get("loadout_revisions")).size());
     }
+
+    @Test
+    public void malformedNumbersStayUnknownNeverNoneOrCompleted()
+    {
+        Map<String, Object> raw = new LinkedHashMap<>(capture.snapshot(client));
+        Map<String, Object> slayer = new LinkedHashMap<>();
+        slayer.put("task_remaining", Double.NaN);
+        raw.put("slayer", slayer);
+        Map<String, Object> ca = new LinkedHashMap<>();
+        java.util.List<Object> words = new java.util.ArrayList<>(Collections.nCopies(21, (Object) 0.0));
+        words.set(0, 1.0e10);
+        ca.put("words", words);
+        raw.put("combat_achievement_tasks", ca);
+        Map<String, Object> r = AccountReadiness.derive(raw);
+        assertEquals("unknown", at(r, "slayer_task").get("state"));
+        assertEquals("unknown", at(r, "combat_achievements").get("state"));
+        words.set(0, Double.NaN);
+        assertEquals("unknown", at(AccountReadiness.derive(raw), "combat_achievements").get("state"));
+        words.set(0, 2.5);
+        assertEquals("unknown", at(AccountReadiness.derive(raw), "combat_achievements").get("state"));
+        words.set(0, -1.0); // all 32 bits set is a valid int word
+        assertEquals(32, ((java.util.List<?>) at(AccountReadiness.derive(raw), "combat_achievements").get("completed_task_ids")).size());
+        slayer.put("task_remaining", Double.POSITIVE_INFINITY);
+        assertEquals("unknown", at(AccountReadiness.derive(raw), "slayer_task").get("state"));
+    }
 }
