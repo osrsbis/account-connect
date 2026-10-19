@@ -20,6 +20,10 @@ final class GeHistoryCapture
     private static final String STRICT_NUMBER = "(0|[1-9][0-9]{0,2}(?:,[0-9]{3})+|[1-9][0-9]*)";
     private static final Pattern DEDUCTION = Pattern.compile(STRICT_NUMBER + " coins?(?:<br>| )\\("
         + STRICT_NUMBER + " - " + STRICT_NUMBER + "(?: tax)?\\)");
+    private static final Pattern NET_SEGMENT = Pattern.compile(STRICT_NUMBER + " coins?");
+    private static final Pattern DEDUCTION_SEGMENT = Pattern.compile("\\(" + STRICT_NUMBER + " - " + STRICT_NUMBER
+        + "(?: tax)?\\)");
+    private static final Pattern EACH_SEGMENT = Pattern.compile("= " + STRICT_NUMBER + " each");
     private static final Pattern COLOUR_WRAPPER = Pattern.compile("<col=[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?>(.*)</col>");
     private final List<Map<String, Object>> observations = new ArrayList<>();
     private List<Map<String, Object>> previous;
@@ -95,7 +99,8 @@ final class GeHistoryCapture
                 return null;
             if (rawState.isEmpty() && item.getItemId() <= 0) continue; // empty history row
             if (item.getItemId() <= 0 || item.getItemQuantity() <= 0) return null;
-            String side = Text.removeTags(rawState).trim();
+            // The 0.7.43 actual client shows "Bought:" / "Sold:".
+            String side = Text.removeTags(rawState).trim().replaceFirst(":$", "");
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("row_index", offset / 6);
             row.put("item_id", item.getItemId());
@@ -116,8 +121,9 @@ final class GeHistoryCapture
 
     /**
      * Historic format reference: Flipping Utilities GeHistoryTabExtractor.getPrice ("(gross - tax tax)").
-     * The 0.7.42 actual client (2026-10-19 screenshot) renders "2,646 coins (2,700 - 54)" with no
-     * "tax" word, so both forms are accepted. The raw widget markup itself is not yet field-read.
+     * The 0.7.43 actual client (field-read 2026-10-19) renders each line in its own colour wrapper:
+     * "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,700 - 54)</col>", optionally followed by
+     * "<br>= 1,323 each", with no "tax" word. Both forms are accepted.
      * Unlike that extractor, retain offer totals: division cannot recover exact fills, and
      * displayed net must never have tax deducted again. Missing tax is not evidence of zero tax.
      */
@@ -134,15 +140,16 @@ final class GeHistoryCapture
         // Only a complete plain string or one balanced colour wrapper is accepted. Never
         // strip arbitrary markup: doing so can join split digits or hide truncated text.
         String state = unwrapColour(rawState);
+        if (state.endsWith(":")) state = state.substring(0, state.length() - 1);
         boolean buy = "Bought".equals(state);
         if (!buy && !"Sold".equals(state)) return;
-        Matcher match = DEDUCTION.matcher(unwrapColour(rawPrice));
-        if (!match.matches()) return;
+        String[] parts = deduction(rawPrice);
+        if (parts == null) return;
         try
         {
-            long net = Long.parseLong(match.group(1).replace(",", ""));
-            long gross = Long.parseLong(match.group(2).replace(",", ""));
-            long tax = Long.parseLong(match.group(3).replace(",", ""));
+            long net = Long.parseLong(parts[0].replace(",", ""));
+            long gross = Long.parseLong(parts[1].replace(",", ""));
+            long tax = Long.parseLong(parts[2].replace(",", ""));
             // Nonnegative longs and tax <= gross make subtraction overflow-safe.
             if (tax > gross || gross - tax != net || (buy && tax != 0)) return;
             row.put("original_gross_gp", gross);
@@ -154,6 +161,28 @@ final class GeHistoryCapture
         {
             // All three fields remain unknown on overflow, even if a prefix was parseable.
         }
+    }
+
+    /**
+     * {net, gross, tax} text, or null. Either the historic single string, or lines split on "<br>"
+     * where each line is plain or exactly one balanced colour wrapper: net coins, (gross - tax),
+     * then an optional "= N each". Any other markup or extra line rejects the whole row.
+     */
+    private static String[] deduction(String rawPrice)
+    {
+        Matcher whole = DEDUCTION.matcher(unwrapColour(rawPrice));
+        if (whole.matches()) return new String[]{whole.group(1), whole.group(2), whole.group(3)};
+        String[] lines = rawPrice.split("<br>", -1);
+        if (lines.length < 2 || lines.length > 3) return null;
+        for (int i = 0; i < lines.length; i++)
+        {
+            lines[i] = unwrapColour(lines[i]);
+            if (lines[i].indexOf('<') >= 0 || lines[i].indexOf('>') >= 0) return null;
+        }
+        Matcher net = NET_SEGMENT.matcher(lines[0]), split = DEDUCTION_SEGMENT.matcher(lines[1]);
+        if (!net.matches() || !split.matches()) return null;
+        if (lines.length == 3 && !EACH_SEGMENT.matcher(lines[2]).matches()) return null;
+        return new String[]{net.group(1), split.group(1), split.group(2)};
     }
 
     private static String unwrapColour(String raw)

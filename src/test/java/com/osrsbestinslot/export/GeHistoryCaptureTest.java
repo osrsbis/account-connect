@@ -47,6 +47,34 @@ public class GeHistoryCaptureTest
         assertNull(GeHistoryCapture.read(row("Sold", 1, "2,600 coins (2,700 - 54)")).get(0).get("explicit_tax_gp"));
     }
 
+    @Test public void fieldReadMarkupFromTheActual0743ClientIsParsed()
+    {
+        // Exact widget strings captured by the plugin on 0.7.43 at the Varrock GE, 2026-10-19.
+        Map<String, Object> sold = GeHistoryCapture.read(row("Sold:", 1,
+            "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,700 - 54)</col>")).get(0);
+        assertEquals("sell", sold.get("side"));
+        assertDeduction(sold, 2700, 54, 2646);
+        Map<String, Object> each = GeHistoryCapture.read(row("Sold:", 2,
+            "<col=ffb83f>23,952 coins</col><br><col=9f9f9f>(24,440 - 488)</col><br>= 11,976 each")).get(0);
+        assertDeduction(each, 24440, 488, 23952);
+        assertEquals(11976L, each.get("displayed_each_gp"));
+        Map<String, Object> bought = GeHistoryCapture.read(row("Bought:", 57,
+            "<col=ffb83f>638,571 coins</col><br>= 11,203 each")).get(0);
+        assertEquals("buy", bought.get("side"));
+        assertEquals(638571L, bought.get("displayed_total_gp"));
+        assertEquals(11203L, bought.get("displayed_each_gp"));
+        assertNull(bought.get("explicit_tax_gp"));
+        for (String bad : new String[]{
+            "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,700 - 55)</col>",
+            "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,700 - 54)</col><br>>= 1 each",
+            "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,700 - 54)</col><br>= 1 each<br>= 1 each",
+            "<col=ffb83f>2,646 coins<br><col=9f9f9f>(2,700 - 54)</col>",
+            "<col=ffb83f>2,646 coins</col><br><col=9f9f9f>(2,<b>700</b> - 54)</col>"})
+        {
+            assertNull(bad, GeHistoryCapture.read(row("Sold:", 1, bad)).get(0).get("explicit_tax_gp"));
+        }
+    }
+
     @Test public void explicitDeductionIsAnOfferTotalRegardlessOfQuantity()
     {
         for (int quantity : new int[] {1, 3, Integer.MAX_VALUE})
