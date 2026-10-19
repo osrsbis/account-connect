@@ -552,4 +552,38 @@ public class OwnGameplayCaptureTest
         assertFalse(capture.ready(client, TOKEN)); // account switch resets the tracker
         assertNull(capture.loadouts);
     }
+
+    @Test public void missingWornReadEndsRevisionUntilAFreshBaseline()
+    {
+        settle();
+        ItemContainer worn = mock(ItemContainer.class);
+        when(worn.getItems()).thenReturn(new Item[]{new Item(-1, 0), new Item(-1, 0),
+            new Item(-1, 0), new Item(4151, 1)});
+        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
+        capture.poll(client, 1000L);
+        assertNotNull(capture.loadouts.activeAt(tick));
+        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(null);
+        tick++; capture.poll(client, 1600L);
+        assertNull(capture.loadouts.activeAt(tick));
+        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
+        tick++; capture.poll(client, 2200L);
+        assertEquals(2, capture.loadouts.revisions().size());
+        assertEquals("baseline", capture.loadouts.activeAt(tick).get("provenance"));
+    }
+
+    @Test public void sceneGapCannotMaskALoadoutTickCounterRestart()
+    {
+        settle();
+        ItemContainer worn = mock(ItemContainer.class);
+        when(worn.getItems()).thenReturn(new Item[]{new Item(-1, 0), new Item(-1, 0),
+            new Item(-1, 0), new Item(4151, 1)});
+        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
+        capture.poll(client, 1000L);
+        String before = capture.loadouts.generation();
+        capture.gap(); // clears general lastTick before the next poll
+        tick = 5; capture.poll(client, 1600L);
+        assertNotEquals(before, capture.loadouts.generation());
+        assertEquals("baseline", capture.loadouts.activeAt(tick).get("provenance"));
+        assertEquals(1, capture.loadouts.revisions().size());
+    }
 }
