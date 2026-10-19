@@ -1,6 +1,7 @@
 package com.osrsbestinslot.export;
 
 import java.util.*;
+import java.util.function.IntUnaryOperator;
 
 /**
  * Own-account holdings read model (C4 wealth lane, contract v1). Pure derivation over one built snapshot map
@@ -37,7 +38,7 @@ final class WealthLedger
 	/** The four core locations. The account view is "core complete" only when all four are observed and exact. */
 	static final List<String> CORE = List.of("inventory", "equipment", "bank", "ge_escrow");
 	/** Own storages the snapshot carries only after the game sent them this session (opened or checked). */
-	static final List<String> OPTIONAL_STORAGE = List.of("looting_bag", "seed_vault", "bonds_pouch", "quiver_ammo",
+	static final List<String> OPTIONAL_STORAGE = List.of("looting_bag", "seed_vault", "bonds_pouch", "bonds_escrow", "quiver_ammo",
 		"seed_box", "tackle_box", "forestry_kit", "huntsmans_kit", "barbarian_knapsack", "death_storage",
 		"gravestone", "poh_costume_room", "poh_menagerie", "potion_storage_device");
 	/**
@@ -173,7 +174,7 @@ final class WealthLedger
 			{
 				if (l.readable() && CARRIED.equals(l.state) == carried)
 				{
-					l.items.forEach((id, qty) -> out.merge(id, qty, Long::sum));
+					l.items.forEach((id, qty) -> out.merge(id, qty, Math::addExact));
 				}
 			}
 			return out;
@@ -187,7 +188,8 @@ final class WealthLedger
 
 		static long coins(SortedMap<Integer, Long> items)
 		{
-			return items.getOrDefault(COINS, 0L) + items.getOrDefault(PLATINUM_TOKEN, 0L) * PLATINUM_TOKEN_COINS;
+			return Math.addExact(items.getOrDefault(COINS, 0L),
+				Math.multiplyExact(items.getOrDefault(PLATINUM_TOKEN, 0L), PLATINUM_TOKEN_COINS));
 		}
 
 		/**
@@ -314,7 +316,7 @@ final class WealthLedger
 
 	static Holdings fromSnapshot(Map<?, ?> snap)
 	{
-		return fromSnapshot(snap, DEFAULT_STALE_AFTER_MS, null);
+		return fromSnapshot(snap, DEFAULT_STALE_AFTER_MS, null, null);
 	}
 
 	/**
@@ -323,9 +325,14 @@ final class WealthLedger
 	 * this login session; the plugin clears these on login, so a previous account never leaks in).
 	 * There is no shared public account/mode epoch yet (integrator contract 2026-10-19). A caller that has one passes
 	 * callerIdentity; otherwise the key comes from the snapshot's own account block.
+	 *
+	 * canonical maps a noted or placeholder item id to its base id (in the plugin: ItemManager::canonicalize). The
+	 * snapshot keeps raw ids, so without it a noted withdraw shows as -N of one id and +N of another. null = no mapping,
+	 * and then noted moves stay unexplained (visible, never hidden).
 	 */
-	static Holdings fromSnapshot(Map<?, ?> snap, long staleAfterMs, String callerIdentity)
+	static Holdings fromSnapshot(Map<?, ?> snap, long staleAfterMs, String callerIdentity, IntUnaryOperator canonical)
 	{
+		IntUnaryOperator canon = canonical == null ? IntUnaryOperator.identity() : canonical;
 		Long capturedS = asLong(snap.get("captured_at"));
 		if (capturedS == null || capturedS <= 0)
 		{
@@ -336,13 +343,13 @@ final class WealthLedger
 		Map<String, Location> locs = new LinkedHashMap<>();
 
 		locs.put("inventory", flag(flags, "inventory_synced")
-			? new Location("inventory", OBSERVED, asOf, list(snap.get("inventory")), null)
+			? new Location("inventory", OBSERVED, asOf, list(snap.get("inventory"), canon), null)
 			: new Location("inventory", UNKNOWN, null, null, "inventory container not sent"));
 		locs.put("equipment", flag(flags, "equipment_synced")
-			? new Location("equipment", OBSERVED, asOf, equipment(snap.get("equipment")), null)
+			? new Location("equipment", OBSERVED, asOf, equipment(snap.get("equipment"), canon), null)
 			: new Location("equipment", UNKNOWN, null, null, "equipment container not sent"));
 		locs.put("bank", storage("bank", flag(flags, "bank_synced") ? asMap(snap.get("bank")) : null, asOf, staleAfterMs,
-			"bank not opened this login session"));
+			"bank not opened this login session", canon));
 
 		List<Escrow> escrow = new ArrayList<>();
 		Object offers = snap.get("ge_offers");
@@ -350,18 +357,23 @@ final class WealthLedger
 		{
 			SortedMap<Integer, Long> locked = new TreeMap<>();
 			boolean bounded = false;
+			Set<Integer> slots = new HashSet<>();
 			for (Object o : (List<?>) offers)
 			{
-				Escrow e = escrow(asMap(o));
+				Escrow e = escrow(asMap(o), canon);
+				if (!slots.add(e.slot))
+				{
+					throw new IllegalArgumentException("two ge_offers rows for slot " + e.slot);
+				}
 				escrow.add(e);
 				bounded |= BOUNDED.equals(e.escrowState);
 				if (e.lockedCoins > 0)
 				{
-					locked.merge(COINS, e.lockedCoins, Long::sum);
+					locked.merge(COINS, e.lockedCoins, Math::addExact);
 				}
 				if (e.lockedItems > 0)
 				{
-					locked.merge(e.itemId, e.lockedItems, Long::sum);
+					locked.merge(e.itemId, e.lockedItems, Math::addExact);
 				}
 			}
 			locs.put("ge_escrow", new Location("ge_escrow", bounded ? BOUNDED : OBSERVED, asOf, locked,
@@ -374,7 +386,8 @@ final class WealthLedger
 
 		for (String name : OPTIONAL_STORAGE)
 		{
-			locs.put(name, storage(name, asMap(snap.get(name)), asOf, staleAfterMs, "not opened or checked this login session"));
+			locs.put(name, storage(name, asMap(snap.get(name)), asOf, staleAfterMs, "not opened or checked this login session",
+				canon));
 		}
 		for (String name : UNSUPPORTED_STORAGE)
 		{
@@ -410,12 +423,17 @@ final class WealthLedger
 	 */
 	static Escrow escrow(Map<?, ?> o)
 	{
+		return escrow(o, IntUnaryOperator.identity());
+	}
+
+	static Escrow escrow(Map<?, ?> o, IntUnaryOperator canon)
+	{
 		if (o == null)
 		{
 			throw new IllegalArgumentException("ge offer row");
 		}
 		int slot = (int) req(o, "slot");
-		int itemId = (int) req(o, "item_id");
+		int itemId = canon.applyAsInt((int) req(o, "item_id"));
 		String state = String.valueOf(o.get("state"));
 		long total = req(o, "total_qty");
 		long done = req(o, "transferred_qty");
@@ -441,8 +459,8 @@ final class WealthLedger
 		if (buy)
 		{
 			// Unfilled coins stay locked while the offer is open. Bought items and the overpay refund may be collected.
-			long unfilledCoins = (total - done) * price;
-			long refund = Math.max(0L, done * price - spent);
+			long unfilledCoins = Math.multiplyExact(total - done, price);
+			long refund = Math.max(0L, Math.multiplyExact(done, price) - spent);
 			if (open)
 			{
 				return new Escrow(slot, "buy", itemId, state, unfilledCoins, 0, refund, done);
@@ -458,7 +476,8 @@ final class WealthLedger
 		return new Escrow(slot, "sell", itemId, state, 0, 0, spent, unsold);
 	}
 
-	private static Location storage(String name, Map<?, ?> block, long asOf, long staleAfterMs, String missing)
+	private static Location storage(String name, Map<?, ?> block, long asOf, long staleAfterMs, String missing,
+		IntUnaryOperator canon)
 	{
 		if (block == null)
 		{
@@ -469,15 +488,15 @@ final class WealthLedger
 		{
 			// The container was present when the snapshot was built, so its items are the client's copy at that moment,
 			// but the plugin has no send time for it. Real 0.7.39 run: first bank open after login had no observed_at.
-			return new Location(name, UNDATED, asOf, list(block.get("items")),
+			return new Location(name, UNDATED, asOf, list(block.get("items"), canon),
 				"present at capture, game send time not recorded");
 		}
 		long at = observedS * 1000L;
 		String state = asOf - at > staleAfterMs ? STALE : OBSERVED;
-		return new Location(name, state, at, list(block.get("items")), null);
+		return new Location(name, state, at, list(block.get("items"), canon), null);
 	}
 
-	private static SortedMap<Integer, Long> list(Object raw)
+	private static SortedMap<Integer, Long> list(Object raw, IntUnaryOperator canon)
 	{
 		SortedMap<Integer, Long> out = new TreeMap<>();
 		if (raw == null)
@@ -490,12 +509,12 @@ final class WealthLedger
 		}
 		for (Object row : (List<?>) raw)
 		{
-			add(out, asMap(row));
+			add(out, asMap(row), canon);
 		}
 		return out;
 	}
 
-	private static SortedMap<Integer, Long> equipment(Object raw)
+	private static SortedMap<Integer, Long> equipment(Object raw, IntUnaryOperator canon)
 	{
 		SortedMap<Integer, Long> out = new TreeMap<>();
 		Map<?, ?> slots = asMap(raw);
@@ -503,13 +522,13 @@ final class WealthLedger
 		{
 			for (Object row : slots.values())
 			{
-				add(out, asMap(row));
+				add(out, asMap(row), canon);
 			}
 		}
 		return out;
 	}
 
-	private static void add(SortedMap<Integer, Long> out, Map<?, ?> row)
+	private static void add(SortedMap<Integer, Long> out, Map<?, ?> row, IntUnaryOperator canon)
 	{
 		if (row == null)
 		{
@@ -523,7 +542,12 @@ final class WealthLedger
 		}
 		if (qty > 0)
 		{
-			out.merge((int) id, qty, Long::sum);
+			int base = canon.applyAsInt((int) id);
+			if (base <= 0)
+			{
+				throw new IllegalArgumentException("canonical item id");
+			}
+			out.merge(base, qty, Math::addExact);
 		}
 	}
 

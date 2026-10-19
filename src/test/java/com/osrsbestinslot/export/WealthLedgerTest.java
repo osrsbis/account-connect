@@ -239,7 +239,9 @@ public class WealthLedgerTest
 		Snap d = new Snap(T0 + 30).inv(995, 1_000).inv(LOBSTER, 100).bank(T0 - 5, 995, 1);
 		Map<String, Object> r3 = rec(c, d);
 		assertNull(classes(r3, LOBSTER).get(WealthReconciliation.TRADE));
-		assertEquals(Long.valueOf(100L), classes(r3, LOBSTER).get(WealthReconciliation.GE_SETTLEMENT_INFERRED));
+		// The 100 were already counted as trade in c; collecting them is an internal collect-box move (value 0).
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, 100L), classes(r3, LOBSTER));
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, 1_000L), classes(r3, 995));
 		assertEquals(false, r3.get("core_complete"));
 	}
 
@@ -336,7 +338,10 @@ public class WealthLedgerTest
 		Snap b = new Snap(T0 + 600).inv(995, 1_620_000).bank(T0 - 5, 995, 1);
 		Map<String, Object> r = rec(a, b);
 		assertEquals(Map.of(WealthReconciliation.GE_SETTLEMENT_INFERRED, -1L), classes(r, WHIP));
-		assertEquals(Map.of(WealthReconciliation.GE_SETTLEMENT_INFERRED, 1_620_000L), classes(r, 995));
+		// Sold above the 1.5M ask: only the ask is justified by the offer terms; the 120k excess stays unexplained.
+		Map<String, Long> coins = classes(r, 995);
+		assertEquals(Long.valueOf(1_500_000L), coins.get(WealthReconciliation.GE_SETTLEMENT_INFERRED));
+		assertEquals(Long.valueOf(120_000L), coins.get(WealthReconciliation.UNEXPLAINED));
 		assertEquals(false, r.get("core_complete"));
 	}
 
@@ -592,6 +597,212 @@ public class WealthLedgerTest
 		assertEquals(WealthLedger.UNKNOWN, b.locations.get("bank").state);
 	}
 
+	// ---- Regression tests for adversarial review r1 (da11975). Probe names are the reviewer's. ----
+
+	@Test
+	public void h1TransferredFlowCannotHideALossWhenTheDepositIsSeen()
+	{
+		Snap a = new Snap(T0).inv(995, 13_000_000).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).bank(T0 + 55, 995, 10_000_001);
+		List<WealthReconciliation.Flow> flows = List.of(
+			new WealthReconciliation.Flow("bank1:0", 995, -10_000_000, "transferred", "observed", "bank_deposit"));
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, flows, null, null);
+		assertEquals(Long.valueOf(10_000_000L), classes(r, 995).get(WealthReconciliation.TRANSFER));
+		assertEquals(Long.valueOf(-3_000_000L), classes(r, 995).get(WealthReconciliation.UNEXPLAINED));
+		assertNull(classes(r, 995).get(WealthReconciliation.TRANSFER_OUT_OF_VIEW));
+		assertEquals(false, r.get("explained"));
+		// Mirror (P19): a seen withdraw cannot hide an unrecorded gain.
+		Snap c = new Snap(T0 + 120).inv(995, 13_000_000).bank(T0 + 115, 995, 1);
+		Map<String, Object> r2 = WealthReconciliation.reconcile(b.h(), c.h(), null, List.of(
+			new WealthReconciliation.Flow("bank2:0", 995, 10_000_000, "transferred", "observed", "bank_withdraw")), null, null);
+		assertEquals(Long.valueOf(3_000_000L), classes(r2, 995).get(WealthReconciliation.UNEXPLAINED));
+	}
+
+	@Test
+	public void h2CollectBoxIsInferredAndNeverCompleteAndTradeIncomeIsNotABoxMove()
+	{
+		// R1: the same open offer in three snapshots; lobsters keep appearing.
+		Snap s1 = new Snap(T0).offer(0, LOBSTER, "BUYING", 10_000, 5_000, 200, 1_000_000).bank(T0 - 5, 995, 1);
+		Snap s2 = new Snap(T0 + 60).inv(LOBSTER, 5_000).offer(0, LOBSTER, "BUYING", 10_000, 5_000, 200, 1_000_000)
+			.bank(T0 + 55, 995, 1);
+		Map<String, Object> r = rec(s1, s2);
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, 5_000L), classes(r, LOBSTER));
+		assertEquals(false, r.get("explained"));
+		assertEquals(false, r.get("core_complete"));
+		// P20: a recorded trade receipt is applied before collect-box room.
+		Snap s3 = new Snap(T0 + 120).inv(LOBSTER, 5_500).offer(0, LOBSTER, "BUYING", 10_000, 5_000, 200, 1_000_000)
+			.bank(T0 + 115, 995, 1);
+		Map<String, Object> r2 = WealthReconciliation.reconcile(s2.h(), s3.h(), null, List.of(
+			new WealthReconciliation.Flow("trade1:0", LOBSTER, 500, "transferred", "observed", "trade_received")), null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER_OUT_OF_VIEW, 500L), classes(r2, LOBSTER));
+	}
+
+	@Test
+	public void h3CollectingAFinishedOfferIsNotASecondValuedSettlement()
+	{
+		Map<Integer, Long> p = Map.of(LOBSTER, 200L);
+		Snap s1 = new Snap(T0).offer(0, LOBSTER, "BUYING", 100, 0, 200, 0).bank(T0 - 5, 995, 1);
+		Snap s2 = new Snap(T0 + 60).offer(0, LOBSTER, "BOUGHT", 100, 100, 200, 19_000).bank(T0 + 55, 995, 1);
+		Snap s3 = new Snap(T0 + 120).inv(LOBSTER, 100).inv(995, 1_000).bank(T0 + 115, 995, 1);
+		Map<String, Object> r12 = WealthReconciliation.reconcile(s1.h(), s2.h(), null, null, p, p);
+		Map<String, Object> r23 = WealthReconciliation.reconcile(s2.h(), s3.h(), null, null, p, p);
+		@SuppressWarnings("unchecked") Map<String, Long> v12 = (Map<String, Long>) r12.get("value_by_class_gp_at_from_prices");
+		@SuppressWarnings("unchecked") Map<String, Long> v23 = (Map<String, Long>) r23.get("value_by_class_gp_at_from_prices");
+		long total = 0;
+		for (Map<String, Long> v : List.of(v12, v23))
+		{
+			for (long x : v.values())
+			{
+				total += x;
+			}
+		}
+		assertEquals(1_000L, total);	// 100 lobsters worth 20,000 bought for 19,000
+		assertNull(classes(r23, LOBSTER).get(WealthReconciliation.GE_SETTLEMENT_INFERRED));
+	}
+
+	@Test
+	public void h4NotedWithdrawIsATransferWithACanonicalMap()
+	{
+		java.util.function.IntUnaryOperator canon = id -> id == 380 ? LOBSTER : id;
+		Snap a = new Snap(T0).bank(T0 - 5, LOBSTER, 100);
+		Snap b = new Snap(T0 + 10).inv(380, 100).bank(T0 + 5, 995, 1);
+		WealthLedger.Holdings ha = WealthLedger.fromSnapshot(a.m, WealthLedger.DEFAULT_STALE_AFTER_MS, null, canon);
+		WealthLedger.Holdings hb = WealthLedger.fromSnapshot(b.m, WealthLedger.DEFAULT_STALE_AFTER_MS, null, canon);
+		Map<String, Object> r = WealthReconciliation.reconcile(ha, hb, null, null, null, null);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER, 100L), classes(r, LOBSTER));
+		// Without the map the split stays visible as unexplained, never hidden.
+		Map<String, Object> raw = rec(a, b);
+		assertEquals(Map.of(WealthReconciliation.UNEXPLAINED, 100L), classes(raw, 380));
+	}
+
+	@Test
+	public void m1CancelMovesLockedCoinsIntoTheCollectBox()
+	{
+		Snap a = new Snap(T0).offer(0, LOBSTER, "BUYING", 100, 40, 200, 7_600).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).offer(0, LOBSTER, "CANCELLED_BUY", 100, 40, 200, 7_600).bank(T0 + 55, 995, 1);
+		Map<String, Object> r = rec(a, b);
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, -12_000L), classes(r, 995));
+		Snap c = new Snap(T0 + 120).inv(LOBSTER, 40).inv(995, 12_400).bank(T0 + 115, 995, 1);
+		Map<String, Object> r2 = rec(b, c);
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, 12_400L), classes(r2, 995));
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, 40L), classes(r2, LOBSTER));
+		Snap sa = new Snap(T0).offer(1, SHARK, "SELLING", 100, 50, 900, 45_000).bank(T0 - 5, 995, 1);
+		Snap sb = new Snap(T0 + 60).offer(1, SHARK, "CANCELLED_SELL", 100, 50, 900, 45_000).bank(T0 + 55, 995, 1);
+		assertEquals(Map.of(WealthReconciliation.GE_COLLECT_BOX, -50L), classes(rec(sa, sb), SHARK));
+	}
+
+	@Test
+	public void m2VanishedSellCoinsAreBoundedByTheAsk()
+	{
+		Snap a = new Snap(T0).offer(3, SHARK, "SELLING", 1, 0, 900, 0).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).inv(995, 50_000_900).bank(T0 + 55, 995, 1);
+		Map<String, Object> r = rec(a, b);
+		assertEquals(Long.valueOf(900L), classes(r, 995).get(WealthReconciliation.GE_SETTLEMENT_INFERRED));
+		assertEquals(Long.valueOf(50_000_000L), classes(r, 995).get(WealthReconciliation.UNEXPLAINED));
+	}
+
+	@Test
+	public void m3BankFlowIntoAnUnreadBankHasNoValue()
+	{
+		Snap a = new Snap(T0).inv(LOBSTER, 28);
+		Snap b = new Snap(T0 + 60);
+		Map<Integer, Long> p = Map.of(LOBSTER, 200L);
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, List.of(
+			new WealthReconciliation.Flow("bank1:0", LOBSTER, -28, "transferred", "observed", "bank_deposit")), p, p);
+		assertEquals(Map.of(WealthReconciliation.TRANSFER_OWN_UNREAD, -28L), classes(r, LOBSTER));
+		@SuppressWarnings("unchecked") Map<String, Long> v = (Map<String, Long>) r.get("value_by_class_gp_at_from_prices");
+		assertEquals(Long.valueOf(0L), v.get(WealthReconciliation.TRANSFER_OWN_UNREAD));
+	}
+
+	@Test
+	public void m4UnknownFlowClassKeepsConservation()
+	{
+		Snap a = new Snap(T0).inv(SHARK, 20).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 60).inv(SHARK, 12).bank(T0 + 55, 995, 1);
+		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), b.h(), null, List.of(
+			new WealthReconciliation.Flow("u1:0", SHARK, -5, "unknown", "unknown")), null, null);
+		assertEquals(Map.of(WealthReconciliation.UNEXPLAINED, -8L), classes(r, SHARK));
+		assertEquals(true, r.get("conservation_holds"));
+	}
+
+	@Test
+	public void m5OfferFirstSeenWithFillsIsInferredNotProvenTrade()
+	{
+		Snap a = new Snap(T0).inv(995, 0).bank(T0 - 5, 995, 1);
+		Snap b = new Snap(T0 + 5).offer(0, LOBSTER, "BOUGHT", 100, 100, 200, 19_000).bank(T0 - 5, 995, 1);
+		Map<String, Object> r = rec(a, b);
+		assertEquals(List.of("slot0:placement_not_observed"), r.get("inferred_trade_slots"));
+		assertEquals(false, r.get("explained"));
+	}
+
+	@Test
+	public void l1SameSecondFlowsAndFillsAreNotPlaced()
+	{
+		long from = T0 * 1000, to = (T0 + 60) * 1000;
+		Map<String, Object> f = new LinkedHashMap<>();
+		f.put("flow_id", "x:0");
+		f.put("item_id", SHARK);
+		f.put("qty_delta", -1L);
+		f.put("observed_at_ms", from + 800);
+		f.put("flow_class", "consumed_inferred");
+		f.put("provenance", "inferred");
+		List<String> ex = new ArrayList<>();
+		assertTrue(WealthReconciliation.flowsFromC3(List.of(f), from, to, ex).isEmpty());
+		assertEquals(List.of("x:0:same_second_as_snapshot"), ex);
+	}
+
+	@Test
+	public void l2BankReadingTakenBeforeFromIsCarriedNotFresh()
+	{
+		Snap a = new Snap(T0).bank(T0 - 30, 995, 1);
+		Snap b = new Snap(T0 + 3_000).bank(T0 - 30, 995, 1);
+		Map<String, Object> r = rec(a, b);
+		assertEquals(Collections.singletonList("bank"), r.get("carried_forward_locations"));
+		assertEquals(false, r.get("core_complete"));
+	}
+
+	@Test
+	public void l3BondsEscrowIsReadAndL5DuplicateSlotsAndL7OverflowAreRejected()
+	{
+		Snap s = new Snap(T0).storage("bonds_escrow", T0 - 1, 13190, 1).bank(T0 - 5, 995, 1);
+		assertEquals(WealthLedger.OBSERVED, s.h().locations.get("bonds_escrow").state);
+		Snap dup = new Snap(T0).offer(0, LOBSTER, "BUYING", 100, 0, 200, 0).offer(0, LOBSTER, "BUYING", 100, 0, 200, 0);
+		try
+		{
+			dup.h();
+			fail("duplicate slot accepted");
+		}
+		catch (IllegalArgumentException expected)
+		{
+		}
+		Snap big = new Snap(T0);
+		for (int i = 0; i < 8; i++)
+		{
+			big.offer(i, LOBSTER, "BUYING", Integer.MAX_VALUE, 0, Integer.MAX_VALUE, 0);
+		}
+		try
+		{
+			big.h().knownCoins();
+			fail("overflow accepted");
+		}
+		catch (ArithmeticException expected)
+		{
+		}
+	}
+
+	@Test
+	public void l4NullFlowFieldsAreRejected()
+	{
+		try
+		{
+			new WealthReconciliation.Flow(null, SHARK, -1, "consumed_inferred", "inferred");
+			fail("null flow id accepted");
+		}
+		catch (NullPointerException expected)
+		{
+		}
+	}
+
 	/** Writes the derived-result example for the handoff (build/wealth-ledger-example.json). */
 	@Test
 	public void derivedResultExample() throws Exception
@@ -609,7 +820,9 @@ public class WealthLedgerTest
 		WealthLedger.Holdings hb = b.h();
 		Map<String, Object> r = WealthReconciliation.reconcile(a.h(), hb, null, flows, p0, p1);
 		assertEquals(true, r.get("conservation_holds"));
-		assertEquals(true, r.get("core_complete"));
+		// Bounded escrow and an inferred collect-box move: correct classes, but not proven complete.
+		assertEquals(false, r.get("core_complete"));
+		assertEquals(false, r.get("explained"));
 		assertEquals(Collections.singletonList("looting_bag"), r.get("stale_locations"));
 		@SuppressWarnings("unchecked") Map<String, Long> v = (Map<String, Long>) r.get("value_by_class_gp_at_from_prices");
 		assertEquals(Long.valueOf(0L), v.get(WealthReconciliation.GE_COLLECT_BOX));	// still owned, only out of view

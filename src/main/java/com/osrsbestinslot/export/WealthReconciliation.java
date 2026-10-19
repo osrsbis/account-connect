@@ -26,6 +26,10 @@ final class WealthReconciliation
 	static final String TRANSFORM = "transform";
 	static final String TRANSFER_OUT_OF_VIEW = "transfer_out_of_view";
 	static final String TRANSFER_INFERRED_CARRIED = "transfer_inferred_carried";
+	/** C3 bank_session flow whose bank side was not read in this window: own move, recorded by an event, value 0. */
+	static final String TRANSFER_OWN_UNREAD = "transfer_own_unread";
+	/** Snapshot times are whole seconds; a flow or fill in the same second as either snapshot cannot be placed. */
+	static final long SNAPSHOT_TIME_RESOLUTION_MS = 1000L;
 	static final String UNEXPLAINED = "unexplained";
 
 	private WealthReconciliation()
@@ -57,14 +61,27 @@ final class WealthReconciliation
 		final long qtyDelta;
 		final String flowClass;
 		final String provenance;
+		final String origin;
 
 		Flow(String flowId, int itemId, long qtyDelta, String flowClass, String provenance)
 		{
-			this.flowId = flowId;
+			this(flowId, itemId, qtyDelta, flowClass, provenance, null);
+		}
+
+		Flow(String flowId, int itemId, long qtyDelta, String flowClass, String provenance, String origin)
+		{
+			this.flowId = Objects.requireNonNull(flowId, "flow_id");
 			this.itemId = itemId;
 			this.qtyDelta = qtyDelta;
-			this.flowClass = flowClass;
+			this.flowClass = Objects.requireNonNull(flowClass, "flow_class");
 			this.provenance = provenance;
+			this.origin = origin;
+		}
+
+		/** C3 marks bank deposits/withdrawals as transferred with origin bank_deposit / bank_withdraw. */
+		boolean ownBankMove()
+		{
+			return "bank_deposit".equals(origin) || "bank_withdraw".equals(origin);
 		}
 	}
 
@@ -123,11 +140,12 @@ final class WealthReconciliation
 					excluded.add(key + ":fill_unknown");
 					continue;
 				}
-				if (end <= fromMs || start > toMs)
+				if (end <= fromMs || start >= toMs + SNAPSHOT_TIME_RESOLUTION_MS)
 				{
 					continue;	// outside the window
 				}
-				if (start < fromMs || end > toMs)
+				// Snapshot times are whole seconds: a fill touching the second of either snapshot may already be in it.
+				if (start < fromMs + SNAPSHOT_TIME_RESOLUTION_MS || end > toMs)
 				{
 					excluded.add(key + ":fill_straddles_window");
 					continue;
@@ -170,15 +188,22 @@ final class WealthReconciliation
 				excluded.add(id + ":no_time");
 				continue;
 			}
-			if (at <= fromMs || at > toMs)
+			if (at < fromMs || at >= toMs + SNAPSHOT_TIME_RESOLUTION_MS)
 			{
+				continue;
+			}
+			if (at < fromMs + SNAPSHOT_TIME_RESOLUTION_MS || at >= toMs)
+			{
+				excluded.add(id + ":same_second_as_snapshot");	// may already be inside the FROM or TO snapshot
 				continue;
 			}
 			Long item = WealthLedger.asLong(f.get("item_id")), qty = WealthLedger.asLong(f.get("qty_delta"));
 			String cls = String.valueOf(f.get("flow_class"));
+			Object origin = f.get("origin");
 			out.add(item == null || qty == null || item <= 0
-				? new Flow(id, 0, 0, cls, "unknown")
-				: new Flow(id, item.intValue(), qty, cls, String.valueOf(f.get("provenance"))));
+				? new Flow(id, 0, 0, cls, "unknown", origin == null ? null : origin.toString())
+				: new Flow(id, item.intValue(), qty, cls, String.valueOf(f.get("provenance")),
+					origin == null ? null : origin.toString()));
 		}
 		return out;
 	}
@@ -240,10 +265,11 @@ final class WealthReconciliation
 				continue;
 			}
 			comparable.add(name);
-			if (a.observedAtMs != null && a.observedAtMs.equals(b.observedAtMs) && !name.equals("ge_escrow")
+			if (b.observedAtMs != null && b.observedAtMs <= from.asOfMs && !name.equals("ge_escrow")
 				&& !name.equals("inventory") && !name.equals("equipment"))
 			{
-				// Same reading carried forward: the game did not resend it, so changes made out of view are unseen.
+				// The TO reading was taken at or before the FROM snapshot: nothing in this window was read there, so
+				// changes made out of view (for example items sent straight to the bank) are unseen.
 				carried.add(name);
 			}
 			if (WealthLedger.STALE.equals(a.state) || WealthLedger.STALE.equals(b.state)
@@ -277,9 +303,10 @@ final class WealthReconciliation
 		boolean geComparable = comparable.contains("ge_escrow");
 		Map<Integer, long[]> settleBounds = new HashMap<>();	// item -> [min, max] for vanished/replaced offers
 		Map<Integer, long[]> boxBounds = new HashMap<>();		// item -> [max collected out, max collected in]
+		List<String> inferredTrades = new ArrayList<>();
 		if (geComparable)
 		{
-			geFacts(from, to, tradeFacts == null, facts, settleBounds, boxBounds, tradeSources);
+			geFacts(from, to, tradeFacts == null, facts, settleBounds, boxBounds, tradeSources, inferredTrades);
 		}
 		if (tradeFacts != null)
 		{
@@ -296,7 +323,7 @@ final class WealthReconciliation
 				}
 			}
 		}
-		Map<Integer, Long> outOfView = new HashMap<>();
+		Map<Integer, Long> outOfView = new HashMap<>(), ownUnread = new HashMap<>();
 		List<String> unknownFlows = new ArrayList<>();
 		Set<String> seenFlows = new HashSet<>();
 		int duplicateFlows = 0;
@@ -337,8 +364,8 @@ final class WealthReconciliation
 				String cls = ledgerClass(f.flowClass);
 				if (cls.equals(TRANSFER_OUT_OF_VIEW))
 				{
-					// C3 also marks bank deposits as transferred. Use the flow only for the part no in-view location shows.
-					outOfView.merge(id, q, Long::sum);
+					// Used only for the part no in-view location shows (see the per-item netting below).
+					(f.ownBankMove() ? ownUnread : outOfView).merge(id, q, Long::sum);
 				}
 				else
 				{
@@ -366,6 +393,7 @@ final class WealthReconciliation
 		Set<Integer> items = new TreeSet<>(moves.keySet());
 		items.addAll(facts.keySet());
 		items.addAll(outOfView.keySet());
+		items.addAll(ownUnread.keySet());
 		List<Map<String, Object>> rows = new ArrayList<>();
 		Map<String, Long> classValue = new LinkedHashMap<>();
 		Map<String, Long> classQtyItems = new LinkedHashMap<>();
@@ -392,12 +420,10 @@ final class WealthReconciliation
 					remaining -= e.getValue();
 				}
 			}
-			long[] settle = settleBounds.get(id);
-			if (remaining != 0 && settle != null && remaining >= settle[0] && remaining <= settle[1])
-			{
-				cls.merge(GE_SETTLEMENT_INFERRED, remaining, Long::sum);
-				remaining = 0;
-			}
+			// Out-of-view flows first. A transferred flow whose other side is already seen in view was used up as the
+			// in-view transfer, so only the part beyond the in-view moves on that side can explain a residual.
+			remaining = applyOutOfView(cls, remaining, ownUnread.get(id), pn, TRANSFER_OWN_UNREAD);
+			remaining = applyOutOfView(cls, remaining, outOfView.get(id), pn, TRANSFER_OUT_OF_VIEW);
 			long[] box = boxBounds.get(id);
 			if (remaining != 0 && box != null)
 			{
@@ -409,12 +435,16 @@ final class WealthReconciliation
 					remaining -= take;
 				}
 			}
-			Long away = outOfView.get(id);
-			if (remaining != 0 && away != null && Long.signum(away) == Long.signum(remaining))
+			long[] settle = settleBounds.get(id);
+			if (remaining != 0 && settle != null)
 			{
-				long take = remaining > 0 ? Math.min(remaining, away) : Math.max(remaining, away);
-				cls.merge(TRANSFER_OUT_OF_VIEW, take, Long::sum);
-				remaining -= take;
+				// Only the part the vanished offer's terms can justify; any excess stays unexplained.
+				long take = Math.max(settle[0], Math.min(settle[1], remaining));
+				if (take != 0)
+				{
+					cls.merge(GE_SETTLEMENT_INFERRED, take, Long::sum);
+					remaining -= take;
+				}
 			}
 			if (remaining != 0 && anyCarried)
 			{
@@ -429,7 +459,7 @@ final class WealthReconciliation
 			}
 			if (remaining != 0)
 			{
-				cls.put(UNEXPLAINED, remaining);
+				cls.merge(UNEXPLAINED, remaining, Long::sum);
 			}
 			Map<String, Object> row = new LinkedHashMap<>();
 			row.put("item_id", id);
@@ -446,7 +476,7 @@ final class WealthReconciliation
 				{
 					// Transfers and collect-box moves stay inside the account: they move value, they never create it.
 					boolean internal = e.getKey().equals(TRANSFER) || e.getKey().equals(GE_COLLECT_BOX)
-						|| e.getKey().equals(TRANSFER_INFERRED_CARRIED);
+						|| e.getKey().equals(TRANSFER_INFERRED_CARRIED) || e.getKey().equals(TRANSFER_OWN_UNREAD);
 					long v = internal ? 0 : e.getValue() * pa;
 					classValue.merge(e.getKey(), v, Long::sum);
 				}
@@ -509,12 +539,17 @@ final class WealthReconciliation
 		out.put("conservation_holds", conserved);
 		out.put("unknown_flows", unknownFlows);
 		out.put("conflicting_flow_ids", conflictingFlows);
+		out.put("inferred_trade_slots", inferredTrades);
+		// The collect box is never read: its use is inferred from slot counters, so it never counts as explained.
 		boolean explained = rowsHave(rows, UNEXPLAINED) == 0 && rowsHave(rows, GE_SETTLEMENT_INFERRED) == 0
-			&& rowsHave(rows, TRANSFER_INFERRED_CARRIED) == 0 && unknownFlows.isEmpty() && conflictingFlows.isEmpty();
+			&& rowsHave(rows, TRANSFER_INFERRED_CARRIED) == 0 && rowsHave(rows, GE_COLLECT_BOX) == 0
+			&& unknownFlows.isEmpty() && conflictingFlows.isEmpty() && inferredTrades.isEmpty();
 		boolean core = true;
 		for (String name : WealthLedger.CORE)
 		{
-			core &= comparable.contains(name) && !carried.contains(name) && !stale.contains(name);
+			core &= comparable.contains(name) && !carried.contains(name) && !stale.contains(name)
+				&& WealthLedger.OBSERVED.equals(from.locations.get(name).state)
+				&& WealthLedger.OBSERVED.equals(to.locations.get(name).state);
 		}
 		out.put("explained", explained);
 		out.put("core_comparable", core);
@@ -526,15 +561,18 @@ final class WealthReconciliation
 
 	/**
 	 * GE slot evidence between two snapshots. The same offer persists when slot, item, side, total and price match
-	 * and no counter went down; then the counter difference is an observed fill. An offer that is new at TO was
-	 * placed inside the interval, so its counters count from zero. A vanished or replaced offer was collected out
-	 * of view, which gives only a bounded, inferred settlement for its item and coins.
+	 * and no counter went down; then the counter difference is an observed fill. An offer first seen at TO with fills
+	 * is a placement that was not observed: its fills may predate the window (for example a read taken before the
+	 * login GE replay), so they are derived but listed in inferredTrades. A vanished or replaced offer was collected
+	 * out of view.
 	 *
-	 * Collect-box bounds: box[0] = most that can have left the box into view (box contents at FROM plus fills);
-	 * box[1] = most that can have entered the box out of view (fills inside the interval).
+	 * Collect-box room (box[0] = most that can have left the box into view, box[1] = most that can have entered it):
+	 * FROM box contents plus fills, released locked coins/items on a cancel. A vanished offer's FROM box contents are
+	 * box room; only fills after FROM (at most the unfilled remainder) can be settlement.
 	 */
 	private static void geFacts(WealthLedger.Holdings from, WealthLedger.Holdings to, boolean deriveFills,
-		Map<Integer, Map<String, Long>> facts, Map<Integer, long[]> settle, Map<Integer, long[]> box, List<String> sources)
+		Map<Integer, Map<String, Long>> facts, Map<Integer, long[]> settle, Map<Integer, long[]> box, List<String> sources,
+		List<String> inferredTrades)
 	{
 		Map<Integer, WealthLedger.Escrow> fromSlot = new HashMap<>(), toSlot = new HashMap<>();
 		for (WealthLedger.Escrow a : from.escrow)
@@ -547,11 +585,23 @@ final class WealthReconciliation
 			WealthLedger.Escrow a = fromSlot.get(b.slot);
 			boolean same = same(a, b);
 			long q = b.done - (same ? a.done : 0), s = b.spent - (same ? a.spent : 0);
+			boolean buy = b.side.equals("buy");
+			if (same)
+			{
+				// A cancel moves the still-locked coins (buy) or items (sell) into the collect box.
+				long releasedCoins = a.lockedCoins - b.lockedCoins - (buy ? Math.multiplyExact(q, b.price) : 0);
+				long releasedItems = a.lockedItems - b.lockedItems - (buy ? 0 : q);
+				bound(box, WealthLedger.COINS, 0, releasedCoins);
+				bound(box, b.itemId, 0, releasedItems);
+			}
 			if (q <= 0 && s <= 0)
 			{
 				continue;
 			}
-			boolean buy = b.side.equals("buy");
+			if (!same && a == null && b.done > 0)
+			{
+				inferredTrades.add("slot" + b.slot + ":placement_not_observed");
+			}
 			if (deriveFills)
 			{
 				add(facts, b.itemId, TRADE, buy ? q : -q);
@@ -564,7 +614,7 @@ final class WealthReconciliation
 			if (buy)
 			{
 				bound(box, b.itemId, 0, q);
-				bound(box, WealthLedger.COINS, 0, q * b.price - s);	// overpay refund
+				bound(box, WealthLedger.COINS, 0, Math.multiplyExact(q, b.price) - s);	// overpay refund
 			}
 			else
 			{
@@ -580,27 +630,51 @@ final class WealthReconciliation
 				continue;
 			}
 			long remaining = a.total - a.done;
+			boolean open = a.offerState.equals("BUYING") || a.offerState.equals("SELLING");
+			if (!open || remaining <= 0)
+			{
+				continue;	// a finished or cancelled offer has nothing left to fill; its box contents are box room above
+			}
 			if (a.side.equals("buy"))
 			{
-				// Unfilled coins that came back are a net-zero round trip; only new fills cost coins.
-				range(settle, a.itemId, 0, remaining + a.maxUncollectedItems);
-				range(settle, WealthLedger.COINS, -(remaining * a.price), a.maxUncollectedCoins);
+				// Fills after FROM: items arrive, and they cost at most the locked price.
+				range(settle, a.itemId, 0, remaining);
+				range(settle, WealthLedger.COINS, -Math.multiplyExact(remaining, a.price), 0);
 			}
 			else
 			{
-				// A sell can fill above its ask, so the coin side has no useful upper bound.
-				range(settle, a.itemId, -remaining, a.maxUncollectedItems);
-				range(settle, WealthLedger.COINS, 0, UNBOUNDED);
+				// A sell can fill above its ask. Only the part up to the ask is justified; more stays unexplained.
+				range(settle, a.itemId, -remaining, 0);
+				range(settle, WealthLedger.COINS, 0, Math.multiplyExact(remaining, a.price));
 			}
 		}
 	}
-
-	private static final long UNBOUNDED = Long.MAX_VALUE / 4;
 
 	private static boolean same(WealthLedger.Escrow a, WealthLedger.Escrow b)
 	{
 		return a != null && b != null && a.itemId == b.itemId && a.side.equals(b.side) && a.total == b.total
 			&& a.price == b.price && b.done >= a.done && b.spent >= a.spent;
+	}
+
+	/**
+	 * Use a transferred flow for the residual. A negative flow (left a read location) whose arrival is seen in view
+	 * was already counted as an in-view transfer; only the part beyond the in-view arrivals (pn[0]) is out of view.
+	 * The same holds for a positive flow and the in-view departures (pn[1]).
+	 */
+	private static long applyOutOfView(Map<String, Long> cls, long remaining, Long flow, long[] pn, String name)
+	{
+		if (remaining == 0 || flow == null || flow == 0)
+		{
+			return remaining;
+		}
+		long away = flow < 0 ? Math.min(0, flow + pn[0]) : Math.max(0, flow + pn[1]);
+		if (away == 0 || Long.signum(away) != Long.signum(remaining))
+		{
+			return remaining;
+		}
+		long take = remaining > 0 ? Math.min(remaining, away) : Math.max(remaining, away);
+		cls.merge(name, take, Long::sum);
+		return remaining - take;
 	}
 
 	private static void bound(Map<Integer, long[]> box, int id, long out, long in)
@@ -614,7 +688,7 @@ final class WealthReconciliation
 	{
 		long[] r = settle.computeIfAbsent(id, k -> new long[2]);
 		r[0] += min;
-		r[1] = r[1] >= UNBOUNDED || max >= UNBOUNDED ? UNBOUNDED : r[1] + max;
+		r[1] += max;
 	}
 
 	private static void add(Map<Integer, Map<String, Long>> facts, int id, String cls, long q)
