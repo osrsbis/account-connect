@@ -301,6 +301,16 @@ public class ActivityRecordTest
         assertEquals(1, ((Map<?,?>)r.get("quality")).get("duplicates_dropped"));
     }
 
+    /** C2 2478986: an inferred end has end_tick but no end time, so no rate is published. */
+    @Test public void inferredEncounterEndHasNoRate()
+    {
+        Map<String,Object> s = scope(); Map<String,Object> e = encounter();
+        e.put("outcome", "unobserved_end_inactivity"); e.put("end_observed_at_ms", null); s.put("encounter", e);
+        Map<?,?> res = (Map<?,?>)ActivityRecord.derive(s, encounterEvents(), prices).get("result");
+        assertNull(res.get("net_gp_per_elapsed_hour"));
+        assertEquals(List.of("encounter_end_time_unobserved:unobserved_end_inactivity"), res.get("unavailable_reasons"));
+    }
+
     /** Writes the derived example for the handoff; the build directory is not committed. */
     @Test public void writeDerivedExample() throws Exception
     {

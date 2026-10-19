@@ -172,8 +172,10 @@ final class ActivityRecord
         List<String> reasons = new ArrayList<>();
         if (gaps.contains("scope_identity_missing")) reasons.add("scope_identity_missing");
         if (conflictsInWindow > 0) reasons.add("conflicting_event_ids:" + conflictsInWindow);
-        if (end == null) reasons.add("window_open");
-        if (unpriced > 0) reasons.add("unpriced_flows:" + unpriced);
+        // C2 sets end_observed_at_ms null for inferred ends (scene_gap, tick_reversal, inactivity): the end time is unknown.
+        Object outcome = encounter == null ? null : encounter.get("outcome");
+        if (end == null) reasons.add(encounter == null || "open".equals(outcome) ? "window_open" : "encounter_end_time_unobserved:" + outcome);
+        if (unpriced > 0 && end != null) reasons.add("unpriced_flows:" + unpriced); // no as_of means nothing was priced
         if (unknownLoss > 0) reasons.add("unknown_loss:" + unknownLoss);
         if (flows.isEmpty()) reasons.add("no_classified_flows");
         Map<String,Object> result = new LinkedHashMap<>();
