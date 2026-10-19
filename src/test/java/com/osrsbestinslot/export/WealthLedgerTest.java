@@ -290,6 +290,35 @@ public class WealthLedgerTest
 	}
 
 	@Test
+	public void c1CommittedExampleOutputFeedsTheLedger() throws Exception
+	{
+		// Pinned copy of C1 GeOfferLifecycle.reduce output at 4c38900 (sha256 7d49157f...). Buy 400 runes for 98,000,
+		// then sell them in two fills for 39,150 + 65,250 (RuneLite gp counter, tax unknown).
+		Map<String, Object> reduced = WealthLedgerReplay.load(Paths.get("src", "test", "resources", "wealth",
+			"c1-example-output-4c38900.json").toString());
+		List<String> excluded = new ArrayList<>();
+		List<WealthReconciliation.TradeFact> all = WealthReconciliation.tradeFactsFromC1(reduced, "42", "STANDARD",
+			1_000_000, 1_300_000, excluded);
+		assertTrue(excluded.isEmpty());
+		long items = 0, coins = 0;
+		for (WealthReconciliation.TradeFact t : all)
+		{
+			assertEquals(560, t.itemId);
+			items += t.qtyDelta;
+			coins += t.coinsDelta;
+		}
+		assertEquals(0L, items);
+		assertEquals(-98_000L + 39_150 + 65_250, coins);
+		// A window ending mid-sell keeps only the fills inside it and lists the one that straddles.
+		excluded.clear();
+		List<WealthReconciliation.TradeFact> part = WealthReconciliation.tradeFactsFromC1(reduced, "42", "STANDARD",
+			1_000_000, 1_200_000, excluded);
+		assertEquals(2, part.size());
+		assertEquals(1, excluded.size());
+		assertTrue(excluded.get(0).endsWith(":fill_straddles_window"));
+	}
+
+	@Test
 	public void sellOfferVanishedOutOfViewIsBoundedInferenceNotComplete()
 	{
 		Snap a = new Snap(T0).inv(995, 0).offer(3, WHIP, "SELLING", 1, 0, 1_500_000, 0).bank(T0 - 5, 995, 1);

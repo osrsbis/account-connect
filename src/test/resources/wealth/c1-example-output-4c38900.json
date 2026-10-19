@@ -1,0 +1,214 @@
+{
+  "record_schema_v": 1,
+  "derivation": "c1_ge_offer_lifecycle_v1",
+  "generation": "caller-generation-1",
+  "generation_source": "caller_supplied",
+  "offers": [
+    {
+      "record_schema_v": 1,
+      "derivation": "c1_ge_offer_lifecycle_v1",
+      "offer_key": "6e0f6fdef553ea61751c8ff8bfc49920",
+      "offer_key_scope": "collector_session",
+      "account_hash": "42",
+      "profile_type": "STANDARD",
+      "slot": 2,
+      "item_id": 560,
+      "side": "buy",
+      "listing_price": 250,
+      "total_qty": 1000,
+      "placement": "observed",
+      "placed_observed_at_ms": 1001200,
+      "first_seen_at_ms": 1001200,
+      "phase": "cancelled",
+      "completed_at_observed_ms": null,
+      "cancelled_at_observed_ms": 1084000,
+      "collected": true,
+      "collected_at_observed_ms": 1090000,
+      "counter_qty": 400,
+      "counter_gp": 98000,
+      "baseline_qty_uncredited": 0,
+      "baseline_gp_uncredited": 0,
+      "filled_qty_observed": 400,
+      "filled_gp_observed": 98000,
+      "fills": [
+        {
+          "sequence": 2,
+          "qty": 400,
+          "gp": 98000,
+          "interval_start_ms": 1001200,
+          "interval_end_ms": 1066000,
+          "fill_time": "unknown_within_interval",
+          "avg_gp_per_unit_proxy": "245"
+        }
+      ],
+      "untimed_fill_qty": 0,
+      "first_fill_interval_ms": [
+        1001200,
+        1066000
+      ],
+      "completion_interval_ms": null,
+      "cancel_interval_ms": [
+        1066000,
+        1084000
+      ],
+      "fill_time": "unknown_within_intervals",
+      "identity": "inferred_session_slot",
+      "quarantined": false,
+      "quarantine_reasons": [],
+      "gaps": [],
+      "completeness": "complete_observed_lifecycle",
+      "cashflow": {
+        "gp_counter_semantics": "runelite_spent_tax_unknown",
+        "status": "credited_counter_difference",
+        "coins_paid_gp": 98000,
+        "items_bought": 400,
+        "overpay_refund_gp_whole_offer": 2000,
+        "tax_gp": 0,
+        "tax_status": "no_tax_on_buys"
+      },
+      "escrow": {
+        "as_of_observed_ms": 1090000,
+        "basis": "slot_emptied_while_logged_in",
+        "escrow_state": "observed",
+        "gap_or_reset_seen": false,
+        "filled_qty": 400,
+        "locked_coins": 0,
+        "locked_items": 0,
+        "uncollected_items_max": 0,
+        "uncollected_coins_max": 0,
+        "collection_note": "collect_is_not_proof_of_arrival_match_container_change"
+      },
+      "history_corroboration": null,
+      "contributing_event_ids": [
+        "00000000000000000000000000000001",
+        "00000000000000000000000000000002",
+        "00000000000000000000000000000003",
+        "00000000000000000000000000000004"
+      ],
+      "as_of_observed_ms": 1090000
+    },
+    {
+      "record_schema_v": 1,
+      "derivation": "c1_ge_offer_lifecycle_v1",
+      "offer_key": "041696b98fc13a69443158e0c549e015",
+      "offer_key_scope": "collector_session",
+      "account_hash": "42",
+      "profile_type": "STANDARD",
+      "slot": 2,
+      "item_id": 560,
+      "side": "sell",
+      "listing_price": 260,
+      "total_qty": 400,
+      "placement": "observed",
+      "placed_observed_at_ms": 1090600,
+      "first_seen_at_ms": 1090600,
+      "phase": "completed",
+      "completed_at_observed_ms": 1240000,
+      "cancelled_at_observed_ms": null,
+      "collected": true,
+      "collected_at_observed_ms": 1252000,
+      "counter_qty": 400,
+      "counter_gp": 104400,
+      "baseline_qty_uncredited": 0,
+      "baseline_gp_uncredited": 0,
+      "filled_qty_observed": 400,
+      "filled_gp_observed": 104400,
+      "fills": [
+        {
+          "sequence": 2,
+          "qty": 150,
+          "gp": 39150,
+          "interval_start_ms": 1090600,
+          "interval_end_ms": 1156000,
+          "fill_time": "unknown_within_interval",
+          "avg_gp_per_unit_proxy": "261"
+        },
+        {
+          "sequence": 3,
+          "qty": 250,
+          "gp": 65250,
+          "interval_start_ms": 1156000,
+          "interval_end_ms": 1240000,
+          "fill_time": "unknown_within_interval",
+          "avg_gp_per_unit_proxy": "261"
+        }
+      ],
+      "untimed_fill_qty": 0,
+      "first_fill_interval_ms": [
+        1090600,
+        1156000
+      ],
+      "completion_interval_ms": [
+        1156000,
+        1240000
+      ],
+      "cancel_interval_ms": null,
+      "fill_time": "unknown_within_intervals",
+      "identity": "inferred_session_slot",
+      "quarantined": false,
+      "quarantine_reasons": [],
+      "gaps": [],
+      "completeness": "complete_observed_lifecycle",
+      "cashflow": {
+        "gp_counter_semantics": "matches_history_gross_one_offer",
+        "status": "credited_counter_difference",
+        "items_sold": 400,
+        "gp_counter": 104400,
+        "tax_status": "history_explicit_offer_total",
+        "tax_gp": 2000,
+        "tax_rule_low_gp": 1689,
+        "tax_rule_high_gp": 2088,
+        "net_gp_rule_low": 102312,
+        "net_gp_rule_high": 102711,
+        "tax_assumption": "spent_is_gross_unverified; item_exemptions_not_checked",
+        "net_gp": 102400
+      },
+      "escrow": {
+        "as_of_observed_ms": 1252000,
+        "basis": "slot_emptied_while_logged_in",
+        "escrow_state": "observed",
+        "gap_or_reset_seen": false,
+        "filled_qty": 400,
+        "locked_coins": 0,
+        "locked_items": 0,
+        "uncollected_items_max": 0,
+        "uncollected_coins_max": 0,
+        "collection_note": "collect_is_not_proof_of_arrival_match_container_change"
+      },
+      "history_corroboration": {
+        "match": "unique_item_side_qty_counter",
+        "counter_equals": "history_gross",
+        "history_gross_gp": 104400,
+        "history_tax_gp": 2000,
+        "history_net_gp": 102400,
+        "history_execution_time": "unknown",
+        "history_verified_with_actual_client": false
+      },
+      "contributing_event_ids": [
+        "00000000000000000000000000000005",
+        "00000000000000000000000000000006",
+        "00000000000000000000000000000007",
+        "00000000000000000000000000000008"
+      ],
+      "as_of_observed_ms": 1252000
+    }
+  ],
+  "history_only": [
+    {
+      "item_id": 11802,
+      "side": "sell",
+      "quantity": 1,
+      "gross_gp": 20000000,
+      "tax_gp": 400000,
+      "net_gp": 19600000,
+      "displayed_total_gp": null,
+      "recoverable": "offer_total_only",
+      "execution_time": "unknown",
+      "placement_and_fills": "unknown",
+      "may_overlap_unobserved_or_earlier_session_offers": true
+    }
+  ],
+  "diagnostics": {
+    "history_joined": 1
+  }
+}
