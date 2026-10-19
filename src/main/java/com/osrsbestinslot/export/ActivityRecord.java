@@ -254,26 +254,45 @@ final class ActivityRecord
         return account.equals(a) && profile.equals(p) ? "bound" : "mismatch";
     }
 
-    /** Order-independent form; JSON replay turns integers into doubles, so whole numbers compare as longs. */
+    /**
+     * Order-independent, unambiguous form: every value is type-tagged and every string, key and container
+     * is length-framed, so no string content can imitate structure. JSON replay turns integers into
+     * doubles, so whole numbers compare as longs.
+     */
     static String canonical(Object x)
+    {
+        StringBuilder out = new StringBuilder(); canonical(x, out); return out.toString();
+    }
+
+    private static void canonical(Object x, StringBuilder out)
     {
         if (x instanceof Map)
         {
-            TreeMap<String,String> sorted = new TreeMap<>();
-            for (Map.Entry<?,?> e : ((Map<?,?>)x).entrySet()) sorted.put(String.valueOf(e.getKey()), canonical(e.getValue()));
-            return sorted.toString();
+            TreeMap<String,Object> sorted = new TreeMap<>();
+            for (Map.Entry<?,?> e : ((Map<?,?>)x).entrySet()) sorted.put(String.valueOf(e.getKey()), e.getValue());
+            out.append('M').append(sorted.size()).append('{');
+            for (Map.Entry<String,Object> e : sorted.entrySet()) { framed(e.getKey(), out); canonical(e.getValue(), out); }
+            out.append('}');
         }
-        if (x instanceof List)
+        else if (x instanceof List)
         {
-            List<String> out = new ArrayList<>(); for (Object v : (List<?>)x) out.add(canonical(v)); return out.toString();
+            out.append('L').append(((List<?>)x).size()).append('[');
+            for (Object v : (List<?>)x) canonical(v, out);
+            out.append(']');
         }
-        if (x instanceof Number)
+        else if (x instanceof Number)
         {
             double d = ((Number)x).doubleValue();
-            return d == Math.rint(d) && Math.abs(d) < 9.007199254740991E15 ? "n" + (long)d : "d" + d;
+            if (d == Math.rint(d) && Math.abs(d) < 9.007199254740991E15) out.append('n').append((long)d).append(';');
+            else out.append('d').append(Double.doubleToLongBits(d)).append(';');
         }
-        return x == null ? "null" : x instanceof String ? "s" + x : String.valueOf(x);
+        else if (x == null) out.append('z');
+        else if (x instanceof Boolean) out.append((Boolean)x ? 't' : 'f');
+        else if (x instanceof String) { out.append('s'); framed((String)x, out); }
+        else { out.append('o'); framed(x.getClass().getName() + ":" + x, out); }
     }
+
+    private static void framed(String s, StringBuilder out) { out.append(s.length()).append(':').append(s); }
 
     private static Long asLong(Object x)
     {

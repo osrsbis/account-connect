@@ -385,6 +385,16 @@ public class ActivityRecordTest
         assertTrue(((List<?>)((Map<?,?>)r.get("result")).get("unavailable_reasons")).contains("invalid_window"));
     }
 
+    /** Integrator review 87956a1: string content must not imitate map structure in the conflict check. */
+    @Test public void canonicalFormCannotBeForgedByStringContent()
+    {
+        assertNotEquals(ActivityRecord.canonical(Map.of("a", "x, b=sy")), ActivityRecord.canonical(Map.of("a", "x", "b", "y")));
+        assertNotEquals(ActivityRecord.canonical(List.of("a, b")), ActivityRecord.canonical(List.of("a", "b")));
+        assertNotEquals(ActivityRecord.canonical("1"), ActivityRecord.canonical(1));
+        // Numeric normalization is kept: a JSON-replayed 2.0 equals the integer 2.
+        assertEquals(ActivityRecord.canonical(Map.of("q", 2, "k", "v")), ActivityRecord.canonical(Map.of("k", "v", "q", 2.0)));
+    }
+
     /** Writes the derived example for the handoff; the build directory is not committed. */
     @Test public void writeDerivedExample() throws Exception
     {
