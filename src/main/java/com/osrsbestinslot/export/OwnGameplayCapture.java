@@ -5,6 +5,9 @@ import net.runelite.api.Actor;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Hitsplat;
+import net.runelite.api.InventoryID;
+import net.runelite.api.Item;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
@@ -65,6 +68,7 @@ final class OwnGameplayCapture
     private int loadoutLastTick = -1;
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
+    private CombatEncounterTracker encounters = new CombatEncounterTracker(null);
 
     private static final class Target
     {
@@ -85,7 +89,7 @@ final class OwnGameplayCapture
         stateObserved = stateHandedOff = stateNotHandedOff = 0;
         varsObserved = varsHandedOff = varsNotHandedOff = 0;
         signalsObserved=signalsHandedOff=signalsNotHandedOff=0;
-        gapReason = "not_observed";
+        gapReason = "not_observed"; encounters = new CombatEncounterTracker(null); wornSession = null; wornSlots = null; localInputs = 0;
     }
 
     boolean ready(Client client, String grantIdentity)
@@ -118,6 +122,7 @@ final class OwnGameplayCapture
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
         targets.clear(); splats.clear(); states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
+        encounters.interrupt("scene_gap", lastTick);
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -155,6 +160,7 @@ final class OwnGameplayCapture
             }
             observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
         }
+        if (session != null) track(row);
         Map<String,Object> combat = OwnCombatEvent.from(session, row);
         if (combat != null)
         {
@@ -307,8 +313,91 @@ final class OwnGameplayCapture
                 target = new Target(npc, tick); targets.put(npc, target);
             }
             value.put("npc_id", npc.getId()); value.put("target_observation_id", target.id);
+            worn(client, tick, at);
         }
         append("combat.own_hits", "HitsplatApplied", tick, at, value);
+    }
+
+    // Own worn item IDs only, read at an own hit and recorded when the ID set changes. Quantities
+    // (ammunition) are excluded. A new session always starts a new baseline.
+    private String wornSession;
+    private Map<String,Object> wornSlots;
+    private void worn(Client client, int tick, long at)
+    {
+        ItemContainer container = client.getItemContainer(InventoryID.EQUIPMENT);
+        if (container == null) return; // unknown is not an empty loadout
+        Map<String,Object> slots = new LinkedHashMap<>();
+        Item[] items = container.getItems();
+        for (int i = 0; items != null && i < items.length && i < CombatEncounterTracker.SLOT_NAMES.length; i++)
+            if (CombatEncounterTracker.SLOT_NAMES[i] != null && items[i] != null && items[i].getId() > 0 && items[i].getQuantity() > 0)
+                slots.put(CombatEncounterTracker.SLOT_NAMES[i], items[i].getId());
+        boolean sameSession = session != null && session.equals(wornSession);
+        if (sameSession && slots.equals(wornSlots)) return;
+        Map<String,Object> value = new LinkedHashMap<>();
+        value.put("observation", sameSession ? "observed_change" : "baseline");
+        value.put("content_id", CombatEncounterTracker.contentId(slots)); value.put("slots", slots);
+        wornSession = session; wornSlots = slots;
+        combatOnly("combat.worn_revision", "own_worn_container_at_own_hit", tick, at, value);
+    }
+
+    /** Own death only. Another actor's death never produces this row. */
+    void ownDeath(Client client, Actor actor, long at)
+    {
+        Player self = client.getLocalPlayer();
+        if (self == null || actor != self) return;
+        Map<String,Object> value = new LinkedHashMap<>();
+        value.put("actor", "self"); value.put("classification", "observed_own_death");
+        combatOnly("combat.own_death", "ActorDeath:self", client.getTickCount(), at, value);
+    }
+
+    /** Own NPC loot from ServerNpcLoot. A reward observation, not kill credit. No NPC or item names. */
+    void loot(Client client, int npcId, Collection<net.runelite.client.game.ItemStack> stacks, long at)
+    {
+        if (stacks == null || stacks.isEmpty()) return;
+        Map<Integer,Long> merged = new TreeMap<>();
+        for (net.runelite.client.game.ItemStack s : stacks)
+        {
+            if (s == null || s.getId() <= 0 || s.getQuantity() <= 0) continue;
+            if (!merged.containsKey(s.getId()) && merged.size() >= 28) continue;
+            merged.merge(s.getId(), (long) s.getQuantity(), Long::sum);
+        }
+        if (merged.isEmpty()) return;
+        List<Map<String,Object>> items = new ArrayList<>();
+        for (Map.Entry<Integer,Long> e : merged.entrySet())
+        {
+            Map<String,Object> item = new LinkedHashMap<>(); item.put("id", e.getKey()); item.put("qty", e.getValue()); items.add(item);
+        }
+        Map<String,Object> value = new LinkedHashMap<>();
+        value.put("npc_id", npcId >= 0 ? npcId : null); value.put("items", items);
+        value.put("classification", "reward_observation_not_kill_credit");
+        combatOnly("combat.loot_observed", "ServerNpcLoot", client.getTickCount(), at, value);
+    }
+
+    // New encounter inputs stay out of the uploaded snapshot, out of every transport projection and
+    // out of the shared sequence, so source_sequence gaps never appear. Only the local tracker reads them.
+    private long localInputs;
+    private void combatOnly(String kind, String source, int tick, long at, Map<String,Object> value)
+    {
+        if (session == null) return;
+        Map<String,Object> row = new LinkedHashMap<>();
+        row.put("local_input_id", "local:" + (++localInputs)); row.put("after_sequence", sequence);
+        row.put("kind", kind); row.put("source", source); row.put("tick", tick);
+        row.put("observed_at_ms", at); row.put("direct", true); row.put("value", value);
+        track(row);
+    }
+
+    private void track(Map<String,Object> row)
+    {
+        if (!session.replace("-", "").equals(encounters.session())) encounters = new CombatEncounterTracker(session);
+        encounters.accept(row);
+    }
+
+    /** Derived encounter summary for this gameplay session. Not a complete combat history. */
+    Map<String,Object> encounterSummary(int asOfTick)
+    {
+        Map<String,Object> out = encounters.summary(asOfTick);
+        out.put("input_gap_reason", gapReason);
+        return out;
     }
 
     void endNpc(Client client, NPC npc, boolean death, long at)
