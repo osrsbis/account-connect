@@ -512,7 +512,7 @@ final class GeOfferLifecycle
         c.put("items_sold", qty);
         c.put("gp_counter", gp);
         c.put("tax_gp", null);
-        putTaxRule(c, qty, gp, "spent_is_gross_unverified; item_exemptions_not_checked");
+        putTaxRule(c, qty, gp, "spent_is_gross_field_observed_once_0742; item_exemptions_not_checked");
         return c;
     }
 
