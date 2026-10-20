@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.50";
+	private static final String PLUGIN_VERSION = "0.7.51";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -176,7 +176,17 @@ public class AccountConnectPlugin extends Plugin
 	{
 		// Existing gameplay permission plus explicit future Queue scope; never legacy fallback.
 		String scope = ownGameplayQueueScope();
-		if (!gameplayGranted() || scope == null) return false;
+		if (!gameplayGranted()) return false;
+		if (scope == null)
+		{
+			// No Queue scope: own combat and own signals may use the legacy writer, which stores them only for a
+			// granted token. A signal must pass its own wire check first.
+			String legacyType = String.valueOf(observation.get("type"));
+			if (!legacyOwnCombatAllowed(legacyType)) return false;
+			if ("own_signal".equals(legacyType) && OwnSignalEvent.wire(observation) == null) return false;
+			Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
+			emitEvent(String.valueOf(observation.get("type")), fields); return true;
+		}
 		boolean signals = "own-signals-v1".equals(scope), vars = signals || "own-vars-v1".equals(scope), states = vars || "own-state-v1".equals(scope);
 		String type = String.valueOf(observation.get("type"));
 		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type)
@@ -185,6 +195,20 @@ public class AccountConnectPlugin extends Plugin
 			&& !(signals && "own_signal".equals(type) && OwnSignalEvent.wire(observation) != null)) return false;
 		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
 		emitEvent(type, fields); return true;
+	}
+
+	/**
+	 * Own combat and own signals on the legacy event writer: only combat_hit / combat_npc_end / own_signal, only
+	 * with the own-gameplay grant for the current token, only when no Queue scope is active and the live client
+	 * still matches the active account and profile. own_state / own_vars never use the legacy writer.
+	 */
+	boolean legacyOwnCombatAllowed(String type)
+	{
+		if (!"combat_hit".equals(type) && !"combat_npc_end".equals(type) && !"own_signal".equals(type)) return false;
+		if (!gameplayGranted() || eventQueueScope != null) return false;
+		return client == null || (client.getGameState() == GameState.LOGGED_IN && client.getLocalPlayer() != null
+			&& Long.toString(client.getAccountHash()).equals(activeHash)
+			&& RuneScapeProfileType.getCurrent(client).name().equals(activeProfileType));
 	}
 
 	/** Same effective gate for capture baselines and their journal handoff. No network or disk work. */
@@ -459,6 +483,7 @@ public class AccountConnectPlugin extends Plugin
 		publicOutboxPaused = false;
 		clientClosing = false;
 		removeOrphanedKeys();
+		restorePendingEvents();	// what the last close or stop could not deliver
 		// Started while already in the world: the GE slots were replayed before we were listening, so the
 		// next LOGGED_IN (a region load) is not a login and must not open a replay window.
 		geAwaitingLogin = client == null || client.getGameState() != GameState.LOGGED_IN;
@@ -584,6 +609,7 @@ public class AccountConnectPlugin extends Plugin
 		bankGrossDeposited.clear();
 		bankGrossWithdrawn.clear();
 		dropBankVisit();
+		persistPendingEvents();	// queued events survive a plugin stop; startUp sends them again
 		closeSpool();	// rows stay on disk; the next process recovers them under the same identity
 	}
 
@@ -959,7 +985,10 @@ public class AccountConnectPlugin extends Plugin
 	// Store transacted-price capture: a store buy/sell click snapshots the pre-transaction coin count and
 	// arms this pending; the next INVENTORY change reads the post count and the |delta| is the exact gp that
 	// changed hands (see store-price-feasibility.md). Emit is deferred to that inventory change, not the click.
-	private volatile StorePending storePending;
+	// ONE PENDING PER ITEM, in click order. A single slot kept only the last click: two different items bought
+	// in one tick gave one store_buy, and the other item got no event at all (Torva helm + fury, 2026-09-26).
+	// Client thread only.
+	final Map<Integer, StorePending> storePendings = new LinkedHashMap<>();
 	/** Ticks after which an unresolved store pending is stale (a failed click fires no inventory change). */
 	static final int STORE_PENDING_MAX_TICKS = 3;
 	/** No item-count baseline was captured, so the executed quantity cannot be measured. */
@@ -3926,7 +3955,8 @@ public class AccountConnectPlugin extends Plugin
 			maybeForceSnapshotForEvent(type);
 			return;
 		}
-		if ("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_state".equals(type) || "own_vars".equals(type) || "own_signal".equals(type))
+		if (("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_signal".equals(type)) && !legacyOwnCombatAllowed(type)
+			|| "own_state".equals(type) || "own_vars".equals(type))
 		{
 			// A grant/identity race cannot send this future scope to the legacy writer.
 			healthEventsLost.incrementAndGet(); return;
@@ -4063,11 +4093,194 @@ public class AccountConnectPlugin extends Plugin
 		java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
 		finalFlushDone = done;
 		boolean sent = flushEventsNow();
-		if (!sent)
+		if (!sent && !eventPostInFlight)
 		{
 			done.complete(null);
 		}
-		event.waitFor(done);
+		// What the final batch could not deliver (a 429 when the global hour is full, a 5xx, no network, or
+		// more than one batch) goes to disk, and the next start sends it. RuneLite waits at most 10 s for all
+		// plugins, so the write does not wait longer than EXIT_FLUSH_WAIT_MS for the POST.
+		event.waitFor(done.handle((v, t) -> null).completeOnTimeout(null, EXIT_FLUSH_WAIT_MS, TimeUnit.MILLISECONDS)
+			.thenRun(this::persistPendingEvents));
+	}
+
+	// ---- EXIT PERSISTENCE of the memory buffer ----
+	//
+	// pendingEvents lives in memory. A client closed while the server answered 429 (global event cap full)
+	// lost every queued event: 11 events of one session were never sent (2026-10-11). Now the close and a
+	// plugin stop write the rows the memory path owns to one file, and the next startUp puts them back at
+	// the front of the buffer. Rows already on disk elsewhere (the public outbox journal, the staff spool)
+	// are not written twice.
+	//
+	// IDENTITY. A row is restored only under the token it was queued for (its token fingerprint, never the
+	// token). A start with another token or none deletes the file unread. Rows older than EventSpool.MAX_AGE_MS
+	// are dropped. At most MAX_PENDING_EVENTS rows. The file is deleted when it is read.
+
+	static final String EXIT_PENDING_FILE = "pending-events.json";
+	/** Longest wait for the final POST before the buffer is written anyway. A batch still in flight then is not written. */
+	static final long EXIT_FLUSH_WAIT_MS = 7_000L;
+
+	private java.nio.file.Path exitPendingPath()
+	{
+		return spoolDataRoot().resolve("osrsbis").resolve(EXIT_PENDING_FILE);
+	}
+
+	/**
+	 * Move the memory-owned rows of pendingEvents to the exit file, after any rows already in it. The rows leave
+	 * the buffer under its lock, so a flush still running cannot also send them. A failed write puts them back.
+	 */
+	void persistPendingEvents()
+	{
+		List<Map<String, Object>> taken = new ArrayList<>();
+		synchronized (pendingEvents)
+		{
+			java.util.Iterator<Map<String, Object>> it = pendingEvents.iterator();
+			while (it.hasNext())
+			{
+				Map<String, Object> ev = it.next();
+				Object id = ev.get("event_id");
+				if (ev.containsKey(EVENT_PUBLIC_OUTBOX) || !(ev.get(EVENT_TOKEN_FP) instanceof String)
+					|| id != null && spoolMemoryOwned.containsKey(String.valueOf(id)))
+				{
+					continue;
+				}
+				taken.add(ev);
+				it.remove();
+			}
+		}
+		if (taken.isEmpty())
+		{
+			return;
+		}
+		try
+		{
+			List<Map<String, Object>> all = readExitPending();
+			for (Map<String, Object> ev : taken)
+			{
+				Map<String, Object> row = new LinkedHashMap<>(ev);
+				row.remove(EVENT_QUEUE);	// the writer is chosen again at the next start
+				all.add(row);
+			}
+			while (all.size() > MAX_PENDING_EVENTS)
+			{
+				all.remove(0);
+				healthEventsLost.incrementAndGet();
+			}
+			java.nio.file.Path file = exitPendingPath();
+			java.nio.file.Files.createDirectories(file.getParent());
+			java.nio.file.Path tmp = file.resolveSibling(EXIT_PENDING_FILE + ".tmp");
+			java.nio.file.Files.write(tmp, gson.toJson(all).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+				java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+		}
+		catch (Throwable t)
+		{
+			log.debug("OSRS BiS pending events could not be written at exit", t);
+			synchronized (pendingEvents)
+			{
+				pendingEvents.addAll(0, taken);
+			}
+		}
+	}
+
+	/** Put the exit file's rows for the current token back at the front of pendingEvents, and delete the file. */
+	void restorePendingEvents()
+	{
+		try
+		{
+			String fp = currentEventTokenFingerprint();
+			List<Map<String, Object>> all = readExitPending();
+			java.nio.file.Files.deleteIfExists(exitPendingPath());
+			long now = System.currentTimeMillis();
+			List<Map<String, Object>> keep = new ArrayList<>();
+			for (Map<String, Object> ev : all)
+			{
+				Object ts = ev.get("ts");
+				if (fp != null && fp.equals(ev.get(EVENT_TOKEN_FP)) && ts instanceof Number
+					&& now - ((Number) ts).longValue() <= EventSpool.MAX_AGE_MS)
+				{
+					keep.add(ev);
+				}
+			}
+			if (keep.isEmpty())
+			{
+				return;
+			}
+			synchronized (pendingEvents)
+			{
+				pendingEvents.addAll(0, keep);
+				while (pendingEvents.size() > MAX_PENDING_EVENTS)
+				{
+					evictOneForOverflow();
+				}
+			}
+			scheduleCoalescedFlush();
+		}
+		catch (Throwable t)
+		{
+			log.debug("OSRS BiS pending events could not be restored", t);
+		}
+	}
+
+	private List<Map<String, Object>> readExitPending() throws IOException
+	{
+		java.nio.file.Path file = exitPendingPath();
+		List<Map<String, Object>> rows = new ArrayList<>();
+		if (!java.nio.file.Files.exists(file))
+		{
+			return rows;
+		}
+		try
+		{
+			Object parsed = gson.fromJson(new String(java.nio.file.Files.readAllBytes(file),
+				java.nio.charset.StandardCharsets.UTF_8), Object.class);
+			if (parsed instanceof List)
+			{
+				for (Object row : (List<?>) parsed)
+				{
+					if (row instanceof Map)
+					{
+						@SuppressWarnings("unchecked")
+						Map<String, Object> ev = (Map<String, Object>) wholeNumbers(row);
+						rows.add(ev);
+					}
+				}
+			}
+		}
+		catch (RuntimeException corrupt)
+		{
+			log.debug("OSRS BiS pending events file is unreadable and is dropped", corrupt);
+		}
+		return rows;
+	}
+
+	/** Gson reads every JSON number as a Double. Give whole numbers back their Long form, as emitted. */
+	static Object wholeNumbers(Object v)
+	{
+		if (v instanceof Double)
+		{
+			double d = (Double) v;
+			return d == Math.rint(d) && Math.abs(d) <= 9_007_199_254_740_992d ? (Object) (long) d : v;
+		}
+		if (v instanceof Map)
+		{
+			Map<String, Object> out = new LinkedHashMap<>();
+			for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet())
+			{
+				out.put(String.valueOf(e.getKey()), wholeNumbers(e.getValue()));
+			}
+			return out;
+		}
+		if (v instanceof List)
+		{
+			List<Object> out = new ArrayList<>();
+			for (Object o : (List<?>) v)
+			{
+				out.add(wholeNumbers(o));
+			}
+			return out;
+		}
+		return v;
 	}
 
 	private void completeFinalFlush()
@@ -6599,9 +6812,7 @@ public class AccountConnectPlugin extends Plugin
 			int tick = client == null ? 0 : client.getTickCount();
 			// The transacted item's post count too: its distance from the pending's baseline is the
 			// quantity the server ACTUALLY moved, which is what licenses a derived unit price.
-			StorePending sp = storePending;
-			long itemAfter = (sp == null || inv == null) ? UNKNOWN_ITEM_COUNT : countItem(inv, sp.item);
-			resolveStorePendingOnInventoryChange(coinsAfter, itemAfter, tick);
+			resolveStorePendingsOnInventoryChange(coinsAfter, inv == null ? null : id -> countItem(inv, id), tick);
 			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
 			// EVERY armed pending is offered this change, each against its own item count — see
 			// resolveInvDeltaPendings: a stale drop at the head must never hide a real pickup behind it.
@@ -7633,14 +7844,17 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void flushStorePendingOnShopClose()
 	{
-		StorePending p = storePending;
-		storePending = null;
-		if (p == null || !activityLogActive())
+		List<StorePending> armed = new ArrayList<>(storePendings.values());
+		storePendings.clear();
+		if (!activityLogActive())
 		{
 			return;
 		}
-		// coinsAfter == coinsBefore -> zero delta -> fails the sign check -> {item, qty} only, never a guess.
-		emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, p.coinsBefore, p.ambiguous, p.qtyMerged));
+		for (StorePending p : armed)
+		{
+			// coinsAfter == coinsBefore -> zero delta -> fails the sign check -> {item, qty} only, never a guess.
+			emitEvent(p.type, buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, p.coinsBefore, p.ambiguous, p.qtyMerged));
+		}
 	}
 
 	void handleTradeWidgetClosed(int groupId)
@@ -8125,8 +8339,10 @@ public class AccountConnectPlugin extends Plugin
 				storeProbeItem = item;
 			}
 		}
-		StorePending prev = storePending;
-		storePending = mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick);
+		storePendings.values().removeIf(p -> tick - p.tick > STORE_PENDING_MAX_TICKS);	// failed clicks
+		// Removed and put back so a repeat click moves the item to the end: click order is emit order.
+		StorePending prev = storePendings.remove(item);
+		storePendings.put(item, mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick));
 	}
 
 	/**
@@ -8203,26 +8419,68 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void resolveStorePendingOnInventoryChange(long coinsAfter, long itemAfter, int currentTick)
 	{
-		StorePending p = storePending;
-		if (p == null)
+		resolveStorePendingsOnInventoryChange(coinsAfter, id -> itemAfter, currentTick);
+	}
+
+	/**
+	 * Resolve the armed store pendings against one INVENTORY change. {@code countAfter} gives an item's count
+	 * after the change, or is null when the inventory could not be read.
+	 *
+	 * <p>Stale pendings are dropped. One live pending resolves exactly as before: this change is its own.
+	 * With several live pendings (different items clicked inside one window), the item counts decide whose
+	 * change this is. One item moved: the whole coin delta is that item's, so its gp_total is exact, and the
+	 * others stay armed with this change's coin count as their new baseline. Several items moved in this one
+	 * change: each still gets its own event, but one coin delta cannot be split, so none carries gp_total.
+	 */
+	void resolveStorePendingsOnInventoryChange(long coinsAfter, java.util.function.IntToLongFunction countAfter,
+		int currentTick)
+	{
+		storePendings.values().removeIf(p -> currentTick - p.tick > STORE_PENDING_MAX_TICKS);
+		if (storePendings.isEmpty())
 		{
 			return;
 		}
-		if (currentTick - p.tick > STORE_PENDING_MAX_TICKS)
+		List<StorePending> resolved = new ArrayList<>();
+		if (storePendings.size() == 1 || countAfter == null
+			|| storePendings.values().stream().anyMatch(p -> p.itemBefore == UNKNOWN_ITEM_COUNT))
 		{
-			storePending = null;	// stale: a failed click's pending paired with an unrelated later change
-			return;
+			// One click, or nothing to tell several apart: this change resolves them all. Several get no price.
+			resolved.addAll(storePendings.values());
 		}
-		storePending = null;		// consume — last-click-wins already collapsed repeats to this one
+		else
+		{
+			for (StorePending p : storePendings.values())
+			{
+				long executed = executedQty(p, countAfter.applyAsLong(p.item));
+				if (executed > 0)
+				{
+					resolved.add(p);
+				}
+			}
+		}
+		boolean shared = resolved.size() > 1;
+		for (StorePending p : resolved)
+		{
+			storePendings.remove(p.item);
+		}
+		// The coins of this change belong to the resolved clicks. What stays armed counts from here.
+		for (Map.Entry<Integer, StorePending> e : storePendings.entrySet())
+		{
+			StorePending p = e.getValue();
+			e.setValue(new StorePending(p.type, p.item, p.qty, coinsAfter, p.itemBefore, p.tick, p.ambiguous, p.qtyMerged));
+		}
 		if (!activityLogActive())
 		{
 			return;
 		}
-		long executed = executedQty(p, itemAfter);
-		Map<String, Object> fields = buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter,
-			p.ambiguous, p.qtyMerged, executed);
-		addStoreContextFields(fields);	// nearby[] + world + loc — the candidate receivers of a store transfer
-		emitEvent(p.type, fields);
+		for (StorePending p : resolved)
+		{
+			long executed = executedQty(p, countAfter == null ? UNKNOWN_ITEM_COUNT : countAfter.applyAsLong(p.item));
+			Map<String, Object> fields = buildStoreTxFields(p.type, p.item, p.qty, p.coinsBefore, coinsAfter,
+				p.ambiguous || shared, p.qtyMerged, executed);
+			addStoreContextFields(fields);	// nearby[] + world + loc — the candidate receivers of a store transfer
+			emitEvent(p.type, fields);
+		}
 	}
 
 	/**

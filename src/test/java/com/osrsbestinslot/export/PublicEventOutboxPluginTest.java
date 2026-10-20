@@ -256,6 +256,51 @@ public class PublicEventOutboxPluginTest
         server.enqueue(new MockResponse().setBody(receipt(id)));p.flushEvents();request();done();
         p.pumpPublicOutbox();p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
     }
+    private void gameplayOnlyGrant(boolean gameplay) throws Exception
+    {
+        Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Own-Gameplay",gameplay?"on":"off").build();
+        p.applyServerPolicy(r,token.get());p.awaitSpoolIdleForTest();
+    }
+    @Test public void grantedCombatWithoutQueueScopeUsesLegacyWriterAndStateNeverDoes() throws Exception
+    {
+        Map<String,Object> hit=new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
+            "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
+            "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","dealt_to_npc","amount",3,"hitsplat_type",16));
+        gameplayOnlyGrant(false);
+        assertFalse("no grant, nothing on the legacy path",p.emitOwnCombat(hit));p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        gameplayOnlyGrant(true);
+        assertTrue(p.emitOwnCombat(hit));p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());assertEquals("combat_hit",p.pendingEvents.get(0).get("type"));
+        assertNotNull("legacy combat carries an event_id for server dedupe",p.pendingEvents.get(0).get("event_id"));
+        p.pendingEvents.clear();
+        Map<String,Object> state=OwnStateEventTest.goalEvent();
+        assertFalse("own_state never uses the legacy writer",p.emitOwnGameplayEvent(state));
+        p.emitEvent("own_state",Map.of("state_schema",1));p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        gameplayOnlyGrant(false);
+        p.emitEvent("combat_hit",Map.of("combat_schema",1));p.awaitSpoolIdleForTest();
+        assertTrue("a revoked grant stops the legacy combat path",p.pendingEvents.isEmpty());
+    }
+    @Test public void grantedOwnSignalWithoutQueueScopeUsesLegacyWriterOnlyWhenValid() throws Exception
+    {
+        Map<String,Object> signal=new LinkedHashMap<>(OwnSignalEventTest.event("farming.compost"));
+        gameplayOnlyGrant(false);
+        assertFalse("no grant, no legacy signal",p.emitOwnGameplayEvent(signal));p.awaitSpoolIdleForTest();
+        assertTrue(p.pendingEvents.isEmpty());
+        gameplayOnlyGrant(true);
+        assertTrue(p.emitOwnGameplayEvent(signal));p.awaitSpoolIdleForTest();
+        assertEquals(1,p.pendingEvents.size());assertEquals("own_signal",p.pendingEvents.get(0).get("type"));
+        assertNotNull(p.pendingEvents.get(0).get("event_id"));
+        p.pendingEvents.clear();
+        Map<String,Object> broken=new LinkedHashMap<>(signal);broken.remove("signal_value");
+        assertFalse("an invalid signal never reaches the legacy writer",p.emitOwnGameplayEvent(broken));
+        p.awaitSpoolIdleForTest();assertTrue(p.pendingEvents.isEmpty());
+        gameplayOnlyGrant(false);
+        p.emitEvent("own_signal",Map.of("signal_schema",1));p.awaitSpoolIdleForTest();
+        assertTrue("a revoked grant stops the legacy signal path",p.pendingEvents.isEmpty());
+    }
     @Test public void combatCannotUsePreviousAccountOrWorldProfileBeforeSessionTaskCatchesUp() throws Exception
     {
         combatGrant(true);net.runelite.api.Client client=mock(net.runelite.api.Client.class);

@@ -30,11 +30,16 @@ dependencies {
 }
 
 group = 'com.osrsbestinslot.export'
-version = '0.7.50'
+version = '0.7.51'
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
     options.release.set(11)
+}
+
+// Tests never write to the real ~/.runelite: plugin data paths resolve under build/.
+test {
+    systemProperty 'user.home', "${buildDir}/test-home"
 }
 
 // Launches a full RuneLite client with this plugin loaded (dev / login test).
