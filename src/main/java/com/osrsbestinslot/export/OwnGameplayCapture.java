@@ -24,7 +24,6 @@ final class OwnGameplayCapture
     // Extra block bounded below the existing 512KiB complete snapshot request ceiling.
     static final int MAX_OBSERVATIONS = 256;
     static final int MAX_OBSERVATION_BYTES = 96 * 1024;
-    private static final com.google.gson.Gson JSON = new com.google.gson.Gson();
     private static final int MAX_TARGETS = 16;
     // RuneLite API 1.13.1 constants, checked against the audited acquisition sources.
     private static final Skill[] GOAL_SKILLS = {Skill.ATTACK, Skill.STRENGTH, Skill.RANGED,
@@ -148,13 +147,81 @@ final class OwnGameplayCapture
         append(kind,"own_key_packet+visible_fixed_chest",tick,at,change,true,false);
     }
 
+    /**
+     * UTF-8 byte length of the JSON the snapshot would carry for this value, without creating a Gson instance (the
+     * Plugin Hub refuses fresh Gson). Matches Gson's default output for the shapes a row holds: maps with string keys,
+     * lists, strings, numbers, booleans and nulls (null map values are omitted, as Gson does).
+     */
+    static int jsonBytes(Object v)
+    {
+        if (v == null) return 4;
+        if (v instanceof Boolean) return ((Boolean) v) ? 4 : 5;
+        if (v instanceof Number) return numberText((Number) v).length();
+        if (v instanceof CharSequence || v instanceof Character) return stringBytes(v.toString());
+        if (v instanceof Map)
+        {
+            int n = 2, members = 0;
+            for (Map.Entry<?,?> e : ((Map<?,?>) v).entrySet())
+            {
+                if (e.getValue() == null) continue;
+                n += stringBytes(String.valueOf(e.getKey())) + 1 + jsonBytes(e.getValue());
+                members++;
+            }
+            return n + Math.max(0, members - 1);
+        }
+        if (v instanceof Iterable)
+        {
+            int n = 2, members = 0;
+            for (Object o : (Iterable<?>) v) { n += jsonBytes(o); members++; }
+            return n + Math.max(0, members - 1);
+        }
+        if (v instanceof int[]) { java.util.List<Integer> l = new java.util.ArrayList<>(); for (int i : (int[]) v) l.add(i); return jsonBytes(l); }
+        if (v instanceof long[]) { java.util.List<Long> l = new java.util.ArrayList<>(); for (long i : (long[]) v) l.add(i); return jsonBytes(l); }
+        if (v instanceof Object[]) return jsonBytes(java.util.Arrays.asList((Object[]) v));
+        if (v instanceof Enum) return stringBytes(((Enum<?>) v).name());
+        return stringBytes(v.toString());
+    }
+
+    private static String numberText(Number n)
+    {
+        if (n instanceof Double || n instanceof Float)
+        {
+            double d = n.doubleValue();
+            if (n instanceof Float) return Float.toString(n.floatValue());
+            return Double.toString(d);
+        }
+        return n.toString();
+    }
+
+    /** Bytes of a Gson-escaped JSON string, quotes included. Gson escapes <, >, &, = and ' as a six-character escape by default. */
+    private static int stringBytes(String s)
+    {
+        int n = 2;
+        for (int i = 0; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+            switch (c)
+            {
+                case '"': case '\\': case '\n': case '\r': case '\t': case '\b': case '\f': n += 2; break;
+                case '<': case '>': case '&': case '=': case '\'': n += 6; break;
+                default:
+                    if (c < 0x20 || c == '\u2028' || c == '\u2029') n += 6;
+                    else if (c < 0x80) n += 1;
+                    else if (c < 0x800) n += 2;
+                    else if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) { n += 4; i++; }
+                    else n += 3;
+            }
+        }
+        return n;
+    }
+
     private void append(String kind,String source,int tick,long at,Map<String,Object> value,boolean direct,boolean keepSnapshot)
     {
         Map<String,Object> row = new LinkedHashMap<>();
         row.put("sequence", ++sequence); row.put("event_id", session + ":" + sequence);
         row.put("kind", kind); row.put("source", source); row.put("tick", tick);
         row.put("observed_at_ms", at); row.put("direct", direct); row.put("value", value);
-        int bytes = JSON.toJson(row).getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
+        int bytes = jsonBytes(row) + 1;
         if (bytes > MAX_OBSERVATION_BYTES) { evicted++; return; }
         if(keepSnapshot)
         {
