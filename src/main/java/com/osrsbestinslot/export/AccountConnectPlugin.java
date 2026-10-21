@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.51";
+	private static final String PLUGIN_VERSION = "0.7.52";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -773,6 +773,10 @@ public class AccountConnectPlugin extends Plugin
 	private final Map<String, Integer> lastSkillLevel = new java.util.HashMap<>();
 	/** Tick of the last LOGGED_IN. The client replays every slot right after login; that replay is a baseline, not activity. */
 	int geLoginTick = Integer.MIN_VALUE / 2;
+	/** Tick of the last real login or hop (not a scene LOADING). The account varps arrive just after it. */
+	int worldLoginTick = Integer.MIN_VALUE / 2;
+	/** Ticks after a login before a zero membership-days varp is read as "no membership" (3 s). */
+	static final int MEMBERS_SETTLE_TICKS = 5;
 	/** Set when the account leaves the world (login screen, hop, relog, disconnect); the next LOGGED_IN is a real login. */
 	boolean geAwaitingLogin = true;
 	/** Account the remembered GE slots belong to. */
@@ -6770,6 +6774,7 @@ public class AccountConnectPlugin extends Plugin
 				if (client != null && geAwaitingLogin)
 				{
 					geLoginTick = client.getTickCount();
+					worldLoginTick = geLoginTick;
 				}
 				geAwaitingLogin = false;
 				break;
@@ -11776,6 +11781,24 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
+	 * account.members: TRUE on a members world. Elsewhere the membership-days varp decides, but only once the
+	 * player's variables have settled after login: TRUE with days left, FALSE with none, null before that.
+	 * An early read can be a zero still on its way, or a value left from the account logged in before.
+	 */
+	static Boolean accountMembers(boolean onMembersWorld, boolean varsSettled, int membershipDays)
+	{
+		if (onMembersWorld)
+		{
+			return Boolean.TRUE;
+		}
+		if (!varsSettled || membershipDays < 0)
+		{
+			return null;
+		}
+		return membershipDays > 0;
+	}
+
+	/**
 	 * The game_vars block for this snapshot, or null. Null when not granted, before the player's skills have
 	 * loaded (a login snapshot can read all zeros: 6 of 3,003 production snapshots on 2026-10-15 had every skill
 	 * at level 0), or inside GAME_VARS_MIN_INTERVAL_MS of the last accepted block. The cadence applies
@@ -11828,13 +11851,14 @@ public class AccountConnectPlugin extends Plugin
 		// profile_type keeps that old value (STANDARD/BETA/LEAGUE/...) under its own name.
 		account.put("account_type", accountTypeName(client.getVarbitValue(ACCOUNT_TYPE_VARBIT)));
 		account.put("profile_type", RuneScapeProfileType.getCurrent(client).name());
-		// Membership is NOT readable client-side on an f2p world (no varbit/varp exists for the
-		// account's subscription). Being on a members world DOES prove an active sub. So: true on a
-		// members world, null (unknown — never false) otherwise. current_world_members is the honest
-		// world-type signal; account membership can be inferred server-side from members content.
+		// A members world proves an active sub. An f2p world proves nothing (members play there too), so the
+		// account's own membership-days varp decides there, the same varp the RuneLite friends list uses for
+		// its 400/200 limit. current_world_members stays the plain world-type signal.
 		boolean onMembersWorld = client.getWorldType().contains(WorldType.MEMBERS);
 		account.put("current_world_members", onMembersWorld);
-		account.put("members", onMembersWorld ? Boolean.TRUE : null);
+		boolean varsSettled = client.getRealSkillLevel(Skill.HITPOINTS) > 0
+			&& client.getTickCount() - worldLoginTick >= MEMBERS_SETTLE_TICKS;
+		account.put("members", accountMembers(onMembersWorld, varsSettled, client.getVarpValue(VarPlayer.MEMBERSHIP_DAYS)));
 		snap.put("account", account);
 
 		// ---- capture completeness ----

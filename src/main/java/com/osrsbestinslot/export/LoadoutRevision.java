@@ -27,7 +27,8 @@ final class LoadoutRevision
         null, "gloves", "boots", null, "ring", "ammo"};
     static final int MAX_REVISIONS = 256;
     /** C4 WealthLedger.owns location lists that qualify a "no" answer. */
-    static final String[] HOLDINGS_GAPS = {"unknown_locations", "stale_locations", "bounded_locations", "unsupported_locations"};
+    static final String[] HOLDINGS_GAPS = {"unknown_locations", "stale_locations", "bounded_locations", "unsupported_locations",
+        "undated_locations", "carried_locations"};
 
     private final String generation;
     private final List<Map<String, Object>> revisions = new ArrayList<>();
@@ -172,7 +173,8 @@ final class LoadoutRevision
             int item = ((Number) e.getValue()).intValue();
             Map<?, ?> answer = owns == null ? null : owns.apply(item);
             Object a = answer == null ? null : answer.get("answer");
-            String state = "yes".equals(a) ? "owned_observed"
+            // "yes" from only stale, undated or carried readings is ownership that may be out of date.
+            String state = "yes".equals(a) ? (seenFresh(answer.get("seen")) ? "owned_observed" : "owned_possibly_outdated")
                 : "no_in_observed_locations".equals(a) ? "not_seen_in_observed" : "unknown";
             Map<String, Object> slot = new LinkedHashMap<>();
             slot.put("item_id", item);
@@ -189,5 +191,17 @@ final class LoadoutRevision
         result.put("slots", out);
         result.put("holdings_source", owns == null ? "unavailable" : "c4_wealth_ledger_owns");
         return result;
+    }
+
+    /** True when at least one C4 seen row was read in the current snapshot (state "observed" or "bounded"). */
+    private static boolean seenFresh(Object seen)
+    {
+        if (!(seen instanceof List)) return false;
+        for (Object row : (List<?>) seen)
+        {
+            Object state = row instanceof Map ? ((Map<?, ?>) row).get("state") : null;
+            if ("observed".equals(state) || "bounded".equals(state)) return true;
+        }
+        return false;
     }
 }

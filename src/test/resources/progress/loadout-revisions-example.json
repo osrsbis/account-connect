@@ -74,7 +74,9 @@
         "unsupported_locations": [
           "rune_pouch",
           "poh_storage"
-        ]
+        ],
+        "undated_locations": [],
+        "carried_locations": []
       },
       "weapon": {
         "item_id": 12006,
@@ -90,7 +92,9 @@
         "unsupported_locations": [
           "rune_pouch",
           "poh_storage"
-        ]
+        ],
+        "undated_locations": [],
+        "carried_locations": []
       },
       "body": {
         "item_id": 10551,
@@ -106,7 +110,9 @@
         "unsupported_locations": [
           "rune_pouch",
           "poh_storage"
-        ]
+        ],
+        "undated_locations": [],
+        "carried_locations": []
       },
       "ammo": {
         "item_id": 11212,
@@ -122,7 +128,9 @@
         "unsupported_locations": [
           "rune_pouch",
           "poh_storage"
-        ]
+        ],
+        "undated_locations": [],
+        "carried_locations": []
       }
     },
     "holdings_source": "c4_wealth_ledger_owns"

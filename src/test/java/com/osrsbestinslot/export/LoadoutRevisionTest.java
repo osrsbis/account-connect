@@ -31,11 +31,21 @@ public class LoadoutRevisionTest
         return id -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("item_id", id);
-            m.put("answer", answers.getOrDefault(id, "unknown"));
+            String answer = answers.getOrDefault(id, "unknown");
+            m.put("answer", answer.startsWith("yes") ? "yes" : answer);
+            if (answer.startsWith("yes"))
+            {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("location", "bank");
+                row.put("state", answer.equals("yes:carried") ? "carried" : "observed");
+                m.put("seen", new java.util.ArrayList<>(java.util.Arrays.asList(row)));
+            }
             m.put("unknown_locations", new java.util.ArrayList<>(java.util.Arrays.asList("bank")));
             m.put("stale_locations", new java.util.ArrayList<String>());
             m.put("bounded_locations", new java.util.ArrayList<>(java.util.Arrays.asList("ge_collect")));
-            m.put("unsupported_locations", java.util.Arrays.asList("rune_pouch", "poh_storage"));
+            m.put("unsupported_locations", new java.util.ArrayList<>(java.util.Arrays.asList("rune_pouch", "poh_storage")));
+            m.put("undated_locations", new java.util.ArrayList<String>());
+            m.put("carried_locations", new java.util.ArrayList<String>());
             return m;
         };
     }
@@ -119,6 +129,9 @@ public class LoadoutRevisionTest
         assertEquals("owned_observed", ((Map<?, ?>) slots.get("weapon")).get("current_holdings"));
         assertEquals("not_seen_in_observed", ((Map<?, ?>) slots.get("body")).get("current_holdings"));
         assertEquals("unknown", ((Map<?, ?>) slots.get("head")).get("current_holdings"));
+        answers.put(10828, "yes:carried"); // seen only in a reading carried from an earlier snapshot
+        Map<?, ?> carried = (Map<?, ?>) ((Map<?, ?>) LoadoutRevision.ownership(r, c4(answers)).get("slots")).get("head");
+        assertEquals("owned_possibly_outdated", carried.get("current_holdings"));
         assertEquals(java.util.Arrays.asList("rune_pouch", "poh_storage"),
             ((Map<?, ?>) slots.get("body")).get("unsupported_locations"));
         assertEquals(java.util.Collections.singletonList("ge_collect"), ((Map<?, ?>) slots.get("body")).get("bounded_locations"));
