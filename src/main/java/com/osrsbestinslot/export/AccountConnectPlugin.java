@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.52";
+	private static final String PLUGIN_VERSION = "0.7.53";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -656,6 +656,13 @@ public class AccountConnectPlugin extends Plugin
 	 * never a made-up time. Lets the server tell a bank read this minute from one carried for hours.
 	 */
 	final Map<Integer, Long> containerObservedAtMs = new java.util.concurrent.ConcurrentHashMap<>();
+	/**
+	 * The last populated bank read of this login, kept for the snapshot after the bank closes. The client
+	 * drops the bank container on close, so the first upload after a visit sent no bank and the server
+	 * carried the bank from before the visit: a noted withdraw then showed in the bank and the inventory at
+	 * once (live run 2026-10-22). Cleared with containerObservedAtMs, so a hop or relog never reuses it.
+	 */
+	volatile Item[] lastBankItems;
 	/** Minimum seconds between two snapshots that carry game_vars (the block is excluded from the change hash). */
 	static final long GAME_VARS_MIN_INTERVAL_MS = 15L * 60L * 1000L;
 	private volatile long lastGameVarsSentMs;
@@ -6635,6 +6642,7 @@ public class AccountConnectPlugin extends Plugin
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			containerObservedAtMs.clear(); // observations from a prior account/world login cannot timestamp a new cache
+			lastBankItems = null;
 			accountProgress.reset();
 			ownGameplay.reset();
 			geObservations.gap();
@@ -6829,7 +6837,18 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (event.getContainerId() == BANK_CONTAINER_ID)
 		{
+			rememberBank(event.getItemContainer());
 			handleBankContainerChanged(event.getItemContainer());
+		}
+	}
+
+	/** Keep a populated bank read. An empty read is not evidence (see advanceBankSession) and keeps the last one. */
+	void rememberBank(ItemContainer bank)
+	{
+		Item[] items = bank == null ? null : bank.getItems();
+		if (items != null && java.util.Arrays.stream(items).anyMatch(i -> i != null && i.getId() > 0 && i.getQuantity() > 0))
+		{
+			lastBankItems = items.clone();
 		}
 	}
 
@@ -7849,6 +7868,9 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void flushStorePendingOnShopClose()
 	{
+		int tick = client == null ? 0 : client.getTickCount();
+		// A click whose window passed with no change moving its item did not execute: no row for it.
+		storePendings.values().removeIf(p -> tick - p.tick > STORE_PENDING_MAX_TICKS);
 		List<StorePending> armed = new ArrayList<>(storePendings.values());
 		storePendings.clear();
 		if (!activityLogActive())
@@ -8431,11 +8453,13 @@ public class AccountConnectPlugin extends Plugin
 	 * Resolve the armed store pendings against one INVENTORY change. {@code countAfter} gives an item's count
 	 * after the change, or is null when the inventory could not be read.
 	 *
-	 * <p>Stale pendings are dropped. One live pending resolves exactly as before: this change is its own.
-	 * With several live pendings (different items clicked inside one window), the item counts decide whose
-	 * change this is. One item moved: the whole coin delta is that item's, so its gp_total is exact, and the
-	 * others stay armed with this change's coin count as their new baseline. Several items moved in this one
-	 * change: each still gets its own event, but one coin delta cannot be split, so none carries gp_total.
+	 * <p>Stale pendings are dropped. When the item counts are known they decide whose change this is, also for
+	 * a single click: a click resolves only on a change that moved its item its way. A failed sell (0 gp sale
+	 * refused, item still held) used to resolve on any inventory change inside the window and send a store_sell
+	 * for a sale that never happened (live run 2026-10-19, beside the real retry). One item moved: the whole
+	 * coin delta is that item's, so its gp_total is exact, and the others stay armed with this change's coin
+	 * count as their new baseline. Several items moved in this one change: each still gets its own event, but
+	 * one coin delta cannot be split, so none carries gp_total.
 	 */
 	void resolveStorePendingsOnInventoryChange(long coinsAfter, java.util.function.IntToLongFunction countAfter,
 		int currentTick)
@@ -8446,10 +8470,10 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		List<StorePending> resolved = new ArrayList<>();
-		if (storePendings.size() == 1 || countAfter == null
-			|| storePendings.values().stream().anyMatch(p -> p.itemBefore == UNKNOWN_ITEM_COUNT))
+		if (countAfter == null || storePendings.values().stream().anyMatch(p -> p.itemBefore == UNKNOWN_ITEM_COUNT
+			|| countAfter.applyAsLong(p.item) == UNKNOWN_ITEM_COUNT))
 		{
-			// One click, or nothing to tell several apart: this change resolves them all. Several get no price.
+			// Nothing to tell the clicks apart: this change resolves them all. Several get no price.
 			resolved.addAll(storePendings.values());
 		}
 		else
@@ -11839,7 +11863,10 @@ public class AccountConnectPlugin extends Plugin
 
 		ItemContainer eqp = client.getItemContainer(InventoryID.EQUIPMENT);
 		ItemContainer inv = client.getItemContainer(InventoryID.INVENTORY);
-		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+		ItemContainer liveBank = client.getItemContainer(InventoryID.BANK);
+		// After a close the client has no bank container: report the last read of this login, timestamped by
+		// the bank's last change, instead of nothing (which let the server carry an older bank forward).
+		Item[] bank = liveBank != null ? liveBank.getItems() : lastBankItems;
 		boolean bankSynced = bank != null;
 
 		// ---- account meta ----
@@ -12170,12 +12197,17 @@ public class AccountConnectPlugin extends Plugin
 
 	private List<Map<String, Object>> itemList(ItemContainer c)
 	{
+		return itemList(c == null ? null : c.getItems());
+	}
+
+	private List<Map<String, Object>> itemList(Item[] items)
+	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		if (c == null)
+		if (items == null)
 		{
 			return out;
 		}
-		for (Item item : c.getItems())
+		for (Item item : items)
 		{
 			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
 			{
@@ -12204,12 +12236,17 @@ public class AccountConnectPlugin extends Plugin
 
 	private long containerValue(ItemContainer c)
 	{
-		if (c == null)
+		return containerValue(c == null ? null : c.getItems());
+	}
+
+	private long containerValue(Item[] items)
+	{
+		if (items == null)
 		{
 			return 0L;
 		}
 		long v = 0L;
-		for (Item item : c.getItems())
+		for (Item item : items)
 		{
 			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
 			{
