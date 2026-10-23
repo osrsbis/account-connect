@@ -25,6 +25,8 @@ final class GeObservationTracker
         boolean uncertain;
         boolean gap;
         long sequence;
+        /** Restored from disk after a restart: the offer_key outlived the collector session. */
+        boolean restored;
     }
 
     void clear()
@@ -38,6 +40,95 @@ final class GeObservationTracker
         for (Slot s : slots.values())
         {
             s.gap = true;
+        }
+    }
+
+    boolean isEmpty()
+    {
+        return slots.isEmpty();
+    }
+
+    /** The slots as plain values, for the restart file. Empty-slot times are not kept: they only date a new offer. */
+    java.util.List<Map<String, Object>> export()
+    {
+        java.util.List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (Map.Entry<Integer, Slot> e : new java.util.TreeMap<>(slots).entrySet())
+        {
+            Slot s = e.getValue();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("slot", e.getKey());
+            m.put("key", s.key);
+            m.put("seen", s.seen);
+            m.put("state", s.state.name());
+            m.put("value", java.util.Arrays.stream(s.value).boxed().collect(java.util.stream.Collectors.toList()));
+            m.put("emitted_qty", s.emittedQty);
+            m.put("emitted_gp", s.emittedGp);
+            m.put("emitted_at", s.emittedAt);
+            m.put("observed_at", s.observedAt);
+            m.put("uncertain", s.uncertain);
+            m.put("sequence", s.sequence);
+            out.add(m);
+        }
+        return out;
+    }
+
+    /**
+     * Take back the slots of the same account, profile and token after a restart. Every restored slot is marked
+     * as crossing a gap: the next observation reports the counter difference since the last row sent, with the
+     * interval from that row to now and no fill time. A malformed entry is skipped, never guessed.
+     */
+    void restore(java.util.List<?> saved)
+    {
+        slots.clear();
+        emptySlots.clear();
+        if (saved == null)
+        {
+            return;
+        }
+        for (Object o : saved)
+        {
+            try
+            {
+                Map<?, ?> m = (Map<?, ?>) o;
+                java.util.List<?> v = (java.util.List<?>) m.get("value");
+                String key = (String) m.get("key");
+                if (v == null || v.size() != 5 || key == null || !key.matches("^[0-9a-f]{32}$"))
+                {
+                    continue;
+                }
+                int slot = ((Number) m.get("slot")).intValue();
+                if (slot < 0 || slot >= AccountConnectPlugin.GE_SLOT_COUNT)
+                {
+                    continue;
+                }
+                Slot s = new Slot();
+                s.key = key;
+                s.seen = (String) m.get("seen");
+                s.state = GrandExchangeOfferState.valueOf((String) m.get("state"));
+                s.value = new long[5];
+                for (int i = 0; i < 5; i++)
+                {
+                    s.value[i] = ((Number) v.get(i)).longValue();
+                }
+                s.emittedQty = ((Number) m.get("emitted_qty")).longValue();
+                s.emittedGp = ((Number) m.get("emitted_gp")).longValue();
+                s.emittedAt = ((Number) m.get("emitted_at")).longValue();
+                s.observedAt = ((Number) m.get("observed_at")).longValue();
+                s.uncertain = Boolean.TRUE.equals(m.get("uncertain"));
+                s.sequence = ((Number) m.get("sequence")).longValue();
+                s.lastProgressTick = Integer.MIN_VALUE / 2;	// the tick count restarted with the client
+                s.gap = true;
+                s.restored = true;
+                if (s.state == GrandExchangeOfferState.EMPTY || s.seen == null)
+                {
+                    continue;
+                }
+                slots.put(slot, s);
+            }
+            catch (RuntimeException e)
+            {
+                // skip this entry
+            }
         }
     }
 
@@ -180,7 +271,7 @@ final class GeObservationTracker
         o.put("execution_price", null);
         o.put("tax_gp", null);
         o.put("identity", s.uncertain ? "ambiguous_counter_regression" : s.gap ? "inferred_across_gap" : "inferred_session_slot");
-        o.put("offer_key_scope", "collector_session");
+        o.put("offer_key_scope", s.restored ? "account_profile" : "collector_session");
         boolean clockOk = at >= s.emittedAt;
         o.put("delta_status", s.uncertain ? "unknown" : baseline ? "baseline_only" : "observed_counter_difference");
         o.put("delta_qty", s.uncertain ? null : s.value[1] - s.emittedQty);

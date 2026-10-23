@@ -123,7 +123,7 @@ final class PublicTransport
     private static Map<String,Object> geObservation(Object input)
     {
         Set<String> numbers = keys("schema_v sequence cumulative_qty cumulative_gp delta_from_qty delta_from_gp observed_at_ms counter_observed_at_ms listing_price execution_price tax_gp delta_qty delta_gp interval_start_ms interval_end_ms");
-        Set<String> values = keys("runelite_grand_exchange_offer runelite_spent_tax_unknown ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session unknown baseline_only observed_counter_difference");
+        Set<String> values = keys("runelite_grand_exchange_offer runelite_spent_tax_unknown ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session account_profile unknown baseline_only observed_counter_difference");
         Set<String> labels = keys("source gp_semantics identity offer_key_scope delta_status fill_time");
         Map<String,Object> out = new LinkedHashMap<>();
         if (input instanceof Map) for (Map.Entry<?,?> e : ((Map<?,?>) input).entrySet())

@@ -58,7 +58,7 @@ final class StorageRecoveryCapture
     void container(Client client, int id, ItemContainer container, long now)
     {
         if (id != BANK && id != INVENTORY) return;
-        Map<Integer, Long> counts = counts(container);
+        Map<Integer, Long> counts = counts(client, container);
         if (counts == null) { gap(); return; }
         if (id == INVENTORY)
         {
@@ -221,15 +221,27 @@ final class StorageRecoveryCapture
 
     static Map<Integer, Long> counts(ItemContainer container)
     {
+        return counts(null, container);
+    }
+
+    /** As counts, without bank placeholders: a placeholder is its own id at quantity 1 and is never held. */
+    static Map<Integer, Long> counts(Client client, ItemContainer container)
+    {
         if (container == null || container.getItems() == null || container.getItems().length > 1500) return null;
         Map<Integer, Long> out = new TreeMap<>();
         for (Item item : container.getItems())
         {
             if (item == null || item.getQuantity() < 0) return null;
-            if (item.getId() > 0 && item.getQuantity() > 0)
+            if (item.getId() > 0 && item.getQuantity() > 0 && !placeholder(client, item.getId()))
                 out.merge(item.getId(), (long) item.getQuantity(), Long::sum);
         }
         return out;
+    }
+
+    private static boolean placeholder(Client client, int id)
+    {
+        net.runelite.api.ItemComposition c = client == null ? null : client.getItemDefinition(id);
+        return c != null && c.getPlaceholderTemplateId() != -1;
     }
 
     private static Map<Integer, Long> difference(Map<Integer, Long> before, Map<Integer, Long> after)

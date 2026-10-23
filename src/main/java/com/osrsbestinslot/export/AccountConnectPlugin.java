@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.53";
+	private static final String PLUGIN_VERSION = "0.7.55";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -518,6 +518,9 @@ public class AccountConnectPlugin extends Plugin
 	{
 		geObservations.clear();
 		geAccountHash = -1L;
+		geRestoredFor = null;
+		lastSkillLevel.clear();		// re-enabled on another account: its levels are a baseline, not level-ups
+		lastSkillXp.clear();
 		accountProgress.reset();	// disabled plugins miss hop/relog callbacks
 		ownGameplay.reset();
 		clearResetPhaseEvidence();
@@ -525,7 +528,8 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Take the current GE slots as the baseline, without emitting anything. Runs on the client thread.
+	 * Take the current GE slots as the baseline. Nothing is emitted, except for a slot saved before a restart
+	 * that changed meanwhile (see GE SLOTS ACROSS A RESTART). Runs on the client thread.
 	 * If the account hash is still -1, the seed is keyed to -1 and the first event with a real hash clears
 	 * it (the account-change rule), so an unkeyed seed is never trusted.
 	 */
@@ -542,6 +546,9 @@ public class AccountConnectPlugin extends Plugin
 		geUnkeyed.clear();	// the current slots supersede anything held from before the plugin was enabled
 		prepareGeContext();
 		geAccountHash = client.getAccountHash();
+		// Slots saved before a restart are taken back first, so an offer that moved meanwhile is reported once.
+		// A slot with nothing saved is only a baseline, as before.
+		restoreGeSlots();
 		for (int slot = 0; slot < offers.length; slot++)
 		{
 			GrandExchangeOffer o = offers[slot];
@@ -549,7 +556,7 @@ public class AccountConnectPlugin extends Plugin
 			{
 				continue;
 			}
-			geObservations.observe(slot, o.getState(), new long[]{o.getItemId(), o.getQuantitySold(),
+			judgeGeOffer(slot, o.getState(), new long[]{o.getItemId(), o.getQuantitySold(),
 				o.getTotalQuantity(), o.getPrice(), o.getSpent()}, true, client.getTickCount(), System.currentTimeMillis());
 		}
 	}
@@ -782,6 +789,17 @@ public class AccountConnectPlugin extends Plugin
 	int geLoginTick = Integer.MIN_VALUE / 2;
 	/** Tick of the last real login or hop (not a scene LOADING). The account varps arrive just after it. */
 	int worldLoginTick = Integer.MIN_VALUE / 2;
+	/**
+	 * Ticks after a login or hop before a snapshot is built. The client keeps the previous account's skills
+	 * after a logout and updates them one StatChanged at a time at login (live 2026-10-23: a snapshot 0.4 s
+	 * after a switch carried four skills of the account that had just logged out).
+	 */
+	static final int LOGIN_SETTLE_TICKS = 5;
+
+	boolean loginSettled()
+	{
+		return client.getTickCount() - worldLoginTick >= LOGIN_SETTLE_TICKS;
+	}
 	/** Ticks after a login before a zero membership-days varp is read as "no membership" (3 s). */
 	static final int MEMBERS_SETTLE_TICKS = 5;
 	/** Set when the account leaves the world (login screen, hop, relog, disconnect); the next LOGGED_IN is a real login. */
@@ -3909,6 +3927,26 @@ public class AccountConnectPlugin extends Plugin
 			healthEventsLost.incrementAndGet();
 	}
 
+	/**
+	 * True when the client is in the world as another account than the row names. The hash decides; while
+	 * it still reads -1 just after a login, the player name decides (it cannot change inside a session).
+	 */
+	private boolean stampedForAnotherAccount(Object stampedHash, Object stampedRsn)
+	{
+		if (stampedHash == null || client == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return false;
+		}
+		long live = client.getAccountHash();
+		if (live != -1L)
+		{
+			return !String.valueOf(stampedHash).equals(Long.toString(live));
+		}
+		Player self = client.getLocalPlayer();
+		String name = self == null ? null : self.getName();
+		return name != null && stampedRsn != null && !name.equals(stampedRsn);
+	}
+
 	void emitEvent(String type, Map<String, Object> fields)
 	{
 		emitEventBound(type, fields, currentEventTokenFingerprint());
@@ -3946,6 +3984,14 @@ public class AccountConnectPlugin extends Plugin
 		if (fields != null)
 		{
 			ev.putAll(fields);
+		}
+		// After a logout and a login to another account, activeHash names the old account until the next
+		// syncTask starts the new session. A row stamped with it would file this account's activity under the
+		// other one, so it is dropped. Rows that carry their own account (GE) are kept when it is the live one.
+		if (stampedForAnotherAccount(ev.get("account_hash"), ev.get("rsn")))
+		{
+			healthEventsLost.incrementAndGet();
+			return;
 		}
 		// Generated ONCE, before either queue sees the event, so a retry and a replay carry the same id.
 		String eventId = EventSpool.newEventId();
@@ -6386,6 +6432,10 @@ public class AccountConnectPlugin extends Plugin
 		{
 			resolveDeathPendingViaLiveContainers();
 		}
+		if (!loginSettled())
+		{
+			return;	// the skills still hold the previous account's values until the login stat burst lands
+		}
 		refreshProfileType();
 		// Build + cache the snapshot FIRST so trackSessionStart's login event can carry wealth-at-login (WAVE 3)
 		// and so the new-login force-send below ships this exact snapshot.
@@ -6480,6 +6530,10 @@ public class AccountConnectPlugin extends Plugin
 		if (System.currentTimeMillis() < backoffUntilMillis)
 		{
 			return; // server-imposed 429 backoff still wins — a manual force never overrides it
+		}
+		if (!loginSettled())
+		{
+			return;
 		}
 		Map<String, Object> snapshot = buildSnapshot();
 		String hash = canonicalHash(snapshot);
@@ -6693,6 +6747,7 @@ public class AccountConnectPlugin extends Plugin
 				flushXpGain();		// a hop ends the xp window: emit what accumulated, never drop it
 				xpFlushTicks = 0;
 				lastSkillXp.clear();	// xp deltas re-baseline per account
+				lastSkillLevel.clear();	// level-ups too: the next account's login burst only baselines
 				xpAccum.clear();
 				lastRegion = null;
 				clearFirehose();	// buffered firehose rows must not carry across accounts
@@ -6728,6 +6783,7 @@ public class AccountConnectPlugin extends Plugin
 				flushXpGain();		// a disconnect ends the xp window: emit what accumulated, never drop it
 				xpFlushTicks = 0;
 				lastSkillXp.clear();
+				lastSkillLevel.clear();
 				xpAccum.clear();
 				lastRegion = null;
 				clearFirehose();
@@ -6754,6 +6810,7 @@ public class AccountConnectPlugin extends Plugin
 				xpFlushTicks = 0;
 				flushFirehose();	// flush batched firehose rows before the session ends
 				lastSkillXp.clear();
+				lastSkillLevel.clear();
 				xpAccum.clear();
 				lastRegion = null;
 				clearFirehose();
@@ -6846,7 +6903,7 @@ public class AccountConnectPlugin extends Plugin
 	void rememberBank(ItemContainer bank)
 	{
 		Item[] items = bank == null ? null : bank.getItems();
-		if (items != null && java.util.Arrays.stream(items).anyMatch(i -> i != null && i.getId() > 0 && i.getQuantity() > 0))
+		if (items != null && java.util.Arrays.stream(items).anyMatch(this::realItem))
 		{
 			lastBankItems = items.clone();
 		}
@@ -11083,7 +11140,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		for (Item item : c.getItems())
 		{
-			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+			if (realItem(item))
 			{
 				counts.merge(item.getId(), (long) item.getQuantity(), Long::sum);
 			}
@@ -11282,6 +11339,7 @@ public class AccountConnectPlugin extends Plugin
 			geObservations.clear();
 			geAccountHash = acct;
 		}
+		restoreGeSlots();
 		// An identical re-send of a slot (same state, same offer) emits nothing through the rules below: an
 		// unchanged terminal state, an active offer with no new fill and a repeated EMPTY all yield no row.
 		// A replay is every slot event from leaving the world until LOGGED_IN (the RuneLite GE plugin opens its
@@ -11297,6 +11355,131 @@ public class AccountConnectPlugin extends Plugin
 	private final GeObservationTracker geObservations = new GeObservationTracker();
 	private String geProfileType;
 	private String geTokenFingerprint;
+
+	// ---- GE SLOTS ACROSS A RESTART ----
+	//
+	// The tracker lived in memory, so a client restart forgot every open offer. The login replay then only took
+	// a baseline: a fill that happened while away, and the terminal row of an offer that finished while away,
+	// were never reported, and the collect came under a new offer_key. Now the slots are written after every
+	// GE change and read back at the first GE event of the same token, account and profile. The next
+	// observation reports the counter difference since the last row sent, as for a hop: identity
+	// inferred_across_gap, the interval from that row to now, no fill time. A slot found EMPTY at login was
+	// collected elsewhere and is dropped without a row, so a collect is never counted twice.
+	//
+	// IDENTITY. One entry per token fingerprint (never the token), account hash and profile. Another
+	// account, profile or token never reads it. At most GE_SLOTS_MAX_ENTRIES entries, newest kept.
+
+	static final String GE_SLOTS_FILE = "ge-slots.json";
+	static final int GE_SLOTS_MAX_ENTRIES = 8;
+	/** The key whose saved slots were last restored or superseded; client-thread only. */
+	private String geRestoredFor;
+
+	private String geSlotsKey()
+	{
+		String fp = currentEventTokenFingerprint();
+		if (fp == null || geAccountHash == -1L || geProfileType == null)
+		{
+			return null;
+		}
+		return fp + "|" + geAccountHash + "|" + geProfileType;
+	}
+
+	private java.nio.file.Path geSlotsPath()
+	{
+		return spoolDataRoot().resolve("osrsbis").resolve(GE_SLOTS_FILE);
+	}
+
+	/** Once per token, account and profile: take back the saved slots. Runs right after the tracker was cleared. */
+	void restoreGeSlots()
+	{
+		String key = geSlotsKey();
+		if (key == null || key.equals(geRestoredFor))
+		{
+			return;
+		}
+		geRestoredFor = key;
+		try
+		{
+			for (Map<String, Object> entry : readGeSlots())
+			{
+				if (key.equals(entry.get("key")) && entry.get("slots") instanceof List)
+				{
+					geObservations.restore((List<?>) entry.get("slots"));
+					return;
+				}
+			}
+		}
+		catch (Throwable t)
+		{
+			log.debug("OSRS BiS GE slots could not be restored", t);
+		}
+	}
+
+	/** Write the current slots under the current key. A failed write only costs the restart reconciliation. */
+	void saveGeSlots()
+	{
+		String key = geSlotsKey();
+		if (key == null || !key.equals(geRestoredFor) || gson == null)
+		{
+			return;	// not restored yet for this key: writing now would overwrite the saved slots with nothing
+		}
+		try
+		{
+			List<Map<String, Object>> all = readGeSlots();
+			all.removeIf(e -> key.equals(e.get("key")));
+			Map<String, Object> entry = new LinkedHashMap<>();
+			entry.put("key", key);
+			entry.put("saved_at", System.currentTimeMillis());
+			entry.put("slots", geObservations.export());
+			all.add(entry);
+			all.sort(java.util.Comparator.comparingLong(e -> e.get("saved_at") instanceof Number ? ((Number) e.get("saved_at")).longValue() : 0L));
+			while (all.size() > GE_SLOTS_MAX_ENTRIES)
+			{
+				all.remove(0);
+			}
+			java.nio.file.Path file = geSlotsPath();
+			java.nio.file.Files.createDirectories(file.getParent());
+			java.nio.file.Path tmp = file.resolveSibling(GE_SLOTS_FILE + ".tmp");
+			java.nio.file.Files.write(tmp, gson.toJson(all).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+			java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+				java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+		}
+		catch (Throwable t)
+		{
+			log.debug("OSRS BiS GE slots could not be written", t);
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private List<Map<String, Object>> readGeSlots() throws IOException
+	{
+		java.nio.file.Path file = geSlotsPath();
+		List<Map<String, Object>> rows = new ArrayList<>();
+		if (gson == null || !java.nio.file.Files.exists(file))
+		{
+			return rows;
+		}
+		try
+		{
+			Object parsed = gson.fromJson(new String(java.nio.file.Files.readAllBytes(file),
+				java.nio.charset.StandardCharsets.UTF_8), Object.class);
+			if (parsed instanceof List)
+			{
+				for (Object row : (List<?>) parsed)
+				{
+					if (row instanceof Map)
+					{
+						rows.add(new LinkedHashMap<>((Map<String, Object>) row));
+					}
+				}
+			}
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("OSRS BiS GE slots file unreadable; starting fresh", e);
+		}
+		return rows;
+	}
 
 	private void prepareGeContext()
 	{
@@ -11338,6 +11521,7 @@ public class AccountConnectPlugin extends Plugin
 		int tick = client == null ? 0 : client.getTickCount();
 		if (acct == geAccountHash)
 		{
+			restoreGeSlots();
 			for (Map.Entry<Integer, Object[]> e : held)
 			{
 				judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0], (long[]) e.getValue()[1], true, tick, (Long) e.getValue()[2]);
@@ -11346,6 +11530,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		geObservations.clear();
 		geAccountHash = acct;
+		restoreGeSlots();
 		for (Map.Entry<Integer, Object[]> e : held)
 		{
 			judgeGeOffer(e.getKey(), (GrandExchangeOfferState) e.getValue()[0],
@@ -11357,6 +11542,7 @@ public class AccountConnectPlugin extends Plugin
 	private void judgeGeOffer(int slot, GrandExchangeOfferState state, long[] value, boolean replay, int tick, long observedAt)
 	{
 		Map<String, Object> fields = geObservations.observe(slot, state, value, replay, tick, observedAt);
+		saveGeSlots();
 		if (fields != null)
 		{
 			String type = (String) fields.remove("type");
@@ -12195,6 +12381,22 @@ public class AccountConnectPlugin extends Plugin
 		return m;
 	}
 
+	/**
+	 * A stack that is really held. A bank placeholder is its own item id with quantity 1 in the container (live run
+	 * 2026-10-22: Bat bones 530 left placeholder 19269 x1), so it was sent as an item and moved in and out of the
+	 * bank as a phantom deposit and withdrawal. Its composition names a placeholder template; nothing else does.
+	 * Must run on the client thread (ItemManager composition). Without an ItemManager (tests) nothing is skipped.
+	 */
+	boolean realItem(Item item)
+	{
+		if (item == null || item.getId() <= 0 || item.getQuantity() <= 0)
+		{
+			return false;
+		}
+		net.runelite.api.ItemComposition c = itemManager == null ? null : itemManager.getItemComposition(item.getId());
+		return c == null || c.getPlaceholderTemplateId() == -1;
+	}
+
 	private List<Map<String, Object>> itemList(ItemContainer c)
 	{
 		return itemList(c == null ? null : c.getItems());
@@ -12209,7 +12411,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		for (Item item : items)
 		{
-			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+			if (realItem(item))
 			{
 				out.add(itemMap(item.getId(), item.getQuantity()));
 			}
@@ -12248,7 +12450,7 @@ public class AccountConnectPlugin extends Plugin
 		long v = 0L;
 		for (Item item : items)
 		{
-			if (item != null && item.getId() > 0 && item.getQuantity() > 0)
+			if (realItem(item))
 			{
 				v += (long) itemManager.getItemPrice(item.getId()) * item.getQuantity();
 			}
