@@ -3,6 +3,7 @@ package com.osrsbestinslot.export;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -147,7 +148,7 @@ public class Wave3EnrichmentTest
 	}
 
 	@Test
-	public void netWorthFallsBackToInventoryPlusEquipmentWhenBankNull() throws Exception
+	public void noNetWorthBeforeTheBankIsRead() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		Map<String, Object> wealth = new LinkedHashMap<>();
@@ -157,7 +158,7 @@ public class Wave3EnrichmentTest
 		Map<String, Object> snap = new LinkedHashMap<>();
 		snap.put("wealth", wealth);
 		inject(plugin, "lastBuiltSnapshot", snap);
-		assertEquals(Long.valueOf(500L), plugin.lastKnownNetWorth());
+		assertNull("inventory + gear alone is not net worth", plugin.lastKnownNetWorth());
 	}
 
 	@Test

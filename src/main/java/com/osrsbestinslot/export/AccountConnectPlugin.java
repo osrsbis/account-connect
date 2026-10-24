@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.56";
+	private static final String PLUGIN_VERSION = "0.7.58";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -368,6 +368,11 @@ public class AccountConnectPlugin extends Plugin
 	// Widget unload may precede the logout state. An unreadable close waits for that state or the
 	// next world tick; reads arriving after the close must not become the old visit's end inventory.
 	private boolean bankClosePending;
+	// True only while the snapshot for a bank open is built: the open has been seen, its visit state not yet.
+	private boolean bankOpeningNow;
+	// Tick of the last populated bank ItemContainerChanged. Only a change at or after the open proves the
+	// container holds this visit's contents; a container read at the open alone could be an earlier copy.
+	private int bankChangeTick = Integer.MIN_VALUE / 2;
 
 	// Bank-visit evidence (staff only, 0.7.17). One visit per BANKMAIN open: bank_visit_open, the item list at
 	// open and at close as bank_visit_manifest_chunk events, and bank_visit_close. Follows the server's
@@ -4105,9 +4110,10 @@ public class AccountConnectPlugin extends Plugin
 	}
 
 	/**
-	 * Net worth (gp) from the most recently built snapshot's wealth block, for the login/logout events. Prefers
-	 * net_worth_gp (inventory + equipment + bank, populated once the bank has been opened); before then falls
-	 * back to the carried inventory + worn equipment value. null only if no snapshot has been built yet.
+	 * Net worth (gp) from the most recently built snapshot's wealth block, for the login/logout events:
+	 * net_worth_gp (inventory + equipment + bank). null when no snapshot has been built yet or this login has
+	 * not read the bank. The old fallback to carried inventory + worn equipment gave one field two meanings
+	 * (live 0.7.55: 11.38M with the bank, 5.05M without it on the same account), so it is omitted instead.
 	 */
 	Long lastKnownNetWorth()
 	{
@@ -4121,15 +4127,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return null;
 		}
-		Map<?, ?> wealth = (Map<?, ?>) w;
-		Object net = wealth.get("net_worth_gp");
-		if (net instanceof Number)
-		{
-			return ((Number) net).longValue();
-		}
-		long inv = wealth.get("inventory_gp") instanceof Number ? ((Number) wealth.get("inventory_gp")).longValue() : 0L;
-		long eqp = wealth.get("equipment_gp") instanceof Number ? ((Number) wealth.get("equipment_gp")).longValue() : 0L;
-		return inv + eqp;
+		Object net = ((Map<?, ?>) w).get("net_worth_gp");
+		return net instanceof Number ? ((Number) net).longValue() : null;
 	}
 
 	/**
@@ -6551,6 +6550,7 @@ public class AccountConnectPlugin extends Plugin
 	{
 		Map<String, Object> canonical = new LinkedHashMap<>(snapshot);
 		canonical.remove("captured_at");
+		canonical.remove("captured_at_ms");
 		canonical.remove("wealth");
 		canonical.remove("game_vars");	// varps change constantly; game_vars rides on its own interval (gameVarsBlock)
 		Object gameplay = canonical.get("own_gameplay");
@@ -6560,6 +6560,14 @@ public class AccountConnectPlugin extends Plugin
 			// Keep freshness on the wire, but a passive poll alone must never trigger an upload.
 			stableGameplay.remove("last_authoritative_read_ms");
 			canonical.put("own_gameplay", stableGameplay);
+		}
+		Object bankBlock = canonical.get("bank");
+		if (bankBlock instanceof Map && ((Map<?, ?>) bankBlock).containsKey("open_at_capture"))
+		{
+			// The same bank read with the bank open or closed is no account change.
+			Map<String, Object> stableBank = new LinkedHashMap<>((Map<String, Object>) bankBlock);
+			stableBank.remove("open_at_capture");
+			canonical.put("bank", stableBank);
 		}
 		Object src = canonical.get("source");
 		if (src instanceof Map)
@@ -6697,6 +6705,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			containerObservedAtMs.clear(); // observations from a prior account/world login cannot timestamp a new cache
 			lastBankItems = null;
+			bankChangeTick = Integer.MIN_VALUE / 2;
 			accountProgress.reset();
 			ownGameplay.reset();
 			geObservations.gap();
@@ -6895,6 +6904,11 @@ public class AccountConnectPlugin extends Plugin
 		if (event.getContainerId() == BANK_CONTAINER_ID)
 		{
 			rememberBank(event.getItemContainer());
+			Item[] changed = event.getItemContainer() == null ? null : event.getItemContainer().getItems();
+			if (client != null && changed != null && java.util.Arrays.stream(changed).anyMatch(this::realItem))
+			{
+				bankChangeTick = client.getTickCount();
+			}
 			handleBankContainerChanged(event.getItemContainer());
 		}
 	}
@@ -7203,7 +7217,15 @@ public class AccountConnectPlugin extends Plugin
 		}
 		if (groupId == BANK_GROUP_ID || groupId == COLLECTION_LOG_GROUP_ID)
 		{
-			forceSendSnapshot();
+			bankOpeningNow = groupId == BANK_GROUP_ID;
+			try
+			{
+				forceSendSnapshot();
+			}
+			finally
+			{
+				bankOpeningNow = false;
+			}
 		}
 		if (groupId == BANK_GROUP_ID && activityLogActive() && bankReloadedWhileOpen())
 		{
@@ -7330,6 +7352,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
+		bankChangeTick = Integer.MIN_VALUE / 2;	// a change seen before this close never confirms the next open
 		if (unload)
 		{
 			closeBankVisit(teardownReason(client == null ? null : client.getGameState()), null);
@@ -12072,7 +12095,11 @@ public class AccountConnectPlugin extends Plugin
 	{
 		Map<String, Object> snap = new LinkedHashMap<>();
 		snap.put("schema_v", SCHEMA_V);
-		snap.put("captured_at", System.currentTimeMillis() / 1000L);
+		// One clock read for both: captured_at_ms orders a snapshot against a same-second event, and
+		// captured_at stays its whole second.
+		long capturedAtMs = System.currentTimeMillis();
+		snap.put("captured_at", capturedAtMs / 1000L);
+		snap.put("captured_at_ms", capturedAtMs);
 
 		Map<String, Object> source = new LinkedHashMap<>();
 		source.put("plugin", "osrsbis-export");
@@ -12293,6 +12320,10 @@ public class AccountConnectPlugin extends Plugin
 		bankBlock.put("items", bankSynced ? itemList(bank) : new ArrayList<>());
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
 		bankBlock.put("observed_at", bankSynced ? observedAtSeconds(BANK_CONTAINER_ID) : null);
+		if (bankOpenAtCapture(liveBank))
+		{
+			bankBlock.put("open_at_capture", true);
+		}
 		snap.put("bank", bankBlock);
 
 		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
@@ -12375,6 +12406,35 @@ public class AccountConnectPlugin extends Plugin
 		snap.put("minigame_points", minigames);
 
 		return snap;
+	}
+
+	/**
+	 * bank.open_at_capture: the bank items in this snapshot are the live container of an open bank. True only
+	 * with the open seen and no close since, a populated live read, no first read still pending, and a bank
+	 * change delivered since the open; absent otherwise (closed, closing, unloaded, a retained read from earlier
+	 * in this login, or an open whose contents no change has confirmed yet). Uses the bank-session state, which
+	 * runs for every linked token, not the staff-only visit id.
+	 *
+	 * Live 0.7.57 QA (2026-10-24): the snapshot sent at the open read a populated container before this open's
+	 * ItemContainerChanged (bank.observed_at still the previous change). The contents were right there, but
+	 * nothing proves a container read at the open is not an earlier copy, so the open snapshot carries the key
+	 * only when the change arrived in the open's own tick, and the next snapshot carries it after the change.
+	 */
+	private boolean bankOpenAtCapture(ItemContainer liveBank)
+	{
+		if (liveBank == null || bankClosePending || client == null)
+		{
+			return false;
+		}
+		boolean confirmed = bankOpeningNow
+			? bankChangeTick == client.getTickCount()
+			: bankAtOpen != null && !bankBaselinePending && bankChangeTick >= bankOpenTick;
+		if (!confirmed)
+		{
+			return false;
+		}
+		Item[] items = liveBank.getItems();
+		return items != null && java.util.Arrays.stream(items).anyMatch(this::realItem);
 	}
 
 	/** {region_id, plane} of the local player's world location, or null if it isn't currently readable. */
