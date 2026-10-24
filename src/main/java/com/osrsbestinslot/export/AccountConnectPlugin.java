@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.55";
+	private static final String PLUGIN_VERSION = "0.7.56";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -7185,6 +7185,16 @@ public class AccountConnectPlugin extends Plugin
 	 * directly. Its own guards (token / backoff) still apply — an unlinked account
 	 * opening its bank sends nothing.
 	 */
+	/** Tick of the last bank open handled here; client-thread only. */
+	private int bankOpenTick = Integer.MIN_VALUE / 2;
+
+	/** The bank interface loaded again with no close since the open one tick ago or less. */
+	private boolean bankReloadedWhileOpen()
+	{
+		return !bankClosePending && (bankVisitId != null || bankAtOpen != null || bankBaselinePending)
+			&& client != null && client.getTickCount() - bankOpenTick <= 1;
+	}
+
 	void handleCaptureOnOpenWidgetLoaded(int groupId)
 	{
 		if (groupId == BANK_GROUP_ID)
@@ -7195,8 +7205,17 @@ public class AccountConnectPlugin extends Plugin
 		{
 			forceSendSnapshot();
 		}
+		if (groupId == BANK_GROUP_ID && activityLogActive() && bankReloadedWhileOpen())
+		{
+			// Live 0.7.55 (2026-10-24): one client loaded the bank interface twice 34-66 ms apart on every
+			// open, with no close between. Starting a second visit left the first with no close (60 of
+			// that player's 120 visits). A reload with the visit still open in the same or next tick keeps it.
+			advanceBankSession(client.getItemContainer(InventoryID.BANK));	// a move only this read shows is kept
+			return;
+		}
 		if (groupId == BANK_GROUP_ID && activityLogActive())
 		{
+			bankOpenTick = client.getTickCount();
 			// Snapshot the bank the moment it opens; handleBankWidgetClosed diffs against this on close.
 			// The bank is readable here — the same read forceSendSnapshot just used to set bank_synced.
 			Map<Integer, Long> b = new LinkedHashMap<>();
@@ -9456,6 +9475,21 @@ public class AccountConnectPlugin extends Plugin
 				// is not the same as confirmation, and this release exists to stop plausible wrong numbers.
 				fields.put("unit_price_gp", gp / qty);	// average — see note above
 			}
+		}
+		else if (executedQty != UNKNOWN_ITEM_COUNT)
+		{
+			// The coins cannot be split (two buys settled in one inventory change), but each item's own count
+			// still measured what the server moved. Live 0.7.55 (2026-10-24): a player buying two runes per
+			// world sent half of all rows as a bare {item, qty:50} while about 30 had really moved.
+			if (qtyMerged)
+			{
+				fields.put("qty_merged", true);
+			}
+			else if (executedQty != qty)
+			{
+				fields.put("qty_partial", true);
+			}
+			fields.put("qty_executed", executedQty);
 		}
 		return fields;
 	}
@@ -12470,6 +12504,14 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (c == null)
 		{
+			return;
+		}
+		if (observedAtSeconds(c.getId()) == null)
+		{
+			// Present but no change seen since this login's start (observation times clear on every hop and
+			// relog), so this is not a reading of this login: live 0.7.55 sent 3 of 6 looting bags and 4 of 12
+			// seed vaults with observed_at null. If the client kept it from before, it may even be another
+			// account's. No block: the server keeps this account's last dated reading as carried.
 			return;
 		}
 		if ("seed_box".equals(key))

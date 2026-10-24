@@ -697,7 +697,13 @@ public class OffBookEventsTest
 		plugin.addContainerSnapshot(snap, "looting_bag", null); // never opened -> omitted entirely
 		assertFalse("absent container adds no block", snap.containsKey("looting_bag"));
 
-		plugin.addContainerSnapshot(snap, "looting_bag", container(560, 10));
+		ItemContainer bag = container(560, 10);
+		when(bag.getId()).thenReturn(516);
+		plugin.addContainerSnapshot(snap, "looting_bag", bag);
+		assertFalse("a container the client kept from before this login is not a reading", snap.containsKey("looting_bag"));
+
+		plugin.containerObservedAtMs.put(516, 1_700_000_000_123L);	// the game sent it this login
+		plugin.addContainerSnapshot(snap, "looting_bag", bag);
 		@SuppressWarnings("unchecked")
 		Map<String, Object> block = (Map<String, Object>) snap.get("looting_bag");
 		assertNotNull(block);
@@ -706,6 +712,7 @@ public class OffBookEventsTest
 		List<Map<String, Object>> items = (List<Map<String, Object>>) block.get("items");
 		assertEquals(1, items.size());
 		assertEquals(560, items.get(0).get("id"));
+		assertEquals(1_700_000_000L, block.get("observed_at"));
 	}
 
 	// ---------- helpers ----------

@@ -32,6 +32,8 @@ public class StoreFailedSellTest
 	private static final int COINS = 995;
 	private static final int POT = 1931;
 	private static final int LOBSTER = 379;
+	private static final int NATURE = 561;
+	private static final int DEATH = 560;
 
 	private AccountConnectPlugin plugin;
 	private Client client;
@@ -151,6 +153,42 @@ public class StoreFailedSellTest
 		plugin.flushStorePendingOnShopClose();
 		assertEquals(0, storeSells().size());
 		assertFalse(plugin.storePendings.containsKey(POT));
+	}
+
+	/**
+	 * Live 0.7.55 (2026-10-24): a player buying two runes per world got both in one inventory change. The coins
+	 * cannot be split between them, but each rune's own count measured what moved, so each row keeps it.
+	 */
+	@Test
+	public void twoBuysInOneChangeKeepTheirMeasuredQuantity() throws Exception
+	{
+		inventoryIs(735_512L, POT, LOBSTER);
+		buy(NATURE, 50);
+		buy(DEATH, 50);
+		tick++;
+		inventory = new Item[]{new Item(COINS, 735_512 - 7_000), new Item(POT, 1), new Item(LOBSTER, 1),
+			new Item(NATURE, 30), new Item(DEATH, 30)};
+		ItemContainer changed = client.getItemContainer(InventoryID.INVENTORY);
+		plugin.onItemContainerChanged(new ItemContainerChanged(net.runelite.api.gameval.InventoryID.INV, changed));
+
+		List<Map<String, Object>> buys = plugin.pendingEvents.stream().filter(e -> "store_buy".equals(e.get("type")))
+			.collect(Collectors.toList());
+		assertEquals(2, buys.size());
+		for (Map<String, Object> b : buys)
+		{
+			assertFalse("the coins of two buys are never split by a guess", b.containsKey("gp_total"));
+			assertEquals(30L, b.get("qty_executed"));
+			assertEquals(true, b.get("qty_partial"));
+			assertFalse(b.containsKey("unit_price_gp"));
+		}
+	}
+
+	private void buy(int item, int qty)
+	{
+		MenuOptionClicked click = mock(MenuOptionClicked.class);
+		when(click.getMenuOption()).thenReturn("Buy " + qty + "<col=ff9040>");
+		when(click.getItemId()).thenReturn(item);
+		plugin.onMenuOptionClicked(click);
 	}
 
 	@Test

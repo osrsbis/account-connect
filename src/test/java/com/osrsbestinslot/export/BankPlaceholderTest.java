@@ -188,6 +188,27 @@ public class BankPlaceholderTest
 		}
 	}
 
+	/**
+	 * Live 0.7.55 (2026-10-24): one client loaded the bank interface twice 34-66 ms apart on every open. The
+	 * second load started a new visit and the first never got a close. A reload keeps the open visit.
+	 */
+	@Test
+	public void aBankReloadInTheSameTickKeepsOneVisit() throws Exception
+	{
+		ItemContainer b = container(new int[]{COINS, 100}, new int[]{BONES, 1});
+		open(b);
+		open(b);											// the same interface loaded again, no close
+		change(container(new int[]{COINS, 100}));
+		close();
+		assertEquals("one visit", 1, of("bank_visit_open").size());
+		assertEquals("and it is closed", 1, of("bank_visit_close").size());
+		assertEquals(of("bank_visit_open").get(0).get("visit_id"), of("bank_visit_close").get(0).get("visit_id"));
+		assertEquals(List.of((long) BONES), ids(of("bank_session").get(0).get("withdrawn")));
+
+		open(container(new int[]{COINS, 100}));				// a real reopen after the close is a new visit
+		assertEquals(2, of("bank_visit_open").size());
+	}
+
 	@Test
 	public void aPlaceholderIsNeverMappedToItsBaseItem() throws Exception
 	{

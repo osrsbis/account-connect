@@ -217,6 +217,8 @@ public class BankMoveCaptureTest
 		Rig r = rig();
 		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
 		r.change(containerOf(new int[]{995, 1000}));
+		// A real reopen with the close missed comes ticks later; a reload in the same tick keeps the visit.
+		when(r.client.getTickCount()).thenReturn(2);
 		r.open(containerOf(new int[]{995, 1000}));
 		assertEquals(1, r.sessions().size());
 		assertEquals(false, r.sessions().get(0).get("complete"));
@@ -280,6 +282,8 @@ public class BankMoveCaptureTest
 	{
 		Rig r = rig();
 		r.open(containerOf(new int[]{995, 1000}, new int[]{303, 1}));
+		// A real reopen with the close missed comes ticks later; a reload in the same tick keeps the visit.
+		when(r.client.getTickCount()).thenReturn(2);
 		r.open(containerOf(new int[]{995, 1000}));	// 303 left before the re-open, no change event seen
 		assertEquals(1, r.sessions().size());
 		assertEquals(Long.valueOf(1), list(r.sessions().get(0), "withdrawn").get(303));

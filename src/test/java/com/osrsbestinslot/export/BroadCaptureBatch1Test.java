@@ -456,6 +456,8 @@ public class BroadCaptureBatch1Test
 		when(c.getId()).thenReturn(90);Map<String,Object> snap=new LinkedHashMap<>();p.addContainerSnapshot(snap,"seed_box",c);
 		assertFalse(snap.containsKey("seed_box"));org.mockito.Mockito.verify(c,org.mockito.Mockito.never()).getItems();
 		when(c.getId()).thenReturn(573);when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,2)});
+		p.addContainerSnapshot(snap,"seed_box",c);assertFalse("not read this login: no block",snap.containsKey("seed_box"));
+		p.containerObservedAtMs.put(573,1700000000123L);
 		net.runelite.client.game.ItemManager prices=mock(net.runelite.client.game.ItemManager.class);inject("itemManager",prices);
 		when(prices.getItemPrice(5291)).thenReturn(Long.MAX_VALUE);p.addContainerSnapshot(snap,"seed_box",c);
 		assertNull(((Map<?,?>)snap.get("seed_box")).get("value_gp"));

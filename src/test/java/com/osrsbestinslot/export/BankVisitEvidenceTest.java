@@ -483,6 +483,8 @@ public class BankVisitEvidenceTest
 		Rig r = rig();
 		r.grant("on");
 		r.open(bank(new int[]{995, 10}));
+		// A real reopen with the close missed comes ticks later; a reload in the same tick keeps the visit.
+		when(r.client.getTickCount()).thenReturn(2);
 		r.open(bank(new int[]{995, 10}));
 		r.close();
 		List<Map<String, Object>> opens = r.of("bank_visit_open");

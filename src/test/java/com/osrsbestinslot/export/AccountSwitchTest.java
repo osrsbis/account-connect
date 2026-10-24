@@ -31,25 +31,25 @@ import org.junit.Before;
 import org.junit.Test;
 
 /**
- * Live run 2026-10-23 (G6): D logged out to the login screen and 21 Djinn 736 logged in to the same client.
- * The login stat burst sent four level_up rows under D's hash and RSN carrying djinn's levels, three level_up
- * rows under djinn that compared djinn's levels with D's, and djinn's first snapshot carried D's skills.
+ * Live run 2026-10-23 (G6): account A logged out to the login screen and account B logged in to the same client.
+ * The login stat burst sent four level_up rows under A's hash and RSN carrying B's levels, three level_up
+ * rows under B that compared B's levels with A's, and B's first snapshot carried A's skills.
  * The level baseline is now cleared at every account boundary, a row stamped with the account that logged
  * out is dropped, and no snapshot is built until the login stat burst has landed.
  */
 public class AccountSwitchTest
 {
 	private static final String TOKEN = "0123456789abcdef0123456789abcdef";
-	private static final long D = 4340155410150241529L;
-	private static final long DJINN = 84507830909010332L;
+	private static final long MAIN = 1111111111111111111L;
+	private static final long ALT = 2222222222222222222L;
 
 	private MockWebServer server;
 	private AccountConnectPlugin plugin;
 	private Client client;
 	private Player player;
 	private int tick = 1000;
-	private long hash = D;
-	private String name = "3 Arrow 2605";
+	private long hash = MAIN;
+	private String name = "Fixture Main";
 	private GameState state = GameState.LOGGED_IN;
 
 	@Before
@@ -109,8 +109,8 @@ public class AccountSwitchTest
 		plugin.onGameStateChanged(e);
 	}
 
-	/** D in the world: its session started and its levels seen. */
-	private void dLoggedIn() throws Exception
+	/** MAIN in the world: its session started and its levels seen. */
+	private void mainLoggedIn() throws Exception
 	{
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.syncTask();
@@ -120,15 +120,15 @@ public class AccountSwitchTest
 		plugin.pendingEvents.clear();
 	}
 
-	/** D logs out to the login screen and djinn logs in to the same client. */
-	private void switchToDjinn()
+	/** MAIN logs out to the login screen and the alt logs in to the same client. */
+	private void switchToAlt()
 	{
 		gameState(GameState.LOGIN_SCREEN);
-		plugin.pendingEvents.clear();	// D's own logout row
+		plugin.pendingEvents.clear();	// MAIN's own logout row
 		hash = -1L;
 		gameState(GameState.LOGGING_IN);
-		hash = DJINN;
-		name = "21 Djinn 736";
+		hash = ALT;
+		name = "Fixture Alt";
 		tick++;
 		gameState(GameState.LOGGED_IN);
 	}
@@ -147,9 +147,9 @@ public class AccountSwitchTest
 	@Test
 	public void theLoginStatBurstOfAnotherAccountIsNoLevelUp() throws Exception
 	{
-		dLoggedIn();
-		switchToDjinn();
-		plugin.onStatChanged(new StatChanged(Skill.ATTACK, 3_000_000, 84, 84));	// djinn's real level, not a level-up
+		mainLoggedIn();
+		switchToAlt();
+		plugin.onStatChanged(new StatChanged(Skill.ATTACK, 3_000_000, 84, 84));	// the alt's real level, not a level-up
 		plugin.onStatChanged(new StatChanged(Skill.COOKING, 273_742, 60, 60));
 		assertEquals(0, of("level_up").size());
 	}
@@ -157,70 +157,70 @@ public class AccountSwitchTest
 	@Test
 	public void aRowStampedWithTheAccountThatLoggedOutIsDropped() throws Exception
 	{
-		dLoggedIn();
-		switchToDjinn();
-		plugin.emitEvent("level_up", null);			// before djinn's session starts, activeHash still names D
-		assertEquals("never filed under D", 0, plugin.pendingEvents.size());
+		mainLoggedIn();
+		switchToAlt();
+		plugin.emitEvent("level_up", null);			// before the alt's session starts, activeHash still names MAIN
+		assertEquals("never filed under MAIN", 0, plugin.pendingEvents.size());
 
 		tick += AccountConnectPlugin.LOGIN_SETTLE_TICKS;
 		server.enqueue(new MockResponse().setResponseCode(200));
-		plugin.syncTask();							// djinn's session starts
+		plugin.syncTask();							// the alt's session starts
 		plugin.pendingEvents.clear();
 		plugin.emitEvent("level_up", null);
 		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals(Long.toString(DJINN), plugin.pendingEvents.get(0).get("account_hash"));
-		assertEquals("21 Djinn 736", plugin.pendingEvents.get(0).get("rsn"));
+		assertEquals(Long.toString(ALT), plugin.pendingEvents.get(0).get("account_hash"));
+		assertEquals("Fixture Alt", plugin.pendingEvents.get(0).get("rsn"));
 	}
 
 	@Test
 	public void noSnapshotIsBuiltBeforeTheLoginStatBurstLands() throws Exception
 	{
-		dLoggedIn();
+		mainLoggedIn();
 		server.enqueue(new MockResponse().setResponseCode(200));
-		switchToDjinn();
-		RecordedRequest logoutFlush = server.takeRequest(300, TimeUnit.MILLISECONDS);	// D's own cached snapshot, if unsent
+		switchToAlt();
+		RecordedRequest logoutFlush = server.takeRequest(300, TimeUnit.MILLISECONDS);	// MAIN's own cached snapshot, if unsent
 		if (logoutFlush != null)
 		{
-			assertEquals(Long.toString(D), accountOf(logoutFlush).get("account_hash"));
+			assertEquals(Long.toString(MAIN), accountOf(logoutFlush).get("account_hash"));
 		}
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.syncTask();
-		assertNull("a snapshot now would carry D's skills", server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertNull("a snapshot now would carry MAIN's skills", server.takeRequest(300, TimeUnit.MILLISECONDS));
 		assertEquals("no login row either", 0, of("login").size());
 
 		tick += AccountConnectPlugin.LOGIN_SETTLE_TICKS;
 		plugin.syncTask();
 		RecordedRequest req = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull(req);
-		assertEquals(Long.toString(DJINN), accountOf(req).get("account_hash"));
+		assertEquals(Long.toString(ALT), accountOf(req).get("account_hash"));
 		List<Map<String, Object>> login = of("login");
 		assertEquals(1, login.size());
-		assertEquals(Long.toString(DJINN), login.get(0).get("account_hash"));
+		assertEquals(Long.toString(ALT), login.get(0).get("account_hash"));
 	}
 
 	@Test
 	public void whileTheHashStillReadsUnknownTheNameDecides() throws Exception
 	{
-		dLoggedIn();
+		mainLoggedIn();
 		gameState(GameState.LOGIN_SCREEN);
 		plugin.pendingEvents.clear();
 		hash = -1L;
-		name = "21 Djinn 736";
+		name = "Fixture Alt";
 		gameState(GameState.LOGGING_IN);
 		tick++;
 		gameState(GameState.LOGGED_IN);
 		plugin.emitEvent("level_up", null);
-		assertEquals("djinn's row never filed under D", 0, plugin.pendingEvents.size());
+		assertEquals("the alt's row never filed under MAIN", 0, plugin.pendingEvents.size());
 
-		name = "3 Arrow 2605";
+		name = "Fixture Main";
 		plugin.emitEvent("level_up", null);
-		assertEquals("D back in the world: D's own row is kept", 1, plugin.pendingEvents.size());
+		assertEquals("MAIN back in the world: MAIN's own row is kept", 1, plugin.pendingEvents.size());
 	}
 
 	@Test
 	public void aRelogToTheSameAccountKeepsItsRows() throws Exception
 	{
-		dLoggedIn();
+		mainLoggedIn();
 		gameState(GameState.LOGIN_SCREEN);
 		plugin.pendingEvents.clear();
 		gameState(GameState.LOGGING_IN);
@@ -228,6 +228,6 @@ public class AccountSwitchTest
 		gameState(GameState.LOGGED_IN);
 		plugin.emitEvent("level_up", null);
 		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals(Long.toString(D), plugin.pendingEvents.get(0).get("account_hash"));
+		assertEquals(Long.toString(MAIN), plugin.pendingEvents.get(0).get("account_hash"));
 	}
 }
