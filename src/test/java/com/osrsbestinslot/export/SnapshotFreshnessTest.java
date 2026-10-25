@@ -230,6 +230,47 @@ public class SnapshotFreshnessTest
 		assertNull(openAtCapture(snapshot()));
 	}
 
+	private static Object observedAt(Map<String, Object> snap)
+	{
+		return ((Map<?, ?>) snap.get("bank")).get("observed_at");
+	}
+
+	/**
+	 * Live 0.7.58 QA (2026-10-24, G4): an item was deposited at a deposit box while the bank was closed. The
+	 * upload sent at the reopen held it with the observed_at of the read before the deposit.
+	 */
+	@Test
+	public void anUnconfirmedOpenReadHasNoTimeAndAConfirmedOrRetainedReadKeepsIts() throws Exception
+	{
+		change(container(new Item(COINS, 100)));				// the last visit's read
+		Object lastRead = observedAt(snapshot());
+		assertNotNull(lastRead);
+		close();
+		assertEquals("a retained read after the close keeps its time", lastRead, observedAt(snapshot()));
+
+		tick += 50;
+		ItemContainer deposited = container(new Item(COINS, 100), new Item(BONES, 1));	// changed while closed
+		assertNull("the open read: no change of this open yet", observedAt(open(deposited)));
+		tick++;
+		assertNull("still unconfirmed a tick later", observedAt(snapshot()));
+
+		change(deposited);										// this open's change
+		Map<String, Object> confirmed = snapshot();
+		assertNotNull(observedAt(confirmed));
+		assertEquals(true, openAtCapture(confirmed));
+
+		close();
+		assertEquals("after the close the confirmed read keeps its time", observedAt(confirmed), observedAt(snapshot()));
+	}
+
+	@Test
+	public void anOpenWhoseChangeArrivesInItsOwnTickKeepsItsTime() throws Exception
+	{
+		ItemContainer b = container(new Item(COINS, 100));
+		change(b);
+		assertNotNull(observedAt(open(b)));
+	}
+
 	@Test
 	public void anUnreadableCloseIsNotAnOpenBank() throws Exception
 	{

@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.58";
+	private static final String PLUGIN_VERSION = "0.7.59";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -12319,7 +12319,9 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> bankBlock = new LinkedHashMap<>();
 		bankBlock.put("items", bankSynced ? itemList(bank) : new ArrayList<>());
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
-		bankBlock.put("observed_at", bankSynced ? observedAtSeconds(BANK_CONTAINER_ID) : null);
+		// An open bank's live read that no change of this open has confirmed yet has no known time: the last
+		// change's time predates the open, and the bank may have changed while it was closed.
+		bankBlock.put("observed_at", bankSynced && !bankReadUnconfirmed(liveBank) ? observedAtSeconds(BANK_CONTAINER_ID) : null);
 		if (bankOpenAtCapture(liveBank))
 		{
 			bankBlock.put("open_at_capture", true);
@@ -12435,6 +12437,25 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Item[] items = liveBank.getItems();
 		return items != null && java.util.Arrays.stream(items).anyMatch(this::realItem);
+	}
+
+	/**
+	 * The snapshot reads the live container of a bank open now (the open itself, or a visit with no close since)
+	 * and no bank change of this open has arrived yet. Live 0.7.58 QA (2026-10-24, G4): after a deposit at a
+	 * deposit box while the bank was closed, the open upload held the deposited item with the observed_at of the
+	 * read before the deposit. A retained read after a close is not this case and keeps its own time.
+	 */
+	private boolean bankReadUnconfirmed(ItemContainer liveBank)
+	{
+		if (liveBank == null || client == null || bankClosePending)
+		{
+			return false;
+		}
+		if (bankOpeningNow)
+		{
+			return bankChangeTick != client.getTickCount();
+		}
+		return (bankAtOpen != null || bankBaselinePending) && bankChangeTick < bankOpenTick;
 	}
 
 	/** {region_id, plane} of the local player's world location, or null if it isn't currently readable. */
