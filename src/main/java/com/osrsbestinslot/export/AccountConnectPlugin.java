@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.59";
+	private static final String PLUGIN_VERSION = "0.7.60";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -139,6 +139,14 @@ public class AccountConnectPlugin extends Plugin
 	// versa — volatile keeps the handoff safe without locking.
 	volatile Map<String, Object> lastBuiltSnapshot;
 	volatile String lastBuiltHash;
+	/**
+	 * Every buildSnapshot counts here. A row recorded at its item change with the count of that moment
+	 * names a forced build as its trigger only while the count is unchanged: that build is then the first
+	 * snapshot holding the change. A second row of the same change finds the count moved and names none.
+	 */
+	long snapshotBuildSeq;
+	/** The build count when the inventory change being handled arrived; -1 outside that handler. */
+	long triggerChangeBuildSeq = -1;
 	volatile String lastUploadedHash;
 	volatile long lastSendMillis;
 	volatile long backoffUntilMillis;
@@ -1522,6 +1530,8 @@ public class AccountConnectPlugin extends Plugin
 		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
 		// first records itself; the second completes the emit. -1 = no corroboration yet.
 		volatile int spawnCorroboratedTick = -1;
+		// drop only: the build count when the inventory loss was seen before its ground spawn. -1 = not seen.
+		volatile long lossBuildSeq = -1;
 		// drop only: the WORLD tile the confirming ground spawn landed on, so the drop row carries the pile's
 		// exact tile itself. -1 = the spawn came with no tile (a test overload), and the row then omits it.
 		volatile int spawnX = -1;
@@ -4014,7 +4024,7 @@ public class AccountConnectPlugin extends Plugin
 		healthEventsQueued.incrementAndGet();
 		if (capturePublicOutbox(ev))
 		{
-			maybeForceSnapshotForEvent(type);
+			maybeForceSnapshotForEvent(type, eventId);
 			return;
 		}
 		if (("combat_hit".equals(type) || "combat_npc_end".equals(type) || "own_signal".equals(type)) && !legacyOwnCombatAllowed(type)
@@ -4034,7 +4044,7 @@ public class AccountConnectPlugin extends Plugin
 		}
 		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
 		// event schedules a coalesced flush so it ships in ~1s instead of on the next 5s tick.
-		maybeForceSnapshotForEvent(type);
+		maybeForceSnapshotForEvent(type, eventId);
 		scheduleCoalescedFlush();
 	}
 
@@ -4043,11 +4053,14 @@ public class AccountConnectPlugin extends Plugin
 	 * wealth lands live. forceSendSnapshot honors all the usual guards (logged in, token, backoff)
 	 * and is async. client is null only in buffer-only unit tests — real runtime always has it injected.
 	 */
-	private void maybeForceSnapshotForEvent(String type)
+	private void maybeForceSnapshotForEvent(String type, String eventId)
 	{
 		if (client != null && SNAPSHOT_TRIGGER_EVENTS.contains(type))
 		{
-			forceSendSnapshot();
+			// trigger_event_id: this row's item change came with no build since, so the forced build is the
+			// first snapshot holding it. Readers place the row inside that snapshot even in the same ms.
+			long changeSeq = triggerChangeBuildSeq;
+			forceSendSnapshot(changeSeq >= 0 && changeSeq == snapshotBuildSeq ? eventId : null);
 		}
 	}
 
@@ -6517,6 +6530,12 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void forceSendSnapshot()
 	{
+		forceSendSnapshot(null);
+	}
+
+	/** {@code triggerEventId}: the row whose item change this build is the first to hold, or null. */
+	void forceSendSnapshot(String triggerEventId)
+	{
 		if (clientClosing || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null)
 		{
 			return;
@@ -6535,6 +6554,10 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		Map<String, Object> snapshot = buildSnapshot();
+		if (triggerEventId != null && triggerEventId.matches("^[0-9a-f]{32}$"))
+		{
+			snapshot.put("trigger_event_id", triggerEventId);
+		}
 		String hash = canonicalHash(snapshot);
 		lastBuiltSnapshot = snapshot;	// keep the logout-flush cache coherent, exactly like syncTask
 		lastBuiltHash = hash;
@@ -6551,6 +6574,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> canonical = new LinkedHashMap<>(snapshot);
 		canonical.remove("captured_at");
 		canonical.remove("captured_at_ms");
+		canonical.remove("trigger_event_id");	// names the build's cause, not account state
 		canonical.remove("wealth");
 		canonical.remove("game_vars");	// varps change constantly; game_vars rides on its own interval (gameVarsBlock)
 		Object gameplay = canonical.get("own_gameplay");
@@ -6891,11 +6915,20 @@ public class AccountConnectPlugin extends Plugin
 			int tick = client == null ? 0 : client.getTickCount();
 			// The transacted item's post count too: its distance from the pending's baseline is the
 			// quantity the server ACTUALLY moved, which is what licenses a derived unit price.
-			resolveStorePendingsOnInventoryChange(coinsAfter, inv == null ? null : id -> countItem(inv, id), tick);
-			// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
-			// EVERY armed pending is offered this change, each against its own item count — see
-			// resolveInvDeltaPendings: a stale drop at the head must never hide a real pickup behind it.
-			resolveInvDeltaPendings(inv, coinsAfter, tick);
+			// Rows resolved here report this change: a forced build names one only if no build came first.
+			triggerChangeBuildSeq = snapshotBuildSeq;
+			try
+			{
+				resolveStorePendingsOnInventoryChange(coinsAfter, inv == null ? null : id -> countItem(inv, id), tick);
+				// Off-book drop/pickup/alch resolve on the same INVENTORY change from the item-count delta.
+				// EVERY armed pending is offered this change, each against its own item count — see
+				// resolveInvDeltaPendings: a stale drop at the head must never hide a real pickup behind it.
+				resolveInvDeltaPendings(inv, coinsAfter, tick);
+			}
+			finally
+			{
+				triggerChangeBuildSeq = -1;
+			}
 		}
 		if (event.getContainerId() == EQUIP_CONTAINER_ID)
 		{
@@ -9796,7 +9829,17 @@ public class AccountConnectPlugin extends Plugin
 			}
 			invDeltaPendings.remove(p);	// consume — both signals confirmed
 		}
-		emitDropEvent(p, p.beforeCount - invCountAfter);
+		// The loss came first: the row reports that earlier change, not this spawn.
+		long outer = triggerChangeBuildSeq;
+		triggerChangeBuildSeq = p.lossBuildSeq;
+		try
+		{
+			emitDropEvent(p, p.beforeCount - invCountAfter);
+		}
+		finally
+		{
+			triggerChangeBuildSeq = outer;
+		}
 	}
 
 	/** Drop every armed pending — used by the logout / hop / disconnect / death disarms. */
@@ -11070,6 +11113,10 @@ public class AccountConnectPlugin extends Plugin
 				emitDropEvent(p, dropDelta);
 				return dropDelta;
 			}
+			if (dropDelta > 0 && spawnTick < 0 && p.lossBuildSeq < 0)
+			{
+				p.lossBuildSeq = triggerChangeBuildSeq;	// the loss is this change; its spawn completes the row
+			}
 			if (currentTick - p.tick > DROP_PENDING_MAX_TICKS)
 			{
 				removeInvDeltaPending(p);	// no ground spawn confirmed it — expire silently, emit nothing
@@ -12093,6 +12140,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private Map<String, Object> buildSnapshot()
 	{
+		snapshotBuildSeq++;
 		Map<String, Object> snap = new LinkedHashMap<>();
 		snap.put("schema_v", SCHEMA_V);
 		// One clock read for both: captured_at_ms orders a snapshot against a same-second event, and
