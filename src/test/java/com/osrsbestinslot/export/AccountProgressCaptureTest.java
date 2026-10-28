@@ -491,6 +491,8 @@ public class AccountProgressCaptureTest
         p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         p.onScriptPostFired(setup);
+        verify(client, never()).runScript(2240); // never inside the setup script
+        p.onGameTick(new GameTick());
         verify(client).menuAction(-1, net.runelite.api.gameval.InterfaceID.Collection.SEARCH_TOGGLE,
             MenuAction.CC_OP, 1, -1, "Search", null);
         verify(client).runScript(2240);
@@ -542,6 +544,7 @@ public class AccountProgressCaptureTest
         p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         p.onScriptPostFired(new ScriptPostFired(7797));
+        p.onGameTick(new GameTick());
         ScriptEvent script = mock(ScriptEvent.class);
         when(script.getArguments()).thenReturn(new Object[]{4100, 4151, 0});
         ScriptPreFired slot = new ScriptPreFired(4100); slot.setScriptEvent(script);

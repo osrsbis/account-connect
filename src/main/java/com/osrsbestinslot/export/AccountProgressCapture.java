@@ -114,7 +114,7 @@ final class AccountProgressCapture
     /** Called only after the existing grant and account-settlement gate, on the client thread. */
     void collectionSetup(Client client, long now)
     {
-        if (scanAttempted || client.getTickCount() < nextScanTick || !ownLog(client)) return;
+        if (scanAttempted || client.getTickCount() < nextScanTick || !ownLog(client) || verifiedForCurrentCounts(client)) return;
         Widget search = client.getWidget(InterfaceID.Collection.SEARCH_TOGGLE);
         if (search == null || search.isHidden()) return;
         scanAttempted = true; // set before synchronous scripts can re-enter
@@ -166,6 +166,12 @@ final class AccountProgressCapture
         }
         geHistory.poll(client, now);
         storageRecovery.poll(client, now);
+        pollCollection(client, now);
+    }
+
+    /** The collection part of {@link #poll}: ends a running search scan when its slots match the game's count. */
+    void pollCollection(Client client, long now)
+    {
         if (!ownLog(client))
         {
             scanActive = scanComplete = false;
@@ -199,6 +205,59 @@ final class AccountProgressCapture
             if (collectionObservedAt == null) collectionObservedAt = now / 1000L;
         }
         // Mismatch is not completion; leave time for delayed transmissions until the timeout.
+    }
+
+    /** Where the search scan stands: not_scanned, scanning, count_verified, timeout, unsupported_client, ... */
+    String collectionScanStatus()
+    {
+        return scanStatus;
+    }
+
+    /** A verified scan whose counts the game still shows: a new open does not scan again. */
+    private boolean verifiedForCurrentCounts(Client client)
+    {
+        return scanComplete && Objects.equals(scanObtained, varp(client.getVarps(), 2943))
+            && Objects.equals(scanTotal, varp(client.getVarps(), 2944));
+    }
+
+    /** The scan saw every obtained slot: own log, distinct positive items equal to the game's unchanged counts. */
+    private boolean collectionVerified(Client client, int[] vars)
+    {
+        boolean own = Integer.valueOf(0).equals(bit(client, vars, 12061));
+        Integer total = own ? varp(vars, 2944) : null;
+        Integer obtained = own ? varp(vars, 2943) : null;
+        boolean countsKnown = total != null && total > 0 && obtained != null && obtained >= 0 && obtained <= total;
+        return scanComplete && own && countsKnown
+            && Objects.equals(scanObtained, obtained) && Objects.equals(scanTotal, total)
+            && positiveCollectionCount() == obtained;
+    }
+
+    /**
+     * The whole collection log from a verified scan: every obtained item id, the game's counts and the scan time.
+     * Null when no scan of this login is verified for the counts the game shows now.
+     */
+    Map<String, Object> verifiedCollection(Client client)
+    {
+        int[] live = client.getVarps();
+        int[] vars = live == null ? null : live.clone();
+        if (!collectionVerified(client, vars))
+        {
+            return null;
+        }
+        java.util.List<Integer> ids = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> e : collectionItems.entrySet())
+        {
+            if (e.getValue() > 0)
+            {
+                ids.add(e.getKey());
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("obtained_item_ids", ids);
+        out.put("game_obtained_count", varp(vars, 2943));
+        out.put("game_total_count", varp(vars, 2944));
+        out.put("verified_at_ms", scanVerifiedAt);
+        return out;
     }
 
     private long positiveCollectionCount()
@@ -346,9 +405,7 @@ final class AccountProgressCapture
         log.put("observed_at", collectionObservedAt);
         log.put("observed_item_count", collectionObservedAt == null ? null : collectionItems.size());
         log.put("items", new TreeMap<>(collectionItems));
-        boolean verified = scanComplete && own && countsKnown
-            && Objects.equals(scanObtained, obtained) && Objects.equals(scanTotal, total)
-            && positiveCollectionCount() == obtained;
+        boolean verified = collectionVerified(client, vars);
         log.put("complete", verified);
         log.put("completeness_basis", verified ? "own_search_scan_unique_count_matches_game" : "unverified");
         log.put("scan_status", scanComplete && !verified ? "counts_changed" : scanStatus);

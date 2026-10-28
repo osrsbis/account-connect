@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.61";
+	private static final String PLUGIN_VERSION = "0.7.62";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -157,6 +157,22 @@ public class AccountConnectPlugin extends Plugin
 	private static final int VARP_SLAYER_COUNT = 394;     // remaining kills on current task
 	private static final int VARP_SLAYER_UNLOCKS = 1076;  // bitfield (decode server-side)
 	private static final int VARP_SLAYER_BLOCKED = 1096;  // bitfield (decode server-side)
+	private static final int VARP_SLAYER_UNLOCKS1 = 1344; // gameval SLAYER_REWARDS_UNLOCKS1, bitfield
+	private static final int VARP_SLAYER_UNLOCKS2 = 5587; // gameval SLAYER_REWARDS_UNLOCKS2, bitfield
+	private static final int VARP_QUEST_POINTS = 101;     // gameval QP
+	private static final int VARBIT_CA_POINTS = 14815;    // gameval CA_POINTS
+	// {snapshot key, gameval VarbitID}
+	private static final Object[][] MINIGAME_VARBITS = {
+		{"ba_attacker_base", 4759}, {"ba_collector_base", 4760}, {"ba_healer_base", 4761}, {"ba_defender_base", 4762},
+		{"ba_attacker_extra", 4763}, {"ba_collector_extra", 4764}, {"ba_healer_extra", 4765}, {"ba_defender_extra", 4766},
+		{"colosseum_highest_wave", 11410}, {"hallowed_final_chests", 10423}, {"hallowed_normal_chests", 10446},
+		{"tempoross_permits", 11936},
+	};
+	// {snapshot key, gameval VarPlayerID}
+	private static final Object[][] MINIGAME_VARPS = {
+		{"soul_wars_zeal", 2871}, {"giants_foundry", 3436},
+		{"mixology_lye", 4414}, {"mixology_aga", 4415}, {"mixology_mox", 4416},
+	};
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
 	// We accumulate those item ids; capture is partial until the player opens the relevant clog tabs.
@@ -164,6 +180,14 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.Set<Integer> clogObtained = new java.util.HashSet<>();
 	private boolean clogSeen = false;
 	private final AccountProgressCapture accountProgress = new AccountProgressCapture();
+	// The collection-log search scan for a token without the account-progress grant. Only its collection part is
+	// used: it makes the snapshot's collection_log whole and says so. Nothing else of account progress is read.
+	private final AccountProgressCapture collectionScan = new AccountProgressCapture();
+	// The collection log finished its setup script: start the scan on the next game tick.
+	private boolean collectionSetupPending;
+	// Tick the player's collection log interface opened, or -1 while it is closed. Live 0.7.62 run: the setup
+	// script event was not seen on three opens, so an open log is also checked on each tick, from its second tick.
+	private int collectionLogOpenTick = -1;
 	private final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnGameplayEvent, id -> this.itemManager == null ? -1 : this.itemManager.getItemPrice(id));
 	private volatile String gameplayGrantToken;
 	private volatile long gameplayGrantEpoch;
@@ -262,6 +286,23 @@ public class AccountConnectPlugin extends Plugin
 			return false;
 		}
 		return accountProgress.ready(client, currentLinkToken() + ":" + progressGrantEpoch);
+	}
+
+	/** The collection scan for every linked player. A grant holder uses the account-progress capture instead. */
+	boolean collectionScanReady()
+	{
+		if (progressGranted() || !uploadAllowed())
+		{
+			collectionScan.reset();
+			return false;
+		}
+		return collectionScan.ready(client, currentLinkToken() + ":collection");
+	}
+
+	/** The capture that scans this player's collection log now, or null. */
+	private AccountProgressCapture activeCollection()
+	{
+		return progressReady() ? accountProgress : collectionScanReady() ? collectionScan : null;
 	}
 
 	Map<String, Object> progressBlock()
@@ -391,6 +432,31 @@ public class AccountConnectPlugin extends Plugin
 	private long bankVisitOpenedMs;
 	private boolean bankVisitOpenSent;	// the open event is deferred until the first reliable bank read
 	private boolean bankVisitOpenRead;	// the item list at open was read (from a non-empty container)
+	// A public visit, read once when it starts like the evidence grant. Its open or close item list is not sent
+	// when a snapshot queued for upload holds the same bank: the server keeps only the newest complete bank.
+	private boolean bankVisitPublic;
+	// A public normal close waits for the bank session to end, so the snapshot that holds its bank has a known time.
+	private Map<String, Object> publicCloseFields;
+	private List<long[]> publicCloseList;
+	// The bank block of the newest snapshot queued for upload: its token and account, its manifest hash and whether
+	// its read had a known time. Cleared when that upload fails.
+	private volatile String queuedBankToken;
+	private volatile String queuedBankAccount;
+	private volatile String queuedBankSha;
+	private volatile boolean queuedBankTimed;
+	// The same for the newest snapshot the server ACCEPTED (2xx). A close is flagged only against this.
+	private volatile String acceptedBankToken;
+	private volatile String acceptedBankAccount;
+	private volatile String acceptedBankSha;
+	private volatile boolean acceptedBankTimed;
+	private int publicCloseTick;
+	// A close waits at most this long for a regular snapshot to be accepted: the 120 s upload interval plus margin.
+	static final int PUBLIC_CLOSE_WAIT_TICKS = 250;
+	// A snapshot forced by an event inside a widget-close script waits for the next game tick (a build runs scripts).
+	private boolean widgetClosing;
+	private boolean deferredForce;
+	private String deferredForceTrigger;
+	private long deferredForceBuildSeq;
 
 	// Equipment change capture: last-seen worn-item counts, diffed on each WORN-container change to emit
 	// equip_change {equipped[], unequipped[]}. Only a change in the SET of worn item ids emits: a quantity
@@ -536,6 +602,7 @@ public class AccountConnectPlugin extends Plugin
 		lastSkillLevel.clear();		// re-enabled on another account: its levels are a baseline, not level-ups
 		lastSkillXp.clear();
 		accountProgress.reset();	// disabled plugins miss hop/relog callbacks
+		collectionScan.reset();
 		ownGameplay.reset();
 		clearResetPhaseEvidence();
 		geUnkeyed.clear();
@@ -4143,7 +4210,19 @@ public class AccountConnectPlugin extends Plugin
 			// trigger_event_id: this row's item change came with no build since, so the forced build is the
 			// first snapshot holding it. Readers place the row inside that snapshot even in the same ms.
 			long changeSeq = triggerChangeBuildSeq;
-			forceSendSnapshot(changeSeq >= 0 && changeSeq == snapshotBuildSeq ? eventId : null);
+			String trigger = changeSeq >= 0 && changeSeq == snapshotBuildSeq ? eventId : null;
+			if (widgetClosing)
+			{
+				// Inside a widget-close script (a shop closed with a buy still pending): build on the next tick.
+				if (!deferredForce || deferredForceTrigger == null)
+				{
+					deferredForceTrigger = trigger;
+					deferredForceBuildSeq = snapshotBuildSeq;
+				}
+				deferredForce = true;
+				return;
+			}
+			forceSendSnapshot(trigger);
 		}
 	}
 
@@ -6762,9 +6841,9 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event.getScriptId() == net.runelite.api.ScriptID.BANKMAIN_BUILD && gameplayReady())
 			ownGameplay.bankTabs.built(client, System.currentTimeMillis());
-		if (event.getScriptId() == 7797 && progressReady())
+		if (event.getScriptId() == 7797 && activeCollection() != null)
 		{
-			accountProgress.collectionSetup(client, System.currentTimeMillis());
+			collectionSetupPending = true;
 		}
 	}
 
@@ -6785,9 +6864,10 @@ public class AccountConnectPlugin extends Plugin
 			return;
 		}
 		Object[] args = event.getScriptEvent() == null ? null : event.getScriptEvent().getArguments();
-		if (progressReady())
+		AccountProgressCapture collection = activeCollection();
+		if (collection != null)
 		{
-			accountProgress.collectionSlot(client, args, System.currentTimeMillis() / 1000L);
+			collection.collectionSlot(client, args, System.currentTimeMillis() / 1000L);
 		}
 		if (args != null && args.length > 2 && args[1] instanceof Integer && (Integer) args[1] > 0
 			&& args[2] instanceof Integer && (Integer) args[2] > 0)
@@ -6811,10 +6891,17 @@ public class AccountConnectPlugin extends Plugin
 		if (state == GameState.LOADING) { accountProgress.storageRecovery.gap(); ownGameplay.gap(); }
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
+			finishPublicBankClose(true);	// a close still waiting goes now, with its list unless a snapshot holds it
+			collectionSetupPending = false;
+			deferredForce = false;
+			queuedBankSha = null;
+			acceptedBankSha = null;
+			collectionLogOpenTick = -1;
 			containerObservedAtMs.clear(); // observations from a prior account/world login cannot timestamp a new cache
 			lastBankItems = null;
 			bankChangeTick = Integer.MIN_VALUE / 2;
 			accountProgress.reset();
+			collectionScan.reset();
 			ownGameplay.reset();
 			geObservations.gap();
 		}
@@ -7139,10 +7226,32 @@ public class AccountConnectPlugin extends Plugin
 	{
 		refreshEventObservationContext();
 		finishPendingBankClose();
+		finishPublicBankClose(false);
+		if (deferredForce)
+		{
+			// A trigger name stays valid only if no snapshot was built since the event asked for one.
+			deferredForce = false;
+			forceSendSnapshot(deferredForceBuildSeq == snapshotBuildSeq ? deferredForceTrigger : null);
+		}
+		if (collectionSetupPending || collectionLogOpenTick >= 0 && client.getTickCount() - collectionLogOpenTick >= 2)
+		{
+			// Run here, not inside the setup script: the scan runs a client script of its own. collectionSetup starts
+			// at most one scan per open, and only once the Search toggle is on screen.
+			collectionSetupPending = false;
+			AccountProgressCapture collection = activeCollection();
+			if (collection != null)
+			{
+				collection.collectionSetup(client, System.currentTimeMillis());
+			}
+		}
 		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
 		if (progressReady())
 		{
 			accountProgress.poll(client, System.currentTimeMillis());
+		}
+		else if (collectionScanReady())
+		{
+			collectionScan.pollCollection(client, System.currentTimeMillis());
 		}
 		// Poll the other player's trade offer + name while the MAIN screen (335) is open — the only window
 		// they are readable (see captureOtherOfferWhileMainOpen). Tight-gated: the body runs only during an
@@ -7200,6 +7309,10 @@ public class AccountConnectPlugin extends Plugin
 		handleActivityWidgetLoaded(event.getGroupId());
 		handleCaptureOnOpenWidgetLoaded(event.getGroupId());
 		handleChestLootWidgetLoaded(event.getGroupId());
+		if (event.getGroupId() == COLLECTION_LOG_GROUP_ID && client != null)
+		{
+			collectionLogOpenTick = client.getTickCount();
+		}
 	}
 
 	/**
@@ -7494,6 +7607,8 @@ public class AccountConnectPlugin extends Plugin
 		advanceBankSession(bank);
 		closeBankVisit("closed", bank);
 		endBankSession(true);
+		// The close script is still running here, and a snapshot build runs scripts (quest states), which the
+		// client does not allow inside another script. The close is finished on the next game tick.
 	}
 
 	private void finishPendingBankClose()
@@ -7540,6 +7655,8 @@ public class AccountConnectPlugin extends Plugin
 		bankVisitOpenedMs = System.currentTimeMillis();
 		bankVisitOpenSent = false;
 		bankVisitOpenRead = false;
+		finishPublicBankClose(true);
+		bankVisitPublic = publicBankVisit();
 		if (!atOpen.isEmpty())
 		{
 			sendBankVisitOpen(atOpen);
@@ -7585,10 +7702,80 @@ public class AccountConnectPlugin extends Plugin
 		f.put("item_stacks", list.size());
 		f.put("manifest_sha256", BankVisitManifest.sha256(list));
 		f.put("plugin_version", PLUGIN_VERSION);
+		// The bank-open snapshot was queued just before this visit started, with this exact bank. Its read has no
+		// confirmed time yet, so the server keeps it only until a timed bank arrives, which the close forces.
+		boolean inSnapshot = bankVisitPublic && snapshotQueuedWithBank(BankVisitManifest.sha256(list), false);
+		if (inSnapshot)
+		{
+			f.put("manifest_in_snapshot", true);
+		}
 		emitEvent("bank_visit_open", f);
 		bankVisitOpenSent = true;
 		bankVisitOpenRead = true;
-		emitBankVisitChunks("open", list);
+		if (!inSnapshot)
+		{
+			emitBankVisitChunks("open", list);
+		}
+	}
+
+	/**
+	 * A visit for a token the server named public (X-Bank-Receipt, never sent to staff) and that holds no staff
+	 * spool. Staff visits keep the full lists for the audit trail.
+	 */
+	private boolean publicBankVisit()
+	{
+		String token = currentLinkToken();
+		return token.equals(bankJournalGrantToken) && !token.equals(spoolGrantToken);
+	}
+
+	/** The newest snapshot the server accepted on this token and account holds this bank with a known read time. */
+	private boolean snapshotAcceptedWithBank(String sha)
+	{
+		return currentLinkToken().equals(acceptedBankToken) && activeHash != null && activeHash.equals(acceptedBankAccount)
+			&& sha.equals(acceptedBankSha) && acceptedBankTimed;
+	}
+
+	/** A snapshot queued for upload on this token holds this bank, with a known read time when {@code timed}. */
+	private boolean snapshotQueuedWithBank(String sha, boolean timed)
+	{
+		return currentLinkToken().equals(queuedBankToken) && activeHash != null && activeHash.equals(queuedBankAccount)
+			&& sha.equals(queuedBankSha) && (!timed || queuedBankTimed);
+	}
+
+	/**
+	 * Send the close of a public visit once a snapshot the server accepted holds its end bank with a known read
+	 * time. The close forces no snapshot: it waits for the regular one, so a visit costs no extra request. At
+	 * {@code now} (a teardown or a new open), or after {@link #PUBLIC_CLOSE_WAIT_TICKS}, the close sends its item
+	 * list as chunks, as before.
+	 */
+	private void finishPublicBankClose(boolean now)
+	{
+		Map<String, Object> f = publicCloseFields;
+		List<long[]> endList = publicCloseList;
+		if (f == null)
+		{
+			return;
+		}
+		String sha = BankVisitManifest.sha256(endList);
+		boolean accepted = snapshotAcceptedWithBank(sha);
+		if (!accepted && !now && client != null && client.getTickCount() - publicCloseTick < PUBLIC_CLOSE_WAIT_TICKS)
+		{
+			return;
+		}
+		publicCloseFields = null;
+		publicCloseList = null;
+		if (accepted)
+		{
+			f.put("end_item_stacks", endList.size());
+			f.put("manifest_in_snapshot", true);
+		}
+		else
+		{
+			List<List<long[]>> endChunks = chunksFor("close", endList);
+			f.put("end_chunks", endChunks.size());
+			emitChunkList((String) f.get("visit_id"), "close", endList, endChunks);
+		}
+		emitEvent("bank_visit_close", f);
 	}
 
 	/**
@@ -7622,11 +7809,16 @@ public class AccountConnectPlugin extends Plugin
 		f.put("moves_complete", normal && bankVisitOpenRead && endRead);
 		f.put("deposited_sha256", BankVisitManifest.sha256(dep));
 		f.put("withdrawn_sha256", BankVisitManifest.sha256(wd));
-		List<List<long[]>> endChunks = endRead ? chunksFor("close", endList) : java.util.Collections.emptyList();
+		boolean publicClose = endRead && bankVisitPublic;
+		List<List<long[]>> endChunks = endRead && !publicClose ? chunksFor("close", endList)
+			: java.util.Collections.emptyList();
 		if (endRead)
 		{
 			f.put("end_manifest_sha256", BankVisitManifest.sha256(endList));
-			f.put("end_chunks", endChunks.size());
+			if (!publicClose)
+			{
+				f.put("end_chunks", endChunks.size());
+			}
 		}
 		Map<String, Object> inline = new LinkedHashMap<>(f);
 		inline.put("deposited", dep);
@@ -7644,7 +7836,16 @@ public class AccountConnectPlugin extends Plugin
 		emitChunkList(id, "close", endList, endChunks);
 		emitChunkList(id, "deposited", dep, depChunks);
 		emitChunkList(id, "withdrawn", wd, wdChunks);
-		emitEvent("bank_visit_close", movesInline ? inline : f);
+		if (publicClose)
+		{
+			publicCloseFields = movesInline ? inline : f;
+			publicCloseList = endList;
+			publicCloseTick = client == null ? 0 : client.getTickCount();
+		}
+		else
+		{
+			emitEvent("bank_visit_close", movesInline ? inline : f);
+		}
 		bankVisitId = null;
 	}
 
@@ -7654,6 +7855,8 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private void dropBankVisit()
 	{
+		publicCloseFields = null;
+		publicCloseList = null;
 		bankClosePending = false;
 		bankVisitId = null;
 		bankVisitOpenSent = false;
@@ -8139,7 +8342,26 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onWidgetClosed(WidgetClosed event)
 	{
-		if (event.getGroupId() == COLLECTION_LOG_GROUP_ID) accountProgress.collectionClosed();
+		widgetClosing = true;
+		try
+		{
+			widgetClosed(event);
+		}
+		finally
+		{
+			widgetClosing = false;
+		}
+	}
+
+	private void widgetClosed(WidgetClosed event)
+	{
+		if (event.getGroupId() == COLLECTION_LOG_GROUP_ID)
+		{
+			collectionSetupPending = false;
+			collectionLogOpenTick = -1;
+			accountProgress.collectionClosed();
+			collectionScan.collectionClosed();
+		}
 		if (event.getGroupId() == BANK_GROUP_ID) accountProgress.storageRecovery.gap();
 		handleTradeWidgetClosed(event.getGroupId());
 		handleBankWidgetClosed(event.getGroupId(), bankCloseIsTeardown());
@@ -11624,13 +11846,29 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;
 		}
-		for (Item item : c.getItems())
+		addItemCounts(counts, c.getItems());
+	}
+
+	private void addItemCounts(Map<Integer, Long> counts, Item[] items)
+	{
+		if (items == null)
+		{
+			return;
+		}
+		for (Item item : items)
 		{
 			if (realItem(item))
 			{
 				counts.merge(item.getId(), (long) item.getQuantity(), Long::sum);
 			}
 		}
+	}
+
+	private Map<Integer, Long> itemCounts(Item[] items)
+	{
+		Map<Integer, Long> counts = new LinkedHashMap<>();
+		addItemCounts(counts, items);
+		return counts;
 	}
 
 	/** Resolve a deferred death from the settle-window path: containers are live AND settled, so the loss diff
@@ -12622,6 +12860,10 @@ public class AccountConnectPlugin extends Plugin
 		}
 		Map<String, Object> quests = new LinkedHashMap<>();
 		quests.put("states", states);
+		// How many quests the client could read, so a quest missing from states is known to be unread, not absent.
+		quests.put("read_count", states.size());
+		quests.put("known_count", Quest.values().length);
+		quests.put("quest_points", client.getVarpValue(VARP_QUEST_POINTS));
 		snap.put("quests", quests);
 
 		// ---- achievement diaries: raw completion varbit per region/tier ----
@@ -12645,6 +12887,14 @@ public class AccountConnectPlugin extends Plugin
 		ca.put("elite", client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_ELITE));
 		ca.put("master", client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_MASTER));
 		ca.put("grandmaster", client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_GRANDMASTER));
+		// Every task's completion bit (one bit per task id), so a task-gated item is known, not only the tier.
+		List<Integer> caWords = new ArrayList<>();
+		for (int varp : AccountReadiness.CA_TASK_VARPS)
+		{
+			caWords.add(client.getVarpValue(varp));
+		}
+		ca.put("task_words", caWords);
+		ca.put("points", client.getVarbitValue(VARBIT_CA_POINTS));
 		snap.put("combat_achievements_raw", ca);
 
 		// ---- slayer ----
@@ -12655,6 +12905,9 @@ public class AccountConnectPlugin extends Plugin
 		slayer.put("task_remaining", client.getVarpValue(VARP_SLAYER_COUNT));
 		slayer.put("unlocks_raw", client.getVarpValue(VARP_SLAYER_UNLOCKS));
 		slayer.put("blocked_raw", client.getVarpValue(VARP_SLAYER_BLOCKED));
+		// The later reward words: unlocks1/unlocks2 hold the rewards bought after the first varp filled.
+		slayer.put("unlocks1_raw", client.getVarpValue(VARP_SLAYER_UNLOCKS1));
+		slayer.put("unlocks2_raw", client.getVarpValue(VARP_SLAYER_UNLOCKS2));
 		snap.put("slayer", slayer);
 
 		// ---- rune pouch: raw type-index + amount per slot (server maps type-index -> rune item) ----
@@ -12749,6 +13002,14 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> bankBlock = new LinkedHashMap<>();
 		bankBlock.put("items", bankSynced ? itemList(bank) : new ArrayList<>());
 		bankBlock.put("value_gp", bankSynced ? containerValue(bank) : 0L);
+		List<long[]> manifest = bankSynced ? BankVisitManifest.canonical(itemCounts(bank)) : null;
+		if (manifest != null && manifest.size() == ((List<?>) bankBlock.get("items")).size())
+		{
+			// The same canonical list and hash as a bank visit, so the server can match this bank to a visit and
+			// check the list is whole. A bank with one item in two slots would not match its items, so it has neither.
+			bankBlock.put("manifest_sha256", BankVisitManifest.sha256(manifest));
+			bankBlock.put("item_stacks", manifest.size());
+		}
 		// An open bank's live read that no change of this open has confirmed yet has no known time: the last
 		// change's time predates the open, and the bank may have changed while it was closed.
 		bankBlock.put("observed_at", bankSynced && !bankReadUnconfirmed(liveBank) ? observedAtSeconds(BANK_CONTAINER_ID) : null);
@@ -12786,9 +13047,31 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> collog = new LinkedHashMap<>();
 		List<Integer> obtained = new ArrayList<>(clogObtained);
 		java.util.Collections.sort(obtained);
-		collog.put("synced", clogSeen);
+		AccountProgressCapture collection = activeCollection();
+		Map<String, Object> verified = collection == null ? null : collection.verifiedCollection(client);
+		if (verified != null)
+		{
+			// A verified scan saw every obtained slot: send that whole list, so the server can keep only this one.
+			obtained = new ArrayList<>();
+			for (Object id : (List<?>) verified.get("obtained_item_ids"))
+			{
+				obtained.add((Integer) id);
+			}
+		}
+		collog.put("synced", clogSeen || verified != null);
+		if (collection != null)
+		{
+			collog.put("scan_status", collection.collectionScanStatus());
+		}
 		collog.put("obtained_count", obtained.size());
 		collog.put("obtained_item_ids", obtained);
+		if (verified != null)
+		{
+			collog.put("complete", true);
+			collog.put("game_obtained_count", verified.get("game_obtained_count"));
+			collog.put("game_total_count", verified.get("game_total_count"));
+			collog.put("verified_at_ms", verified.get("verified_at_ms"));
+		}
 		snap.put("collection_log", collog);
 
 		// ---- wealth (broken out: carried coins, inventory, worn gear, bank, total) ----
@@ -12835,6 +13118,16 @@ public class AccountConnectPlugin extends Plugin
 		Map<String, Object> minigames = new LinkedHashMap<>();
 		minigames.put("nmz", client.getVarbitValue(Varbits.NMZ_POINTS));
 		minigames.put("tithe", client.getVarbitValue(Varbits.TITHE_FARM_POINTS));
+		// Own milestones the game keeps in vars (gameval ids, runelite-api 1.13.4), raw. Boss kill counts and
+		// minigame scores are not in vars: the server reads those from the official hiscores.
+		for (Object[] m : MINIGAME_VARBITS)
+		{
+			minigames.put((String) m[0], client.getVarbitValue((int) m[1]));
+		}
+		for (Object[] m : MINIGAME_VARPS)
+		{
+			minigames.put((String) m[0], client.getVarpValue((int) m[1]));
+		}
 		snap.put("minigame_points", minigames);
 
 		return snap;
@@ -13092,6 +13385,17 @@ public class AccountConnectPlugin extends Plugin
 		if (!progressGranted() || !token.equals(progressGrantToken)) sentSnapshot.remove("account_progress");
 		if (!gameplayGranted() || !token.equals(gameplayGrantToken)) sentSnapshot.remove("own_gameplay");
 		final String sentHash = canonicalHash(sentSnapshot);
+		Object sentBank = sentSnapshot.get("bank");
+		Object sentBankSha = sentBank instanceof Map ? ((Map<?, ?>) sentBank).get("manifest_sha256") : null;
+		Object sentAccount = sentSnapshot.get("account");
+		Object sentHashValue = sentAccount instanceof Map ? ((Map<?, ?>) sentAccount).get("account_hash") : null;
+		final String bankAccount = sentHashValue instanceof String ? (String) sentHashValue : null;
+		final String bankSha = sentBankSha instanceof String ? (String) sentBankSha : null;
+		final boolean bankTimed = sentBank instanceof Map && ((Map<?, ?>) sentBank).get("observed_at") != null;
+		queuedBankToken = token;
+		queuedBankAccount = bankAccount;
+		queuedBankSha = bankSha;
+		queuedBankTimed = bankTimed;
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("token", token);
 		body.put("snapshot", sentSnapshot);
@@ -13112,6 +13416,7 @@ public class AccountConnectPlugin extends Plugin
 					snapshotRetryPending = true;
 					applyRateLimitBackoff(null);
 				}
+				forgetQueuedBank(bankSha);
 				log.debug("OSRS BiS sync failed", e);
 			}
 
@@ -13129,6 +13434,10 @@ public class AccountConnectPlugin extends Plugin
 					}
 					if (response.isSuccessful())
 					{
+						acceptedBankToken = token;
+						acceptedBankAccount = bankAccount;
+						acceptedBankSha = bankSha;
+						acceptedBankTimed = bankTimed;
 						onUploadAccepted(sentHash);
 						Object gv = sentSnapshot.get("game_vars");
 						if (gv instanceof Map)
@@ -13140,6 +13449,7 @@ public class AccountConnectPlugin extends Plugin
 					{
 						snapshotRetryPending = true;
 						applyRateLimitBackoff(response.header("Retry-After"));
+						forgetQueuedBank(bankSha);
 					}
 					// All failed snapshot requests remain pending behind bounded retry backoff.
 					log.debug("OSRS BiS sync response: {}", code);
@@ -13150,6 +13460,15 @@ public class AccountConnectPlugin extends Plugin
 				}
 			}
 		});
+	}
+
+	/** A failed upload: a newer one may have replaced the queued record, so only the same bank is forgotten. */
+	private void forgetQueuedBank(String sha)
+	{
+		if (sha != null && sha.equals(queuedBankSha))
+		{
+			queuedBankSha = null;
+		}
 	}
 
 	/** A 2xx accept: this canonical hash is now the server's known state, and any 429 backoff clears. */

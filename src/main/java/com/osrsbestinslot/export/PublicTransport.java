@@ -39,8 +39,8 @@ final class PublicTransport
         allow("own_vars", "");
         allow("own_signal", "");
         allow("own_state", ""); // the nested body uses the closed OwnStateEvent projection below
-        allow("bank_visit_open", "visit_id opened_at_ms read_at_ms bank_state item_stacks manifest_sha256 plugin_version");
-        allow("bank_visit_close", "visit_id closed_at_ms close_reason manifest_complete moves_complete deposited_sha256 withdrawn_sha256 end_manifest_sha256 end_chunks deposited withdrawn deposited_chunks withdrawn_chunks moves_chunks");
+        allow("bank_visit_open", "visit_id opened_at_ms read_at_ms bank_state item_stacks manifest_sha256 plugin_version manifest_in_snapshot");
+        allow("bank_visit_close", "visit_id closed_at_ms close_reason manifest_complete moves_complete deposited_sha256 withdrawn_sha256 end_manifest_sha256 end_chunks end_item_stacks manifest_in_snapshot deposited withdrawn deposited_chunks withdrawn_chunks moves_chunks");
         allow("bank_visit_manifest_chunk", "visit_id phase chunk chunks manifest_sha256 items");
         // No fh_batch, store_taken or media manifests: these are observations of others / Ops proof.
     }

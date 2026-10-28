@@ -211,7 +211,8 @@ The snapshot is tied to the link token you chose (not your real identity) and co
 
 - Skills (levels, XP), total & combat level
 - Quest states, achievement-diary and combat-achievement progress
-- Slayer points / current task
+- Slayer points / current task, slayer reward unlocks, spellbook and account mode
+- Quest points, every combat-achievement task, and minigame milestones the game keeps in game variables
 - Worn equipment, inventory, and bank contents (bank only after you open it in-game)
 - Grand Exchange offers, displayed recent GE history (rollout-gated), rune pouch
 - Collection-log entries you have obtained (captured only while the collection-log interface is open)
@@ -261,9 +262,12 @@ exhaustive event stream** and repeated salvage lines must not be summed as loot.
 Collection slots are capped at 4096; repeated draws replace absolute quantities.
 Passive page renders remain incomplete. The capture-first follow-up below adds an
 own-log Search scan with explicit count verification. Missing items in a partial
-scan never mean unowned. The legacy collection block remains partial; unknown
-ownership now also rejects its slots, and explicit zero quantities never enter
-the legacy obtained-item set.
+scan never mean unowned. Since 0.7.62 every linked player's own-log open runs
+this scan. When it is count-verified, the snapshot's `collection_log` carries the
+whole obtained list with `complete: true`, `game_obtained_count`,
+`game_total_count` and `verified_at_ms`. A new item ends that until the next
+verified scan. Otherwise the block stays partial as before. Unknown ownership
+rejects its slots, and explicit zero quantities never enter the obtained-item set.
 
 Reads wait for an identified account, positive Hitpoints level, and two game
 ticks. A single cloned varp array supplies each structured snapshot. Missing,
@@ -507,6 +511,23 @@ and the session's `complete` flag are false without a reliable closing read.
 `close_reason: closed` records an observed widget close when its later teardown
 cause was not known; it does not establish a normal complete visit. No ending
 inventory is invented. Actual final-build account/crash acceptance remains required.
+
+### Latest bank in the snapshot (0.7.62)
+
+The server keeps only the newest complete bank of a player, from the snapshot. The
+snapshot's `bank` block carries `manifest_sha256` and `item_stacks`, built from the same
+canonical list as a bank visit, when every item is in one stack. On a token with the public
+bank receipt, a visit's `bank_visit_open` and normal `bank_visit_close` send no open or
+close item list when a snapshot queued for upload on the same token and account holds that
+exact bank with a known read time. They say so with `manifest_in_snapshot: true`, and the
+close sends `end_item_stacks` instead of `end_chunks`. The open counts the bank-open snapshot,
+whose read has no confirmed time yet; a failed upload is never counted. The close forces no
+upload: it waits up to 250 game ticks for a regular snapshot the server accepted (2xx) that holds
+its end bank with a known read time. Otherwise, and at a logout, hop or new open first, the list
+goes as chunks as before. A snapshot an event forces inside a widget-close script is built on the
+next game tick.
+Deposited and withdrawn lists, `bank_session` and teardown closes are unchanged. Staff
+visits always send every list.
 
 ### Public Queue retry contract (local candidate)
 
