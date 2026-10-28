@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.60";
+	private static final String PLUGIN_VERSION = "0.7.61";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -529,6 +529,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void clearClientThreadStateOnShutdown()
 	{
+		shopOpen = false; // re-enable must wait for a new shop-open event
 		geObservations.clear();
 		geAccountHash = -1L;
 		geRestoredFor = null;
@@ -718,6 +719,64 @@ public class AccountConnectPlugin extends Plugin
 	{
 		return (serverStoreToolsEnabled || storeToolsDevOverride()) && uploadAllowed();
 	}
+
+	/**
+	 * STAFF CAPTURE: trade screenshots, store and drop clips, and other players near a shop or a drop.
+	 * One plugin for everyone (2026-10-28): there is no separate staff build.
+	 * Off unless the server answered this exact link token with X-Staff-Capture: on and named the account
+	 * in X-Staff-Account, and that account is the one logged in now. The server sends that only for an
+	 * approved staff token. No setting, system property or other header can turn it on.
+	 *
+	 * ONLY osrsbestinslot.com CAN GRANT IT. "API base URL" is an ordinary setting, so any server a player
+	 * points it at could otherwise answer X-Staff-Capture: on and switch on the other-player readers and the
+	 * recorders. The grant is taken only from a response to the official endpoint, and it holds only while
+	 * the setting still names that endpoint.
+	 */
+	static final String OFFICIAL_API_BASE = "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
+	/** The only endpoint whose answer can grant staff capture. Tests point it at their own server. */
+	String staffApiBase = OFFICIAL_API_BASE;
+	private volatile String staffCaptureGrantToken;
+	private volatile String staffCaptureGrantAccount;
+
+	private boolean onStaffApi(String url)
+	{
+		String base = staffApiBase.replaceAll("/+$", "");
+		String u = url == null ? "" : url.trim().replaceAll("/+$", "");
+		return u.equals(base) || u.startsWith(base + "/");
+	}
+
+	private boolean configuredForStaffApi()
+	{
+		return config != null && onStaffApi(config.apiBaseUrl());
+	}
+
+	private void clearStaffCaptureGrant()
+	{
+		staffCaptureGrantToken = null;
+		staffCaptureGrantAccount = null;
+	}
+
+	/** Test seam: the server's X-Staff-Capture grant for this token and account, as applyServerPolicy stores it. */
+	void setStaffCaptureForTest(String token, String account)
+	{
+		staffCaptureGrantToken = token;
+		staffCaptureGrantAccount = account;
+	}
+
+	boolean staffCaptureEnabled()
+	{
+		String token = staffCaptureGrantToken;
+		String account = staffCaptureGrantAccount;
+		if (token == null || account == null || !uploadAllowed() || !configuredForStaffApi()
+			|| !account.equals(activeHash) || !currentLinkToken().equals(token))
+		{
+			return false;
+		}
+		// activeHash follows a relog only at the next session start, seconds later. The client knows at once.
+		long live = client == null ? -1L : client.getAccountHash();
+		return live == -1L || account.equals(Long.toString(live));
+	}
+
 
 	/**
 	 * Own-account activity log (syncActivityLog opt-in): buffered structured events — logins/logouts,
@@ -1605,12 +1664,12 @@ public class AccountConnectPlugin extends Plugin
 		java.util.Arrays.asList("trade", "ge_buy", "ge_sell", "ge_cancel", "store_buy", "store_sell", "death", "drop", "alch"));
 
 	/**
-	 * The public artifact cannot capture/upload media, including before the first server response.
-	 * Legacy private operational code below is retained but no server grant widens this boundary.
+	 * Trade screenshots are staff capture: off for every player until the server grants staff capture to
+	 * this token and the logged-in account (staffCaptureEnabled), including before the first server response.
 	 */
 	boolean screenshotsEnabled()
 	{
-		return PublicTransport.mediaAllowed() && activityLogActive() && !serverScreenshotsDisabled;
+		return staffCaptureEnabled() && !serverScreenshotsDisabled;
 	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
@@ -1814,7 +1873,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean dropProofEnabled()
 	{
-		return PublicTransport.mediaAllowed() && storeToolsEnabled()
+		return staffCaptureEnabled() && storeToolsEnabled()
 			&& serverDropProofEnabled
 			&& (!serverClipsDisabled || dropProofDevOverride());
 	}
@@ -1916,6 +1975,7 @@ public class AccountConnectPlugin extends Plugin
 			gameplayGrantToken = null;
 			gameplayGrantEpoch++;
 			setBroadCaptureGrant(null, false);
+			clearStaffCaptureGrant();
 			snapshotRetryPending = false;
 			// A visit belongs to the token that was granted at its open: never finish it under another one.
 			bankEvidenceToken = null;
@@ -3302,14 +3362,37 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	java.util.List<DropCandidates.Observed> observedPlayers()
 	{
-		// Other-player readers are absent from the public artifact.
-		return java.util.Collections.emptyList();
+		if (!staffCaptureEnabled()) return java.util.Collections.emptyList();
+
+		java.util.List<DropCandidates.Observed> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		java.util.List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return out;
+		}
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty()
+				|| p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			WorldPoint loc = p.getWorldLocation();
+			out.add(new DropCandidates.Observed(Text.removeTags(p.getName()),
+				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel(), p.getAnimation()));
+		}
+		return out;
 	}
 
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
 	{
-		return PublicTransport.mediaAllowed() && activityLogActive() && !serverClipsDisabled;
+		return staffCaptureEnabled() && !serverClipsDisabled;
 	}
 
 	/**
@@ -3688,7 +3771,7 @@ public class AccountConnectPlugin extends Plugin
 	private void postStoreClipChunk(String base, String token, java.util.List<byte[]> chunk, long capturedAt,
 		int attempt, boolean held)
 	{
-		if (!PublicTransport.mediaAllowed() || !uploadAllowed() || (attempt > 0 && !token.equals(currentLinkToken())))
+		if (!staffCaptureEnabled() || !uploadAllowed() || (attempt > 0 && !token.equals(currentLinkToken())))
 		{
 			// Uploads switched off, or a retry after the user linked a different token: this chunk
 			// was captured under the old token and must not be filed under the new one.
@@ -3969,7 +4052,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void emitEventBound(String type, Map<String, Object> fields, String tokenFingerprint)
 	{
-		if (!PublicTransport.allowsEvent(type)) return;
+		if (!PublicTransport.allowsEvent(type, staffCaptureEnabled())) return;
 		String liveFingerprint = currentEventTokenFingerprint();
 		if (tokenFingerprint == null || !tokenFingerprint.equals(liveFingerprint))
 		{
@@ -4018,7 +4101,7 @@ public class AccountConnectPlugin extends Plugin
 		Map<String,Object> context = eventObservationContext.event(contextOwner, PLUGIN_VERSION,
 			((Number)ev.get("ts")).longValue());
 		if (context != null) ev.put("observation_context", context);
-		ev = PublicTransport.event(ev);
+		ev = PublicTransport.event(ev, staffCaptureEnabled());
 		if (ev == null) { healthEventsLost.incrementAndGet(); return; }
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
@@ -4783,7 +4866,7 @@ public class AccountConnectPlugin extends Plugin
 					// overtake it either, so the batch stops here.
 					break;
 				}
-				if (!PublicTransport.allowsEvent(String.valueOf(ev.get("type"))))
+				if (!PublicTransport.allowsEvent(String.valueOf(ev.get("type")), staffCaptureEnabled()))
 				{
 					// Legacy memory rows are dropped locally; durable rows are quarantined on replay.
 					healthEventsLost.incrementAndGet();
@@ -4901,7 +4984,7 @@ public class AccountConnectPlugin extends Plugin
 			List<String> encoded = new ArrayList<>(batch.size());
 			for (Map<String, Object> queued : batch)
 			{
-				Map<String, Object> wire = PublicTransport.event(queued);
+				Map<String, Object> wire = PublicTransport.event(queued, staffCaptureEnabled());
 				encoded.add(gson.toJson(wire));
 			}
 			boolean queue = Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE));
@@ -6053,7 +6136,7 @@ public class AccountConnectPlugin extends Plugin
 			List<String> privacyRejected = new ArrayList<>();
 			for (EventSpool.Record candidate : candidates)
 			{
-				Map<String, Object> wire = PublicTransport.event(gson.fromJson(candidate.eventJson, Map.class));
+				Map<String, Object> wire = PublicTransport.event(gson.fromJson(candidate.eventJson, Map.class), staffCaptureEnabled());
 				if (wire == null)
 				{
 					privacyRejected.add(candidate.eventId);
@@ -6495,10 +6578,11 @@ public class AccountConnectPlugin extends Plugin
 			// per token budget is untouched for every ordinary user. A granted client costs at most
 			// one extra request per DROP_PROOF_POLICY_HEARTBEAT_MILLIS, which is 4 per hour.
 			//
+			// The staff-capture grant (screenshots, clips, other-player readers) gets the same heartbeat.
 			// It deliberately does NOT force a send for a client whose grant is off. That direction
 			// is a GRANT arriving, not a revocation, and failing to hear about it only delays a
 			// feature. Failing to hear about a revocation keeps a screen recorder alive.
-			if (!dropProofEnabled()
+			if (!dropProofEnabled() && !staffCaptureEnabled()
 				|| now - lastSendMillis < DROP_PROOF_POLICY_HEARTBEAT_MILLIS)
 			{
 				return; // nothing meaningfully changed since the last accepted upload
@@ -6737,14 +6821,17 @@ public class AccountConnectPlugin extends Plugin
 		// A store-clip visit must not survive a hop / logout / disconnect. End it here; frames are still
 		// valid delivery proof if the visit had a buy/sell (upload=true only uploads when it did), else dropped.
 		if (clipCapturing
-			&& (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST))
+			&& (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN
+				|| state == GameState.CONNECTION_LOST || state == GameState.LOGGING_IN))
 		{
 			stopStoreClipCapture(true);
 		}
 		// A hop or a disconnect ends the shop session, so the observed phase no longer describes the
 		// shop in front of us. Drop it: an anchor that survives a hop is a confidently wrong countdown.
-		if (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST)
+		if (state == GameState.HOPPING || state == GameState.LOGIN_SCREEN
+			|| state == GameState.CONNECTION_LOST || state == GameState.LOGGING_IN)
 		{
+			shopOpen = false; // WidgetClosed is not guaranteed during teardown
 			storeResetAnchorMs = 0;
 			clearResetPhaseEvidence();
 			removeResetTimer();
@@ -6755,7 +6842,7 @@ public class AccountConnectPlugin extends Plugin
 				// Region transition — a NEW instanced chest may lie ahead; the belt keys are per-visit.
 				chestLooted = false;
 				lastChestEmitKey = null;
-				// Scene reload replays existing ground piles as fresh ItemSpawned events (Codex consult
+				// Scene reload replays existing ground piles as fresh ItemSpawned events (review
 				// 2026-07-18) — a surviving pending could pair a replayed same-id pile with an unrelated
 				// inventory loss. A drop clicked right before a region boundary is lost; miss beats fabricate.
 				clearInvDeltaPendings();
@@ -7742,13 +7829,28 @@ public class AccountConnectPlugin extends Plugin
 			// Counterparty + received[] come from the 335 poll above (the only place they are readable). Fall
 			// back to the confirm screen ONLY when the poll captured nothing — counterpartyName() is usually
 			// null here (335 title gone) and readReceivedOffer() reads the value-text column.
-			pendingCounterparty = null;
-			pendingCounterpartyCombatLevel = null;
+			if (!staffCaptureEnabled())
+			{
+				pendingCounterparty = null;
+				pendingCounterpartyCombatLevel = null;
+			}
+			else if (pendingCounterparty == null || pendingCounterparty.isEmpty())
+			{
+				pendingCounterparty = counterpartyName();
+				pendingCounterpartyCombatLevel = visibleCounterpartyCombatLevel(pendingCounterparty);
+			}
 			if (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
 			{
 				pendingTradeReceived = readReceivedOffer();
 			}
-
+			// Lossless text fallback only when we still have no structured items (e.g. big "Lots!" trade the
+			// poll missed) — keeps the existing "no received_text when items exist" contract. Staff only:
+			// the text is the other player's offer as the game wrote it.
+			if (staffCaptureEnabled() && (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
+				&& (pendingReceivedText == null || pendingReceivedText.isEmpty()))
+			{
+				pendingReceivedText = readReceivedText();
+			}
 		}
 	}
 
@@ -7771,8 +7873,26 @@ public class AccountConnectPlugin extends Plugin
 		{
 			pendingTradeReceived = other;
 		}
-		pendingCounterparty = null;
-		pendingCounterpartyCombatLevel = null;
+		if (!staffCaptureEnabled())
+		{
+			pendingCounterparty = null;
+			pendingCounterpartyCombatLevel = null;
+			return;
+		}
+		String cp = counterpartyName();
+		if (cp != null && !cp.isEmpty())
+		{
+			if (pendingCounterparty == null || !cp.equalsIgnoreCase(pendingCounterparty))
+			{
+				pendingCounterpartyCombatLevel = null;
+			}
+			pendingCounterparty = cp;
+			Integer observedCombat = visibleCounterpartyCombatLevel(cp);
+			if (observedCombat != null)
+			{
+				pendingCounterpartyCombatLevel = observedCombat;
+			}
+		}
 	}
 
 	/** Snapshot the items in our own trade offer (container 90) as [{id, qty}]. */
@@ -7857,6 +7977,24 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	/** Trade partner name from the trade window title ("Trading With: Name"), or null. Staff capture only. */
+	private String counterpartyName()
+	{
+		Widget w = client.getWidget(TRADE_TITLE_COMPONENT);
+		if (w == null)
+		{
+			return null;
+		}
+		String t = Text.removeTags(w.getText() == null ? "" : w.getText()).trim();
+		int idx = t.toLowerCase(java.util.Locale.ROOT).indexOf("with");
+		if (idx >= 0)
+		{
+			String name = t.substring(idx + 4).replaceFirst("^[:\\s]+", "").trim();
+			return name.isEmpty() ? null : name;
+		}
+		return t.isEmpty() ? null : t;
+	}
+
 	/**
 	 * WAVE 1b fallback — the "You will receive" column is likely a TEXT summary ("Blood rune x 100<br>Coins
 	 * x 5,000"), not item sprites. When no item children are found, capture that RAW text (tags/&lt;br&gt;
@@ -7933,8 +8071,37 @@ public class AccountConnectPlugin extends Plugin
 
 	Integer visibleCounterpartyCombatLevel(String rsn)
 	{
-		// Other-player readers are absent from the public artifact.
-		return null;
+		String wanted = normalizeRsnForMatch(rsn);
+		if (!staffCaptureEnabled() || client == null || wanted.isEmpty())
+		{
+			return null;
+		}
+		List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return null;
+		}
+		Integer found = null;
+		int matches = 0;
+		for (Player p : players)
+		{
+			if (p == null || p == client.getLocalPlayer() || p.getName() == null)
+			{
+				continue;
+			}
+			String name = normalizeRsnForMatch(p.getName());
+			if (!wanted.equals(name))
+			{
+				continue;
+			}
+			matches++;
+			int level = p.getCombatLevel();
+			if (level > 0)
+			{
+				found = level;
+			}
+		}
+		return matches == 1 ? found : null;
 	}
 
 	void handleTradeWidgetLoaded(int groupId)
@@ -8087,7 +8254,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean maxCapture()
 	{
-		return PublicTransport.firehoseAllowed() && serverMaxCaptureEnabled && uploadAllowed();
+		return false;
 	}
 
 	/** Buffer one firehose row. No-op unless the grant is live. Batched, never emitted per event. */
@@ -8208,7 +8375,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onInteractingChanged(InteractingChanged event)
 	{
-		// Other-player readers are absent from the public artifact.
+		// Firehose only, and the firehose is off for every player, staff included (maxCapture).
 
 	}
 
@@ -8258,7 +8425,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void nearbyPlayerEvent(Player p, String kind)
 	{
-		// Other-player readers are absent from the public artifact.
+		// Firehose only, and the firehose is off for every player, staff included (maxCapture).
 
 	}
 
@@ -8699,6 +8866,59 @@ public class AccountConnectPlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Ephemeral rows for the staff store overlay only. The upload readers below stay empty;
+	 * rendering a visible player must not populate event context, journals or snapshots.
+	 */
+	List<Map<String, Object>> nearbyPlayersForOverlay(int cap)
+	{
+		List<Map<String, Object>> rows = new ArrayList<>();
+		if (cap <= 0 || client == null || !isShopOpen() || !storeToolsEnabled() || !staffCaptureEnabled())
+		{
+			return rows;
+		}
+		Player self = client.getLocalPlayer();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null)
+		{
+			return rows;
+		}
+		List<Player> players = client.getPlayers();
+		if (players == null)
+		{
+			return rows;
+		}
+		for (Player player : players)
+		{
+			if (player == null || player == self)
+			{
+				continue;
+			}
+			String name = player.getName();
+			WorldPoint location = player.getWorldLocation();
+			if (name == null || location == null)
+			{
+				continue;
+			}
+			name = Text.removeTags(name);
+			int distance = location.distanceTo(me);
+			if (name.isEmpty() || distance > StoreNearbyOverlay.DISPLAY_RANGE_TILES)
+			{
+				continue;
+			}
+			Map<String, Object> row = new LinkedHashMap<>();
+			row.put("rsn", name);
+			row.put("dist", distance);
+			row.put("cb", player.getCombatLevel());
+			rows.add(row);
+		}
+		rows.sort(java.util.Comparator
+			.comparingInt((Map<String, Object> row) -> (Integer) row.get("dist"))
+			.thenComparing(row -> (String) row.get("rsn")));
+		int limit = Math.min(cap, StoreNearbyOverlay.DISPLAY_CAP);
+		return new ArrayList<>(rows.subList(0, Math.min(limit, rows.size())));
+	}
+
 	/** Snapshot up to {@code cap} nearest OTHER players right now: {rsn, dx, dy, dist, cb}, nearest first. */
 	List<Map<String, Object>> nearbyPlayersSnapshot(int cap)
 	{
@@ -8743,8 +8963,43 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	List<Map<String, Object>> surroundingPlayersNow()
 	{
-		// Other-player readers are absent from the public artifact.
-		return java.util.Collections.emptyList();
+		if (!staffCaptureEnabled()) return java.util.Collections.emptyList();
+
+		List<Map<String, Object>> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return out;
+		}
+		for (Player p : players)
+		{
+			WorldPoint loc = p == null ? null : p.getWorldLocation();
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || loc == null)
+			{
+				continue;
+			}
+			int dx = loc.getX() - me.getX();
+			int dy = loc.getY() - me.getY();
+			Map<String, Object> m = new LinkedHashMap<>();
+			m.put("rsn", Text.removeTags(p.getName()));
+			m.put("dx", dx);
+			m.put("dy", dy);
+			m.put("dist", Math.max(Math.abs(dx), Math.abs(dy)));
+			m.put("cb", p.getCombatLevel());
+			out.add(m);
+		}
+		out.sort((a, b) ->
+		{
+			int c = Integer.compare((Integer) a.get("dist"), (Integer) b.get("dist"));
+			return c != 0 ? c : ((String) a.get("rsn")).compareTo((String) b.get("rsn"));
+		});
+		return out;
 	}
 
 	/**
@@ -8851,8 +9106,60 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	List<Map<String, Object>> nearbyPlayersSnapshot(int cap, boolean activity)
 	{
-		// Other-player readers are absent from the public artifact.
-		return java.util.Collections.emptyList();
+		if (!staffCaptureEnabled()) return java.util.Collections.emptyList();
+
+		List<Map<String, Object>> out = new ArrayList<>();
+		if (client == null)
+		{
+			return out;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return out;
+		}
+		List<Player> others = new ArrayList<>();
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			others.add(p);
+		}
+		others.sort((a, b) -> Integer.compare(a.getWorldLocation().distanceTo(me), b.getWorldLocation().distanceTo(me)));
+		for (Player p : others)
+		{
+			if (out.size() >= cap)
+			{
+				break;
+			}
+			WorldPoint loc = p.getWorldLocation();
+			Map<String, Object> m = new LinkedHashMap<>();
+			m.put("rsn", Text.removeTags(p.getName()));
+			m.put("dx", loc.getX() - me.getX());
+			m.put("dy", loc.getY() - me.getY());
+			m.put("dist", loc.distanceTo(me));
+			m.put("cb", p.getCombatLevel());
+			if (activity)
+			{
+				m.put("anim", p.getAnimation());
+				Actor t = p.getInteracting();
+				if (t instanceof net.runelite.api.NPC && t.getName() != null)
+				{
+					String npc = Text.removeTags(t.getName());
+					m.put("interacting_npc", npc);
+					// The SAME NPC, by index. A second trader of the same shop (a shop assistant) reads false here
+					// but still shows its name in interacting_npc; a same-named NPC elsewhere never reads true.
+					m.put("with_shopkeeper", shopkeeperIndex >= 0
+						&& ((net.runelite.api.NPC) t).getIndex() == shopkeeperIndex);
+				}
+			}
+			out.add(m);
+		}
+		return out;
 	}
 
 	/**
@@ -9409,8 +9716,49 @@ public class AccountConnectPlugin extends Plugin
 	/** Merge the current nearby players into the shop-visit accumulator (called each tick while shop open). */
 	void accumulateShopNearby()
 	{
-		// Other-player readers are absent from the public artifact.
-		shopVisitNearby.clear();
+		if (!staffCaptureEnabled())
+		{
+			shopVisitNearby.clear();
+			return;
+		}
+		if (client == null)
+		{
+			return;
+		}
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		WorldPoint me = self == null ? null : self.getWorldLocation();
+		if (me == null || players == null)
+		{
+			return;
+		}
+		int tick = client.getTickCount();
+		for (Player p : players)
+		{
+			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
+			{
+				continue;
+			}
+			int dist = p.getWorldLocation().distanceTo(me);
+			String rsn = Text.removeTags(p.getName());
+			int[] rec = shopVisitNearby.get(rsn);
+			if (rec == null)
+			{
+				if (shopVisitNearby.size() >= MAX_NEARBY_TRACKED)
+				{
+					continue;	// map full — don't grow unbounded on a crowded world
+				}
+				shopVisitNearby.put(rsn, new int[]{dist, tick, tick, p.getCombatLevel()});
+			}
+			else
+			{
+				if (dist < rec[0])
+				{
+					rec[0] = dist;	// closest approach this visit
+				}
+				rec[2] = tick;		// last seen
+			}
+		}
 	}
 
 	/** Emit nearby[] from the visit accumulator, nearest-first: {rsn, dist, first_tick, last_tick, cb}. */
@@ -9534,6 +9882,16 @@ public class AccountConnectPlugin extends Plugin
 		}
 		else if (executedQty != UNKNOWN_ITEM_COUNT)
 		{
+			// A SALE THE SHOP PAID 0 GP FOR. The item count measured the sell and the coins were read before
+			// and after (a measured quantity needs the inventory read at the click, which is where the coins
+			// come from) and did not move, on a row of its own. Without this the row looked exactly like a sale
+			// whose coins were never read (live 0.7.55 audit 2026-10-27: 181 such rows, 7 of 1M+ items).
+			// coins_unchanged tells a reader this 0 was measured; it is never sent without gp_total 0.
+			if ("store_sell".equals(type) && !ambiguous && !qtyMerged && delta == 0 && executedQty > 0)
+			{
+				fields.put("gp_total", 0L);
+				fields.put("coins_unchanged", true);
+			}
 			// The coins cannot be split (two buys settled in one inventory change), but each item's own count
 			// still measured what the server moved. Live 0.7.55 (2026-10-24): a player buying two runes per
 			// world sent half of all rows as a bare {item, qty:50} while about 30 had really moved.
@@ -9925,7 +10283,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
 		}
-		// Ownership discriminator (Codex consult 2026-07-18): the client tags ground items with ownership,
+		// Ownership discriminator (review 2026-07-18): the client tags ground items with ownership,
 		// and a fresh OWN drop is always OWNERSHIP_SELF. Anything else (another player's pile, an NPC drop,
 		// an ownerless world spawn, a GIM partner's item) can never corroborate OUR drop — this closes the
 		// whole coincidental-foreign-source fabrication class in one check. [verify in-client]
@@ -10463,8 +10821,32 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onProjectileMoved(net.runelite.api.events.ProjectileMoved event)
 	{
-		// Other-player readers are absent from the public artifact.
-
+		if (!staffCaptureEnabled() || client == null || event == null || event.getProjectile() == null
+			|| event.getProjectile().getId() != DropCandidates.TELEGRAB_PROJECTILE)
+		{
+			return;
+		}
+		net.runelite.api.Projectile pr = event.getProjectile();
+		if (!telegrabProjectilesSeen.add(pr))
+		{
+			return;
+		}
+		WorldPoint target = pr.getTargetPoint();
+		if (target == null && event.getPosition() != null)
+		{
+			target = WorldPoint.fromLocal(client, event.getPosition());
+		}
+		if (target == null)
+		{
+			return;
+		}
+		Actor src = pr.getSourceActor();
+		boolean self = src != null && src == client.getLocalPlayer();
+		String caster = src == null || src.getName() == null ? null : Text.removeTags(src.getName());
+		WorldPoint from = src != null && src.getWorldLocation() != null ? src.getWorldLocation() : pr.getSourcePoint();
+		recordTelegrabSighting(new DropCandidates.TelegrabSighting(target.getX(), target.getY(), target.getPlane(),
+			client.getTickCount(), "projectile", self ? null : caster, self,
+			from == null ? target.getX() : from.getX(), from == null ? target.getY() : from.getY()));
 	}
 
 	/** A Telekinetic Grab impact graphic. It carries no caster, only the tile. */
@@ -11946,7 +12328,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void uploadTradeScreenshot(String token, byte[] pngBytes, String phase)
 	{
-		if (!PublicTransport.mediaAllowed() || !uploadAllowed())
+		if (!staffCaptureEnabled() || !uploadAllowed())
 		{
 			return;		// upload switch off — send nothing
 		}
@@ -12877,6 +13259,34 @@ public class AccountConnectPlugin extends Plugin
 			&& !sentToken.equals(spoolGrantToken) && "event-id-v1".equals(response.header("X-Bank-Receipt"))
 			? sentToken : null;
 
+
+		// The server grant binds this exact account and link token to staff media/evidence.
+		// A late response for a previous account never opens a new account's recorder.
+		// An accepted upload without the grant ends it, and so does any refusal (4xx). Only a 429 or a 5xx
+		// says nothing about staff, so only those keep it and leave a running store clip alone.
+		boolean previouslyGranted = staffCaptureEnabled();
+		if (!configuredForStaffApi() || !onStaffApi(response.request().url().toString()))
+		{
+			clearStaffCaptureGrant();
+		}
+		else if (response.isSuccessful())
+		{
+			String staffCapture = response.header("X-Staff-Capture");
+			String staffAccount = response.header("X-Staff-Account");
+			if ("on".equalsIgnoreCase(staffCapture == null ? "" : staffCapture.trim())
+				&& staffAccount != null && staffAccount.trim().matches("-?[0-9]{1,19}"))
+			{
+				setStaffCaptureForTest(sentToken, staffAccount.trim());
+			}
+			else
+			{
+				clearStaffCaptureGrant();
+			}
+		}
+		else if (response.code() >= 400 && response.code() < 500 && response.code() != 429)
+		{
+			clearStaffCaptureGrant();
+		}
 		String screenshots = response.header("X-Screenshots");
 		if (screenshots != null)
 		{
@@ -12894,6 +13304,12 @@ public class AccountConnectPlugin extends Plugin
 			{
 				removeResetTimer();	// a revoked grant must clear what is already on screen
 			}
+		}
+		// Either header can end staff capture. A store clip recording when it ends is dropped, not sent.
+		if (previouslyGranted && !staffCaptureEnabled())
+		{
+			stopStoreClipCapture(false);
+			removeResetTimer();
 		}
 
 		String maxCap = response.header("X-Max-Capture");

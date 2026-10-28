@@ -65,6 +65,7 @@ public class DropStopContractTest
 		f.set(r.plugin, r.config);
 		r.plugin.setStoreToolsForTest(true);		// the shop-overlay grant
 		r.plugin.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag
+		StaffGrant.give(r.plugin);					// the server's staff-capture grant for this token and account
 		return r;
 	}
 
@@ -858,6 +859,9 @@ public class DropStopContractTest
 
 		r.config.token = OTHER_TOKEN;
 		p.pollDropSession();
+		// The staff grant is bound to the token, so the swap ended it. The new staff token gets its own
+		// grant on its first accepted upload; that answer arrives here.
+		StaffGrant.give(p);
 
 		// Route 1: nothing can be taken out of it, and the retry buffer is gone.
 		assertTrue(seg.discarded());
@@ -1008,6 +1012,9 @@ public class DropStopContractTest
 
 		r.config.token = OTHER_TOKEN;
 		p.pollDropSession();
+		// The staff grant is bound to the token, so the swap ended it. The new staff token gets its own
+		// grant on its first accepted upload; that answer arrives here.
+		StaffGrant.give(p);
 		assertFalse(p.dropSession.active());
 
 		// A NEW drop, under the NEW token.
@@ -1415,10 +1422,14 @@ public class DropStopContractTest
 	private static okhttp3.Response policyResponse(String... headerKV)
 	{
 		okhttp3.Response.Builder b = new okhttp3.Response.Builder()
-			.request(new okhttp3.Request.Builder().url("http://localhost/account-ingest").build())
+			.request(new okhttp3.Request.Builder().url(AccountConnectPlugin.OFFICIAL_API_BASE + "/account-ingest").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1)
 			.code(200)
-			.message("OK");
+			.message("OK")
+			// A staff client's every accepted upload carries its staff-capture grant. An arm that withdraws
+			// it names the header itself, which replaces these.
+			.header("X-Staff-Capture", "on")
+			.header("X-Staff-Account", StaffGrant.ACCOUNT);
 		for (int i = 0; i + 1 < headerKV.length; i += 2)
 		{
 			b.header(headerKV[i], headerKV[i + 1]);

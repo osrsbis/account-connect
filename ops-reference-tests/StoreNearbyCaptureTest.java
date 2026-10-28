@@ -557,5 +557,6 @@ public class StoreNearbyCaptureTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(fieldName);
 		f.setAccessible(true);
 		f.set(plugin, value);
+		StaffGrant.afterInject(plugin, fieldName);
 	}
 }

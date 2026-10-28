@@ -409,6 +409,7 @@ public class StoreResetPhaseEvidenceTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(name);
 		f.setAccessible(true);
 		f.set(p, value);
+		StaffGrant.afterInject(p, name);
 	}
 
 	private long anchor() throws Exception

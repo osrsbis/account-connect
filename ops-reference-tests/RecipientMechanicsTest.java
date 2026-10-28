@@ -51,6 +51,7 @@ public class RecipientMechanicsTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(field);
 		f.setAccessible(true);
 		f.set(target, value);
+		StaffGrant.afterInject(target, field);
 	}
 
 	private static Player player(String name, int x, int y, int anim)

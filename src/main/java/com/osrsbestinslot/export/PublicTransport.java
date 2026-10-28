@@ -3,13 +3,12 @@ package com.osrsbestinslot.export;
 import java.util.*;
 
 /**
- * Public Hub wire contract. Remote grants, tokens and JVM properties cannot widen it.
- * Private operational capture requires a separately reviewed distribution, not a Hub toggle.
+ * Public Hub wire contract. Remote grants, tokens and JVM properties cannot widen it for a player.
+ * The one exception is staff capture, which the server grants only to an approved staff token and account.
  */
 final class PublicTransport
 {
     private PublicTransport() {}
-    static boolean mediaAllowed() { return false; }
     static boolean firehoseAllowed() { return false; }
 
     private static final Map<String, Set<String>> FIELDS = new HashMap<>();
@@ -20,7 +19,7 @@ final class PublicTransport
         allow("trade", "given received world world_members");
         allow("ge_offer ge_progress ge_buy ge_sell ge_cancel ge_collect",
             "item qty price gp qty_total slot state side offer_key offer_seen ge_observation world world_members");
-        allow("store_buy store_sell", "item qty gp_total qty_merged qty_executed qty_partial unit_price_gp world loc");
+        allow("store_buy store_sell", "item qty gp_total coins_unchanged qty_merged qty_executed qty_partial unit_price_gp world loc");
         allow("drop", "item qty location wilderness tile drop_session_id drop_seq");
         allow("ground_removed", "item qty location ticks_on_ground cause recipient drop_session_id drop_seq attribution_uncertain tile");
         allow("pickup alch", "item qty spell gp location");
@@ -51,6 +50,38 @@ final class PublicTransport
         for (String type : types.split(" ")) FIELDS.put(type, keys(fields));
     }
     static boolean allowsEvent(String type) { return FIELDS.containsKey(type); }
+    private static final Set<String> STAFF_EVENT_TYPES = keys("store_taken drop_trade_clip drop_trade_clip_final");
+    static boolean allowsEvent(String type, boolean verifiedStaff)
+    {
+        return allowsEvent(type) || (verifiedStaff && STAFF_EVENT_TYPES.contains(type));
+    }
+
+    /**
+     * The public projection, unless the server has granted staff capture to this exact token and account.
+     * A staff row keeps every field the plugin wrote, as staff clients sent before the public boundary
+     * (other players' names, counterparty, recipient, media manifests). Local delivery keys ("__...") never leave.
+     */
+    static Map<String, Object> event(Map<String, Object> input, boolean verifiedStaff)
+    {
+        Map<String, Object> standard = event(input);
+        if (!verifiedStaff || input == null) return standard;
+        String type = String.valueOf(input.get("type"));
+        if (!allowsEvent(type, true)) return null;
+        // A row the public projection refuses stays refused, unless it is one of the staff-only types.
+        if (standard == null && !STAFF_EVENT_TYPES.contains(type)) return null;
+        Map<String, Object> out = standard == null ? new LinkedHashMap<>() : standard;
+        for (Map.Entry<String, Object> e : input.entrySet())
+        {
+            String key = e.getKey();
+            Object value = e.getValue();
+            if (key == null || key.startsWith("__")) continue;
+            if ("observation_context".equals(key)) { out.put(key, EventObservationContext.project(value)); continue; }
+            if (value == null || value instanceof String || value instanceof Number || value instanceof Boolean
+                || value instanceof Map || value instanceof List)
+                out.put(key, value);
+        }
+        return out;
+    }
 
     /** null means local privacy rejection, never an acknowledged server delivery. */
     static Map<String, Object> event(Map<String, Object> input)

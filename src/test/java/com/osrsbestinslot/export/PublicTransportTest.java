@@ -208,6 +208,149 @@ public class PublicTransportTest
         assertEquals(expected,sent.get("items").toString());assertEquals(hash,sent.get("manifest_sha256").getAsString());
     }
 
+    /** The X-Staff-Capture answer through the same policy path; staffAccount null omits the account header. */
+    private Response staffAnswer(String staffCapture, String staffAccount)
+    {
+        plugin.staffApiBase = server.url("/api").toString();	// this rig's stand-in for osrsbestinslot.com
+        Response.Builder b = grant().newBuilder().request(new Request.Builder().url(server.url("/api/account-ingest")).build());
+        if (staffCapture != null) b.header("X-Staff-Capture", staffCapture);
+        if (staffAccount != null) b.header("X-Staff-Account", staffAccount);
+        return b.build();
+    }
+    private void assertNoStaffTool(String why)
+    {
+        assertFalse(why, plugin.staffCaptureEnabled());
+        assertFalse(why, plugin.screenshotsEnabled()); assertFalse(why, plugin.storeClipsEnabled());
+        assertFalse(why, plugin.dropProofEnabled()); assertFalse(why, plugin.maxCapture());
+    }
+
+    /**
+     * One plugin for everyone (2026-10-28). A player's client gets the staff tools only when the server
+     * names its logged-in account in a staff-capture grant for its token. Nothing short of that opens them.
+     */
+    /** A client with the fixture account logged in. */
+    private net.runelite.api.Client loggedIn()
+    {
+        net.runelite.api.Client client = mock(net.runelite.api.Client.class);
+        when(client.getAccountHash()).thenReturn(12345L);
+        return client;
+    }
+
+    @Test public void onlyTheServerStaffGrantForThisAccountOpensStaffTools() throws Exception
+    {
+        put("client", loggedIn());
+        plugin.applyServerPolicy(staffAnswer("on", null), TOKEN);
+        assertNoStaffTool("a grant that names no account");
+        plugin.applyServerPolicy(staffAnswer("on", "99999"), TOKEN);
+        assertNoStaffTool("a grant for another account");
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), "fedcba9876543210fedcba9876543210");
+        assertNoStaffTool("a late answer for a token this client no longer holds");
+        plugin.applyServerPolicy(staffAnswer("yes", "12345"), TOKEN);
+        assertNoStaffTool("any value but on");
+
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.staffCaptureEnabled());
+        assertTrue(plugin.screenshotsEnabled()); assertTrue(plugin.storeClipsEnabled()); assertTrue(plugin.dropProofEnabled());
+        assertFalse("the firehose stays off for staff too", plugin.maxCapture());
+
+        put("activeHash", "99999");
+        assertNoStaffTool("another account logged in on the same client");
+        put("activeHash", "12345");
+        assertTrue(plugin.staffCaptureEnabled());
+        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(503).message("busy").build(), TOKEN);
+        assertTrue("a server error says nothing about staff", plugin.staffCaptureEnabled());
+        plugin.applyServerPolicy(grant(), TOKEN);
+        assertNoStaffTool("the next accepted upload without the grant ends it");
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(403).message("revoked").build(), TOKEN);
+        assertNoStaffTool("a revoked token");
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(413).message("too large").build(), TOKEN);
+        assertNoStaffTool("any other refusal");
+    }
+
+    /**
+     * "API base URL" is a setting any player can change. A server the player points it at must not be able to
+     * switch on the staff tools, whatever it answers, through the real upload path.
+     */
+    @Test public void onlyTheOfficialServerCanGrantStaffCapture() throws Exception
+    {
+        assertEquals("https://www.osrsbestinslot.com/wp-json/osrsbis/v1", AccountConnectPlugin.OFFICIAL_API_BASE);
+        assertEquals("the default endpoint is the official one", AccountConnectPlugin.OFFICIAL_API_BASE, plugin.staffApiBase);
+        put("client", loggedIn());
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}")
+            .setHeader("X-Staff-Capture", "on").setHeader("X-Staff-Account", "12345")
+            .setHeader("X-Store-Tools", "on").setHeader("X-Drop-Proof", "on"));
+        Map<String,Object> snap = new LinkedHashMap<>(); snap.put("account", Map.of("rsn", "OwnPlayer"));
+        call("postSnapshot", new Class<?>[]{String.class,Map.class,String.class}, TOKEN, snap, "h");
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        for (int i = 0; i < 100 && !plugin.storeToolsEnabled(); i++) Thread.sleep(10);
+        assertTrue("the answer was applied", plugin.storeToolsEnabled());
+        assertNoStaffTool("a player's own server granted staff capture");
+
+        // Granted by the official endpoint, the grant ends the moment the setting names another server.
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.staffCaptureEnabled());
+        AccountConnectConfig moved = mock(AccountConnectConfig.class);
+        when(moved.linkToken()).thenReturn(TOKEN); when(moved.apiBaseUrl()).thenReturn("https://example.invalid/api");
+        put("config", moved);
+        assertNoStaffTool("the setting now names another server");
+    }
+
+    /** A relog to another account on a staff token: the client knows at once, before the next session start. */
+    @Test public void aRelogToAnotherAccountEndsStaffCaptureAtOnce() throws Exception
+    {
+        net.runelite.api.Client client = mock(net.runelite.api.Client.class); put("client", client);
+        when(client.getAccountHash()).thenReturn(12345L);
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.staffCaptureEnabled());
+        when(client.getAccountHash()).thenReturn(67890L);
+        assertNoStaffTool("another account is logged in, activeHash not yet updated");
+    }
+
+    /** A staff row keeps what the plugin wrote; the same row from a player goes through the public projection. */
+    @Test public void onlyAStaffRowCarriesOtherPlayers()
+    {
+        Map<String,Object> trade = legacyTrade();
+        trade.put("__delivery_token_fp", "local");
+        Map<String,Object> pub = PublicTransport.event(trade, false);
+        assertFalse(pub.toString(), pub.toString().contains("OTHER_CANARY"));
+        Map<String,Object> staff = PublicTransport.event(trade, true);
+        assertEquals("OTHER_CANARY", staff.get("counterparty"));
+        assertEquals("OTHER_CANARY", staff.get("received_text"));
+        assertFalse("local delivery keys never leave", staff.containsKey("__delivery_token_fp"));
+        Map<String,Object> taken = new LinkedHashMap<>();
+        taken.put("type", "store_taken"); taken.put("event_id", ID); taken.put("item", 1);
+        taken.put("taken_by_candidates", Arrays.asList(Map.of("rsn", "OTHER_CANARY")));
+        assertNull("a player never sends store_taken", PublicTransport.event(taken, false));
+        assertNotNull(PublicTransport.event(taken, true));
+    }
+
+    /** The plugin's own emit path: a player's queued rows hold no other player, a staff client's keep them. */
+    @Test public void emittedRowsCarryOtherPlayersOnlyUnderTheStaffGrant() throws Exception
+    {
+        Map<String,Object> fields = legacyTrade();
+        for (String k : Arrays.asList("type", "event_id", "ts", "account_hash", "rsn")) fields.remove(k);
+        Map<String,Object> taken = new LinkedHashMap<>();
+        taken.put("item", 1); taken.put("taken_by_candidates", Arrays.asList(Map.of("rsn", "OTHER_CANARY")));
+
+        plugin.emitEvent("trade", new LinkedHashMap<>(fields));
+        plugin.emitEvent("store_taken", new LinkedHashMap<>(taken));
+        assertEquals("a player's store_taken is never queued", 1, plugin.pendingEvents.size());
+        assertFalse(plugin.pendingEvents.toString(), plugin.pendingEvents.toString().contains("OTHER_CANARY"));
+
+        plugin.pendingEvents.clear();
+        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.emitEvent("trade", new LinkedHashMap<>(fields));
+        plugin.emitEvent("store_taken", new LinkedHashMap<>(taken));
+        assertEquals(2, plugin.pendingEvents.size());
+        assertEquals("OTHER_CANARY", plugin.pendingEvents.get(0).get("counterparty"));
+        assertEquals("store_taken", plugin.pendingEvents.get(1).get("type"));
+    }
+
     @Test public void publicCollectorsNeverReadOtherPlayerIdentitiesEvenWithGrants() throws Exception
     {
         net.runelite.api.Client client=mock(net.runelite.api.Client.class); put("client",client);

@@ -15,8 +15,8 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
 /**
  * Who is standing next to you while a shop is open, nearest first.
  *
- * The plugin already computes this list every tick to attach to a store event. This renders the
- * same list and captures nothing new — no extra data is read and none leaves the client.
+ * Rows are read only for this display while the staff store-tools gate is open. They are
+ * neither retained nor passed to the public capture readers or upload paths.
  *
  * The reset countdown used to live here and was SPLIT OUT on 2026-09-03: this list changes length
  * as players walk past, and a growing panel dragged the countdown around with it. See
@@ -90,7 +90,7 @@ class StoreNearbyOverlay extends OverlayPanel
 
 		// No "Store" title any more: the countdown left for its own overlay, and "Nearby (N)"
 		// already names this panel. One less line covering the shop.
-		List<String[]> rows = visibleRows(plugin.nearbyPlayersSnapshot(DISPLAY_CAP));
+		List<String[]> rows = visibleRows(plugin.nearbyPlayersForOverlay(DISPLAY_CAP));
 
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text(rows.isEmpty() ? "Nobody nearby" : "Nearby (" + rows.size() + ")")

@@ -76,6 +76,7 @@ public class SurroundingPlayersTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(field);
 		f.setAccessible(true);
 		f.set(target, value);
+		StaffGrant.afterInject(target, field);
 	}
 
 	private static Map<String, Object> eventOfType(AccountConnectPlugin p, String type)

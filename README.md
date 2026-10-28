@@ -1,5 +1,7 @@
 # OSRS Best in Slot — Account Connect
 
+Every release also runs the [staff acceptance gate](docs/STAFF_ACCEPTANCE.md). A passing public build does not certify the staff delivery tools.
+
 A RuneLite plugin that connects your Old School RuneScape account to
 [osrsbestinslot.com](https://www.osrsbestinslot.com) so its gear and skill
 calculators auto-fill from your real account — no manual data entry.
@@ -188,6 +190,19 @@ are still required. It does not make all snapshot families durable.
 3. While you are logged in, the plugin periodically reads your account state and sends
    a snapshot to osrsbestinslot.com, keyed by that token. The site reads it back to
    pre-fill the calculators.
+
+## Staff tools
+
+There is one plugin for everyone. The staff tools in it are off for every player. They turn on only
+when osrsbestinslot.com answers an upload with `X-Staff-Capture: on` and names, in `X-Staff-Account`,
+the account that is logged in. The site sends that only for a link token on its staff list. No setting,
+JVM property or other header turns them on, and they turn off again on the next answer without the
+grant, on a refused token, on a token change and while another account is logged in.
+
+With the grant, the plugin records trade screenshots, store and drop clips, and the other players
+near a shop or a drop pile: the nearby panel, the trade counterparty, `store_taken` and its buyer
+candidates. For a player, `PublicTransport` removes every other-player field before a row is queued
+or sent.
 
 ## What it sends
 

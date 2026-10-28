@@ -30,7 +30,7 @@ dependencies {
 }
 
 group = 'com.osrsbestinslot.export'
-version = '0.7.60'
+version = '0.7.61'
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
@@ -51,4 +51,122 @@ tasks.register('runClient', JavaExec) {
     mainClass = 'com.osrsbestinslot.export.AccountConnectPluginTest'
     // RuneLite's ExternalPluginManager.loadBuiltin REQUIRES assertions enabled, or it throws on launch.
     jvmArgs = ['-ea']
+}
+
+// Staff distribution has a separate positive acceptance gate. A green public test task is NOT
+// staff acceptance. No private capability is enabled or packaged by these test source sets.
+def staffJar = providers.provider {
+    project.hasProperty('staffCandidateJar') ? file(project.property('staffCandidateJar')) : tasks.jar.archiveFile.get().asFile
+}
+def privateContracts = [
+    'SurroundingPlayersTest', 'DropStopContractTest', 'StoreClipRetryTest',
+    'DropFinalManifestTest', 'DropProofIntegrationTest', 'StoreResetPhaseEvidenceTest',
+    'StoreNearbyCaptureTest', 'RecipientMechanicsTest',
+    'StaffTradeScreenshotTest', 'StaffTradeOtherOfferCaptureTest',
+    'StaffTradeReceivedTest', 'StaffStoreClipUploadTest'
+]
+def storeContracts = [
+    'StoreWorkflowRegressionTest', 'StoreNearbyOverlayTest', 'StoreResetOverlayTest',
+    'StoreResetTimerTest', 'StoreToolsGateTest', 'StoreMultiQtyGpTest',
+    'StoreSameTickItemsTest', 'StoreFailedSellTest'
+]
+
+sourceSets {
+    staffCapabilities {
+        java.srcDir 'staff-acceptance-tests'
+    }
+    staffAcceptance {
+        java.srcDirs = ['ops-reference-tests', 'src/test/java']
+        // StaffGrant is the server's staff-capture answer that every private contract's fixture receives.
+        java.include((privateContracts + storeContracts + ['StaffGrant']).collect { "**/${it}.java" })
+    }
+}
+
+['staffCapabilities', 'staffAcceptance'].each { name ->
+    configurations["${name}Implementation"].extendsFrom(configurations.testImplementation)
+    configurations["${name}RuntimeOnly"].extendsFrom(configurations.testRuntimeOnly)
+    def sources = sourceSets[name]
+    // Both compilation and execution use the supplied artifact. Never include main.output here:
+    // doing so lets healthy checkout classes hide a broken/wrong staff distribution JAR.
+    sources.compileClasspath = files(staffJar) + configurations["${name}CompileClasspath"]
+    sources.runtimeClasspath = sources.output + files(staffJar) + configurations["${name}RuntimeClasspath"]
+    if (!project.hasProperty('staffCandidateJar')) {
+        tasks.named(sources.compileJavaTaskName) { dependsOn tasks.jar }
+    }
+}
+
+// Explicit floors prevent a silently deleted positive suite from shrinking staff coverage.
+def staffMinimumTests = [
+    StaffCapabilitiesTest: 3, DropFinalManifestTest: 5, DropProofIntegrationTest: 20,
+    DropStopContractTest: 66, RecipientMechanicsTest: 20, StaffStoreClipUploadTest: 9,
+    StaffTradeOtherOfferCaptureTest: 8, StaffTradeReceivedTest: 9, StaffTradeScreenshotTest: 10,
+    StoreClipRetryTest: 9, StoreNearbyCaptureTest: 19, StoreResetPhaseEvidenceTest: 25,
+    SurroundingPlayersTest: 19, StoreWorkflowRegressionTest: 5, StoreNearbyOverlayTest: 13,
+    StoreResetOverlayTest: 8, StoreResetTimerTest: 30, StoreToolsGateTest: 7,
+    StoreMultiQtyGpTest: 21, StoreSameTickItemsTest: 4, StoreFailedSellTest: 6
+]
+def configureStaffGate = { Test task, String setName, List requiredClasses ->
+    def sources = sourceSets[setName]
+    task.group = 'verification'
+    task.testClassesDirs = sources.output.classesDirs
+    task.classpath = sources.runtimeClasspath
+    task.inputs.file(staffJar).withPropertyName('staffCandidateJar')
+    // Always re-run acceptance: a cached report is not approval for a newly selected artifact.
+    task.outputs.upToDateWhen { false }
+    task.systemProperty 'user.home', "${buildDir}/${setName}-home"
+    task.systemProperty 'java.awt.headless', 'true'
+    task.testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    def seen = [:]
+    long executed = 0
+    long skipped = 0
+    task.doFirst {
+        if (!task.filter.commandLineIncludePatterns.empty || !task.filter.includePatterns.empty ||
+            !task.filter.excludePatterns.empty || !task.includes.empty || !task.excludes.empty) {
+            throw new GradleException('Staff acceptance cannot be narrowed. Run the complete task without --tests/includes/excludes.')
+        }
+        File candidate = staffJar.get()
+        if (!candidate.isFile() || !candidate.name.endsWith('.jar')) {
+            throw new GradleException('staffCandidateJar must name the exact built JAR that will be distributed.')
+        }
+        task.systemProperty 'staff.candidate.jar', candidate.canonicalPath
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        candidate.withInputStream { input ->
+            byte[] buffer = new byte[8192]
+            int n
+            while ((n = input.read(buffer)) != -1) digest.update(buffer, 0, n)
+        }
+        String sha = digest.digest().encodeHex().toString()
+        logger.lifecycle("STAFF CANDIDATE: ${candidate.canonicalPath} SHA-256=${sha}")
+        File identity = file("${buildDir}/reports/staff-acceptance/candidate.txt")
+        identity.parentFile.mkdirs()
+        identity.text = "candidate=${candidate.canonicalPath}\nsha256=${sha}\n"
+    }
+    task.afterTest { descriptor, result ->
+        String suite = descriptor.className.tokenize('.').last()
+        seen[suite] = (seen[suite] ?: 0) + result.testCount
+        executed += result.testCount
+        skipped += result.skippedTestCount
+    }
+    task.doLast {
+        def incomplete = requiredClasses.findAll { (seen[it] ?: 0) < staffMinimumTests[it] }
+        if (!incomplete.empty || skipped != 0) {
+            throw new GradleException("Incomplete staff acceptance: incomplete=${incomplete}, executed=${executed}, skipped=${skipped}")
+        }
+        logger.lifecycle("STAFF CONTRACTS PASSED: ${executed} tests; 0 skipped; all ${requiredClasses.size()} required suites.")
+    }
+}
+
+tasks.register('staffCapabilities', Test) {
+    description = 'Reject staff candidates missing delivery-proof capabilities; tests the actual JAR.'
+    configureStaffGate(delegate, 'staffCapabilities', ['StaffCapabilitiesTest'])
+}
+tasks.register('staffAcceptance', Test) {
+    description = 'Run all positive private and store workflow contracts against the exact staff candidate JAR.'
+    dependsOn tasks.staffCapabilities
+    configureStaffGate(delegate, 'staffAcceptance', privateContracts + storeContracts)
+}
+
+// Supplying a staff artifact makes conventional check/build enforce staff acceptance too.
+if (project.hasProperty('staffCandidateJar')) {
+    tasks.named('check') { dependsOn tasks.staffAcceptance }
 }

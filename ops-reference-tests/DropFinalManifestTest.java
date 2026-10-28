@@ -193,5 +193,6 @@ public class DropFinalManifestTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(fieldName);
 		f.setAccessible(true);
 		f.set(target, value);
+		StaffGrant.afterInject(target, fieldName);
 	}
 }

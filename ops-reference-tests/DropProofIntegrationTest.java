@@ -50,6 +50,7 @@ public class DropProofIntegrationTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(field);
 		f.setAccessible(true);
 		f.set(target, value);
+		StaffGrant.afterInject(target, field);
 	}
 
 	private static Object get(AccountConnectPlugin p, String field) throws Exception

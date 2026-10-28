@@ -526,7 +526,7 @@ public class WealthLedgerTest
 	}
 
 	/**
-	 * Shape of the real 0.7.39 run (retained166, 2026-10-19, djinn, five snapshots): bank absent, then present with no
+	 * Shape of the real 0.7.39 run (2026-10-19, five snapshots): bank absent, then present with no
 	 * observed_at on first open, then dated after a deposit, then absent again after the bank closed. Synthetic values.
 	 */
 	@Test
@@ -923,7 +923,7 @@ public class WealthLedgerTest
 		assertEquals(2, ex.size());
 	}
 
-	/** Shape from the real 0.7.42 run (retained166, 2026-10-19): feather buy placed and cancelled between snapshots. */
+	/** Shape from the real 0.7.42 run (2026-10-19): feather buy placed and cancelled between snapshots. */
 	@Test
 	public void real0742BuyPlacedAndCancelledInsideTheWindowIsACollectBoxMove()
 	{
@@ -938,7 +938,7 @@ public class WealthLedgerTest
 		assertEquals(100L, e.maxUncollectedCoins);
 	}
 
-	/** Shape from the real 0.7.43 run (retained166): withdraw, bank closes, bank reopens with a reading from before. */
+	/** Shape from the real 0.7.43 run: withdraw, bank closes, bank reopens with a reading from before. */
 	@Test
 	public void real0743RefreshedCarriedBankIsNotCountedTwice()
 	{
@@ -958,7 +958,7 @@ public class WealthLedgerTest
 		assertEquals(true, r45.get("explained"));
 	}
 
-	/** Shape from the real 0.7.46 run (retained166): rat loot drops to the ground; only some is picked up. */
+	/** Shape from the real 0.7.46 run: rat loot drops to the ground; only some is picked up. */
 	@Test
 	public void real0746GroundLootIsRewardOnlyWhenItReachesTheInventory()
 	{

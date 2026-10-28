@@ -115,6 +115,61 @@ public class StoreFailedSellTest
 		assertEquals("one real sale, one row", 1, sells.size());
 		assertEquals(POT, sells.get(0).get("item"));
 		assertEquals(0, plugin.storePendings.size());
+		assertEquals("a measured 0 gp sale says so", 0L, sells.get(0).get("gp_total"));
+		assertEquals(true, sells.get(0).get("coins_unchanged"));
+	}
+
+	/**
+	 * Live 0.7.61 player run (2026-10-28): Sell 1 Vial, the shop paid 0 gp, and the row had no gp_total, the
+	 * same as a sale whose coins were never read. A measured 0 now says gp_total 0 with coins_unchanged.
+	 */
+	@Test
+	public void aZeroGpSaleIsMeasuredAndEveryUnmeasuredCaseIsNot()
+	{
+		sell(POT);
+		tick++;
+		inventoryNow(735_512L, LOBSTER);
+		Map<String, Object> zero = storeSells().get(0);
+		assertEquals(0L, zero.get("gp_total"));
+		assertEquals(true, zero.get("coins_unchanged"));
+		assertEquals(1L, zero.get("qty_executed"));
+		assertFalse("no price from a 0", zero.containsKey("unit_price_gp"));
+		assertEquals("it survives the public projection", true, PublicTransport.event(zero).get("coins_unchanged"));
+		plugin.pendingEvents.clear();
+
+		sell(LOBSTER);
+		plugin.flushStorePendingOnShopClose();		// closed before any change: nothing was measured
+		assertFalse(storeSells().get(0).containsKey("gp_total"));
+		assertFalse(storeSells().get(0).containsKey("coins_unchanged"));
+	}
+
+	@Test
+	public void aSaleThatPaysIsNotMarked()
+	{
+		sell(LOBSTER);
+		tick++;
+		inventoryNow(735_512L + 28L, POT);
+		assertEquals(28L, storeSells().get(0).get("gp_total"));
+		assertFalse(storeSells().get(0).containsKey("coins_unchanged"));
+	}
+
+	@Test
+	public void theBuilderMarksOnlyAMeasuredUnambiguousSell()
+	{
+		assertEquals(true, AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L, false, false, 1L)
+			.get("coins_unchanged"));
+		assertFalse("two sales in one change", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+			true, false, 1L).containsKey("gp_total"));
+		assertFalse("merged clicks", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 2, 100L, 100L,
+			false, true, 1L).containsKey("gp_total"));
+		assertFalse("nothing moved", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+			false, false, 0L).containsKey("gp_total"));
+		assertFalse("item count unknown", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+			false, false, AccountConnectPlugin.UNKNOWN_ITEM_COUNT).containsKey("gp_total"));
+		assertFalse("coins fell on a sell", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 90L,
+			false, false, 1L).containsKey("gp_total"));
+		assertFalse("a buy for 0 is not a shop case", AccountConnectPlugin.buildStoreTxFields("store_buy", POT, 1, 100L,
+			100L, false, false, 1L).containsKey("gp_total"));
 	}
 
 	@Test

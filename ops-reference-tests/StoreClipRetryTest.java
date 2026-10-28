@@ -370,6 +370,7 @@ public class StoreClipRetryTest
 		Field f = AccountConnectPlugin.class.getDeclaredField(fieldName);
 		f.setAccessible(true);
 		f.set(plugin, value);
+		StaffGrant.afterInject(plugin, fieldName);
 	}
 
 	private static byte[] readAll(InputStream in) throws java.io.IOException
