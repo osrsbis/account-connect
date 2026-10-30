@@ -548,6 +548,47 @@ public class PublicEventOutboxPluginTest
         assertTrue(p.pendingEvents.isEmpty());p.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
         assertEquals(1,p.pendingEvents.size());
     }
+    @Test public void aBankCloseCapturedAtLogoutIsSentBeforeTheNextLogin() throws Exception
+    {
+        // Live 0.7.62: a close journaled at logout waited for the same account's next login, often days.
+        bankGrant(true,false);String id=emitBank();p.trackLogout("manual");p.awaitSpoolIdleForTest();
+        p.pumpPublicOutbox();p.awaitSpoolIdleForTest();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+id+"\",\"status\":\"stored\"}]}"));
+        p.flushEvents();JsonObject sent=request();
+        assertEquals(id,sent.getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString());done();
+        assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
+    @Test public void aClientCloseSendsTheBankCloseAfterTheOtherRows() throws Exception
+    {
+        // One request carries one kind of row: the bank close goes in a later batch of the same close.
+        bankGrant(true,false);emit();String bankId=emitBank();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+bankId+"\",\"status\":\"stored\"}]}"));
+        net.runelite.client.events.ClientShutdown close=new net.runelite.client.events.ClientShutdown();
+        p.onClientShutdown(close);
+        JsonObject first=request();JsonObject second=request();
+        assertEquals("ge_progress",first.getAsJsonArray("events").get(0).getAsJsonObject().get("type").getAsString());
+        assertEquals(bankId,second.getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString());
+        done();assertEquals(0,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
+    @Test public void anEndedSessionsRowsWaitForTheirOwnProfile() throws Exception
+    {
+        bankGrant(true,false);emitBank();p.trackLogout("manual");p.awaitSpoolIdleForTest();
+        ConfigManager other=mock(ConfigManager.class);ConfigProfile profile=mock(ConfigProfile.class);
+        when(profile.getId()).thenReturn(8L);when(other.getProfile()).thenReturn(profile);set(p,"configManager",other);
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
+        p.pumpPublicOutbox();p.awaitSpoolIdleForTest();p.flushEvents();
+        RecordedRequest r=server.takeRequest(500,TimeUnit.MILLISECONDS);
+        assertTrue("only the logout row may go",r==null||!r.getBody().readUtf8().contains("bank_visit_close"));done();
+        p.flushEvents();assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
+    }
+    @Test public void anEndedSessionsRowsWaitWhenTheTokenChanges() throws Exception
+    {
+        bankGrant(true,false);emitBank();p.trackLogout("manual");p.awaitSpoolIdleForTest();
+        token.set("ffffffffffffffffffffffffffffffff");p.pumpPublicOutbox();p.awaitSpoolIdleForTest();p.flushEvents();
+        assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
+        assertEquals(1,((Number)p.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+    }
     @Test public void publicBankRevocationPurgesBeforeColdRecovery() throws Exception
     {
         bankGrant(true,false);emitBank();server.enqueue(new MockResponse().setResponseCode(403).setBody("{\"error\":\"revoked\"}"));

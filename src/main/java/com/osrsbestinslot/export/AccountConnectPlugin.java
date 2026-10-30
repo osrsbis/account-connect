@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.62";
+	private static final String PLUGIN_VERSION = "0.7.64";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -873,6 +873,14 @@ public class AccountConnectPlugin extends Plugin
 	private volatile long publicOutboxDropped;
 	private volatile long publicOutboxPurged;
 	private volatile boolean publicOutboxPaused;
+	/**
+	 * The public owner of the session a logout just ended, with its token. Rows that session captured (a bank
+	 * close at logout, a close that waited for its snapshot) still go to the server until the next login, a token
+	 * change or a revocation. Live 0.7.62 (10-29..30): 45 of 49 visits with no close ended in a logout, client close
+	 * or idle stop, with the close journaled but never sent until that account logged in again.
+	 */
+	private volatile PublicEventOutbox.Context endedPublicOwner;
+	private volatile String endedPublicToken;
 
 	/** Server ingest limits: at most 100 events and under 256 KiB of UTF-8 per request. */
 	static final int EVENT_BATCH_MAX_EVENTS = 100;
@@ -1652,6 +1660,11 @@ public class AccountConnectPlugin extends Plugin
 		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
 		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
 		final int tick;
+		/** Identity of this click, never the most recent click when its signals arrive. */
+		final String dropSessionId;
+		final int dropSeq;
+		/** Quantity added by this ground event; -1 for callers without ground quantity evidence. */
+		volatile long spawnQuantity = -1;
 		// drop only: tick a matching ground spawn was seen at our tile BEFORE the inventory loss was visible.
 		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
 		// first records itself; the second completes the emit. -1 = no corroboration yet.
@@ -1683,6 +1696,16 @@ public class AccountConnectPlugin extends Plugin
 			Map<String, Object> location, Boolean wilderness, int tick,
 			int takeX, int takeY, int takePlane)
 		{
+			this(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick,
+				takeX, takeY, takePlane, null, 0);
+		}
+
+		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
+			Map<String, Object> location, Boolean wilderness, int tick,
+			int takeX, int takeY, int takePlane, String dropSessionId, int dropSeq)
+		{
+			this.dropSessionId = dropSessionId;
+			this.dropSeq = dropSeq;
 			this.takeX = takeX;
 			this.takeY = takeY;
 			this.takePlane = takePlane;
@@ -2901,13 +2924,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void attachPileToDropSession(DroppedGroundItem g)
 	{
+		attachPileToDropSession(g, pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void attachPileToDropSession(DroppedGroundItem g, String sid, int seq)
+	{
 		if (g == null || !dropSession.active())
 		{
 			return;
 		}
-		String sid = pendingDropSessionId;
-		int seq = pendingDropSeq;
-		if (sid == null || seq <= 0)
+		if (sid == null || seq <= 0 || !sid.equals(dropSession.sessionId()))
 		{
 			return;
 		}
@@ -2949,13 +2975,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void adoptMergedPileIntoDropSession(DroppedGroundItem existing)
 	{
+		adoptMergedPileIntoDropSession(existing, pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void adoptMergedPileIntoDropSession(DroppedGroundItem existing, String sid, int seq)
+	{
 		if (existing == null || !dropSession.active())
 		{
 			return;
 		}
-		String sid = pendingDropSessionId;
-		int seq = pendingDropSeq;
-		if (sid == null || seq <= 0)
+		if (sid == null || seq <= 0 || !sid.equals(dropSession.sessionId()))
 		{
 			return;
 		}
@@ -2969,7 +2998,7 @@ public class AccountConnectPlugin extends Plugin
 		// Not ours yet. Adopt it through the same call the spawn path uses, so the pile gets this
 		// session's id, this drop's sequence and exactly ONE recorder key, and the pending is
 		// resolved by that key rather than left outstanding.
-		attachPileToDropSession(existing);
+		attachPileToDropSession(existing, sid, seq);
 	}
 
 	/**
@@ -4262,6 +4291,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			activeRsn = rsn;
 			activeHash = hash;
+			endedPublicOwner = null;
 			syncSpoolState();	// an account change purges the previous account's durable spool
 			sessionActive = true;
 			sessionStartMillis = System.currentTimeMillis();
@@ -4317,16 +4347,42 @@ public class AccountConnectPlugin extends Plugin
 	public void onClientShutdown(ClientShutdown event)
 	{
 		clientClosing = true;
-		if (client != null && client.getGameState() == GameState.LOGGED_IN)
-		{
-			trackLogout("client_close");
-		}
 		java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
 		finalFlushDone = done;
-		boolean sent = flushEventsNow();
-		if (!sent && !eventPostInFlight)
+		finalFlushBatchesLeft.set(FINAL_FLUSH_EXTRA_BATCHES);
+		// ClientShutdown is posted on the UI thread. The bank state belongs to the client thread, so the
+		// teardown runs there, and the logout and the final flush follow it even if the teardown fails.
+		Runnable closeSession = () ->
 		{
-			done.complete(null);
+			if (client != null && client.getGameState() == GameState.LOGGED_IN)
+			{
+				try
+				{
+					// A bank open, or a close waiting for its snapshot, would otherwise never be sent:
+					// end it as a teardown, as a logout does.
+					finishPublicBankClose(true);
+					closeBankVisit("logout", null);
+					endBankSession(false);
+				}
+				catch (RuntimeException failure)
+				{
+					log.debug("OSRS BiS bank teardown at client close failed", failure);
+				}
+				trackLogout("client_close");
+			}
+			boolean sent = flushEventsNow();
+			if (!sent && !eventPostInFlight)
+			{
+				completeFinalFlush();
+			}
+		};
+		if (clientThread != null)
+		{
+			clientThread.invoke(closeSession);
+		}
+		else
+		{
+			closeSession.run();
 		}
 		// What the final batch could not deliver (a 429 when the global hour is full, a 5xx, no network, or
 		// more than one batch) goes to disk, and the next start sends it. RuneLite waits at most 10 s for all
@@ -4517,11 +4573,31 @@ public class AccountConnectPlugin extends Plugin
 	private void completeFinalFlush()
 	{
 		java.util.concurrent.CompletableFuture<Void> f = finalFlushDone;
-		if (f != null)
+		if (f == null || f.isDone())
 		{
-			f.complete(null);
+			return;
 		}
+		// One request carries one kind of row. A public row (a bank close) reaches the buffer after its journal
+		// write on the disk thread, so the close sends a few more batches from there, after those writes.
+		if (clientClosing && finalFlushBatchesLeft.getAndDecrement() > 0 && onSpoolThread(() ->
+		{
+			// Honours a backoff the last answer set: a refused close is not sent again, its rows stay saved.
+			boolean before = eventPostInFlight;
+			flushEvents();
+			if (before || !eventPostInFlight)
+			{
+				completeFinalFlush();
+			}
+		}))
+		{
+			return;
+		}
+		f.complete(null);
 	}
+
+	/** Batches the client close sends after the first one, so a bank close journaled at the close goes too. */
+	static final int FINAL_FLUSH_EXTRA_BATCHES = 3;
+	private final java.util.concurrent.atomic.AtomicInteger finalFlushBatchesLeft = new java.util.concurrent.atomic.AtomicInteger();
 
 	/** Completed by the event callback of the final close flush; null when no close is in progress. */
 	volatile java.util.concurrent.CompletableFuture<Void> finalFlushDone;
@@ -4568,6 +4644,8 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("wealth", netWorth);
 		}
 		emitEvent("logout", fields);
+		endedPublicOwner = publicQueueContext(true);
+		endedPublicToken = currentLinkToken();
 		sessionActive = false;
 		eventObservationContext.clear();
 	}
@@ -4632,6 +4710,26 @@ public class AccountConnectPlugin extends Plugin
 		catch (IllegalArgumentException unknown) { return null; }
 	}
 
+	/** The live owner, or after a logout the owner of the session that ended, while its token and grant still hold. */
+	private PublicEventOutbox.Context publicSendContext()
+	{
+		PublicEventOutbox.Context live = publicQueueContext(true);
+		if (live != null || sessionActive) return live;
+		PublicEventOutbox.Context ended = endedPublicOwner;
+		String token = currentLinkToken();
+		if (ended == null || publicOutboxPaused || config == null || !uploadAllowed() || !token.equals(endedPublicToken)
+			|| token.equals(spoolGrantToken) || !(token.equals(eventQueueGrantToken) || token.equals(bankJournalGrantToken))
+			|| configManager == null || configManager.getProfile() == null)
+			return null;
+		try
+		{
+			// Rows wait for their own RuneLite profile too: a profile switched after the logout ends this window.
+			return ended.identity.equals(new PublicEventOutbox.Context(token, ended.account, ended.mode,
+				Long.toString(configManager.getProfile().getId())).identity) ? ended : null;
+		}
+		catch (IllegalArgumentException unknown) { return null; }
+	}
+
 	private PublicEventOutbox publicBankOutbox;
 
 	private PublicEventOutbox publicBankOutboxOnDiskThread()
@@ -4688,7 +4786,7 @@ public class AccountConnectPlugin extends Plugin
 	private boolean capturedPublicOwnerStillValid(PublicEventOutbox.Context owner, String scope)
 	{
 		if (!publicScopeGranted(scope)) return false;
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current != null) return owner.identity.equals(current.identity);
 		// A bank close is captured before trackLogout clears the mode. Finish that already captured
 		// disk write after logout, but do not replay until a matching logged-in identity returns.
@@ -4751,7 +4849,7 @@ public class AccountConnectPlugin extends Plugin
 	{
 		publicOutboxUndurable.incrementAndGet();
 		queueDeliveryHealth.undurable(event);
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope))
 		{
 			healthEventsLost.incrementAndGet();
@@ -4774,7 +4872,7 @@ public class AccountConnectPlugin extends Plugin
 	private void stagePublicOutbox(PublicEventOutbox.Context owner, String scope) throws IOException
 	{
 		List<Map<String, Object>> recovered = publicOutboxForScope(scope).pending(owner, scope, MAX_PENDING_EVENTS);
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope)) return;
 		synchronized (pendingEvents)
 		{
@@ -4795,14 +4893,14 @@ public class AccountConnectPlugin extends Plugin
 	/** One coalesced disk read, never file IO on the client tick. */
 	void pumpPublicOutbox()
 	{
-		PublicEventOutbox.Context owner = publicQueueContext(true);
+		PublicEventOutbox.Context owner = publicSendContext();
 		String scope = eventQueueScope;
 		if (owner == null || !publicOutboxPumpQueued.compareAndSet(false, true)) return;
 		if (!onSpoolThread(() ->
 		{
 			try
 			{
-				PublicEventOutbox.Context current = publicQueueContext(true);
+				PublicEventOutbox.Context current = publicSendContext();
 				if (current != null && owner.identity.equals(current.identity))
 				{
 					if (publicScopeGranted(scope)) stagePublicOutbox(owner, scope);
@@ -4863,6 +4961,7 @@ public class AccountConnectPlugin extends Plugin
 	private void revokePublicOutbox(String sentToken)
 	{
 		if (sentToken != null && !sentToken.equals(currentLinkToken())) return;
+		endedPublicOwner = null;
 		eventQueueGrantToken = null;
 		eventQueueScope = null;
 		bankJournalGrantToken = null;
@@ -4956,8 +5055,8 @@ public class AccountConnectPlugin extends Plugin
 				Object durableOwner = ev.get(EVENT_PUBLIC_OUTBOX);
 				if (durableOwner instanceof PublicEventOutbox.Context)
 				{
-					PublicEventOutbox.Context current = publicQueueContext(true);
-					if (current == null) continue; // logout/unknown mode pauses replay
+					PublicEventOutbox.Context current = publicSendContext();
+					if (current == null) continue; // no owner (another login pending, unknown mode) pauses replay
 					if (stagedPublicScope(ev) == null) continue; // another public capability cannot resume this path
 					if (!current.identity.equals(((PublicEventOutbox.Context) durableOwner).identity))
 					{
@@ -5011,7 +5110,7 @@ public class AccountConnectPlugin extends Plugin
 		try
 		{
 			PublicEventOutbox.Context owner = (PublicEventOutbox.Context) selected.get(0).get(EVENT_PUBLIC_OUTBOX);
-			PublicEventOutbox.Context current = publicQueueContext(true);
+			PublicEventOutbox.Context current = publicSendContext();
 			String scope = stagedPublicScope(selected.get(0));
 			if (current == null || !owner.identity.equals(current.identity) || scope == null)
 			{
@@ -5084,7 +5183,7 @@ public class AccountConnectPlugin extends Plugin
 				.post(RequestBody.create(JSON, body))
 				.build();
 			String outboxIdentity = publicOutboxIdentity(batch.get(0));
-			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicQueueContext(true);
+			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicSendContext();
 			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)
 				|| stagedPublicScope(batch.get(0)) == null))
 			{
@@ -6432,6 +6531,7 @@ public class AccountConnectPlugin extends Plugin
 	private void closeSpool()
 	{
 		publicOutboxPaused = true;
+		endedPublicOwner = null;
 		bankJournalGrantToken = null;
 		// A re-enable is treated like a cold start: nothing is written or replayed until the server
 		// sends X-Event-Spool again for the configured token.
@@ -6979,6 +7079,7 @@ public class AccountConnectPlugin extends Plugin
 				lastChestEmitKey = null;
 				break;
 			case CONNECTION_LOST:
+				pendingWorldHop = null;
 				clogObtained.clear();
 				clogSeen = false;
 				geAwaitingLogin = true;
@@ -7012,7 +7113,8 @@ public class AccountConnectPlugin extends Plugin
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				closeBankVisit("logout", null);
 				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
-				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
+				lastWorld = 0;
+				pendingWorldHop = null;	// a hop that never reached the new world is not sent	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
 				xpFlushTicks = 0;
 				flushFirehose();	// flush batched firehose rows before the session ends
@@ -7030,6 +7132,7 @@ public class AccountConnectPlugin extends Plugin
 				flushPendingSnapshot();
 				break;
 			case LOGGED_IN:
+				endedPublicOwner = null;	// rows of the session before wait for their own account again
 				refreshProfileType(); // before replay/loot events, not five seconds later at syncTask
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
@@ -7199,7 +7302,32 @@ public class AccountConnectPlugin extends Plugin
 			Map<String, Object> fields = new LinkedHashMap<>();
 			fields.put("from", prev);
 			fields.put("to", w);
+			GameState state = client.getGameState();
+			if (state == GameState.HOPPING || state == GameState.LOADING)
+			{
+				// During a hop the game mode and the observation context are cleared until the next login. Live
+				// 0.7.61/0.7.62 (10-29..30): all 2,930 world_hop rows had neither. It is sent on the first tick in the world.
+				pendingWorldHop = fields;
+				return;
+			}
 			emitEvent("world_hop", fields);
+		}
+	}
+
+	/** A hop seen while the client was between worlds, sent once the new world's context is known. */
+	private Map<String, Object> pendingWorldHop;
+
+	private void finishPendingWorldHop()
+	{
+		Map<String, Object> hop = pendingWorldHop;
+		if (hop == null || client == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		pendingWorldHop = null;
+		if (activityLogActive())
+		{
+			emitEvent("world_hop", hop);
 		}
 	}
 
@@ -7225,6 +7353,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameTick(GameTick event)
 	{
 		refreshEventObservationContext();
+		finishPendingWorldHop();
 		finishPendingBankClose();
 		finishPublicBankClose(false);
 		if (deferredForce)
@@ -8651,8 +8780,15 @@ public class AccountConnectPlugin extends Plugin
 
 	}
 
+	/**
+	 * The gate for a count line. Live 0.7.61/0.7.62 (10-27..30) sent no raid, Wintertodt or agility count: "Your
+	 * completed Tombs of Amascut count is", "Your subdued Wintertodt count is", "Your completion count for the Theatre of
+	 * Blood is" and "Your ... lap count is" did not match.
+	 * A lap line goes out as kind "count" with source "<course> lap": the ingest kinds have no "lap".
+	 */
 	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
-		"(?:kill|completion|chest|success|harvest) count is:? ?([\\d,]+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+		"(?:(?:kill|completion|chest|success|harvest|lap) count|Your (?:completed|subdued) .+? count|Your completion count for .+?) is:? ?([\\d,]+)",
+		java.util.regex.Pattern.CASE_INSENSITIVE);
 	/**
 	 * Structured source of a count line: "Your [completion count for |subdued |completed ]<source>
 	 * [kill|harvest|completion|success|Total Ticket ][count ]is: N". The shape follows the parser in the
@@ -10225,7 +10361,9 @@ public class AccountConnectPlugin extends Plugin
 		// A ground Take carries the pile's tile; anything else has none, which reads as (-1,-1,-1).
 		int[] tile = "pickup".equals(base) ? groundTakeTile(event) : new int[]{-1, -1, -1};
 		InvDeltaPending armed = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins,
-			location, wilderness, tick, tile[0], tile[1], tile[2]);
+			location, wilderness, tick, tile[0], tile[1], tile[2],
+			"drop".equals(base) && dropProofEnabled() ? pendingDropSessionId : null,
+			"drop".equals(base) && dropProofEnabled() ? pendingDropSeq : 0);
 		synchronized (invDeltaPendings)
 		{
 			// A second Drop before the first lands is the NORMAL shape of a drop trade, never a mistake.
@@ -10344,82 +10482,95 @@ public class AccountConnectPlugin extends Plugin
 		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, stackGrew, -1, -1, -1);
 	}
 
-	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
-	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew,
-		int tileX, int tileY, int tilePlane)
+	/** The oldest matching click which has not already consumed a ground spawn. */
+	private InvDeltaPending pendingDropForSpawn(int item, int tick)
 	{
-		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew)
-		{
-			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
-		}
 		if (deathPending != null)
 		{
-			// Death belt (backs the onActorDeath disarm): mid-death ground spawns + inventory wipe are the
-			// death's items, never a player-initiated drop — refuse all corroboration while a death settles.
 			clearInvDeltaPendings();
-			return;
+			return null;
 		}
-		// Match by ITEM ID against the oldest matching armed drop. Packet order is the server's choice, so a
-		// spawn may arrive for the second click before the first; matching on the item rather than on "the
-		// one pending" is what lets each drop find its own.
-		InvDeltaPending p;
 		synchronized (invDeltaPendings)
 		{
-			p = null;
+			InvDeltaPending expiredCorroboration = null;
 			java.util.Iterator<InvDeltaPending> it = invDeltaPendings.iterator();
 			while (it.hasNext())
 			{
-				InvDeltaPending c = it.next();
-				if (!"drop".equals(c.base) || c.item != spawnedItemId)
+				InvDeltaPending p = it.next();
+				if (!"drop".equals(p.base) || p.item != item) continue;
+				if (tick - p.tick > DROP_PENDING_MAX_TICKS)
 				{
-					continue;
-				}
-				if (currentTick - c.tick > DROP_PENDING_MAX_TICKS)
-				{
-					// Stale — the click this pending belonged to is long over. Discard it and keep looking:
-					// returning here left a NEWER armed drop of the same item without its spawn, while the
-					// pile was already tracked, so a ground_removed row appeared with no drop row (theft
-					// investigation M5, event 40325).
 					it.remove();
 					continue;
 				}
-				p = c;
-				break;
+				if (p.spawnCorroboratedTick < 0) return p;
+				if (expiredCorroboration == null
+					&& tick - p.spawnCorroboratedTick > DROP_CORROBORATION_MAX_TICKS)
+				{
+					expiredCorroboration = p;
+				}
 			}
-			if (p == null)
-			{
-				return;
-			}
-			// The tile follows the spawn that corroborates (overwritten with spawnCorroboratedTick) or completes
-			// the drop, so the row names the pile that actually confirmed it, never an earlier stray spawn.
+			// A stray spawn can expire, but it must not steal a later click's first ground event.
+			return expiredCorroboration;
+		}
+	}
+
+	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick,
+		boolean stackGrew, int tileX, int tileY, int tilePlane)
+	{
+		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew) return;
+		resolveDropPendingOnGroundSpawn(pendingDropForSpawn(spawnedItemId, currentTick), invCountAfter,
+			currentTick, tileX, tileY, tilePlane, -1);
+	}
+
+	private void resolveDropPendingOnGroundSpawn(InvDeltaPending p, long invCountAfter, int currentTick,
+		int tileX, int tileY, int tilePlane, long quantityAdded)
+	{
+		if (p == null) return;
+		synchronized (invDeltaPendings)
+		{
+			if (!invDeltaPendings.contains(p)) return;
 			if (tileX >= 0 && tileY >= 0 && tilePlane >= 0)
 			{
 				p.spawnX = tileX;
 				p.spawnY = tileY;
 				p.spawnPlane = tilePlane;
 			}
-			long staleDelta = p.beforeCount - invCountAfter;
-			if (staleDelta <= 0)
-			{
-				// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a
-				// server packet detail we don't control). Record the corroboration; the inventory-change path
-				// completes the emit when the loss lands. Without this, spawn-first ordering misses EVERY drop.
-				p.spawnCorroboratedTick = currentTick;
-				return;
-			}
-			invDeltaPendings.remove(p);	// consume — both signals confirmed
+			p.spawnCorroboratedTick = currentTick;
+			p.spawnQuantity = quantityAdded;
+			if (p.beforeCount <= invCountAfter) return; // inventory signal has not arrived yet
+			invDeltaPendings.remove(p);
 		}
-		// The loss came first: the row reports that earlier change, not this spawn.
 		long outer = triggerChangeBuildSeq;
 		triggerChangeBuildSeq = p.lossBuildSeq;
 		try
 		{
-			emitDropEvent(p, p.beforeCount - invCountAfter);
+			completeDropPending(p, p.beforeCount - invCountAfter);
 		}
 		finally
 		{
 			triggerChangeBuildSeq = outer;
 		}
+	}
+
+	/** A shared inventory decrement must not be emitted once for each same-item click. */
+	private long completeDropPending(InvDeltaPending p, long available)
+	{
+		long qty = p.spawnQuantity > 0 ? Math.min(available, p.spawnQuantity) : available;
+		synchronized (invDeltaPendings)
+		{
+			for (InvDeltaPending other : invDeltaPendings)
+			{
+				if (other != p && "drop".equals(other.base) && other.item == p.item
+					&& other.beforeCount == p.beforeCount)
+				{
+					other.beforeCount = Math.max(0, other.beforeCount - qty);
+				}
+			}
+		}
+		emitDropEvent(p, qty);
+		return qty;
 	}
 
 	/** Drop every armed pending — used by the logout / hop / disconnect / death disarms. */
@@ -10480,11 +10631,12 @@ public class AccountConnectPlugin extends Plugin
 		// to one removal when a session drops the same item, same quantity, onto the same tile twice
 		// — which is the ordinary shape of a drop trade, not an edge case.
 		String auditSessionId = null;
-		if (dropSession.active() && pendingDropSessionId != null)
+		if (dropSession.active() && p.dropSessionId != null
+			&& p.dropSessionId.equals(dropSession.sessionId()) && p.dropSeq > 0)
 		{
-			auditSessionId = pendingDropSessionId;
+			auditSessionId = p.dropSessionId;
 			fields.put("drop_session_id", auditSessionId);
-			fields.put("drop_seq", pendingDropSeq);
+			fields.put("drop_seq", p.dropSeq);
 		}
 		// Staff Wilderness drops only: who the client had loaded around us at this drop. The Wilderness
 		// flag is the one sampled at the Drop click, so the gate and the row agree.
@@ -10498,10 +10650,9 @@ public class AccountConnectPlugin extends Plugin
 
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
 	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile,
-		boolean stackGrew, boolean quantityMerge)
+		boolean stackGrew, boolean quantityMerge, long quantityAdded)
 	{
-		InvDeltaPending p = peekInvDeltaPending();
-		if (p == null || client == null || it == null || tile == null)
+		if (client == null || it == null || tile == null)
 		{
 			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
 		}
@@ -10526,13 +10677,12 @@ public class AccountConnectPlugin extends Plugin
 		// Track the pile BEFORE resolving: resolution may consume the pending, and the pile is ours either
 		// way (OWNERSHIP_SELF, our own tile). Only track when an armed drop of this item is waiting, so a
 		// pile we did not drop this session is never adopted.
-		if (dist <= DROP_SPAWN_MAX_DIST && stackGrew && hasArmedDropFor(it.getId()))
-		{
-			trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
-				currentLocation(), tick, it.getDespawnTime(), quantityMerge);
-		}
-		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew,
-			tw.getX(), tw.getY(), tw.getPlane());
+		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew || quantityAdded <= 0) return;
+		InvDeltaPending p = pendingDropForSpawn(it.getId(), tick);
+		if (p == null) return;
+		trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
+			currentLocation(), tick, it.getDespawnTime(), quantityMerge, p.dropSessionId, p.dropSeq);
+		resolveDropPendingOnGroundSpawn(p, invCount, tick, tw.getX(), tw.getY(), tw.getPlane(), quantityAdded);
 	}
 
 	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
@@ -10541,7 +10691,8 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event != null && gameplayReady()) ownGameplay.groundClues.spawned(client, event.getItem(), System.currentTimeMillis());
 		// A genuine NEW ground item, never a merge into an existing stack.
-		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false);
+		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false,
+			event.getItem() == null ? 0 : event.getItem().getQuantity());
 	}
 
 	/**
@@ -10553,7 +10704,8 @@ public class AccountConnectPlugin extends Plugin
 	{
 		// A GROWN stack is a merge: the game holds ONE pile and will fire ONE ItemDespawned for it.
 		handleGroundItemForDropPending(event.getItem(), event.getTile(),
-			event.getNewQuantity() > event.getOldQuantity(), true);
+			event.getNewQuantity() > event.getOldQuantity(), true,
+			(long) event.getNewQuantity() - event.getOldQuantity());
 	}
 
 	/** True when a "drop" pending for this item is armed — i.e. this ground pile is one we just dropped. */
@@ -10591,6 +10743,13 @@ public class AccountConnectPlugin extends Plugin
 	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 		int dropTick, int despawnTick, boolean quantityMerge)
 	{
+		trackGroundDrop(item, qty, x, y, plane, location, dropTick, despawnTick, quantityMerge,
+			pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
+		int dropTick, int despawnTick, boolean quantityMerge, String sid, int seq)
+	{
 		synchronized (groundDrops)
 		{
 			// A MERGED STACK IS ONE PILE. Dropping a stackable onto a live pile of the same item on
@@ -10612,7 +10771,7 @@ public class AccountConnectPlugin extends Plugin
 				quantityMerge && dropSession.active() ? findGroundDrop(item, x, y, plane) : null;
 			if (merged != null)
 			{
-				adoptMergedPileIntoDropSession(merged);
+				adoptMergedPileIntoDropSession(merged, sid, seq);
 				return;
 			}
 			while (groundDrops.size() >= GROUND_TRACK_MAX)
@@ -10628,7 +10787,7 @@ public class AccountConnectPlugin extends Plugin
 			// FINDING R2 needs that distinction; see DroppedGroundItem.mergeShadow.
 			g.mergeShadow = quantityMerge;
 			groundDrops.addLast(g);
-			attachPileToDropSession(g);
+			attachPileToDropSession(g, sid, seq);
 		}
 	}
 
@@ -11714,8 +11873,7 @@ public class AccountConnectPlugin extends Plugin
 			if (dropDelta > 0 && spawnTick >= 0 && currentTick - spawnTick <= DROP_CORROBORATION_MAX_TICKS)
 			{
 				removeInvDeltaPending(p);
-				emitDropEvent(p, dropDelta);
-				return dropDelta;
+				return completeDropPending(p, dropDelta);
 			}
 			if (dropDelta > 0 && spawnTick < 0 && p.lossBuildSeq < 0)
 			{
