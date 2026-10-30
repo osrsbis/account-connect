@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.63";
+	private static final String PLUGIN_VERSION = "0.7.64";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -1660,6 +1660,11 @@ public class AccountConnectPlugin extends Plugin
 		final Map<String, Object> location;	// {region_id, plane} at click, or null (alch)
 		final Boolean wilderness;	// drop only: true if dropped inside the Wilderness (instantly visible)
 		final int tick;
+		/** Identity of this click, never the most recent click when its signals arrive. */
+		final String dropSessionId;
+		final int dropSeq;
+		/** Quantity added by this ground event; -1 for callers without ground quantity evidence. */
+		volatile long spawnQuantity = -1;
 		// drop only: tick a matching ground spawn was seen at our tile BEFORE the inventory loss was visible.
 		// Makes resolution order-independent — whichever of (spawn, inventory-decrement) the client processes
 		// first records itself; the second completes the emit. -1 = no corroboration yet.
@@ -1691,6 +1696,16 @@ public class AccountConnectPlugin extends Plugin
 			Map<String, Object> location, Boolean wilderness, int tick,
 			int takeX, int takeY, int takePlane)
 		{
+			this(base, item, spell, beforeCount, beforeCoins, location, wilderness, tick,
+				takeX, takeY, takePlane, null, 0);
+		}
+
+		InvDeltaPending(String base, int item, String spell, long beforeCount, long beforeCoins,
+			Map<String, Object> location, Boolean wilderness, int tick,
+			int takeX, int takeY, int takePlane, String dropSessionId, int dropSeq)
+		{
+			this.dropSessionId = dropSessionId;
+			this.dropSeq = dropSeq;
 			this.takeX = takeX;
 			this.takeY = takeY;
 			this.takePlane = takePlane;
@@ -2909,13 +2924,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void attachPileToDropSession(DroppedGroundItem g)
 	{
+		attachPileToDropSession(g, pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void attachPileToDropSession(DroppedGroundItem g, String sid, int seq)
+	{
 		if (g == null || !dropSession.active())
 		{
 			return;
 		}
-		String sid = pendingDropSessionId;
-		int seq = pendingDropSeq;
-		if (sid == null || seq <= 0)
+		if (sid == null || seq <= 0 || !sid.equals(dropSession.sessionId()))
 		{
 			return;
 		}
@@ -2957,13 +2975,16 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void adoptMergedPileIntoDropSession(DroppedGroundItem existing)
 	{
+		adoptMergedPileIntoDropSession(existing, pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void adoptMergedPileIntoDropSession(DroppedGroundItem existing, String sid, int seq)
+	{
 		if (existing == null || !dropSession.active())
 		{
 			return;
 		}
-		String sid = pendingDropSessionId;
-		int seq = pendingDropSeq;
-		if (sid == null || seq <= 0)
+		if (sid == null || seq <= 0 || !sid.equals(dropSession.sessionId()))
 		{
 			return;
 		}
@@ -2977,7 +2998,7 @@ public class AccountConnectPlugin extends Plugin
 		// Not ours yet. Adopt it through the same call the spawn path uses, so the pile gets this
 		// session's id, this drop's sequence and exactly ONE recorder key, and the pending is
 		// resolved by that key rather than left outstanding.
-		attachPileToDropSession(existing);
+		attachPileToDropSession(existing, sid, seq);
 	}
 
 	/**
@@ -10340,7 +10361,9 @@ public class AccountConnectPlugin extends Plugin
 		// A ground Take carries the pile's tile; anything else has none, which reads as (-1,-1,-1).
 		int[] tile = "pickup".equals(base) ? groundTakeTile(event) : new int[]{-1, -1, -1};
 		InvDeltaPending armed = new InvDeltaPending(base, item, spell, beforeCount, beforeCoins,
-			location, wilderness, tick, tile[0], tile[1], tile[2]);
+			location, wilderness, tick, tile[0], tile[1], tile[2],
+			"drop".equals(base) && dropProofEnabled() ? pendingDropSessionId : null,
+			"drop".equals(base) && dropProofEnabled() ? pendingDropSeq : 0);
 		synchronized (invDeltaPendings)
 		{
 			// A second Drop before the first lands is the NORMAL shape of a drop trade, never a mistake.
@@ -10459,82 +10482,95 @@ public class AccountConnectPlugin extends Plugin
 		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, stackGrew, -1, -1, -1);
 	}
 
-	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
-	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew,
-		int tileX, int tileY, int tilePlane)
+	/** The oldest matching click which has not already consumed a ground spawn. */
+	private InvDeltaPending pendingDropForSpawn(int item, int tick)
 	{
-		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew)
-		{
-			return;	// !stackGrew: a SHRINKING nearby stack is another player looting it — never our drop landing
-		}
 		if (deathPending != null)
 		{
-			// Death belt (backs the onActorDeath disarm): mid-death ground spawns + inventory wipe are the
-			// death's items, never a player-initiated drop — refuse all corroboration while a death settles.
 			clearInvDeltaPendings();
-			return;
+			return null;
 		}
-		// Match by ITEM ID against the oldest matching armed drop. Packet order is the server's choice, so a
-		// spawn may arrive for the second click before the first; matching on the item rather than on "the
-		// one pending" is what lets each drop find its own.
-		InvDeltaPending p;
 		synchronized (invDeltaPendings)
 		{
-			p = null;
+			InvDeltaPending expiredCorroboration = null;
 			java.util.Iterator<InvDeltaPending> it = invDeltaPendings.iterator();
 			while (it.hasNext())
 			{
-				InvDeltaPending c = it.next();
-				if (!"drop".equals(c.base) || c.item != spawnedItemId)
+				InvDeltaPending p = it.next();
+				if (!"drop".equals(p.base) || p.item != item) continue;
+				if (tick - p.tick > DROP_PENDING_MAX_TICKS)
 				{
-					continue;
-				}
-				if (currentTick - c.tick > DROP_PENDING_MAX_TICKS)
-				{
-					// Stale — the click this pending belonged to is long over. Discard it and keep looking:
-					// returning here left a NEWER armed drop of the same item without its spawn, while the
-					// pile was already tracked, so a ground_removed row appeared with no drop row (theft
-					// investigation M5, event 40325).
 					it.remove();
 					continue;
 				}
-				p = c;
-				break;
+				if (p.spawnCorroboratedTick < 0) return p;
+				if (expiredCorroboration == null
+					&& tick - p.spawnCorroboratedTick > DROP_CORROBORATION_MAX_TICKS)
+				{
+					expiredCorroboration = p;
+				}
 			}
-			if (p == null)
-			{
-				return;
-			}
-			// The tile follows the spawn that corroborates (overwritten with spawnCorroboratedTick) or completes
-			// the drop, so the row names the pile that actually confirmed it, never an earlier stray spawn.
+			// A stray spawn can expire, but it must not steal a later click's first ground event.
+			return expiredCorroboration;
+		}
+	}
+
+	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
+	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick,
+		boolean stackGrew, int tileX, int tileY, int tilePlane)
+	{
+		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew) return;
+		resolveDropPendingOnGroundSpawn(pendingDropForSpawn(spawnedItemId, currentTick), invCountAfter,
+			currentTick, tileX, tileY, tilePlane, -1);
+	}
+
+	private void resolveDropPendingOnGroundSpawn(InvDeltaPending p, long invCountAfter, int currentTick,
+		int tileX, int tileY, int tilePlane, long quantityAdded)
+	{
+		if (p == null) return;
+		synchronized (invDeltaPendings)
+		{
+			if (!invDeltaPendings.contains(p)) return;
 			if (tileX >= 0 && tileY >= 0 && tilePlane >= 0)
 			{
 				p.spawnX = tileX;
 				p.spawnY = tileY;
 				p.spawnPlane = tilePlane;
 			}
-			long staleDelta = p.beforeCount - invCountAfter;
-			if (staleDelta <= 0)
-			{
-				// The spawn was processed BEFORE the inventory decrement was visible (intra-tick order is a
-				// server packet detail we don't control). Record the corroboration; the inventory-change path
-				// completes the emit when the loss lands. Without this, spawn-first ordering misses EVERY drop.
-				p.spawnCorroboratedTick = currentTick;
-				return;
-			}
-			invDeltaPendings.remove(p);	// consume — both signals confirmed
+			p.spawnCorroboratedTick = currentTick;
+			p.spawnQuantity = quantityAdded;
+			if (p.beforeCount <= invCountAfter) return; // inventory signal has not arrived yet
+			invDeltaPendings.remove(p);
 		}
-		// The loss came first: the row reports that earlier change, not this spawn.
 		long outer = triggerChangeBuildSeq;
 		triggerChangeBuildSeq = p.lossBuildSeq;
 		try
 		{
-			emitDropEvent(p, p.beforeCount - invCountAfter);
+			completeDropPending(p, p.beforeCount - invCountAfter);
 		}
 		finally
 		{
 			triggerChangeBuildSeq = outer;
 		}
+	}
+
+	/** A shared inventory decrement must not be emitted once for each same-item click. */
+	private long completeDropPending(InvDeltaPending p, long available)
+	{
+		long qty = p.spawnQuantity > 0 ? Math.min(available, p.spawnQuantity) : available;
+		synchronized (invDeltaPendings)
+		{
+			for (InvDeltaPending other : invDeltaPendings)
+			{
+				if (other != p && "drop".equals(other.base) && other.item == p.item
+					&& other.beforeCount == p.beforeCount)
+				{
+					other.beforeCount = Math.max(0, other.beforeCount - qty);
+				}
+			}
+		}
+		emitDropEvent(p, qty);
+		return qty;
 	}
 
 	/** Drop every armed pending — used by the logout / hop / disconnect / death disarms. */
@@ -10595,11 +10631,12 @@ public class AccountConnectPlugin extends Plugin
 		// to one removal when a session drops the same item, same quantity, onto the same tile twice
 		// — which is the ordinary shape of a drop trade, not an edge case.
 		String auditSessionId = null;
-		if (dropSession.active() && pendingDropSessionId != null)
+		if (dropSession.active() && p.dropSessionId != null
+			&& p.dropSessionId.equals(dropSession.sessionId()) && p.dropSeq > 0)
 		{
-			auditSessionId = pendingDropSessionId;
+			auditSessionId = p.dropSessionId;
 			fields.put("drop_session_id", auditSessionId);
-			fields.put("drop_seq", pendingDropSeq);
+			fields.put("drop_seq", p.dropSeq);
 		}
 		// Staff Wilderness drops only: who the client had loaded around us at this drop. The Wilderness
 		// flag is the one sampled at the Drop click, so the gate and the row agree.
@@ -10613,10 +10650,9 @@ public class AccountConnectPlugin extends Plugin
 
 	/** Live wrapper for the ground-spawn resolvers: distance from the local player + current inventory count. */
 	private void handleGroundItemForDropPending(net.runelite.api.TileItem it, net.runelite.api.Tile tile,
-		boolean stackGrew, boolean quantityMerge)
+		boolean stackGrew, boolean quantityMerge, long quantityAdded)
 	{
-		InvDeltaPending p = peekInvDeltaPending();
-		if (p == null || client == null || it == null || tile == null)
+		if (client == null || it == null || tile == null)
 		{
 			return;	// cheap early-out — ItemSpawned fires constantly for scenery/other players' items
 		}
@@ -10641,13 +10677,12 @@ public class AccountConnectPlugin extends Plugin
 		// Track the pile BEFORE resolving: resolution may consume the pending, and the pile is ours either
 		// way (OWNERSHIP_SELF, our own tile). Only track when an armed drop of this item is waiting, so a
 		// pile we did not drop this session is never adopted.
-		if (dist <= DROP_SPAWN_MAX_DIST && stackGrew && hasArmedDropFor(it.getId()))
-		{
-			trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
-				currentLocation(), tick, it.getDespawnTime(), quantityMerge);
-		}
-		resolveDropPendingOnGroundSpawn(it.getId(), dist, invCount, tick, stackGrew,
-			tw.getX(), tw.getY(), tw.getPlane());
+		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew || quantityAdded <= 0) return;
+		InvDeltaPending p = pendingDropForSpawn(it.getId(), tick);
+		if (p == null) return;
+		trackGroundDrop(it.getId(), it.getQuantity(), tw.getX(), tw.getY(), tw.getPlane(),
+			currentLocation(), tick, it.getDespawnTime(), quantityMerge, p.dropSessionId, p.dropSeq);
+		resolveDropPendingOnGroundSpawn(p, invCount, tick, tw.getX(), tw.getY(), tw.getPlane(), quantityAdded);
 	}
 
 	/** A fresh ground item at our tile — the primary own-drop confirmation signal. */
@@ -10656,7 +10691,8 @@ public class AccountConnectPlugin extends Plugin
 	{
 		if (event != null && gameplayReady()) ownGameplay.groundClues.spawned(client, event.getItem(), System.currentTimeMillis());
 		// A genuine NEW ground item, never a merge into an existing stack.
-		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false);
+		handleGroundItemForDropPending(event.getItem(), event.getTile(), true, false,
+			event.getItem() == null ? 0 : event.getItem().getQuantity());
 	}
 
 	/**
@@ -10668,7 +10704,8 @@ public class AccountConnectPlugin extends Plugin
 	{
 		// A GROWN stack is a merge: the game holds ONE pile and will fire ONE ItemDespawned for it.
 		handleGroundItemForDropPending(event.getItem(), event.getTile(),
-			event.getNewQuantity() > event.getOldQuantity(), true);
+			event.getNewQuantity() > event.getOldQuantity(), true,
+			(long) event.getNewQuantity() - event.getOldQuantity());
 	}
 
 	/** True when a "drop" pending for this item is armed — i.e. this ground pile is one we just dropped. */
@@ -10706,6 +10743,13 @@ public class AccountConnectPlugin extends Plugin
 	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 		int dropTick, int despawnTick, boolean quantityMerge)
 	{
+		trackGroundDrop(item, qty, x, y, plane, location, dropTick, despawnTick, quantityMerge,
+			pendingDropSessionId, pendingDropSeq);
+	}
+
+	private void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
+		int dropTick, int despawnTick, boolean quantityMerge, String sid, int seq)
+	{
 		synchronized (groundDrops)
 		{
 			// A MERGED STACK IS ONE PILE. Dropping a stackable onto a live pile of the same item on
@@ -10727,7 +10771,7 @@ public class AccountConnectPlugin extends Plugin
 				quantityMerge && dropSession.active() ? findGroundDrop(item, x, y, plane) : null;
 			if (merged != null)
 			{
-				adoptMergedPileIntoDropSession(merged);
+				adoptMergedPileIntoDropSession(merged, sid, seq);
 				return;
 			}
 			while (groundDrops.size() >= GROUND_TRACK_MAX)
@@ -10743,7 +10787,7 @@ public class AccountConnectPlugin extends Plugin
 			// FINDING R2 needs that distinction; see DroppedGroundItem.mergeShadow.
 			g.mergeShadow = quantityMerge;
 			groundDrops.addLast(g);
-			attachPileToDropSession(g);
+			attachPileToDropSession(g, sid, seq);
 		}
 	}
 
@@ -11829,8 +11873,7 @@ public class AccountConnectPlugin extends Plugin
 			if (dropDelta > 0 && spawnTick >= 0 && currentTick - spawnTick <= DROP_CORROBORATION_MAX_TICKS)
 			{
 				removeInvDeltaPending(p);
-				emitDropEvent(p, dropDelta);
-				return dropDelta;
+				return completeDropPending(p, dropDelta);
 			}
 			if (dropDelta > 0 && spawnTick < 0 && p.lossBuildSeq < 0)
 			{

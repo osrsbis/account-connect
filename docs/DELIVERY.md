@@ -112,3 +112,15 @@ markers and age bounds are checked again before dispatch; restored rows still ne
 a valid fresh server grant and are subject to the server's deletion tombstones.
 The 48-hour local retry bound does not change indefinite eligible server history
 or explicit account erasure. Actual-client restart/fault QA remains outstanding.
+
+## Drop event linkage (0.7.64)
+
+Each pending drop retains the session and sequence assigned at its own click. The ground-spawn and inventory-change
+paths use that identity even when several clicks precede either signal or spawns arrive in a different order.
+A ground spawn corroborates only one pending action. Its added quantity bounds the emitted drop quantity, and
+pending drops that share the same inventory baseline cannot consume that loss repeatedly.
+
+The existing fields and their meaning are unchanged: a drop sequence identifies its own action within one session.
+Expired, interrupted and unobserved actions still remain incomplete; the fix does not infer a recipient or recover
+events that an older client missed. The exact-JAR acceptance suite includes rapid mixed-item drops and repeated
+same-item drops with both inventory-first and spawn-first ordering.

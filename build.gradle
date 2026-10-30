@@ -30,7 +30,7 @@ dependencies {
 }
 
 group = 'com.osrsbestinslot.export'
-version = '0.7.63'
+version = '0.7.64'
 
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
@@ -60,7 +60,7 @@ def staffJar = providers.provider {
 }
 def privateContracts = [
     'SurroundingPlayersTest', 'DropStopContractTest', 'StoreClipRetryTest',
-    'DropFinalManifestTest', 'DropProofIntegrationTest', 'StoreResetPhaseEvidenceTest',
+    'DropFinalManifestTest', 'DropProofIntegrationTest', 'DropEvidenceLinkageTest', 'StoreResetPhaseEvidenceTest',
     'StoreNearbyCaptureTest', 'RecipientMechanicsTest',
     'StaffTradeScreenshotTest', 'StaffTradeOtherOfferCaptureTest',
     'StaffTradeReceivedTest', 'StaffStoreClipUploadTest'
@@ -97,7 +97,7 @@ sourceSets {
 
 // Explicit floors prevent a silently deleted positive suite from shrinking staff coverage.
 def staffMinimumTests = [
-    StaffCapabilitiesTest: 3, DropFinalManifestTest: 5, DropProofIntegrationTest: 20,
+    StaffCapabilitiesTest: 3, DropFinalManifestTest: 5, DropProofIntegrationTest: 20, DropEvidenceLinkageTest: 4,
     DropStopContractTest: 66, RecipientMechanicsTest: 20, StaffStoreClipUploadTest: 9,
     StaffTradeOtherOfferCaptureTest: 8, StaffTradeReceivedTest: 9, StaffTradeScreenshotTest: 10,
     StoreClipRetryTest: 9, StoreNearbyCaptureTest: 19, StoreResetPhaseEvidenceTest: 25,
