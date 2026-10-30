@@ -119,7 +119,7 @@ public class AccountConnectPlugin extends Plugin
 	private static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	private static final String PLUGIN_VERSION = "0.7.62";
+	private static final String PLUGIN_VERSION = "0.7.63";
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final int COINS_ID = 995;
 
@@ -873,6 +873,14 @@ public class AccountConnectPlugin extends Plugin
 	private volatile long publicOutboxDropped;
 	private volatile long publicOutboxPurged;
 	private volatile boolean publicOutboxPaused;
+	/**
+	 * The public owner of the session a logout just ended, with its token. Rows that session captured (a bank
+	 * close at logout, a close that waited for its snapshot) still go to the server until the next login, a token
+	 * change or a revocation. Live 0.7.62 (10-29..30): 45 of 49 visits with no close ended in a logout, client close
+	 * or idle stop, with the close journaled but never sent until that account logged in again.
+	 */
+	private volatile PublicEventOutbox.Context endedPublicOwner;
+	private volatile String endedPublicToken;
 
 	/** Server ingest limits: at most 100 events and under 256 KiB of UTF-8 per request. */
 	static final int EVENT_BATCH_MAX_EVENTS = 100;
@@ -4262,6 +4270,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			activeRsn = rsn;
 			activeHash = hash;
+			endedPublicOwner = null;
 			syncSpoolState();	// an account change purges the previous account's durable spool
 			sessionActive = true;
 			sessionStartMillis = System.currentTimeMillis();
@@ -4317,16 +4326,42 @@ public class AccountConnectPlugin extends Plugin
 	public void onClientShutdown(ClientShutdown event)
 	{
 		clientClosing = true;
-		if (client != null && client.getGameState() == GameState.LOGGED_IN)
-		{
-			trackLogout("client_close");
-		}
 		java.util.concurrent.CompletableFuture<Void> done = new java.util.concurrent.CompletableFuture<>();
 		finalFlushDone = done;
-		boolean sent = flushEventsNow();
-		if (!sent && !eventPostInFlight)
+		finalFlushBatchesLeft.set(FINAL_FLUSH_EXTRA_BATCHES);
+		// ClientShutdown is posted on the UI thread. The bank state belongs to the client thread, so the
+		// teardown runs there, and the logout and the final flush follow it even if the teardown fails.
+		Runnable closeSession = () ->
 		{
-			done.complete(null);
+			if (client != null && client.getGameState() == GameState.LOGGED_IN)
+			{
+				try
+				{
+					// A bank open, or a close waiting for its snapshot, would otherwise never be sent:
+					// end it as a teardown, as a logout does.
+					finishPublicBankClose(true);
+					closeBankVisit("logout", null);
+					endBankSession(false);
+				}
+				catch (RuntimeException failure)
+				{
+					log.debug("OSRS BiS bank teardown at client close failed", failure);
+				}
+				trackLogout("client_close");
+			}
+			boolean sent = flushEventsNow();
+			if (!sent && !eventPostInFlight)
+			{
+				completeFinalFlush();
+			}
+		};
+		if (clientThread != null)
+		{
+			clientThread.invoke(closeSession);
+		}
+		else
+		{
+			closeSession.run();
 		}
 		// What the final batch could not deliver (a 429 when the global hour is full, a 5xx, no network, or
 		// more than one batch) goes to disk, and the next start sends it. RuneLite waits at most 10 s for all
@@ -4517,11 +4552,31 @@ public class AccountConnectPlugin extends Plugin
 	private void completeFinalFlush()
 	{
 		java.util.concurrent.CompletableFuture<Void> f = finalFlushDone;
-		if (f != null)
+		if (f == null || f.isDone())
 		{
-			f.complete(null);
+			return;
 		}
+		// One request carries one kind of row. A public row (a bank close) reaches the buffer after its journal
+		// write on the disk thread, so the close sends a few more batches from there, after those writes.
+		if (clientClosing && finalFlushBatchesLeft.getAndDecrement() > 0 && onSpoolThread(() ->
+		{
+			// Honours a backoff the last answer set: a refused close is not sent again, its rows stay saved.
+			boolean before = eventPostInFlight;
+			flushEvents();
+			if (before || !eventPostInFlight)
+			{
+				completeFinalFlush();
+			}
+		}))
+		{
+			return;
+		}
+		f.complete(null);
 	}
+
+	/** Batches the client close sends after the first one, so a bank close journaled at the close goes too. */
+	static final int FINAL_FLUSH_EXTRA_BATCHES = 3;
+	private final java.util.concurrent.atomic.AtomicInteger finalFlushBatchesLeft = new java.util.concurrent.atomic.AtomicInteger();
 
 	/** Completed by the event callback of the final close flush; null when no close is in progress. */
 	volatile java.util.concurrent.CompletableFuture<Void> finalFlushDone;
@@ -4568,6 +4623,8 @@ public class AccountConnectPlugin extends Plugin
 			fields.put("wealth", netWorth);
 		}
 		emitEvent("logout", fields);
+		endedPublicOwner = publicQueueContext(true);
+		endedPublicToken = currentLinkToken();
 		sessionActive = false;
 		eventObservationContext.clear();
 	}
@@ -4632,6 +4689,26 @@ public class AccountConnectPlugin extends Plugin
 		catch (IllegalArgumentException unknown) { return null; }
 	}
 
+	/** The live owner, or after a logout the owner of the session that ended, while its token and grant still hold. */
+	private PublicEventOutbox.Context publicSendContext()
+	{
+		PublicEventOutbox.Context live = publicQueueContext(true);
+		if (live != null || sessionActive) return live;
+		PublicEventOutbox.Context ended = endedPublicOwner;
+		String token = currentLinkToken();
+		if (ended == null || publicOutboxPaused || config == null || !uploadAllowed() || !token.equals(endedPublicToken)
+			|| token.equals(spoolGrantToken) || !(token.equals(eventQueueGrantToken) || token.equals(bankJournalGrantToken))
+			|| configManager == null || configManager.getProfile() == null)
+			return null;
+		try
+		{
+			// Rows wait for their own RuneLite profile too: a profile switched after the logout ends this window.
+			return ended.identity.equals(new PublicEventOutbox.Context(token, ended.account, ended.mode,
+				Long.toString(configManager.getProfile().getId())).identity) ? ended : null;
+		}
+		catch (IllegalArgumentException unknown) { return null; }
+	}
+
 	private PublicEventOutbox publicBankOutbox;
 
 	private PublicEventOutbox publicBankOutboxOnDiskThread()
@@ -4688,7 +4765,7 @@ public class AccountConnectPlugin extends Plugin
 	private boolean capturedPublicOwnerStillValid(PublicEventOutbox.Context owner, String scope)
 	{
 		if (!publicScopeGranted(scope)) return false;
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current != null) return owner.identity.equals(current.identity);
 		// A bank close is captured before trackLogout clears the mode. Finish that already captured
 		// disk write after logout, but do not replay until a matching logged-in identity returns.
@@ -4751,7 +4828,7 @@ public class AccountConnectPlugin extends Plugin
 	{
 		publicOutboxUndurable.incrementAndGet();
 		queueDeliveryHealth.undurable(event);
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope))
 		{
 			healthEventsLost.incrementAndGet();
@@ -4774,7 +4851,7 @@ public class AccountConnectPlugin extends Plugin
 	private void stagePublicOutbox(PublicEventOutbox.Context owner, String scope) throws IOException
 	{
 		List<Map<String, Object>> recovered = publicOutboxForScope(scope).pending(owner, scope, MAX_PENDING_EVENTS);
-		PublicEventOutbox.Context current = publicQueueContext(true);
+		PublicEventOutbox.Context current = publicSendContext();
 		if (current == null || !owner.identity.equals(current.identity) || !publicScopeGranted(scope)) return;
 		synchronized (pendingEvents)
 		{
@@ -4795,14 +4872,14 @@ public class AccountConnectPlugin extends Plugin
 	/** One coalesced disk read, never file IO on the client tick. */
 	void pumpPublicOutbox()
 	{
-		PublicEventOutbox.Context owner = publicQueueContext(true);
+		PublicEventOutbox.Context owner = publicSendContext();
 		String scope = eventQueueScope;
 		if (owner == null || !publicOutboxPumpQueued.compareAndSet(false, true)) return;
 		if (!onSpoolThread(() ->
 		{
 			try
 			{
-				PublicEventOutbox.Context current = publicQueueContext(true);
+				PublicEventOutbox.Context current = publicSendContext();
 				if (current != null && owner.identity.equals(current.identity))
 				{
 					if (publicScopeGranted(scope)) stagePublicOutbox(owner, scope);
@@ -4863,6 +4940,7 @@ public class AccountConnectPlugin extends Plugin
 	private void revokePublicOutbox(String sentToken)
 	{
 		if (sentToken != null && !sentToken.equals(currentLinkToken())) return;
+		endedPublicOwner = null;
 		eventQueueGrantToken = null;
 		eventQueueScope = null;
 		bankJournalGrantToken = null;
@@ -4956,8 +5034,8 @@ public class AccountConnectPlugin extends Plugin
 				Object durableOwner = ev.get(EVENT_PUBLIC_OUTBOX);
 				if (durableOwner instanceof PublicEventOutbox.Context)
 				{
-					PublicEventOutbox.Context current = publicQueueContext(true);
-					if (current == null) continue; // logout/unknown mode pauses replay
+					PublicEventOutbox.Context current = publicSendContext();
+					if (current == null) continue; // no owner (another login pending, unknown mode) pauses replay
 					if (stagedPublicScope(ev) == null) continue; // another public capability cannot resume this path
 					if (!current.identity.equals(((PublicEventOutbox.Context) durableOwner).identity))
 					{
@@ -5011,7 +5089,7 @@ public class AccountConnectPlugin extends Plugin
 		try
 		{
 			PublicEventOutbox.Context owner = (PublicEventOutbox.Context) selected.get(0).get(EVENT_PUBLIC_OUTBOX);
-			PublicEventOutbox.Context current = publicQueueContext(true);
+			PublicEventOutbox.Context current = publicSendContext();
 			String scope = stagedPublicScope(selected.get(0));
 			if (current == null || !owner.identity.equals(current.identity) || scope == null)
 			{
@@ -5084,7 +5162,7 @@ public class AccountConnectPlugin extends Plugin
 				.post(RequestBody.create(JSON, body))
 				.build();
 			String outboxIdentity = publicOutboxIdentity(batch.get(0));
-			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicQueueContext(true);
+			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : publicSendContext();
 			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)
 				|| stagedPublicScope(batch.get(0)) == null))
 			{
@@ -6432,6 +6510,7 @@ public class AccountConnectPlugin extends Plugin
 	private void closeSpool()
 	{
 		publicOutboxPaused = true;
+		endedPublicOwner = null;
 		bankJournalGrantToken = null;
 		// A re-enable is treated like a cold start: nothing is written or replayed until the server
 		// sends X-Event-Spool again for the configured token.
@@ -6979,6 +7058,7 @@ public class AccountConnectPlugin extends Plugin
 				lastChestEmitKey = null;
 				break;
 			case CONNECTION_LOST:
+				pendingWorldHop = null;
 				clogObtained.clear();
 				clogSeen = false;
 				geAwaitingLogin = true;
@@ -7012,7 +7092,8 @@ public class AccountConnectPlugin extends Plugin
 				clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
 				closeBankVisit("logout", null);
 				endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
-				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
+				lastWorld = 0;
+				pendingWorldHop = null;	// a hop that never reached the new world is not sent	// the next login's WorldChanged must not be read as a hop
 				flushXpGain();		// flush accumulated xp before the session ends
 				xpFlushTicks = 0;
 				flushFirehose();	// flush batched firehose rows before the session ends
@@ -7030,6 +7111,7 @@ public class AccountConnectPlugin extends Plugin
 				flushPendingSnapshot();
 				break;
 			case LOGGED_IN:
+				endedPublicOwner = null;	// rows of the session before wait for their own account again
 				refreshProfileType(); // before replay/loot events, not five seconds later at syncTask
 				// Scene is settled again. Nothing tracked survives from before, so observation is trustworthy
 				// for piles dropped from here on.
@@ -7199,7 +7281,32 @@ public class AccountConnectPlugin extends Plugin
 			Map<String, Object> fields = new LinkedHashMap<>();
 			fields.put("from", prev);
 			fields.put("to", w);
+			GameState state = client.getGameState();
+			if (state == GameState.HOPPING || state == GameState.LOADING)
+			{
+				// During a hop the game mode and the observation context are cleared until the next login. Live
+				// 0.7.61/0.7.62 (10-29..30): all 2,930 world_hop rows had neither. It is sent on the first tick in the world.
+				pendingWorldHop = fields;
+				return;
+			}
 			emitEvent("world_hop", fields);
+		}
+	}
+
+	/** A hop seen while the client was between worlds, sent once the new world's context is known. */
+	private Map<String, Object> pendingWorldHop;
+
+	private void finishPendingWorldHop()
+	{
+		Map<String, Object> hop = pendingWorldHop;
+		if (hop == null || client == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		pendingWorldHop = null;
+		if (activityLogActive())
+		{
+			emitEvent("world_hop", hop);
 		}
 	}
 
@@ -7225,6 +7332,7 @@ public class AccountConnectPlugin extends Plugin
 	public void onGameTick(GameTick event)
 	{
 		refreshEventObservationContext();
+		finishPendingWorldHop();
 		finishPendingBankClose();
 		finishPublicBankClose(false);
 		if (deferredForce)
@@ -8651,8 +8759,15 @@ public class AccountConnectPlugin extends Plugin
 
 	}
 
+	/**
+	 * The gate for a count line. Live 0.7.61/0.7.62 (10-27..30) sent no raid, Wintertodt or agility count: "Your
+	 * completed Tombs of Amascut count is", "Your subdued Wintertodt count is", "Your completion count for the Theatre of
+	 * Blood is" and "Your ... lap count is" did not match.
+	 * A lap line goes out as kind "count" with source "<course> lap": the ingest kinds have no "lap".
+	 */
 	private static final java.util.regex.Pattern KILL_COUNT_RE = java.util.regex.Pattern.compile(
-		"(?:kill|completion|chest|success|harvest) count is:? ?([\\d,]+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+		"(?:(?:kill|completion|chest|success|harvest|lap) count|Your (?:completed|subdued) .+? count|Your completion count for .+?) is:? ?([\\d,]+)",
+		java.util.regex.Pattern.CASE_INSENSITIVE);
 	/**
 	 * Structured source of a count line: "Your [completion count for |subdued |completed ]<source>
 	 * [kill|harvest|completion|success|Total Ticket ][count ]is: N". The shape follows the parser in the

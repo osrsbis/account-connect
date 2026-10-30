@@ -128,6 +128,37 @@ public class Wave1EventsTest
 	}
 
 	@Test
+	public void raidWintertodtAndLapCountsAreSent() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		p.emitParsedMilestones("Your completed Tombs of Amascut: Expert Mode count is: 214.");
+		p.emitParsedMilestones("Your subdued Wintertodt count is: 1,302.");
+		p.emitParsedMilestones("Your Seers' Village Rooftop lap count is: 88.");
+		p.emitParsedMilestones("Your completion count for the Theatre of Blood is: 12.");
+		assertEquals(4, p.pendingEvents.size());
+		Map<String, Object> raid = p.pendingEvents.get(0);
+		assertEquals("Tombs of Amascut: Expert Mode", raid.get("source"));
+		assertEquals("completed", raid.get("kind"));
+		assertEquals(214L, raid.get("count"));
+		assertEquals("Wintertodt", p.pendingEvents.get(1).get("source"));
+		assertEquals("subdued", p.pendingEvents.get(1).get("kind"));
+		assertEquals(1302L, p.pendingEvents.get(1).get("count"));
+		assertEquals("Seers' Village Rooftop lap", p.pendingEvents.get(2).get("source"));
+		assertEquals("count", p.pendingEvents.get(2).get("kind"));
+		assertEquals(88L, p.pendingEvents.get(2).get("count"));
+		assertEquals("Theatre of Blood", p.pendingEvents.get(3).get("source"));
+	}
+
+	@Test
+	public void aCountWordElsewhereInALineIsNotACount() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		p.emitParsedMilestones("Your reward is: 5 coins.");
+		p.emitParsedMilestones("Your completed tasks are shown in the journal.");
+		assertTrue(p.pendingEvents.isEmpty());
+	}
+
+	@Test
 	public void petParsed() throws Exception
 	{
 		AccountConnectPlugin p = plug();
@@ -177,6 +208,53 @@ public class Wave1EventsTest
 		assertEquals("world_hop", e.get("type"));
 		assertEquals(302, e.get("from"));
 		assertEquals(330, e.get("to"));
+	}
+
+	/** A hop seen between worlds goes out on the first tick in the new world, with that world's context. */
+	@Test
+	public void aHopSeenWhileHoppingIsSentInTheNewWorld() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getWorld()).thenReturn(302);
+		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
+		p.onWorldChanged(mock(WorldChanged.class));
+		when(c.getWorld()).thenReturn(330);
+		when(c.getGameState()).thenReturn(GameState.HOPPING);
+		p.onWorldChanged(mock(WorldChanged.class));
+		assertTrue("not while the mode is unknown", hops(p).isEmpty());
+		java.lang.reflect.Method finish = AccountConnectPlugin.class.getDeclaredMethod("finishPendingWorldHop");
+		finish.setAccessible(true);
+		finish.invoke(p);
+		assertTrue("still hopping", hops(p).isEmpty());
+		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
+		finish.invoke(p);
+		assertEquals(1, hops(p).size());
+		assertEquals(302, hops(p).get(0).get("from"));
+		assertEquals(330, hops(p).get(0).get("to"));
+		finish.invoke(p);
+		assertEquals("once", 1, hops(p).size());
+	}
+
+	/** Picking worlds on the login screen is not a hop. */
+	@Test
+	public void worldPicksOnTheLoginScreenAreNotDeferredAsAHop() throws Exception
+	{
+		AccountConnectPlugin p = plug();
+		Client c = mock(Client.class);
+		inject(p, "client", c);
+		when(c.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
+		when(c.getWorld()).thenReturn(302);
+		p.onWorldChanged(mock(WorldChanged.class));
+		when(c.getWorld()).thenReturn(330);
+		p.onWorldChanged(mock(WorldChanged.class));
+		p.pendingEvents.clear();
+		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
+		java.lang.reflect.Method finish = AccountConnectPlugin.class.getDeclaredMethod("finishPendingWorldHop");
+		finish.setAccessible(true);
+		finish.invoke(p);
+		assertTrue(hops(p).isEmpty());
 	}
 
 	/**
