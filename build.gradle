@@ -166,7 +166,6 @@ tasks.register('staffAcceptance', Test) {
     configureStaffGate(delegate, 'staffAcceptance', privateContracts + storeContracts)
 }
 
-// Supplying a staff artifact makes conventional check/build enforce staff acceptance too.
-if (project.hasProperty('staffCandidateJar')) {
-    tasks.named('check') { dependsOn tasks.staffAcceptance }
-}
+// Conventional check/build always enforce staff acceptance: one plugin for everyone, so every build is a
+// staff build. Without staffCandidateJar it tests this checkout's own JAR; with it, the supplied artifact.
+tasks.named('check') { dependsOn tasks.staffAcceptance }
