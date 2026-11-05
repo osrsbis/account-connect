@@ -35,6 +35,7 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.ui.overlay.tooltip.TooltipManager;
 import net.runelite.client.util.Text;
 
 /** Local-only, read-only GE calculator. All game and purchase state belongs to the client thread. */
@@ -47,6 +48,10 @@ final class FlipperController
     private final ClientToolbar toolbar;
     private final OverlayManager overlays;
     private final EventBus eventBus;
+    private final TooltipManager tooltips;
+    private final FlipperOfferActivity offerActivity = new FlipperOfferActivity();
+    private volatile FlipperOverviewOverlay.View overview;
+    private FlipperOverviewOverlay overviewOverlay;
     private final FlipperBuyHistory history = new FlipperBuyHistory();
     private volatile FlipperView view = FlipperView.empty(false, 0, "Enable Flipper to calculate a sell offer.");
     private volatile boolean running;
@@ -98,7 +103,7 @@ final class FlipperController
 
     @Inject
     FlipperController(Client client, ConfigManager configManager,
-        ClientThread clientThread, ClientToolbar toolbar, OverlayManager overlays, EventBus eventBus)
+        ClientThread clientThread, ClientToolbar toolbar, OverlayManager overlays, EventBus eventBus, TooltipManager tooltips)
     {
         this.client = client;
         this.configManager = configManager;
@@ -106,6 +111,7 @@ final class FlipperController
         this.toolbar = toolbar;
         this.overlays = overlays;
         this.eventBus = eventBus;
+        this.tooltips = tooltips;
     }
 
     void startUp(Plugin plugin)
@@ -118,6 +124,8 @@ final class FlipperController
         eventBus.register(this);
         overlay = new FlipperOverlay(plugin, this);
         overlays.add(overlay);
+        overviewOverlay = new FlipperOverviewOverlay(plugin, client, tooltips, () -> overview, this::showOverlay);
+        overlays.add(overviewOverlay);
         SwingUtilities.invokeLater(() ->
         {
             if (!running || lifecycle.get() != generation)
@@ -154,6 +162,12 @@ final class FlipperController
         {
             overlays.remove(overlay);
             overlay = null;
+        }
+        overview = null;
+        if (overviewOverlay != null)
+        {
+            overlays.remove(overviewOverlay);
+            overviewOverlay = null;
         }
         view = FlipperView.empty(false, view.key, "Flipper is off.");
         clientThread.invoke(() -> { if (lifecycle.get() == generation) resetSession(); });
@@ -213,6 +227,7 @@ final class FlipperController
     {
         if (event.getGameState() != GameState.LOGGED_IN)
         {
+            overview = null;
             if (event.getGameState() != GameState.LOADING)
             {
                 resetSession();
@@ -230,6 +245,7 @@ final class FlipperController
             int slot = event.getSlot();
             GrandExchangeOffer offer = event.getOffer();
             history.observe(slot, offer, false);
+            offerActivity.observe(slot, offer, activityNow());
             if (slot < 0 || slot >= offerCosts.length)
             {
                 return;
@@ -283,6 +299,7 @@ final class FlipperController
             resetSession();
             account = current;
             history.seed(client.getGrandExchangeOffers());
+            offerActivity.seed(client.getGrandExchangeOffers(), activityNow());
         }
         return true;
     }
@@ -290,6 +307,8 @@ final class FlipperController
     private void resetSession()
     {
         history.clear();
+        offerActivity.clear();
+        overview = null;
         java.util.Arrays.fill(offerCosts, null);
         account = null;
         clearSelection();
@@ -344,11 +363,13 @@ final class FlipperController
         }
         if (!ready())
         {
+            overview = null;
             clearSelection();
             publish(FlipperView.empty(enabled, selectionKey, enabled
                 ? "Open a sell offer in the Grand Exchange." : "Enable Flipper to calculate a sell offer."));
             return;
         }
+        refreshOverview();
         Widget setup = client.getWidget(InterfaceID.GeOffers.SETUP);
         Widget details = client.getWidget(InterfaceID.GeOffers.DETAILS);
         Widget frame = client.getWidget(InterfaceID.GeOffers.FRAME);
@@ -456,6 +477,32 @@ final class FlipperController
         String name = definition == null || definition.getName() == null ? "Item " + item : definition.getName();
         publish(new FlipperView(enabled, selectionKey, item, name, status, quantity, sold, price,
             typing ? -1 : rate, source, manualInput, cost, anchor));
+    }
+
+    private static long activityNow()
+    {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+    }
+
+    private void refreshOverview()
+    {
+        long now = activityNow();
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+        if (offers == null) { overview = null; return; }
+        for (int i = 0; i < Math.min(8, offers.length); i++) offerActivity.observe(i, offers[i], now);
+        Widget index = client.getWidget(InterfaceID.GeOffers.INDEX);
+        Widget frame = client.getWidget(InterfaceID.GeOffers.FRAME);
+        if (!visible(index) || !visible(frame) || frame.getBounds() == null
+            || visible(client.getWidget(InterfaceID.GeOffers.SETUP)) || visible(client.getWidget(InterfaceID.GeOffers.DETAILS)))
+        { overview = null; return; }
+        java.util.Map<Integer, Rectangle> slots = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < FlipperOverviewOverlay.SLOT_WIDGETS.length; i++)
+        {
+            Widget slot = client.getWidget(FlipperOverviewOverlay.SLOT_WIDGETS[i]);
+            if (visible(slot) && slot.getBounds() != null && slot.getBounds().width > 0 && slot.getBounds().height > 0)
+                slots.put(i, slot.getBounds());
+        }
+        overview = new FlipperOverviewOverlay.View(account, frame.getBounds(), slots, offerActivity.snapshot(), now);
     }
 
     private void noSelection(String status)

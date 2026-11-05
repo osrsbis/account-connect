@@ -92,3 +92,40 @@ GE setup/details, taxed and exempt items, edits, recorded buys, partial sales, c
 account transitions, fixed/resizable layout and coexistence with other GE overlays. Fixture renders and
 unit tests do not claim logged-in acceptance. The complete build and unchanged staff artifact acceptance
 gate remain required.
+
+
+## Grand Exchange overview assistance
+
+The same sidebar Flipper toggle also controls a compact observation rail below the native GE overview.
+Native Buy/Sell controls, item images, prices and progress bars are not replaced or intercepted. The rail
+follows the actual GE frame and visible slot bounds; it hides where there is insufficient canvas space.
+It can occupy chat history beneath the fixed-mode GE window, as the existing selected-offer overlay does.
+This footprint is shown in labelled native-render fixtures; coexistence in every live layout is not claimed.
+
+Each occupied visible slot has a number and native-state cue. Complete and Cancelled are words as well as
+colours. Empty or unreadable slots receive no decoration. These cues are not profitability, urgency or
+recommendations. Hovering a native slot or its observation field uses RuneLite's standard tooltip system
+for filled/total, remaining quantity, watch duration and last locally observed change; clicks remain native.
+
+Pre-existing offers start with unknown true start and prior last-fill time. Their local watch interval is
+known and labelled Watching. A new fill or other observed offer change shows Updated; unchanged duplicate
+events do not reset it. This is observation timing, not the order's actual age or a claim that it is stalled.
+A monotonic process clock supplies elapsed time; a backwards input is unknown. Snapshots copy primitive
+fields so an in-place native offer mutation cannot hide a change. Observed replacement/collection and
+account/profile transition, hop/disconnect, disable or shutdown reset the relevant observations. A replacement
+with identical fields and no observed intermediate transition cannot be distinguished from a duplicate;
+local watch/change timing is therefore not a guaranteed order-identity history or true inactivity.
+
+A view requires the current native INDEX/FRAME, visible matching item descendants within the corresponding
+INDEX_0 through INDEX_7 bounds, and matching native offer fields. Invalid/hidden/replaced widgets suppress
+stale evidence. No dynamic child index is guessed; item lookup is bounded to 64 widgets and four levels per
+occupied slot. The existing PostClientTick path reads at most eight offers; no worker, poller, network call,
+new setting, history store, repricing shortcut or game action is added. Native input and open menus suppress
+both rail and tooltip submissions. RuneLite clears tooltip submissions after each frame.
+
+Focused tests cover existing-offer baselines, watched versus changed timing, duplicate/in-place mutation,
+fill reset, replacement/collection, cancellation, invalid state/geometry, account/profile/toggle transitions,
+current native item binding and menu/input coexistence. Native Graphics2D fixtures cover fixed/resizable and
+150% rendering, all eight slots, long counts, hover, off/input/menu and a labelled composite over a prior
+client image. These are geometry/renderer checks, not live-game acceptance or proof of other plugins' layouts.
+The existing full build and staff artifact suites remain the release gate.

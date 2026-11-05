@@ -40,6 +40,7 @@ public class FlipperControllerTest
         final Client client = mock(Client.class);
         final AtomicReference<Boolean> enabled = new AtomicReference<>(true);
         final ConfigManager configuration = mock(ConfigManager.class);
+        final net.runelite.client.ui.overlay.tooltip.TooltipManager tooltips = new net.runelite.client.ui.overlay.tooltip.TooltipManager();
         final List<Throwable> failures = new ArrayList<>();
         final EventBus bus = new EventBus(failures::add);
         final ClientThread thread = mock(ClientThread.class);
@@ -97,7 +98,7 @@ public class FlipperControllerTest
                 .thenAnswer(call -> enabled.get());
             doAnswer(call -> { enabled.set(call.getArgument(2)); return null; })
                 .when(configuration).setConfiguration(eq(AccountConnectPlugin.CONFIG_GROUP), eq("flipper"), any(Boolean.class));
-            controller = new FlipperController(client, configuration, thread, toolbar, manager, bus);
+            controller = new FlipperController(client, configuration, thread, toolbar, manager, bus, tooltips);
             draft(100, 100, 10_500, 20, "1,029,000 coins (1,050,000 - 2%)");
             controller.startUp(owner);
             SwingUtilities.invokeAndWait(() -> {});
@@ -161,7 +162,7 @@ public class FlipperControllerTest
             f.tick();
             assertEquals(0, new BigDecimal("29000").compareTo(f.controller.view().result.profit));
             assertEquals("Manual purchase cost", f.controller.view().costSource);
-            assertEquals(1, f.overlays.size());
+            assertEquals(2, f.overlays.size());
             assertNotNull(f.overlays.get(0).render(new BufferedImage(600, 500, 2).createGraphics()));
         }
     }
@@ -376,7 +377,7 @@ public class FlipperControllerTest
             });
             SwingUtilities.invokeAndWait(() -> {});
             f.tick();
-            assertEquals(1, f.overlays.size());
+            assertEquals(2, f.overlays.size());
             assertEquals("", f.controller.view().manualInput);
             assertNull(f.controller.view().result.profit);
             verify(f.toolbar, times(2)).addNavigation(any());
