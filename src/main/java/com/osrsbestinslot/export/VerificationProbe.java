@@ -97,6 +97,13 @@ final class VerificationProbe
 		return true;
 	}
 
+	synchronized boolean eventRoom(long nowMs)
+	{
+		while (!samples.isEmpty() && nowMs - samples.peekFirst() >= HOUR_MS) samples.pollFirst();
+		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
+		return samples.size() < MAX_SAMPLES_PER_HOUR && frames.size() < MAX_FRAMES_PER_HOUR;
+	}
+
 	/** True when this sample may also take a frame; counts it. */
 	synchronized boolean takeFrame(long nowMs)
 	{
@@ -241,7 +248,8 @@ final class VerificationProbe
 	private static boolean textOperand(Map<?, ?> row, Object value)
 	{
 		Object inputs = row.get("inputs");
-		return inputs instanceof Map && "text".equals(((Map<?, ?>) inputs).get("reader"))
+		return inputs instanceof Map && ("text".equals(((Map<?, ?>) inputs).get("reader"))
+			|| "discovery_text".equals(((Map<?, ?>) inputs).get("reader")))
 			&& value instanceof String && value.equals(EventVerification.clean((String) value));
 	}
 

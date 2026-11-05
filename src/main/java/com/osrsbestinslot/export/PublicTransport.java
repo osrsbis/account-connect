@@ -38,6 +38,7 @@ final class PublicTransport
         allow("progress", "kind subject count tier task_id shipwreck_type quantity source");
         allow("attempt_end", "outcome basis");
         allow("minigame", "minigame result detail count total screen");
+        allow("verification_discovery", "activity context_basis surface widget region_id discovery_status");
         allow("verification", "area check tick snapshot_revision plugin_version trigger trigger_key trigger_value world ref part parts total mismatches unknown results source_event_id source_event_type source_event_tick source_event_revision");
         allow("pet", ""); // the event is useful; unstructured chat text is not sent
         allow("level_up", "skill level xp");
@@ -72,7 +73,7 @@ final class PublicTransport
     static Map<String, Object> event(Map<String, Object> input, boolean verifiedStaff)
     {
         Map<String, Object> standard = event(input);
-        if (!verifiedStaff || input == null || ("verification".equals(input.get("type")) || "own_state".equals(input.get("type"))
+        if (!verifiedStaff || input == null || ("verification".equals(input.get("type")) || "verification_discovery".equals(input.get("type")) || "own_state".equals(input.get("type"))
             || "own_vars".equals(input.get("type")) || "own_signal".equals(input.get("type")))) return standard;
         String type = String.valueOf(input.get("type"));
         if (!allowsEvent(type, true)) return null;

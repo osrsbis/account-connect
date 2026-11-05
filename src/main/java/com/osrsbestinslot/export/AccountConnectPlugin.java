@@ -348,7 +348,10 @@ public class AccountConnectPlugin extends Plugin
 	private final java.util.concurrent.atomic.AtomicLong verificationEpoch = new java.util.concurrent.atomic.AtomicLong();
 	final VerificationProbe verificationProbe = new VerificationProbe();
 	final EventVerification eventVerification = new EventVerification();
+	final VerificationDiscovery verificationDiscovery = new VerificationDiscovery();
 	private String verificationMessage;
+	private boolean verificationMessageHandled;
+	private boolean discoveryEvidenceQueued;
 	/** captured_at_ms of the last snapshot this client built: the revision a verification row was read against. */
 	volatile long lastSnapshotCapturedAtMs;
 
@@ -370,6 +373,7 @@ public class AccountConnectPlugin extends Plugin
 		verificationEpoch.incrementAndGet();
 		verificationProbe.reset();
 		eventVerification.reset();
+		verificationDiscovery.reset();
 		lastSnapshotCapturedAtMs = 0;
 	}
 
@@ -631,6 +635,9 @@ public class AccountConnectPlugin extends Plugin
 	private ConfigManager configManager;
 
 	@Inject
+	private FlipperController flipper;
+
+	@Inject
 	private net.runelite.client.callback.ClientThread clientThread;
 
 	static final String CONFIG_GROUP = "osrsbisexport";
@@ -654,6 +661,10 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		if (flipper != null)
+		{
+			flipper.startUp(this);
+		}
 		publicOutboxPaused = false;
 		clientClosing = false;
 		removeOrphanedKeys();
@@ -763,6 +774,10 @@ public class AccountConnectPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		if (flipper != null)
+		{
+			flipper.shutDown();
+		}
 		if (overlayManager != null && nearbyOverlay != null)
 		{
 			overlayManager.remove(nearbyOverlay);	// an overlay outliving the plugin is a leak on screen
@@ -4310,7 +4325,7 @@ public class AccountConnectPlugin extends Plugin
 
 	private void emitEventBound(String type, Map<String, Object> fields, String tokenFingerprint)
 	{
-		if ("verification".equals(type) && !verificationGranted()) return;
+		if (("verification".equals(type) || "verification_discovery".equals(type)) && !verificationGranted()) return;
 		if (!PublicTransport.allowsEvent(type, captureEnabled())) return;
 		String liveFingerprint = currentEventTokenFingerprint();
 		if (tokenFingerprint == null || !tokenFingerprint.equals(liveFingerprint))
@@ -4360,10 +4375,17 @@ public class AccountConnectPlugin extends Plugin
 		Map<String,Object> context = eventObservationContext.event(contextOwner, PLUGIN_VERSION,
 			((Number)ev.get("ts")).longValue());
 		if (context != null) ev.put("observation_context", context);
-		boolean eventEvidence = verificationGranted() && EventVerification.TYPES.contains(type) && client != null
+		if (verificationGranted() && client != null && activeHash != null && client.getAccountHash() != -1L
+			&& activeHash.equals(Long.toString(client.getAccountHash())))
+		{
+			verificationDiscovery.bind(currentLinkToken(), activeHash, verificationEpoch.get());
+			if ("activity_counter".equals(type)) verificationDiscovery.counter(ev, client.getTickCount());
+		}
+		boolean eventEvidence = verificationGranted() && EventVerification.TYPES.contains(type) && client != null && client.getAccountHash() != -1L
 			&& activeHash != null && activeHash.equals(Long.toString(client.getAccountHash()));
 		if (eventEvidence)
 		{
+			if (verificationMessage != null && !"verification_discovery".equals(type)) verificationMessageHandled = true;
 			ev.put("verification_tick", client.getTickCount());
 			ev.put("verification_revision", lastSnapshotCapturedAtMs > 0 ? lastSnapshotCapturedAtMs : null);
 			String text = EventVerification.clean(verificationMessage);
@@ -4375,7 +4397,9 @@ public class AccountConnectPlugin extends Plugin
 		{
 			EventVerification.Source source = new EventVerification.Source(ev, currentLinkToken(), activeHash,
 				verificationEpoch.get(), client.getTickCount(), lastSnapshotCapturedAtMs, System.currentTimeMillis(), verificationMessage);
-			if (!eventVerification.offer(source)) eventEvidenceUnknown(source, "pending_capacity");
+			boolean queued = eventVerification.offer(source);
+			if ("verification_discovery".equals(type)) discoveryEvidenceQueued = queued;
+			if (!queued) eventEvidenceUnknown(source, "pending_capacity");
 		}
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
@@ -8771,13 +8795,16 @@ public class AccountConnectPlugin extends Plugin
 				accountProgress.chat(event.getMessage(), System.currentTimeMillis() / 1000L);
 			}
 			verificationMessage = EventVerification.clean(event.getMessage());
+			verificationMessageHandled = false;
 			try
 			{
 				emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
 				emitKillDetail(event.getMessage());
 				emitProgressAndFailure(event.getMessage());
+				if (!verificationMessageHandled && discoveryReady())
+					emitDiscovery(verificationDiscovery.message(client, event.getType(), event.getMessage(), System.currentTimeMillis()));
 			}
-			finally { verificationMessage = null; }
+			finally { verificationMessage = null; verificationMessageHandled = false; }
 			return;
 		}
 		if (event.getType() != ChatMessageType.TRADE)
@@ -8936,6 +8963,8 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onClientTick(net.runelite.api.events.ClientTick event)
 	{
+		if (discoveryReady())
+			for (Map<String, Object> source : verificationDiscovery.poll(client, System.currentTimeMillis())) emitDiscovery(source);
 		pollEventVerification();
 		if (gameplayReady()) ownGameplay.interfaces.clientTick(client, System.currentTimeMillis());
 	}
@@ -9171,6 +9200,34 @@ public class AccountConnectPlugin extends Plugin
 			else now.putIfAbsent((String) c[0], null);
 		}
 		for (Map<String, Object> row : activityCounters.tick(now)) emitEvent("activity_counter", row);
+	}
+
+	private boolean discoveryReady()
+	{
+		if (client == null || !verificationGranted() || client.getGameState() != GameState.LOGGED_IN
+			|| client.getAccountHash() == -1L || activeHash == null || !activeHash.equals(Long.toString(client.getAccountHash())))
+		{
+			verificationDiscovery.reset();
+			return false;
+		}
+		verificationDiscovery.bind(currentLinkToken(), activeHash, verificationEpoch.get());
+		return true;
+	}
+
+	private void emitDiscovery(Map<String, Object> fields)
+	{
+		if (fields == null) return;
+		if (!verificationFramesEnabled() || !verificationProbe.eventRoom(System.currentTimeMillis()) || !eventVerification.room())
+		{ verificationDiscovery.rejected(fields); return; }
+		String previous = verificationMessage;
+		verificationMessage = (String) fields.get("verification_text");
+		discoveryEvidenceQueued = false;
+		try { emitEvent("verification_discovery", fields); }
+		finally
+		{
+			verificationMessage = previous;
+			if (!discoveryEvidenceQueued) verificationDiscovery.rejected(fields);
+		}
 	}
 
 	/** Poll only the bounded event queue on client ticks; it never waits for the random sample gap. */

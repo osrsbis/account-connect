@@ -18,9 +18,15 @@ final class EventVerificationScreen
         if (event.text != null)
         {
             List<Widget> matches = new ArrayList<>();
-            for (int id = InterfaceID.Chatbox.LINE0; id <= InterfaceID.Chatbox.LINE199; id++)
-                match(client, client.getWidget(id), event.text, matches);
-            for (int id : MinigameLines.DIALOGUE_TEXTS) match(client, client.getWidget(id), event.text, matches);
+            if ("verification_discovery".equals(event.type) && event.fields.get("widget") instanceof Number
+                && ((Number) event.fields.get("widget")).intValue() >= 0)
+                match(client, client.getWidget(((Number) event.fields.get("widget")).intValue()), event.text, matches);
+            else
+            {
+                for (int id = InterfaceID.Chatbox.LINE0; id <= InterfaceID.Chatbox.LINE199; id++)
+                    match(client, client.getWidget(id), event.text, matches);
+                for (int id : MinigameLines.DIALOGUE_TEXTS) match(client, client.getWidget(id), event.text, matches);
+            }
             // Repeated identical lines are ambiguous, not proof of the current event.
             if (matches.size() == 1) addMessage(out, matches.get(0), event);
         }
@@ -70,7 +76,10 @@ final class EventVerificationScreen
 
     private static void addMessage(List<VerificationFrame.Region> out, Widget widget, EventVerification.Source event)
     {
-        if ("kill_count".equals(event.type))
+        if ("verification_discovery".equals(event.type))
+            add(out, widget, "message", event.fields.get("verification_text"), "discovery_text", "verification_text",
+                VerificationProbe.inputs("activity", event.fields.get("activity"), "surface", event.fields.get("surface")));
+        else if ("kill_count".equals(event.type))
             add(out, widget, "count", event.fields.get("count"), "kill_count", "count", null);
         else if ("minigame".equals(event.type))
         {

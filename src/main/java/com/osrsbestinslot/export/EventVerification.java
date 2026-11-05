@@ -8,7 +8,8 @@ final class EventVerification
     static final int MAX_PENDING = 8;
     static final int MAX_DELAY_TICKS = 3;
     static final Set<String> TYPES = new HashSet<>(Arrays.asList(
-        "kill_count", "loot", "level_up", "minigame", "progress", "attempt_end", "death", "pet", "slayer_task"));
+        "kill_count", "loot", "level_up", "minigame", "progress", "attempt_end", "death", "pet", "slayer_task",
+        "verification_discovery"));
     private final ArrayDeque<Source> pending = new ArrayDeque<>();
 
     static final class Source
@@ -55,6 +56,7 @@ final class EventVerification
         pending.addLast(source);
         return true;
     }
+    synchronized boolean room() { return pending.size() < MAX_PENDING; }
     synchronized List<Source> drain()
     {
         List<Source> out = new ArrayList<>(pending);
