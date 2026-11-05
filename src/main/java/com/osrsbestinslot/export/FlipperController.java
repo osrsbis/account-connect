@@ -42,7 +42,6 @@ final class FlipperController
 {
     private static final Pattern COINS = Pattern.compile("^([0-9][0-9,]*) coins?(?:\\s.*)?$");
     private final Client client;
-    private final AccountConnectConfig config;
     private final ConfigManager configManager;
     private final ClientThread clientThread;
     private final ClientToolbar toolbar;
@@ -98,11 +97,10 @@ final class FlipperController
     }
 
     @Inject
-    FlipperController(Client client, AccountConnectConfig config, ConfigManager configManager,
+    FlipperController(Client client, ConfigManager configManager,
         ClientThread clientThread, ClientToolbar toolbar, OverlayManager overlays, EventBus eventBus)
     {
         this.client = client;
-        this.config = config;
         this.configManager = configManager;
         this.clientThread = clientThread;
         this.toolbar = toolbar;
@@ -171,6 +169,12 @@ final class FlipperController
         });
     }
 
+    private boolean configuredEnabled()
+    {
+        return Boolean.TRUE.equals(configManager.getConfiguration(AccountConnectPlugin.CONFIG_GROUP,
+            "flipper", Boolean.class));
+    }
+
     private void changeToggle(boolean value)
     {
         if (!value)
@@ -188,7 +192,7 @@ final class FlipperController
     {
         if (AccountConnectPlugin.CONFIG_GROUP.equals(event.getGroup()) && "flipper".equals(event.getKey()))
         {
-            if (!config.flipper())
+            if (!configuredEnabled())
             {
                 enabled = false;
                 view = FlipperView.empty(false, view.key, "Flipper is off.");
@@ -264,7 +268,7 @@ final class FlipperController
 
     private boolean ready()
     {
-        if (!running || !enabled || !config.flipper() || client.getGameState() != GameState.LOGGED_IN)
+        if (!running || !enabled || !configuredEnabled() || client.getGameState() != GameState.LOGGED_IN)
         {
             return false;
         }
@@ -332,7 +336,7 @@ final class FlipperController
         {
             return;
         }
-        boolean wanted = config.flipper();
+        boolean wanted = configuredEnabled();
         if (wanted != enabled)
         {
             resetSession();
@@ -504,7 +508,7 @@ final class FlipperController
 
     boolean showOverlay()
     {
-        return running && enabled && config.flipper();
+        return running && enabled && configuredEnabled();
     }
 
     static BufferedImage logo()

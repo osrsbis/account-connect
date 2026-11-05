@@ -6,7 +6,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -38,7 +38,8 @@ public class FlipperControllerTest
     static final class Fixture implements AutoCloseable
     {
         final Client client = mock(Client.class);
-        final AtomicBoolean enabled = new AtomicBoolean(true);
+        final AtomicReference<Boolean> enabled = new AtomicReference<>(true);
+        final ConfigManager configuration = mock(ConfigManager.class);
         final List<Throwable> failures = new ArrayList<>();
         final EventBus bus = new EventBus(failures::add);
         final ClientThread thread = mock(ClientThread.class);
@@ -56,8 +57,11 @@ public class FlipperControllerTest
         final AccountConnectPlugin owner = new AccountConnectPlugin();
         final FlipperController controller;
 
-        Fixture() throws Exception
+        Fixture() throws Exception { this(true); }
+
+        Fixture(Boolean initialSetting) throws Exception
         {
+            enabled.set(initialSetting);
             when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
             when(client.getAccountHash()).thenReturn(10L);
             when(client.getWorldType()).thenReturn(EnumSet.noneOf(WorldType.class));
@@ -89,12 +93,11 @@ public class FlipperControllerTest
                 .when(manager).add(any(Overlay.class));
             doAnswer(call -> { overlays.remove(call.getArgument(0)); return null; })
                 .when(manager).remove(any(Overlay.class));
-            AccountConnectConfig config = new AccountConnectConfig()
-            {
-                @Override public boolean flipper() { return enabled.get(); }
-            };
-            controller = new FlipperController(client, config, mock(ConfigManager.class),
-                thread, toolbar, manager, bus);
+            when(configuration.getConfiguration(AccountConnectPlugin.CONFIG_GROUP, "flipper", Boolean.class))
+                .thenAnswer(call -> enabled.get());
+            doAnswer(call -> { enabled.set(call.getArgument(2)); return null; })
+                .when(configuration).setConfiguration(eq(AccountConnectPlugin.CONFIG_GROUP), eq("flipper"), any(Boolean.class));
+            controller = new FlipperController(client, configuration, thread, toolbar, manager, bus);
             draft(100, 100, 10_500, 20, "1,029,000 coins (1,050,000 - 2%)");
             controller.startUp(owner);
             SwingUtilities.invokeAndWait(() -> {});
@@ -407,6 +410,83 @@ public class FlipperControllerTest
             when(f.client.getCanvasWidth()).thenReturn(200);
             f.tick();
             assertNull(f.controller.view().anchor);
+        }
+    }
+
+    private static javax.swing.JCheckBox sidebarToggle(FlipperController controller) throws Exception
+    {
+        java.lang.reflect.Field panel = FlipperController.class.getDeclaredField("panel");
+        panel.setAccessible(true);
+        for (java.awt.Component child : ((FlipperPanel) panel.get(controller)).getComponents())
+            if (child instanceof javax.swing.JCheckBox) return (javax.swing.JCheckBox) child;
+        throw new AssertionError("Missing sidebar toggle");
+    }
+
+    @Test
+    public void absentLocalToggleDefaultsOffWithoutConfigItem() throws Exception
+    {
+        try (Fixture f = new Fixture(null))
+        {
+            f.tick();
+            assertFalse(f.controller.view().enabled);
+            assertFalse(f.controller.showOverlay());
+            assertFalse(sidebarToggle(f.controller).isSelected());
+            assertEquals(0L, mockingDetails(f.configuration).getInvocations().stream()
+                .filter(call -> call.getMethod().getName().equals("setConfiguration")).count());
+        }
+    }
+
+    @Test
+    public void sidebarTogglePersistsAcrossRestartAndOnlyToggleIsStored() throws Exception
+    {
+        try (Fixture f = new Fixture(null))
+        {
+            SwingUtilities.invokeAndWait(() ->
+            {
+                try { sidebarToggle(f.controller).doClick(); }
+                catch (Exception error) { throw new AssertionError(error); }
+            });
+            f.tick();
+            assertTrue(f.controller.view().enabled);
+            assertEquals(Boolean.TRUE, f.enabled.get());
+            f.cost("10000");
+            f.controller.shutDown();f.controller.startUp(f.owner);
+            SwingUtilities.invokeAndWait(() -> {});f.tick();
+            assertTrue(f.controller.view().enabled);
+            assertEquals("", f.controller.view().manualInput);
+            assertNull(f.controller.view().result.profit);
+            SwingUtilities.invokeAndWait(() ->
+            {
+                try { sidebarToggle(f.controller).doClick(); }
+                catch (Exception error) { throw new AssertionError(error); }
+            });
+            assertFalse(f.controller.showOverlay());
+            assertEquals(Boolean.FALSE, f.enabled.get());
+            f.controller.shutDown();f.controller.startUp(f.owner);
+            SwingUtilities.invokeAndWait(() -> {});f.tick();
+            assertFalse(f.controller.view().enabled);
+            verify(f.configuration).setConfiguration(AccountConnectPlugin.CONFIG_GROUP, "flipper", true);
+            verify(f.configuration).setConfiguration(AccountConnectPlugin.CONFIG_GROUP, "flipper", false);
+            assertEquals(2L, mockingDetails(f.configuration).getInvocations().stream()
+                .filter(call -> call.getMethod().getName().equals("setConfiguration")).count());
+        }
+    }
+
+    @Test
+    public void oldQueuedCostEditCannotSurviveControllerRestart() throws Exception
+    {
+        try (Fixture f = new Fixture())
+        {
+            List<Runnable> queued = new ArrayList<>();
+            doAnswer(call -> { queued.add(call.getArgument(0)); return null; }).when(f.thread).invoke(any(Runnable.class));
+            f.controller.changeCost(f.controller.view().key, "12345");
+            f.controller.shutDown();f.controller.startUp(f.owner);
+            for (Runnable task : new ArrayList<>(queued)) task.run();
+            f.tick();
+            assertTrue(f.controller.view().enabled);
+            assertEquals("", f.controller.view().manualInput);
+            assertNull(f.controller.view().result.profit);
+            doAnswer(call -> { ((Runnable) call.getArgument(0)).run(); return null; }).when(f.thread).invoke(any(Runnable.class));
         }
     }
 

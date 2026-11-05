@@ -8,17 +8,6 @@ import net.runelite.client.config.ConfigItem;
 public interface AccountConnectConfig extends Config
 {
 	@ConfigItem(
-		keyName = "flipper",
-		name = "Flipper",
-		description = "Show the local Grand Exchange profit calculator and sell-offer overlay.",
-		position = 1
-	)
-	default boolean flipper()
-	{
-		return false;
-	}
-
-	@ConfigItem(
 		keyName = "linkToken",
 		name = "Link token",
 		description =

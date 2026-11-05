@@ -256,9 +256,9 @@ public class UploadGatingTest
 		}
 	}
 
-	/** Only the existing connection items and the explicitly requested local Flipper toggle are declared. */
+	/** The settings panel shows exactly two items: the link token and the API base URL. */
 	@Test
-	public void configDeclaresOnlyConnectionItemsAndRequestedFlipperToggle()
+	public void configDeclaresExactlyLinkTokenAndApiBaseUrl()
 	{
 		java.util.Set<String> keys = new java.util.HashSet<>();
 		for (java.lang.reflect.Method m : AccountConnectConfig.class.getDeclaredMethods())
@@ -270,8 +270,7 @@ public class UploadGatingTest
 				keys.add(item.keyName());
 			}
 		}
-		assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("linkToken", "apiBaseUrl", "flipper")), keys);
-		assertFalse("Local Flipper starts disabled", new AccountConnectConfig() {}.flipper());
+		assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("linkToken", "apiBaseUrl")), keys);
 	}
 
 	/** The approved linkToken description: the 0.7.13 text with the two upload-switch phrases removed. */

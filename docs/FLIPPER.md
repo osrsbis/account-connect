@@ -1,6 +1,6 @@
 # Flipper (candidate)
 
-This candidate adds the requested Flipper toggle, a RuneLite sidebar and a small Grand Exchange sell-offer overlay.
+This candidate adds the requested Flipper toggle inside its RuneLite sidebar and a small Grand Exchange sell-offer overlay.
 It is disabled by default. It is not a release record; the released plugin remains described in README.md.
 
 ## Player behavior
@@ -75,7 +75,8 @@ Shutdown removes the event subscriber, sidebar and overlay. Queued startup, shut
 callbacks are bound to their lifecycle generation; a rapid restart cannot reuse an old panel or edit.
 
 The calculator makes no network requests, sends no new fields, stores no purchase history or manual amounts,
-and works without a link token. Only the requested Flipper toggle is persisted in the plugin configuration.
+and works without a link token. Only the sidebar toggle state is stored through RuneLite configuration (ConfigManager); an absent value means off.
+There is no duplicate RuneLite configuration-panel item: the existing two connection settings are unchanged.
 It does not change the existing account collector or staff gates.
 
 ## Verification and release boundary
