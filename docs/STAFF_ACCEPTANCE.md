@@ -16,8 +16,9 @@ JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64 ./scripts/verify-staff-release.sh /
 
 The wrapper runs `check -PstaffCandidateJar=...`: the normal public regression suite plus
 the separate positive staff acceptance suite. Direct Gradle invocation is equivalent.
-Without that property, `check` and `build` validate only the public build.
-Running `staffAcceptance` without a candidate tests this checkout's built JAR.
+Without that property, `check` and `build` still run staff acceptance, against this
+checkout's own built JAR. That catches a broken staff tool in every normal build, but only
+the run against the exact Hub JAR qualifies that artifact.
 
 The gate compiles and runs the staff contracts against the supplied JAR, without
 `sourceSets.main.output` on its classpath. Preflight verifies the loaded plugin's code source,

@@ -1,8 +1,10 @@
 # Own-gameplay capture
 
-These contracts describe capture that needs the server's own-gameplay grant (`X-Own-Gameplay: on`) and, for the
-journals, an explicit Queue scope. The server keeps that grant off unless a linked player is opted in, so an ordinary
-player's client does not send this data. Each section states its own release state.
+These contracts describe capture controlled by `X-Own-Gameplay: on`. The 0.7.66 candidate can receive that
+grant through collection rollout independently of staff identity. With no Queue scope, closed combat, signal,
+state and variable events use the existing granted, capped legacy receiver. That fallback is not a durable
+public journal across restart. Existing Queue-pinned retries keep their original writer and scope.
+The journal sections below describe negotiated Queue behavior, not a prerequisite for all collection.
 
 ## Own-event provenance (0.7.37 candidate)
 
@@ -164,9 +166,8 @@ Restart or scope rollback retains pending rows until the matching scope returns;
 explicit erasure still prevents replay. Process-local observed/handed-off/failure
 counters are not durable delivery counts. Schema5 and the separate state policy
 are LOCAL candidates; no server policy, public release or live retention scope
-has been activated. The frozen public QA artifact and private staff build remain
-separate. Exact-source review, truthful disclosure, matched backend and actual
-client QA are still required before release.
+has been activated. There is one plugin artifact; capture grants and staff rights are separate.
+Exact-source review, a matched receiver and actual-client acceptance remain required before release.
 
 ## Own-combat journal candidate
 

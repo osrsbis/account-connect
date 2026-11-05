@@ -262,7 +262,7 @@ public class PublicEventOutboxPluginTest
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Own-Gameplay",gameplay?"on":"off").build();
         p.applyServerPolicy(r,token.get());p.awaitSpoolIdleForTest();
     }
-    @Test public void grantedCombatWithoutQueueScopeUsesLegacyWriterAndStateNeverDoes() throws Exception
+    @Test public void grantedClosedGameplayWithoutQueueScopeUsesLegacyWriter() throws Exception
     {
         Map<String,Object> hit=new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
             "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
@@ -276,7 +276,9 @@ public class PublicEventOutboxPluginTest
         assertNotNull("legacy combat carries an event_id for server dedupe",p.pendingEvents.get(0).get("event_id"));
         p.pendingEvents.clear();
         Map<String,Object> state=OwnStateEventTest.goalEvent();
-        assertFalse("own_state never uses the legacy writer",p.emitOwnGameplayEvent(state));
+        assertTrue("closed own_state uses the granted legacy receiver",p.emitOwnGameplayEvent(state));
+        p.awaitSpoolIdleForTest();assertEquals(1,p.pendingEvents.size());
+        assertEquals("own_state",p.pendingEvents.get(0).get("type"));p.pendingEvents.clear();
         p.emitEvent("own_state",Map.of("state_schema",1));p.awaitSpoolIdleForTest();
         assertTrue(p.pendingEvents.isEmpty());
         gameplayOnlyGrant(false);

@@ -402,6 +402,54 @@ public class UploadGatingTest
 		assertEquals(1, server.getRequestCount());
 	}
 
+	/**
+	 * THE REVOCATION IT EXISTS FOR. An idle client holding the staff-capture grant must ask again once the
+	 * heartbeat window elapses, and the answer without the grant must end it. Without the heartbeat the
+	 * client never asks, and a staff grant the server already withdrew keeps the recorders alive.
+	 */
+	@Test
+	public void anIdleStaffClientHeartbeatsAndTheAnswerRevokesTheGrant() throws Exception
+	{
+		buildPlugin();
+		plugin.minUploadIntervalMillis = 1;
+		plugin.staffApiBase = server.url("/").toString();	// this rig's stand-in for osrsbestinslot.com
+		String account = Long.toString(client.getAccountHash());
+
+		server.enqueue(new MockResponse().setResponseCode(200)
+			.setHeader("X-Staff-Capture", "on").setHeader("X-Staff-Account", account));
+		setSkillXp(1000);
+		plugin.syncTask();
+		assertNotNull("the first tick uploads", server.takeRequest(5, TimeUnit.SECONDS));
+		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		assertTrue("the server granted staff capture to this account", plugin.staffCaptureEnabled());
+
+		// Idle inside the window: the hash gate holds the send, even for a granted client.
+		plugin.syncTask();
+		assertNull("an unchanged tick inside the heartbeat window must not send",
+			server.takeRequest(300, TimeUnit.MILLISECONDS));
+
+		// The window elapses with nothing changed. The server has since taken the account off its staff list.
+		plugin.lastSendMillis =
+			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		server.enqueue(new MockResponse().setResponseCode(200));
+		plugin.syncTask();
+		assertNotNull("a granted idle client must heartbeat once the window elapses",
+			server.takeRequest(5, TimeUnit.SECONDS));
+		long deadline = System.currentTimeMillis() + 5000L;
+		while (System.currentTimeMillis() < deadline && plugin.staffCaptureEnabled())
+		{
+			Thread.sleep(10);
+		}
+		assertFalse("the heartbeat's answer without the grant must revoke it", plugin.staffCaptureEnabled());
+
+		// Revoked, it has nothing left to lose: no further heartbeat traffic.
+		plugin.lastSendMillis =
+			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.syncTask();
+		assertNull("a revoked client stops heartbeating", server.takeRequest(500, TimeUnit.MILLISECONDS));
+		assertEquals(2, server.getRequestCount());
+	}
+
 	/** The heartbeat must not defeat the 429 backoff: the server explicitly said stop. */
 	@Test
 	public void theHeartbeatStillHonoursA429Backoff() throws Exception

@@ -55,6 +55,16 @@ The plugin also sends account activity as events: Grand Exchange and store buys 
 loot, items you drop, pick up or alch, when your dropped items leave the ground, deaths, kill counts, level-ups and XP,
 gear changes, bank visits, region changes, world hops, and login and logout times.
 
+Two further parts send nothing unless the site turns them on for your link (they are off by default):
+
+- kill detail: fight, lap and raid durations with personal bests, Hallowed Sepulchre and Guardians of the Rift counts,
+  and the rewards of Tempoross, Wintertodt, Guardians of the Rift and Herbiboar;
+- kill context: your worn items, inventory, combat levels and special attack energy at each kill count, completed slayer
+  tasks, clue, collection-log and combat-task lines as timed events, raid failures, and changes of game counters such as
+  Doom of Mokhaiotl clears, Colosseum waves, Tempoross permits and Tithe Farm and Barbarian Assault points.
+
+Details are in [Kill detail and kill context](docs/KILL_DETAIL.md).
+
 It does **not** read or send your password, email, payment details, or any Jagex-account
 credentials — RuneLite does not expose those to plugins.
 
@@ -66,6 +76,7 @@ The details of each capture and its release state are in `docs/`:
 - [Grand Exchange observations](docs/GE_OBSERVATIONS.md)
 - [Event delivery and retry](docs/DELIVERY.md), including the latest bank in the snapshot (0.7.62)
 - [Own-gameplay capture](docs/OWN_GAMEPLAY.md), which needs a separate server grant
+- [Kill detail and kill context](docs/KILL_DETAIL.md), each behind its own server grant (0.7.65)
 - [Staff acceptance gate](docs/STAFF_ACCEPTANCE.md)
 
 ## Privacy

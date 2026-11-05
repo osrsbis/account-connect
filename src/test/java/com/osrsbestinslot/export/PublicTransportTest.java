@@ -75,6 +75,101 @@ public class PublicTransportTest
         assertTrue(body, body.contains(ID)); assertTrue(body, body.contains("OwnPlayer"));
         assertTrue(body, body.contains("4151")); assertTrue(body, body.contains("995"));
     }
+    @Test public void verificationNeedsItsOwnGrantAndTokenChangeEndsIt() throws Exception
+    {
+        assertFalse(plugin.verificationGranted());
+        plugin.emitEvent("verification", Map.of("area", "skills"));
+        assertTrue(plugin.pendingEvents.isEmpty());
+        Response on = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Verification", "on").build();
+        plugin.applyServerPolicy(on);
+        assertTrue(plugin.verificationGranted());
+        assertEquals("new grants sample promptly without pretending a new game login occurred",
+            "verification_ready", plugin.verificationProbe.due(System.currentTimeMillis()).trigger);
+        assertFalse("row permission alone grants no images", plugin.verificationFramesEnabled());
+        plugin.applyServerPolicy(on.newBuilder().header("X-Screenshots", "off")
+            .header("X-Verification-Frames", "on").build());
+        assertTrue("separate test permission survives the non-staff delivery-media ban", plugin.verificationFramesEnabled());
+        assertFalse("verification permission grants no trade capture", plugin.screenshotsEnabled());
+        plugin.applyServerPolicy(on.newBuilder().header("X-Verification-Frames", "off").build());
+        assertTrue(plugin.verificationGranted());
+        assertFalse(plugin.verificationFramesEnabled());
+        plugin.emitEvent("verification", Map.of("area", "skills", "snapshot_revision", 123L));
+        assertEquals(1, plugin.pendingEvents.size());
+        plugin.applyServerPolicy(on.newBuilder().removeHeader("X-Verification").build());
+        assertFalse(plugin.verificationGranted());
+        plugin.applyServerPolicy(on.newBuilder().code(503).build());
+        assertFalse(plugin.verificationGranted());
+        plugin.applyServerPolicy(on);
+        net.runelite.client.events.ConfigChanged change = new net.runelite.client.events.ConfigChanged();
+        change.setGroup(AccountConnectPlugin.CONFIG_GROUP); change.setKey("linkToken");
+        change.setOldValue(TOKEN); change.setNewValue("ffffffffffffffffffffffffffffffff");
+        plugin.onConfigChanged(change);
+        assertFalse("A -> B -> A cannot restore the earlier grant", plugin.verificationGranted());
+        assertFalse(plugin.verificationFramesEnabled());
+    }
+    @Test public void verificationFrameUploadWorksWithoutStaffDeliveryPermission() throws Exception
+    {
+        Class<?>[] signature = { String.class, byte[].class, String.class, long.class };
+        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+        Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Screenshots", "off")
+            .header("X-Verification", "on").header("X-Verification-Frames", "on").build();
+        plugin.applyServerPolicy(policy);
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
+        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
+        assertNotNull(request);
+        assertEquals("/api/screenshot-ingest", request.getPath());
+        String body = request.getBody().readUtf8();
+        assertTrue(body.contains("verify")); assertTrue(body.contains("0123456789abcdef")); assertTrue(body.contains("1234"));
+        plugin.applyServerPolicy(policy.newBuilder().header("X-Verification-Frames", "off").build());
+        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
+    }
+    @Test public void deliveryGrantAllowsCaptureWithoutStaffIdentityOrOverlays() throws Exception
+    {
+        put("staffApiBase", server.url("/api").toString());
+        Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK")
+            .header("X-Staff-Capture", "off").header("X-Store-Tools", "off").header("X-Screenshots", "off").header("X-Clips", "off")
+            .header("X-Delivery-Capture", "on").header("X-Delivery-Account", "12345")
+            .header("X-Delivery-Screenshots", "allow").header("X-Delivery-Clips", "allow")
+            .header("X-Delivery-Drop-Proof", "on").build();
+        plugin.applyServerPolicy(policy);
+        assertFalse(plugin.staffCaptureEnabled()); assertFalse(plugin.storeToolsEnabled());
+        assertTrue(plugin.deliveryCaptureEnabled()); assertTrue(plugin.screenshotsEnabled());
+        assertTrue(plugin.storeClipsEnabled()); assertTrue(plugin.dropProofEnabled());
+        plugin.emitEvent("trade", Map.of("given", List.of(), "received", List.of(), "counterparty", "OtherPlayer"));
+        assertEquals("OtherPlayer", plugin.pendingEvents.get(0).get("counterparty"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
+        call("uploadTradeScreenshot", new Class<?>[]{String.class, byte[].class, String.class}, TOKEN, new byte[]{1, 2}, "confirm");
+        RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
+        assertNotNull(request); String body = request.getBody().readUtf8();
+        assertTrue(body.contains("account_hash")); assertTrue(body.contains("12345"));
+        put("activeHash", "999"); assertFalse(plugin.deliveryCaptureEnabled());
+        put("activeHash", "12345");
+        plugin.applyServerPolicy(policy.newBuilder().removeHeader("X-Delivery-Capture").build());
+        assertFalse(plugin.deliveryCaptureEnabled()); assertFalse(plugin.screenshotsEnabled());
+        assertFalse(plugin.storeClipsEnabled()); assertFalse(plugin.dropProofEnabled());
+    }
+    @Test public void optionalCollectionGrantsStayWithTheResponseAccount() throws Exception
+    {
+        Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Collection-Account", "12345")
+            .header("X-Own-Gameplay", "on").header("X-Account-Progress", "on")
+            .header("X-Kill-Detail", "on").header("X-Kill-Context", "on").build();
+        plugin.applyServerPolicy(policy);
+        assertTrue(plugin.gameplayGranted()); assertTrue(plugin.progressGranted());
+        assertTrue(plugin.killDetailGranted()); assertTrue(plugin.killContextGranted());
+        put("activeHash", "999");
+        assertFalse(plugin.gameplayGranted()); assertFalse(plugin.progressGranted());
+        assertFalse(plugin.killDetailGranted()); assertFalse(plugin.killContextGranted());
+        put("activeHash", "12345");
+        plugin.applyServerPolicy(policy.newBuilder().removeHeader("X-Collection-Account").build());
+        assertFalse("a missing binding cannot restore an earlier account grant", plugin.gameplayGranted());
+    }
     @Test public void qualifiedGeCountersSurviveProjectionWithoutUnknownNestedFields()
     {
         Map<String,Object> observation = new LinkedHashMap<>();

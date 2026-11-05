@@ -3,8 +3,8 @@ package com.osrsbestinslot.export;
 import java.util.*;
 
 /**
- * Public Hub wire contract. Remote grants, tokens and JVM properties cannot widen it for a player.
- * The one exception is staff capture, which the server grants only to an approved staff token and account.
+ * Public Hub wire contract. The server may grant collection to an exact token and account.
+ * A collection grant widens permitted event fields but never grants staff identity or access rights.
  */
 final class PublicTransport
 {
@@ -13,7 +13,7 @@ final class PublicTransport
 
     private static final Map<String, Set<String>> FIELDS = new HashMap<>();
     private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type world world_members");
-    private static final Set<String> ITEMS = keys("given received equipped unequipped items items_lost deposited withdrawn");
+    private static final Set<String> ITEMS = keys("given received equipped unequipped items items_lost deposited withdrawn worn inventory");
     static
     {
         allow("trade", "given received world world_members");
@@ -31,6 +31,14 @@ final class PublicTransport
         allow("equip_change", "equipped unequipped");
         allow("loot", "source_name source_type items value");
         allow("kill_count", "source kind count");
+        allow("kill_timing", "seq label duration_s new_pb personal_best_s team_size room");
+        allow("kill_context", "source count worn inventory levels_boosted_real special_energy world_members toa_raid_level");
+        allow("activity_counter", "key from to kind seen");
+        allow("slayer_task", "tasks_completed task_target_id");
+        allow("progress", "kind subject count tier task_id shipwreck_type quantity source");
+        allow("attempt_end", "outcome basis");
+        allow("minigame", "minigame result detail count total screen");
+        allow("verification", "area check tick snapshot_revision plugin_version trigger trigger_key trigger_value world ref part parts total mismatches unknown results");
         allow("pet", ""); // the event is useful; unstructured chat text is not sent
         allow("level_up", "skill level xp");
         allow("xp_gain", "gains total");
@@ -64,7 +72,8 @@ final class PublicTransport
     static Map<String, Object> event(Map<String, Object> input, boolean verifiedStaff)
     {
         Map<String, Object> standard = event(input);
-        if (!verifiedStaff || input == null) return standard;
+        if (!verifiedStaff || input == null || ("verification".equals(input.get("type")) || "own_state".equals(input.get("type"))
+            || "own_vars".equals(input.get("type")) || "own_signal".equals(input.get("type")))) return standard;
         String type = String.valueOf(input.get("type"));
         if (!allowsEvent(type, true)) return null;
         // A row the public projection refuses stays refused, unless it is one of the staff-only types.
@@ -101,8 +110,12 @@ final class PublicTransport
             }
             else if (fields.contains(k))
             {
-                if ("ge_observation".equals(k)) out.put(k, geObservation(v));
+                if ("results".equals(k) && "verification".equals(type)) out.put(k, VerificationProbe.project(v));
+                else if ("ge_observation".equals(k)) out.put(k, geObservation(v));
                 else if (ITEMS.contains(k)) out.put(k, itemRows(v));
+                else if ("levels_boosted_real".equals(k)) out.put(k, levelPairs(v));
+                else if ("screen".equals(k))
+                    out.put(k, numericMap(v, MinigameLines.SCREEN_LABELS));	// known labels, numbers only
                 else if ("location".equals(k) || "tile".equals(k))
                     out.put(k, numericMap(v, keys("x y plane region_id")));
                 else if ("gains".equals(k) && v instanceof List)
@@ -172,6 +185,19 @@ final class PublicTransport
         if (input instanceof Map) for (Map.Entry<?,?> e : ((Map<?,?>) input).entrySet())
             if (e.getKey() instanceof String && (allowed == null || allowed.contains(e.getKey())) && e.getValue() instanceof Number)
                 out.put((String)e.getKey(), e.getValue());
+        return out;
+    }
+    /** Skill name to [boosted, real], combat skills only; anything else is dropped. */
+    private static Map<String,Object> levelPairs(Object input)
+    {
+        Map<String,Object> out = new LinkedHashMap<>();
+        if (input instanceof Map) for (Map.Entry<?,?> e : ((Map<?,?>) input).entrySet())
+        {
+            if (!(e.getKey() instanceof String) || !Arrays.asList(KillContext.SKILLS).contains(e.getKey()) || !(e.getValue() instanceof List)) continue;
+            List<?> pair = (List<?>) e.getValue();
+            if (pair.size() == 2 && pair.get(0) instanceof Number && pair.get(1) instanceof Number)
+                out.put((String) e.getKey(), Arrays.asList(((Number) pair.get(0)).intValue(), ((Number) pair.get(1)).intValue()));
+        }
         return out;
     }
     private static List<Object> itemRows(Object input)

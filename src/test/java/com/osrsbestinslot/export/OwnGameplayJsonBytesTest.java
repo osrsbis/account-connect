@@ -22,7 +22,9 @@ public class OwnGameplayJsonBytesTest
         Map<String,Object> value = new LinkedHashMap<>();
         value.put("item_id_before", 1985); value.put("quantity_before", 1); value.put("item_id_after", -1);
         value.put("action", "eat"); value.put("missing", null); value.put("ratio", 0.5); value.put("f", 1.25f);
-        value.put("list", Arrays.asList(1, 2L, "x", null, true, Collections.emptyMap(), Collections.emptyList()));
+        // Plain empty containers: Gson cannot reflect into Collections.emptyMap()/emptyList() on Java 17+ (field guide
+        // §19, 0.7.17), and plugin code never puts those on the wire.
+        value.put("list", Arrays.asList(1, 2L, "x", null, true, new LinkedHashMap<>(), new ArrayList<>()));
         row.put("value", value);
         cases.add(row);
         cases.add("quote\" back\\ nl\n tab\t cr\r bs\b ff\f ctl\u0001 html<>&=' é ✓ 😀   ");
