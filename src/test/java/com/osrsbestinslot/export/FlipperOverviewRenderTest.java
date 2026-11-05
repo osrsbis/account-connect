@@ -94,4 +94,40 @@ public class FlipperOverviewRenderTest
         }
     }
 
+    @Test public void unsupportedRowsAndAllInvalidSlotsPaintNoPixels()
+    {
+        FlipperOverviewOverlay.View base=fixture();Map<Integer,Rectangle> threeRows=new LinkedHashMap<>(base.slots);
+        threeRows.put(4,new Rectangle(22,250,116,50));
+        assertNoPixels(new FlipperOverviewOverlay.View(base.owner,base.frame,threeRows,base.offers,base.now));
+        Map<Integer,Rectangle> invalid=new LinkedHashMap<>();
+        for(Map.Entry<Integer,Rectangle> entry:base.slots.entrySet())
+            invalid.put(entry.getKey(),new Rectangle(-100,entry.getValue().y,70,entry.getValue().height));
+        assertNoPixels(new FlipperOverviewOverlay.View(base.owner,base.frame,invalid,base.offers,base.now));
+    }
+
+    private static void assertNoPixels(FlipperOverviewOverlay.View view)
+    {
+        BufferedImage image=new BufferedImage(765,503,BufferedImage.TYPE_INT_ARGB);Graphics2D g=image.createGraphics();
+        assertTrue(FlipperOverviewOverlay.paint(g,view,765,503).isEmpty());g.dispose();
+        for(int x=0;x<image.getWidth();x++)for(int y=0;y<image.getHeight();y++)assertEquals(0,image.getRGB(x,y));
+    }
+
+    @Test public void brandedRailAndLongOwnPriceTooltipFitNativeRenderer() throws Exception
+    {
+        FlipperOfferActivity tracker=new FlipperOfferActivity();
+        tracker.seed(new GrandExchangeOffer[]{FlipperBuyHistoryTest.offer(GrandExchangeOfferState.SELLING,
+            100,1,0,1_000_000_000_000L,0)},0);
+        String text=FlipperOverviewOverlay.tooltip(tracker.snapshot().get(0),120000);
+        assertTrue(text.startsWith("OSRS Best in Slot · Flipper"));
+        assertTrue(text.contains("Offer price / item: 1,000,000,000,000 GP"));
+        BufferedImage image=new BufferedImage(765,180,BufferedImage.TYPE_INT_ARGB);Graphics2D g=image.createGraphics();
+        g.setFont(FontManager.getRunescapeSmallFont());
+        assertTrue(g.getFontMetrics().stringWidth(FlipperOverviewOverlay.RAIL_TITLE)<=400-14);
+        net.runelite.client.ui.overlay.components.TooltipComponent tooltip=new net.runelite.client.ui.overlay.components.TooltipComponent();
+        tooltip.setText(text);tooltip.setBackgroundColor(new Color(26,28,27,245));tooltip.setPreferredLocation(new java.awt.Point(10,10));
+        Dimension size=tooltip.render(g);assertTrue(size.width<=745&&size.height<=150);g.dispose();
+        File out=new File("build/reports/flipper-overview");assertTrue(out.isDirectory()||out.mkdirs());
+        ImageIO.write(image,"png",new File(out,"overview-tooltip-long-price.png"));
+    }
+
 }

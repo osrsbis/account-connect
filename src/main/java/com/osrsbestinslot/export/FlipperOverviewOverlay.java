@@ -22,6 +22,7 @@ import net.runelite.client.ui.overlay.tooltip.TooltipManager;
 final class FlipperOverviewOverlay extends Overlay
 {
     static final int HEIGHT = 78;
+    static final String RAIL_TITLE = "OSRS Best in Slot · Flipper · locally observed activity";
     static final int[] SLOT_WIDGETS = {InterfaceID.GeOffers.INDEX_0, InterfaceID.GeOffers.INDEX_1,
         InterfaceID.GeOffers.INDEX_2, InterfaceID.GeOffers.INDEX_3, InterfaceID.GeOffers.INDEX_4,
         InterfaceID.GeOffers.INDEX_5, InterfaceID.GeOffers.INDEX_6, InterfaceID.GeOffers.INDEX_7};
@@ -139,7 +140,7 @@ final class FlipperOverviewOverlay extends Overlay
         {
             g.setColor(new Color(25, 28, 27, 238));g.fillRect(frame.x, y, frame.width, HEIGHT);
             g.setFont(FontManager.getRunescapeSmallFont());g.setColor(GOLD);
-            g.drawString("Flipper · locally observed activity", frame.x + 7, y + 12);
+            g.drawString(RAIL_TITLE, frame.x + 7, y + 12);
             for (FlipperOfferActivity.Slot slot : current.offers)
             {
                 Rectangle chip = chips.get(slot.index);
@@ -161,9 +162,10 @@ final class FlipperOverviewOverlay extends Overlay
     static String tooltip(FlipperOfferActivity.Slot slot, long now)
     {
         Long age = slot.elapsed(now), watched = slot.watched(now);
-        return "Flipper · Slot " + (slot.index + 1) + " · " + (slot.buy() ? "Buy" : "Sell") + " · " + slot.status()
+        return "OSRS Best in Slot · Flipper · Slot " + (slot.index + 1) + " · " + (slot.buy() ? "Buy" : "Sell") + " · " + slot.status()
             + "<br>Filled " + FlipperView.number(slot.filled) + " / " + FlipperView.number(slot.total)
             + " · Remaining " + FlipperView.number(slot.remaining())
+            + "<br>Offer price / item: " + FlipperView.number(slot.price) + " GP"
             + "<br>" + (watched == null ? "Watch duration unknown" : "Watching locally: " + FlipperOfferActivity.duration(watched))
             + "<br>" + (age == null ? "Prior start / last fill: unknown" : "Last observed change: " + FlipperOfferActivity.duration(age) + "; true start unknown");
     }

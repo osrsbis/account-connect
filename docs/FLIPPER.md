@@ -102,10 +102,11 @@ follows the actual GE frame and visible slot bounds; it hides where there is ins
 It can occupy chat history beneath the fixed-mode GE window, as the existing selected-offer overlay does.
 This footprint is shown in labelled native-render fixtures; coexistence in every live layout is not claimed.
 
-Each occupied visible slot has a number and native-state cue. Complete and Cancelled are words as well as
+The rail and its hover summary visibly identify OSRS Best in Slot. Each occupied visible slot has a number and native-state cue. Complete and Cancelled are words as well as
 colours. Empty or unreadable slots receive no decoration. These cues are not profitability, urgency or
 recommendations. Hovering a native slot or its observation field uses RuneLite's standard tooltip system
-for filled/total, remaining quantity, watch duration and last locally observed change; clicks remain native.
+for filled/total, remaining quantity, the stored own-offer price per item, watch duration and last locally
+observed change; clicks remain native. The offer price is not a market quote, average fill price or profit.
 
 Pre-existing offers start with unknown true start and prior last-fill time. Their local watch interval is
 known and labelled Watching. A new fill or other observed offer change shows Updated; unchanged duplicate

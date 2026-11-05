@@ -42,6 +42,10 @@ public class FlipperOverviewControllerTest
             when(f.client.getMouseCanvasPosition()).thenReturn(new net.runelite.api.Point(30,60));
             assertTrue(paint(f)>0);assertEquals(1,f.tooltips.getTooltips().size());
             String text=f.tooltips.getTooltips().get(0).getText();assertTrue(text.contains("Filled 25 / 100"));assertTrue(text.contains("Remaining 75"));
+            assertTrue(text.startsWith("OSRS Best in Slot · Flipper"));
+            assertTrue(text.contains("Offer price / item: 200 GP"));
+            // The unrelated editor price in this fixture remains10,500; overview uses this offer's immutable price.
+            assertFalse(text.contains("10,500 GP"));
             f.tooltips.clear();f.offer(0,FlipperBuyHistoryTest.offer(GrandExchangeOfferState.EMPTY,0,0,0,0,0));
             assertEquals(0,paint(f));assertTrue(f.tooltips.getTooltips().isEmpty());
             f.tick();assertEquals(0,paint(f));
