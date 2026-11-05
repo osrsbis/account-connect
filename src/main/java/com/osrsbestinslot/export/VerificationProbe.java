@@ -87,6 +87,16 @@ final class VerificationProbe
 		return s;
 	}
 
+	/** Transient activity evidence bypasses the random-sample spacing, never the shared hourly budget. */
+	synchronized boolean takeEvent(long nowMs)
+	{
+		while (!samples.isEmpty() && nowMs - samples.peekFirst() >= HOUR_MS) samples.pollFirst();
+		if (samples.size() >= MAX_SAMPLES_PER_HOUR) return false;
+		samples.addLast(nowMs);
+		lastSampleMs = nowMs;
+		return true;
+	}
+
 	/** True when this sample may also take a frame; counts it. */
 	synchronized boolean takeFrame(long nowMs)
 	{
@@ -218,7 +228,7 @@ final class VerificationProbe
 						in.put((String) e.getKey(), e.getValue());
 				if (!in.isEmpty()) p.put("inputs", in);
 			}
-			if (r.containsKey("expected") && scalar(r.get("expected"))) p.put("expected", r.get("expected"));
+			if (r.containsKey("expected") && (scalar(r.get("expected")) || textOperand(r, r.get("expected")))) p.put("expected", r.get("expected"));
 			if (scalar(r.get("observed"))) p.put("observed", r.get("observed"));
 			// Never retain a claimed pass after projection removed one of its operands.
 			p.put("match", p.get("expected") == null || p.get("observed") == null ? null
@@ -226,6 +236,13 @@ final class VerificationProbe
 			out.add(p);
 		}
 		return out;
+	}
+
+	private static boolean textOperand(Map<?, ?> row, Object value)
+	{
+		Object inputs = row.get("inputs");
+		return inputs instanceof Map && "text".equals(((Map<?, ?>) inputs).get("reader"))
+			&& value instanceof String && value.equals(EventVerification.clean((String) value));
 	}
 
 	private static boolean scalar(Object v)

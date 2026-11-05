@@ -12,7 +12,7 @@ final class PublicTransport
     static boolean firehoseAllowed() { return false; }
 
     private static final Map<String, Set<String>> FIELDS = new HashMap<>();
-    private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type world world_members");
+    private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type world world_members verification_tick verification_revision verification_text");
     private static final Set<String> ITEMS = keys("given received equipped unequipped items items_lost deposited withdrawn worn inventory");
     static
     {
@@ -38,7 +38,7 @@ final class PublicTransport
         allow("progress", "kind subject count tier task_id shipwreck_type quantity source");
         allow("attempt_end", "outcome basis");
         allow("minigame", "minigame result detail count total screen");
-        allow("verification", "area check tick snapshot_revision plugin_version trigger trigger_key trigger_value world ref part parts total mismatches unknown results");
+        allow("verification", "area check tick snapshot_revision plugin_version trigger trigger_key trigger_value world ref part parts total mismatches unknown results source_event_id source_event_type source_event_tick source_event_revision");
         allow("pet", ""); // the event is useful; unstructured chat text is not sent
         allow("level_up", "skill level xp");
         allow("xp_gain", "gains total");
@@ -103,7 +103,15 @@ final class PublicTransport
         for (Map.Entry<String,Object> e : input.entrySet())
         {
             String k = e.getKey(); Object v = e.getValue();
-            if ("observation_context".equals(k)) out.put(k, EventObservationContext.project(v));
+            if ("verification_text".equals(k))
+            {
+                if (EventVerification.TYPES.contains(type) && v instanceof String && v.equals(EventVerification.clean((String) v))) out.put(k, v);
+            }
+            else if ("verification_tick".equals(k) || "verification_revision".equals(k))
+            {
+                if (EventVerification.TYPES.contains(type) && v instanceof Number) out.put(k, v);
+            }
+            else if ("observation_context".equals(k)) out.put(k, EventObservationContext.project(v));
             else if (ENVELOPE.contains(k))
             {
                 if (v instanceof String || v instanceof Number || v instanceof Boolean) out.put(k,v);

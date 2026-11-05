@@ -15,14 +15,25 @@ final class VerificationFrame
         final String key;
         final int widget;
         final Rectangle bounds;
-        final int value;
+        final Object value;
+        final Map<String, Object> inputs;
+        final String text;
+        net.runelite.api.widgets.Widget sourceWidget;
+        int sourceItemQuantity;
 
         Region(String key, int widget, Rectangle bounds, int value)
+        {
+            this(key, widget, bounds, value, null, null);
+        }
+
+        Region(String key, int widget, Rectangle bounds, Object value, Map<String, Object> inputs, String text)
         {
             this.key = key;
             this.widget = widget;
             this.bounds = new Rectangle(bounds);
             this.value = value;
+            this.inputs = inputs;
+            this.text = text;
         }
     }
 
@@ -63,8 +74,10 @@ final class VerificationFrame
         {
             Rectangle p = pixels(r, width, height, canvasWidth, canvasHeight);
             if (p.isEmpty()) continue;
-            out.add(VerificationProbe.result(r.key, VerificationProbe.inputs("widget", r.widget,
-                "x", p.x, "y", p.y, "width", p.width, "height", p.height), r.value, null));
+            Map<String, Object> inputs = VerificationProbe.inputs("widget", r.widget,
+                "x", p.x, "y", p.y, "width", p.width, "height", p.height);
+            if (r.inputs != null) inputs.putAll(r.inputs);
+            out.add(VerificationProbe.result(r.key, inputs, r.value, null));
         }
         return out;
     }

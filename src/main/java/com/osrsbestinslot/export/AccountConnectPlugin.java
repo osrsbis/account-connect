@@ -347,6 +347,8 @@ public class AccountConnectPlugin extends Plugin
 	private volatile String verificationFramesGrantToken;
 	private final java.util.concurrent.atomic.AtomicLong verificationEpoch = new java.util.concurrent.atomic.AtomicLong();
 	final VerificationProbe verificationProbe = new VerificationProbe();
+	final EventVerification eventVerification = new EventVerification();
+	private String verificationMessage;
 	/** captured_at_ms of the last snapshot this client built: the revision a verification row was read against. */
 	volatile long lastSnapshotCapturedAtMs;
 
@@ -367,6 +369,7 @@ public class AccountConnectPlugin extends Plugin
 		verificationFramesGrantToken = null;
 		verificationEpoch.incrementAndGet();
 		verificationProbe.reset();
+		eventVerification.reset();
 		lastSnapshotCapturedAtMs = 0;
 	}
 
@@ -4301,7 +4304,8 @@ public class AccountConnectPlugin extends Plugin
 	void emitEvent(String type, Map<String, Object> fields)
 	{
 		emitEventBound(type, fields, currentEventTokenFingerprint());
-		if (verificationGranted()) verificationProbe.occasion(type, fields);
+		if (verificationGranted() && !EventVerification.TYPES.contains(type) && !"kill_context".equals(type))
+			verificationProbe.occasion(type, fields);
 	}
 
 	private void emitEventBound(String type, Map<String, Object> fields, String tokenFingerprint)
@@ -4356,8 +4360,23 @@ public class AccountConnectPlugin extends Plugin
 		Map<String,Object> context = eventObservationContext.event(contextOwner, PLUGIN_VERSION,
 			((Number)ev.get("ts")).longValue());
 		if (context != null) ev.put("observation_context", context);
+		boolean eventEvidence = verificationGranted() && EventVerification.TYPES.contains(type) && client != null
+			&& activeHash != null && activeHash.equals(Long.toString(client.getAccountHash()));
+		if (eventEvidence)
+		{
+			ev.put("verification_tick", client.getTickCount());
+			ev.put("verification_revision", lastSnapshotCapturedAtMs > 0 ? lastSnapshotCapturedAtMs : null);
+			String text = EventVerification.clean(verificationMessage);
+			if (text != null) ev.put("verification_text", text);
+		}
 		ev = PublicTransport.event(ev, captureEnabled());
 		if (ev == null) { healthEventsLost.incrementAndGet(); return; }
+		if (eventEvidence && verificationProbe.takeEvent(System.currentTimeMillis()))
+		{
+			EventVerification.Source source = new EventVerification.Source(ev, currentLinkToken(), activeHash,
+				verificationEpoch.get(), client.getTickCount(), lastSnapshotCapturedAtMs, System.currentTimeMillis(), verificationMessage);
+			if (!eventVerification.offer(source)) eventEvidenceUnknown(source, "pending_capacity");
+		}
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
 		if (capturePublicOutbox(ev))
@@ -8751,9 +8770,14 @@ public class AccountConnectPlugin extends Plugin
 			{
 				accountProgress.chat(event.getMessage(), System.currentTimeMillis() / 1000L);
 			}
-			emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
-			emitKillDetail(event.getMessage());
-			emitProgressAndFailure(event.getMessage());
+			verificationMessage = EventVerification.clean(event.getMessage());
+			try
+			{
+				emitParsedMilestones(Text.removeTags(event.getMessage() == null ? "" : event.getMessage()).trim());
+				emitKillDetail(event.getMessage());
+				emitProgressAndFailure(event.getMessage());
+			}
+			finally { verificationMessage = null; }
 			return;
 		}
 		if (event.getType() != ChatMessageType.TRADE)
@@ -8912,6 +8936,7 @@ public class AccountConnectPlugin extends Plugin
 	@Subscribe
 	public void onClientTick(net.runelite.api.events.ClientTick event)
 	{
+		pollEventVerification();
 		if (gameplayReady()) ownGameplay.interfaces.clientTick(client, System.currentTimeMillis());
 	}
 
@@ -9146,6 +9171,112 @@ public class AccountConnectPlugin extends Plugin
 			else now.putIfAbsent((String) c[0], null);
 		}
 		for (Map<String, Object> row : activityCounters.tick(now)) emitEvent("activity_counter", row);
+	}
+
+	/** Poll only the bounded event queue on client ticks; it never waits for the random sample gap. */
+	void pollEventVerification()
+	{
+		if (client == null || !verificationGranted() || client.getGameState() != GameState.LOGGED_IN)
+		{
+			eventVerification.reset();
+			return;
+		}
+		for (EventVerification.Source source : eventVerification.drain())
+		{
+			if (!source.matches(currentLinkToken(), activeHash, verificationEpoch.get())
+				|| !source.account.equals(Long.toString(client.getAccountHash()))) continue;
+			if (source.expired(client.getTickCount())) { eventEvidenceUnknown(source, "source_not_visible"); continue; }
+			if (!verificationFramesEnabled()) { eventEvidenceUnknown(source, "frames_not_granted"); continue; }
+			if (verificationFrameBlocked()) { eventVerification.offer(source); continue; }
+			List<VerificationFrame.Region> regions = EventVerificationScreen.regions(client, source);
+			if (regions.isEmpty()) { eventVerification.offer(source); continue; }
+			if (!verificationProbe.takeFrame(System.currentTimeMillis())) { eventEvidenceUnknown(source, "frame_budget"); continue; }
+			requestEventVerificationFrame(source, regions);
+		}
+	}
+
+	private boolean verificationFrameBlocked()
+	{
+		if (client.isMenuOpen()) return true;
+		for (int group : VERIFY_FRAME_BLOCKERS)
+		{
+			Widget w = client.getWidget(group, 0);
+			if (w != null && !w.isHidden()) return true;
+		}
+		return false;
+	}
+
+	private boolean eventEvidenceCurrent(EventVerification.Source source)
+	{
+		return verificationFramesEnabled() && client.getGameState() == GameState.LOGGED_IN
+			&& source.matches(currentLinkToken(), activeHash, verificationEpoch.get())
+			&& source.account.equals(Long.toString(client.getAccountHash()));
+	}
+
+	private void eventEvidenceUnknown(EventVerification.Source source, String reason)
+	{
+		if (!verificationGranted() || !source.matches(currentLinkToken(), activeHash, verificationEpoch.get())) return;
+		Map<String, Object> row = source.common(client == null ? source.tick : client.getTickCount());
+		row.put("plugin_version", PLUGIN_VERSION);
+		row.put("ref", randomRef());
+		List<Map<String, Object>> missing = EventVerificationScreen.missing(source, java.util.Collections.emptyList(), reason);
+		emitEventScreenRows(missing, row);
+	}
+
+	private void emitEventScreenRows(List<Map<String, Object>> results, Map<String, Object> common)
+	{
+		// Four bounded text results per row keep the final projected fields below the receiver's 8KB cap.
+		int parts = (results.size() + 3) / 4;
+		for (int i = 0; i < parts; i++)
+		{
+			Map<String, Object> row = new LinkedHashMap<>(common);
+			row.put("area", "screen"); row.put("check", "ocr_event"); row.put("part", i + 1); row.put("parts", parts);
+			row.put("total", results.size()); row.put("mismatches", 0); row.put("unknown", results.size());
+			row.put("results", new ArrayList<>(results.subList(i * 4, Math.min(results.size(), i * 4 + 4))));
+			emitEvent("verification", row);
+		}
+	}
+
+	private void requestEventVerificationFrame(EventVerification.Source source, List<VerificationFrame.Region> regions)
+	{
+		final int readTick = client.getTickCount();
+		final long readMs = System.currentTimeMillis();
+		final int canvasW = client.getCanvasWidth(), canvasH = client.getCanvasHeight();
+		final String ref = randomRef();
+		drawManager.requestNextFrameListener(img ->
+		{
+			if (!eventEvidenceCurrent(source)) return;
+			if (client.getTickCount() != readTick || verificationFrameBlocked()
+				|| !EventVerificationScreen.unchanged(client, regions))
+			{
+				clientThread.invoke(() -> eventEvidenceUnknown(source, "screen_changed_before_frame"));
+				return;
+			}
+			BufferedImage rgb = img == null ? null : toRgbFrame(img);
+			if (rgb == null) { clientThread.invoke(() -> eventEvidenceUnknown(source, "frame_unavailable")); return; }
+			final BufferedImage pixels = VerificationFrame.retainRegions(rgb, regions, canvasW, canvasH);
+			final long frameMs = System.currentTimeMillis();
+			executor.submit(() ->
+			{
+				byte[] png = encodePng(pixels);
+				clientThread.invoke(() ->
+				{
+					if (!eventEvidenceCurrent(source)) return;
+					if (png == null || png.length == 0 || png.length > MAX_SCREENSHOT_UPLOAD_BYTES)
+					{ eventEvidenceUnknown(source, "frame_encoding_failed"); return; }
+					Map<String, Object> common = source.common(readTick);
+					common.put("plugin_version", PLUGIN_VERSION); common.put("ref", ref);
+					List<Map<String, Object>> capture = java.util.Arrays.asList(
+						VerificationProbe.observed("frame_tick", readTick), VerificationProbe.observed("frame_delay_ms", frameMs - readMs),
+						VerificationProbe.observed("width", pixels.getWidth()), VerificationProbe.observed("height", pixels.getHeight()));
+					for (Map<String, Object> row : VerificationProbe.rows("frame", "capture", capture, common)) emitEvent("verification", row);
+					List<Map<String, Object>> results = VerificationFrame.results(regions, pixels.getWidth(), pixels.getHeight(), canvasW, canvasH);
+					results.addAll(EventVerificationScreen.missing(source, regions, "source_field_not_visible"));
+					emitEventScreenRows(results, common);
+					uploadVerificationFrame(source.token, png, ref, frameMs);
+				});
+			});
+		});
 	}
 
 	// ---- verification (VerificationProbe; X-Verification grant only) ----
@@ -9552,7 +9683,12 @@ public class AccountConnectPlugin extends Plugin
 			}
 			lastMinigameDialogue[i] = text;
 			Map<String, Object> row = MinigameLines.parseDialogue(text);
-			if (row != null) emitEvent("minigame", row);
+			if (row != null)
+			{
+				verificationMessage = EventVerification.clean(text);
+				try { emitEvent("minigame", row); }
+				finally { verificationMessage = null; }
+			}
 		}
 	}
 
