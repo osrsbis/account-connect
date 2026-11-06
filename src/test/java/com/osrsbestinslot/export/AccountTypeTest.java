@@ -120,24 +120,24 @@ public class AccountTypeTest
 	@Test
 	public void unknownValuesAreNeverGuessed()
 	{
-		assertEquals("UNKNOWN_7", AccountConnectPlugin.accountTypeName(7));
-		assertEquals("UNKNOWN_-1", AccountConnectPlugin.accountTypeName(-1));
+		assertEquals("UNKNOWN_7", SnapshotBuilder.accountTypeName(7));
+		assertEquals("UNKNOWN_-1", SnapshotBuilder.accountTypeName(-1));
 	}
 
 	@Test
 	public void unrankedGroupIsNotCollapsedIntoGroupIronman()
 	{
-		assertEquals("UNRANKED_GROUP_IRONMAN", AccountConnectPlugin.accountTypeName(6));
-		assertEquals(false, AccountConnectPlugin.accountTypeName(6).equals(AccountConnectPlugin.accountTypeName(4)));
+		assertEquals("UNRANKED_GROUP_IRONMAN", SnapshotBuilder.accountTypeName(6));
+		assertEquals(false, SnapshotBuilder.accountTypeName(6).equals(SnapshotBuilder.accountTypeName(4)));
 	}
 
 	@Test
 	public void varbitIdIsTheAccountTypeVarbit()
 	{
-		assertEquals(1777, AccountConnectPlugin.ACCOUNT_TYPE_VARBIT);
+		assertEquals(1777, SnapshotBuilder.ACCOUNT_TYPE_VARBIT);
 		@SuppressWarnings("deprecation")
 		int legacy = Varbits.ACCOUNT_TYPE;
-		assertEquals(legacy, AccountConnectPlugin.ACCOUNT_TYPE_VARBIT);
+		assertEquals(legacy, SnapshotBuilder.ACCOUNT_TYPE_VARBIT);
 	}
 
 	@Test
@@ -148,7 +148,7 @@ public class AccountTypeTest
 		assertEquals("RuneLite enum shape changed; re-verify the map", 6, rl.length);
 		for (int i = 0; i < rl.length; i++)
 		{
-			assertEquals("ordinal " + i, rl[i].name(), AccountConnectPlugin.accountTypeName(i));
+			assertEquals("ordinal " + i, rl[i].name(), SnapshotBuilder.accountTypeName(i));
 		}
 	}
 }

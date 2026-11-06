@@ -11,6 +11,8 @@ import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
+import java.awt.Point;
+import java.awt.Rectangle;
 
 /**
  * Who is standing next to you while a shop is open, nearest first.
@@ -73,8 +75,8 @@ class StoreNearbyOverlay extends OverlayPanel
 		panelComponent.setPreferredSize(new Dimension(PANEL_WIDTH, 0));	// 12-char RSN + "12 tiles  126"
 		// Same plate as the countdown so the two read as one design, not two accidents.
 		panelComponent.setBackgroundColor(PLATE);
-		panelComponent.setBorder(new java.awt.Rectangle(6, 4, 6, 4));
-		panelComponent.setGap(new java.awt.Point(0, 2));	// default 0 makes rows collide
+		panelComponent.setBorder(new Rectangle(6, 4, 6, 4));
+		panelComponent.setGap(new Point(0, 2));	// default 0 makes rows collide
 	}
 
 	@Override
@@ -83,14 +85,14 @@ class StoreNearbyOverlay extends OverlayPanel
 		anchorUnderItems();
 		// Two gates, both required: a shop is open, and the backend granted store tools to this
 		// token. The second is what keeps these overlays off every ordinary player's screen.
-		if (!plugin.isShopOpen() || !plugin.storeToolsEnabled())
+		if (!plugin.store.isShopOpen() || !plugin.grants.storeToolsEnabled())
 		{
 			return null;
 		}
 
 		// No "Store" title any more: the countdown left for its own overlay, and "Nearby (N)"
 		// already names this panel. One less line covering the shop.
-		List<String[]> rows = visibleRows(plugin.nearbyPlayersForOverlay(DISPLAY_CAP));
+		List<String[]> rows = visibleRows(plugin.store.nearbyPlayersForOverlay(DISPLAY_CAP));
 
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text(rows.isEmpty() ? "Nobody nearby" : "Nearby (" + rows.size() + ")")
@@ -123,7 +125,7 @@ class StoreNearbyOverlay extends OverlayPanel
 		{
 			return;
 		}
-		java.awt.Point p = plugin.shopItemsBottomLeft();
+		Point p = plugin.store.shopItemsBottomLeft();
 		if (p == null)
 		{
 			return;		// widget not laid out yet — try again next frame
@@ -132,7 +134,7 @@ class StoreNearbyOverlay extends OverlayPanel
 		{
 			// Right-aligned to the same grid edge as the countdown (p.x is that edge), and pushed
 			// down by the countdown's own height so the two stack without touching.
-			setPreferredLocation(new java.awt.Point(p.x - PANEL_WIDTH, p.y + 32));
+			setPreferredLocation(new Point(p.x - PANEL_WIDTH, p.y + 32));
 		}
 		anchored = true;
 	}

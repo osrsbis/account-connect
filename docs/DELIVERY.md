@@ -6,7 +6,9 @@ and the public Queue journal. Each section states its own release state.
 ## Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
-from archive-plus-D1 receipts, by a fixed event-family list. The ten own-state kinds, seventeen own-vars families and fifteen own-signal families have separate counters. It also reports source-to-journal handoffs, confirmed
+from archive-plus-D1 receipts, by a fixed event-family list. The ten own-state kinds, seventeen own-vars families and
+fifteen own-signal families keep their counters, which stay zero: those events use the legacy receiver
+(OWN_GAMEPLAY.md). It also reports source-to-journal handoffs, confirmed
 forced appends, fallback/refused handoffs and per-ID retry/rejected/erased response
 rows. No token, account, event ID or arbitrary source label is retained in these
 counters. The older `events_sent_total` combines legacy HTTP success and Queue
@@ -72,7 +74,8 @@ same close. A refused close request is not retried at the close; its rows stay s
 
 ## Public Queue retry contract (local candidate)
 
-A successful token-bound `X-Event-Queue: ge-v1` or `own-history-v1` response,
+A successful token-bound `X-Event-Queue: ge-v1` or `own-history-v1` response (the only scopes a server sends and
+the plugin accepts; the four `own-*` scopes earlier candidates accepted were removed in the 0.7.67 simplification),
 a settled own account/mode and a known RuneLite profile are required. The base contract journals
 14 Queue-supported event types: six GE types plus
 bank_session, equip_change, loot, kill_count, level_up, xp_gain, alch and pickup.

@@ -17,6 +17,7 @@ import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.overlay.*;
 import net.runelite.client.ui.overlay.tooltip.Tooltip;
 import net.runelite.client.ui.overlay.tooltip.TooltipManager;
+import net.runelite.api.Point;
 
 /** Non-interactive overview rail. Native offer rectangles are used only for alignment and hover. */
 final class FlipperOverviewOverlay extends Overlay
@@ -69,7 +70,7 @@ final class FlipperOverviewOverlay extends Overlay
             || !current.owner.equals(client.getAccountHash() + "|" + RuneScapeProfileType.getCurrent(client).name())
             || !nativeMatches(current)) return null;
         Map<Integer, Rectangle> chips = paint(graphics, current, client.getCanvasWidth(), client.getCanvasHeight());
-        net.runelite.api.Point mouse = client.getMouseCanvasPosition();
+        Point mouse = client.getMouseCanvasPosition();
         if (mouse != null)
             for (FlipperOfferActivity.Slot slot : current.offers)
             {

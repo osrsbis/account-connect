@@ -66,7 +66,7 @@ public class CaptureVolumeTest
 	private static List<Map<String, Object>> ofType(AccountConnectPlugin p, String type)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> ev : p.pendingEvents)
+		for (Map<String, Object> ev : p.events.pendingEvents)
 		{
 			if (type.equals(ev.get("type")))
 			{
@@ -101,7 +101,7 @@ public class CaptureVolumeTest
 		p.onItemContainerChanged(new ItemContainerChanged(WORN, container(new int[]{HELM, 1}, new int[]{BOW, 1}, new int[]{ARROW, 500})));
 		p.onItemContainerChanged(new ItemContainerChanged(WORN, container(new int[]{HELM, 1}, new int[]{ARROW, 499})));	// shot, then bow off
 		assertEquals(1, ofType(p, "equip_change").size());	// the unequip of the bow
-		p.pendingEvents.clear();
+		p.events.pendingEvents.clear();
 
 		// swap: whip on in the same slot, arrows also spent in the same change
 		p.onItemContainerChanged(new ItemContainerChanged(WORN, container(new int[]{HELM, 1}, new int[]{4151, 1}, new int[]{ARROW, 498})));
@@ -230,10 +230,10 @@ public class CaptureVolumeTest
 		AccountConnectPlugin p = bankPlugin(client);
 		ItemContainer full = container(new int[]{995, 1_000_000}, new int[]{20997, 1}, new int[]{385, 200});
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(null);	// unloaded at open
-		p.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(full);
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, full));	// contents arrive = baseline only
-		p.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		assertEquals("the first contents are a baseline, never a whole-bank deposit", 0, ofType(p, "bank_session").size());
 	}
 
@@ -246,11 +246,11 @@ public class CaptureVolumeTest
 		ItemContainer full = container(new int[]{995, 1_000_000}, new int[]{20997, 1});
 		ItemContainer plusSharks = container(new int[]{995, 1_000_000}, new int[]{20997, 1}, new int[]{385, 50});
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(empty);	// empty at open
-		p.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, full));	// baseline
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, plusSharks));	// the real deposit
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(plusSharks);
-		p.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		List<Map<String, Object>> sess = ofType(p, "bank_session");
 		assertEquals(1, sess.size());
 		@SuppressWarnings("unchecked")
@@ -267,11 +267,11 @@ public class CaptureVolumeTest
 		Client client = mock(Client.class);
 		AccountConnectPlugin p = bankPlugin(client);
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(null);
-		p.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		ItemContainer full = container(new int[]{995, 1_000_000});
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(full);	// readable only at close
-		p.handleBankWidgetClosed(BANK_GROUP);
-		assertTrue(p.pendingEvents.isEmpty());
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

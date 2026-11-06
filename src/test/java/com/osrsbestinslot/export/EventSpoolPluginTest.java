@@ -93,7 +93,7 @@ public class EventSpoolPluginTest
 	{
 		for (AccountConnectPlugin p : plugins)
 		{
-			p.crashSpoolForTest();
+			p.spooler.crashSpoolForTest();
 		}
 		server.shutdown();
 		EventSpoolCodecTest.deleteTree(pluginData);
@@ -113,7 +113,7 @@ public class EventSpoolPluginTest
 			inject(p, "activeHash", accountHash);
 			inject(p, "activeRsn", "Staff One");
 		}
-		p.setSpoolDataRootForTest(pluginData);
+		p.spooler.setSpoolDataRootForTest(pluginData);
 		plugins.add(p);
 		return p;
 	}
@@ -147,8 +147,8 @@ public class EventSpoolPluginTest
 
 	private void grant(AccountConnectPlugin p) throws Exception
 	{
-		p.applyServerPolicy(policy("X-Event-Spool", "on"));
-		p.awaitSpoolIdleForTest();
+		p.grants.applyServerPolicy(policy("X-Event-Spool", "on"));
+		p.spooler.awaitSpoolIdleForTest();
 	}
 
 	private Map<String, Object> fields(String k, Object v)
@@ -160,8 +160,8 @@ public class EventSpoolPluginTest
 
 	private void emit(AccountConnectPlugin p, String type) throws Exception
 	{
-		p.emitEvent(type, fields("item", "Abyssal whip"));
-		p.awaitSpoolIdleForTest();
+		p.events.emitEvent(type, fields("item", "Abyssal whip"));
+		p.spooler.awaitSpoolIdleForTest();
 	}
 
 	private Path spoolRoot()
@@ -226,7 +226,7 @@ public class EventSpoolPluginTest
 	{
 		try
 		{
-			return p.spoolPendingIdsForTest();
+			return p.spooler.spoolPendingIdsForTest();
 		}
 		catch (Exception e)
 		{
@@ -237,9 +237,9 @@ public class EventSpoolPluginTest
 	private List<String> lastMemoryIds(AccountConnectPlugin p)
 	{
 		List<String> out = new ArrayList<>();
-		synchronized (p.pendingEvents)
+		synchronized (p.events.pendingEvents)
 		{
-			for (Map<String, Object> ev : p.pendingEvents)
+			for (Map<String, Object> ev : p.events.pendingEvents)
 			{
 				out.add(String.valueOf(ev.get("event_id")));
 			}
@@ -275,18 +275,18 @@ public class EventSpoolPluginTest
 
 	private void flushAndWait(AccountConnectPlugin p, int expectedRequests) throws Exception
 	{
-		p.flushEvents();
-		waitFor(() -> bodies.size() >= expectedRequests && !p.eventPostInFlight, "memory flush settled");
-		p.awaitSpoolIdleForTest();
+		p.events.flushEvents();
+		waitFor(() -> bodies.size() >= expectedRequests && !p.events.eventPostInFlight, "memory flush settled");
+		p.spooler.awaitSpoolIdleForTest();
 	}
 
 	private void replayAndWait(AccountConnectPlugin p, int expectedRequests) throws Exception
 	{
-		p.spoolReplayNotBeforeMs = 0L;
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.replaySpoolTick();
-		waitFor(() -> bodies.size() >= expectedRequests && !p.spoolReplayInFlight, "replay settled");
-		p.awaitSpoolIdleForTest();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.replaySpoolTick();
+		waitFor(() -> bodies.size() >= expectedRequests && !p.spooler.spoolReplayInFlight, "replay settled");
+		p.spooler.awaitSpoolIdleForTest();
 	}
 
 	private void releaseToReplay(AccountConnectPlugin p) throws Exception
@@ -303,29 +303,29 @@ public class EventSpoolPluginTest
 	public void publicTokenNeverCreatesAnySpoolFileOrDirectoryAcrossEmitFlush5xxAndRestart() throws Exception
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
-		p.applyServerPolicy(policy("X-Max-Capture", "on", "X-Drop-Proof", "on"));	// other grants are not the spool
+		p.grants.applyServerPolicy(policy("X-Max-Capture", "on", "X-Drop-Proof", "on"));	// other grants are not the spool
 		emit(p, "trade");
 		emit(p, "drop");
 		script.add(b -> new MockResponse().setResponseCode(503));
 		flushAndWait(p, 1);
-		p.eventRetryBackoffUntilMs = 0L;
+		p.events.eventRetryBackoffUntilMs = 0L;
 		flushAndWait(p, 2);
-		p.replaySpoolTick();
-		p.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p.spooler.replaySpoolTick();
+		p.grants.applyServerPolicy(policy("X-Event-Spool", "off"));
 		emit(p, "trade");
 		flushAndWait(p, 3);
-		p.awaitSpoolIdleForTest();
-		p.crashSpoolForTest();
+		p.spooler.awaitSpoolIdleForTest();
+		p.spooler.crashSpoolForTest();
 
 		AccountConnectPlugin restarted = plugin(TOKEN_A, "12345");
 		restarted.startUp();
 		emit(restarted, "login");
 		flushAndWait(restarted, 4);
-		restarted.awaitSpoolIdleForTest();
+		restarted.spooler.awaitSpoolIdleForTest();
 
 		assertEquals("no file, no directory, no pointer for a non-staff token: " + allPaths(),
 			Collections.emptyList(), allPaths());
-		assertFalse((boolean) restarted.captureHealthSnapshot().get("spool_active"));
+		assertFalse((boolean) restarted.events.captureHealthSnapshot().get("spool_active"));
 	}
 
 	@Test
@@ -335,7 +335,7 @@ public class EventSpoolPluginTest
 		emit(p, "trade");
 		script.add(b -> new MockResponse().setResponseCode(503));
 		flushAndWait(p, 1);
-		p.eventRetryBackoffUntilMs = 0L;
+		p.events.eventRetryBackoffUntilMs = 0L;
 		flushAndWait(p, 2);
 		List<String> first = idsIn(bodies.get(0));
 		List<String> second = idsIn(bodies.get(1));
@@ -359,7 +359,7 @@ public class EventSpoolPluginTest
 		assertTrue("the spool wrote something", disk.contains("Abyssal whip"));
 		assertFalse("raw token in a file or path", disk.contains(TOKEN_A));
 		assertFalse(disk.contains("__delivery_token_fp"));
-		assertFalse(disk.contains(AccountConnectPlugin.sha256Hex("event-token:" + TOKEN_A)));
+		assertFalse(disk.contains(SnapshotBuilder.sha256Hex("event-token:" + TOKEN_A)));
 		assertFalse(disk.contains("__spool"));
 		assertTrue(Files.isDirectory(identityDir(TOKEN_A, "12345")));
 		assertEquals(EventSpool.identityKey(TOKEN_A, "12345"), EventSpool.readPointer(spoolRoot()));
@@ -372,16 +372,16 @@ public class EventSpoolPluginTest
 			"ge_collect", "store_buy", "store_sell", "store_taken", "drop", "pickup", "ground_removed", "bank_session",
 			"login", "logout", "world_hop", "drop_trade_clip", "drop_trade_clip_final", "death",
 			"bank_visit_open", "bank_visit_manifest_chunk", "bank_visit_close")),
-			AccountConnectPlugin.SPOOL_ALLOWLIST);
+			SpoolDriver.SPOOL_ALLOWLIST);
 
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
 		for (String t : Arrays.asList("fh_batch", "chat", "region", "xp_gain", "equip_change", "loot", "level_up", "alch"))
 		{
-			p.emitEvent(t, fields("marker", "MEMONLY_" + t));
+			p.events.emitEvent(t, fields("marker", "MEMONLY_" + t));
 		}
-		p.emitEvent("trade", fields("given", Arrays.asList(fields("id", 995))));
-		p.awaitSpoolIdleForTest();
+		p.events.emitEvent("trade", fields("given", Arrays.asList(fields("id", 995))));
+		p.spooler.awaitSpoolIdleForTest();
 		String disk = allDiskText();
 		assertTrue(disk.contains(pendingIds(p).get(0)));
 		assertFalse("memory-only types never touch disk", disk.contains("MEMONLY_"));
@@ -402,7 +402,7 @@ public class EventSpoolPluginTest
 
 		setToken(p, TOKEN_B);
 		p.onConfigChanged(null);
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertFalse("A purged at the token change", Files.exists(identityDir(TOKEN_A, "12345")));
 		assertNull("pointer to A removed", EventSpool.readPointer(spoolRoot()));
 
@@ -429,11 +429,11 @@ public class EventSpoolPluginTest
 		int before = bodies.size();
 		setToken(p, "");
 		p.onConfigChanged(null);
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertFalse(Files.exists(identityDir(TOKEN_A, "12345")));
-		p.spoolReplayNotBeforeMs = 0L;
-		p.replaySpoolTick();
-		p.flushEvents();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.replaySpoolTick();
+		p.events.flushEvents();
 		Thread.sleep(300);
 		assertEquals("nothing sent after the clear", before, bodies.size());
 	}
@@ -448,8 +448,8 @@ public class EventSpoolPluginTest
 		String acct1 = pendingIds(p).get(0);
 
 		inject(p, "activeHash", "222");
-		p.syncSpoolState();
-		p.awaitSpoolIdleForTest();
+		p.spooler.syncSpoolState();
+		p.spooler.awaitSpoolIdleForTest();
 		assertFalse("the previous account's identity is purged", Files.exists(identityDir(TOKEN_A, "111")));
 		emit(p, "trade");
 		assertTrue(Files.isDirectory(identityDir(TOKEN_A, "222")));
@@ -473,14 +473,14 @@ public class EventSpoolPluginTest
 		emit(p, "trade");
 		releaseToReplay(p);
 		int before = bodies.size();
-		p.applyServerPolicy(policy("X-Event-Spool", "off"));
-		p.awaitSpoolIdleForTest();
+		p.grants.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p.spooler.awaitSpoolIdleForTest();
 		assertFalse(Files.exists(identityDir(TOKEN_A, "12345")));
 		assertNull(EventSpool.readPointer(spoolRoot()));
 		replayAndWaitNoRequest(p, before);
 		emit(p, "trade");
 		assertFalse("no writes after off", Files.exists(identityDir(TOKEN_A, "12345")));
-		assertEquals(1L, p.captureHealthSnapshot().get("spool_purged_total"));
+		assertEquals(1L, p.events.captureHealthSnapshot().get("spool_purged_total"));
 	}
 
 	@Test
@@ -488,8 +488,8 @@ public class EventSpoolPluginTest
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
-		p.applyServerPolicy(policy("X-Sync-Interval", "30"));
-		p.awaitSpoolIdleForTest();
+		p.grants.applyServerPolicy(policy("X-Sync-Interval", "30"));
+		p.spooler.awaitSpoolIdleForTest();
 		emit(p, "trade");
 		assertEquals(1, pendingIds(p).size());
 	}
@@ -515,8 +515,8 @@ public class EventSpoolPluginTest
 		grant(p);
 		emit(p, "trade");
 		releaseToReplay(p);
-		p.applyServerPolicy(policy("X-Uploads-Enabled", "false"));
-		p.awaitSpoolIdleForTest();
+		p.grants.applyServerPolicy(policy("X-Uploads-Enabled", "false"));
+		p.spooler.awaitSpoolIdleForTest();
 		emit(p, "drop");	// writes continue during a pause
 		releaseToReplay(p);
 		assertEquals(2, pendingIds(p).size());
@@ -525,8 +525,8 @@ public class EventSpoolPluginTest
 		assertTrue("nothing purged by a pause", Files.isDirectory(identityDir(TOKEN_A, "12345")));
 		assertEquals(2, pendingIds(p).size());
 
-		p.applyServerPolicy(policy("X-Uploads-Enabled", "true"));
-		p.awaitSpoolIdleForTest();
+		p.grants.applyServerPolicy(policy("X-Uploads-Enabled", "true"));
+		p.spooler.awaitSpoolIdleForTest();
 		replayAndWait(p, before + 1);
 		assertEquals(2, idsIn(bodies.get(before)).size());
 		waitFor(() -> pendingIds(p).isEmpty(), "acked after resume");
@@ -543,11 +543,11 @@ public class EventSpoolPluginTest
 		emit(p, "drop");
 		releaseToReplay(p);
 		assertEquals(2, pendingIds(p).size());
-		assertEquals(2L, p.captureHealthSnapshot().get("spool_unacked_2xx_total"));
+		assertEquals(2L, p.events.captureHealthSnapshot().get("spool_unacked_2xx_total"));
 		script.add(EventSpoolPluginTest::legacyStored);
 		replayAndWait(p, bodies.size() + 1);
 		assertEquals("aggregate stored:N deletes nothing", 2, pendingIds(p).size());
-		assertTrue("a 2xx without results backs replay off", p.spoolReplayBackoffUntilMs > p.nowMs());
+		assertTrue("a 2xx without results backs replay off", p.spooler.spoolReplayBackoffUntilMs > p.nowMs());
 	}
 
 	@Test
@@ -579,7 +579,7 @@ public class EventSpoolPluginTest
 		});
 		replayAndWait(p, bodies.size() + 1);
 		assertEquals(Arrays.asList(ids.get(3), ids.get(4)), pendingIds(p));
-		Map<String, Object> h = p.captureHealthSnapshot();
+		Map<String, Object> h = p.events.captureHealthSnapshot();
 		assertEquals(3L, h.get("spool_acked_total"));
 		assertEquals(1L, h.get("spool_filtered_total"));
 		assertNotNull(h.get("last_spool_ack_at"));
@@ -623,7 +623,7 @@ public class EventSpoolPluginTest
 		script.add(b -> new MockResponse().setResponseCode(400));
 		replayAndWait(p, bodies.size() + 1);
 		waitFor(() -> pendingIds(p).isEmpty(), "quarantined");
-		assertEquals(1L, p.captureHealthSnapshot().get("spool_quarantined_total"));
+		assertEquals(1L, p.events.captureHealthSnapshot().get("spool_quarantined_total"));
 		int before = bodies.size();
 		replayAndWaitNoRequest(p, before);
 	}
@@ -636,7 +636,7 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		for (int i = 0; i < 150; i++)
 		{
-			p.emitEvent("ge_offer", fields("slot", i % 8));
+			p.events.emitEvent("ge_offer", fields("slot", i % 8));
 		}
 		flushAndWait(p, 1);
 		assertEquals(100, idsIn(bodies.get(0)).size());
@@ -652,7 +652,7 @@ public class EventSpoolPluginTest
 		}
 		for (int i = 0; i < 3; i++)
 		{
-			p.emitEvent("bank_visit_manifest_chunk", fields("items", big));
+			p.events.emitEvent("bank_visit_manifest_chunk", fields("items", big));
 		}
 		flushAndWait(p, 3);
 		assertEquals(2, idsIn(bodies.get(2)).size());
@@ -668,9 +668,9 @@ public class EventSpoolPluginTest
 		grant(p);
 		for (int i = 0; i < 150; i++)
 		{
-			p.emitEvent("trade", fields("n", i));
+			p.events.emitEvent("trade", fields("n", i));
 		}
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		fallback = EventSpoolPluginTest::legacyStored;
 		flushAndWait(p, 1);
 		flushAndWait(p, 2);
@@ -678,27 +678,27 @@ public class EventSpoolPluginTest
 		fallback = EventSpoolPluginTest::ackAll;
 		int before = bodies.size();
 
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.spoolReplayNotBeforeMs = 0L;
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.spoolReplayNotBeforeMs = 0L;
 		script.add(b -> new MockResponse().setResponseCode(429).setHeader("Retry-After", "60"));
-		p.replaySpoolTick();
-		waitFor(() -> bodies.size() == before + 1 && !p.spoolReplayInFlight, "first replay");
+		p.spooler.replaySpoolTick();
+		waitFor(() -> bodies.size() == before + 1 && !p.spooler.spoolReplayInFlight, "first replay");
 		assertEquals(100, idsIn(bodies.get(before)).size());
-		long until = p.spoolReplayBackoffUntilMs;
+		long until = p.spooler.spoolReplayBackoffUntilMs;
 		assertTrue("Retry-After honoured", until - p.nowMs() > 50_000L);
 
-		p.spoolReplayNotBeforeMs = 0L;
-		p.replaySpoolTick();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.replaySpoolTick();
 		Thread.sleep(300);
 		assertEquals("replay stops on 429 until the backoff ends", before + 1, bodies.size());
 
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.replaySpoolTick();
-		waitFor(() -> bodies.size() == before + 2 && !p.spoolReplayInFlight, "second replay");
-		p.replaySpoolTick();
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.replaySpoolTick();
+		waitFor(() -> bodies.size() == before + 2 && !p.spooler.spoolReplayInFlight, "second replay");
+		p.spooler.replaySpoolTick();
 		Thread.sleep(300);
 		assertEquals("at most one replay request per 5 s", before + 2, bodies.size());
-		assertTrue(p.spoolReplayNotBeforeMs - p.nowMs() > 4_000L);
+		assertTrue(p.spooler.spoolReplayNotBeforeMs - p.nowMs() > 4_000L);
 	}
 
 	@Test
@@ -709,14 +709,14 @@ public class EventSpoolPluginTest
 		emit(first, "trade");
 		emit(first, "drop");
 		List<String> old = new ArrayList<>(pendingIds(first));
-		first.crashSpoolForTest();
+		first.spooler.crashSpoolForTest();
 
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
 		emit(p, "trade");
 		String fresh = lastMemoryIds(p).get(0);
 		List<String> expect = new ArrayList<>(old);
-		assertEquals("the memory-owned row is not replay-eligible yet", expect, p.spoolReplayCandidatesForTest());
+		assertEquals("the memory-owned row is not replay-eligible yet", expect, p.spooler.spoolReplayCandidatesForTest());
 
 		// The memory flush is held open while a replay tick runs: the ids must not overlap.
 		java.util.concurrent.CountDownLatch hold = new java.util.concurrent.CountDownLatch(1);
@@ -730,12 +730,12 @@ public class EventSpoolPluginTest
 			}
 			return legacyStored(b);
 		});
-		p.flushEvents();
+		p.events.flushEvents();
 		waitFor(() -> bodies.size() == 1, "memory flush in flight");
 		replayAndWait(p, 2);
 		hold.countDown();
-		waitFor(() -> !p.eventPostInFlight, "memory flush done");
-		p.awaitSpoolIdleForTest();
+		waitFor(() -> !p.events.eventPostInFlight, "memory flush done");
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals(Collections.singletonList(fresh), idsIn(bodies.get(0)));
 		assertEquals("recovered first, without the in-flight id", old, idsIn(bodies.get(1)));
 		replayAndWait(p, 3);
@@ -759,15 +759,15 @@ public class EventSpoolPluginTest
 		grant(a);
 		emit(a, "trade");
 		List<String> aIds = new ArrayList<>(pendingIds(a));
-		a.crashSpoolForTest();
+		a.spooler.crashSpoolForTest();
 		String before = treeDigest();
 
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		p.startUp();
 		emit(p, "trade");		// not active yet: memory only
-		p.spoolReplayNotBeforeMs = 0L;
-		p.replaySpoolTick();
-		p.awaitSpoolIdleForTest();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.replaySpoolTick();
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals("no replay, no delete, no write before the header", before, treeDigest());
 		assertEquals(0, bodies.size());
 
@@ -792,7 +792,7 @@ public class EventSpoolPluginTest
 		emit(a, "trade");
 		emit(a, "drop");
 		Set<String> aIds = new HashSet<>(pendingIds(a));
-		a.crashSpoolForTest();
+		a.spooler.crashSpoolForTest();
 		assertEquals(EventSpool.identityKey(TOKEN_A, "111"), EventSpool.readPointer(spoolRoot()));
 		Path aDir = identityDir(TOKEN_A, "111");
 		List<Boolean> aDirAtFirstRequest = new CopyOnWriteArrayList<>();
@@ -829,11 +829,11 @@ public class EventSpoolPluginTest
 			assertEquals(2, s.filter(x -> x.toString().endsWith(".spl")).count());
 		}
 		String p1Row = pendingIds(p1).get(0);
-		p1.crashSpoolForTest();
-		p2.recoverAbandonedShardsNow();
-		p2.awaitSpoolIdleForTest();
+		p1.spooler.crashSpoolForTest();
+		p2.spooler.recoverAbandonedShardsNow();
+		p2.spooler.awaitSpoolIdleForTest();
 		assertTrue(pendingIds(p2).contains(p1Row));
-		assertEquals(p1Row, p2.spoolReplayCandidatesForTest().get(0));
+		assertEquals(p1Row, p2.spooler.spoolReplayCandidatesForTest().get(0));
 	}
 
 	@Test
@@ -850,7 +850,7 @@ public class EventSpoolPluginTest
 		emit(p1, "trade");
 		releaseToReplay(p1);
 		Path pDir = identityDir(TOKEN_A, "111");
-		Path live = p1.spoolShardFileForTest();
+		Path live = p1.spooler.spoolShardFileForTest();
 		assertTrue(Files.exists(live));
 
 		AccountConnectPlugin other = plugin(TOKEN_B, "222");
@@ -861,19 +861,19 @@ public class EventSpoolPluginTest
 
 		AccountConnectPlugin p2 = plugin(TOKEN_A, "111");
 		grant(p2);
-		p2.applyServerPolicy(policy("X-Event-Spool", "off"));
-		p2.awaitSpoolIdleForTest();
+		p2.grants.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p2.spooler.awaitSpoolIdleForTest();
 		assertTrue("a live shard is never deleted by another process", Files.exists(live));
 		assertTrue(Files.exists(pDir.resolve(EventSpool.MARKER)));
 
 		int before = bodies.size();
 		replayAndWaitNoRequest(p1, before);
-		p1.awaitSpoolIdleForTest();
+		p1.spooler.awaitSpoolIdleForTest();
 		assertFalse("the marked writer deletes its own shard", Files.exists(live));
 		assertFalse(Files.exists(pDir));
 		emit(p1, "trade");
 		assertFalse("and leaves the spool path", Files.exists(pDir));
-		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
+		assertEquals(false, p1.events.captureHealthSnapshot().get("spool_active"));
 	}
 
 	@Test
@@ -882,7 +882,7 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin a = plugin(TOKEN_A, "111");
 		grant(a);
 		emit(a, "trade");
-		a.crashSpoolForTest();
+		a.spooler.crashSpoolForTest();
 		Path aDir = identityDir(TOKEN_A, "111");
 		assertTrue(Files.isDirectory(aDir));
 
@@ -895,7 +895,7 @@ public class EventSpoolPluginTest
 		ev.setOldValue(TOKEN_A);
 		ev.setNewValue("");
 		p.onConfigChanged(ev);
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertFalse("the user withdrew the token: its spool is destroyed", Files.exists(aDir));
 		assertNull(EventSpool.readPointer(spoolRoot()));
 	}
@@ -907,13 +907,13 @@ public class EventSpoolPluginTest
 		grant(p);
 		for (int i = 0; i < 501; i++)
 		{
-			p.emitEvent("trade", fields("n", i));
+			p.events.emitEvent("trade", fields("n", i));
 		}
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals(501, pendingIds(p).size());
 		String oldest = pendingIds(p).get(0);
 		assertEquals("only the row the memory cap dropped is replay-eligible",
-			Collections.singletonList(oldest), p.spoolReplayCandidatesForTest());
+			Collections.singletonList(oldest), p.spooler.spoolReplayCandidatesForTest());
 	}
 
 	// ------------------------------------------------------------------ round 2: ordering
@@ -925,7 +925,7 @@ public class EventSpoolPluginTest
 		grant(p);
 		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
 		java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
-		p.spoolBeforeAppendHookForTest = () ->
+		p.spooler.spoolBeforeAppendHookForTest = () ->
 		{
 			entered.countDown();
 			try
@@ -936,24 +936,24 @@ public class EventSpoolPluginTest
 			{
 			}
 		};
-		p.emitEvent("trade", fields("item", "Abyssal whip"));
+		p.events.emitEvent("trade", fields("item", "Abyssal whip"));
 		assertTrue("the spool thread is inside the append", entered.await(3, TimeUnit.SECONDS));
 		String id = lastMemoryIds(p).get(0);
 
-		p.flushEvents();
+		p.events.flushEvents();
 		Thread.sleep(300);
 		assertEquals("nothing may be POSTed before the row is durable", 0, bodies.size());
 		assertEquals("the event is still waiting in memory", Collections.singletonList(id), lastMemoryIds(p));
 
 		gate.countDown();
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals("durable now", Collections.singletonList(id), pendingIds(p));
 		flushAndWait(p, 1);
 		assertEquals(Collections.singletonList(id), idsIn(bodies.get(0)));
-		p.flushEvents();
+		p.events.flushEvents();
 		Thread.sleep(200);
 		assertEquals("POSTed exactly once", 1, bodies.size());
-		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+		assertEquals(0, p.spooler.spoolDurabilityPendingCountForTest());
 	}
 
 	@Test
@@ -961,7 +961,7 @@ public class EventSpoolPluginTest
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
-		p.spoolBeforeAppendHookForTest = () ->
+		p.spooler.spoolBeforeAppendHookForTest = () ->
 		{
 			throw new java.io.UncheckedIOException(new java.io.IOException("disk full"));
 		};
@@ -970,8 +970,8 @@ public class EventSpoolPluginTest
 		flushAndWait(p, 1);
 		assertEquals("the event still goes out, memory-only", Collections.singletonList(id), idsIn(bodies.get(0)));
 		assertTrue("nothing durable", pendingIds(p).isEmpty());
-		assertEquals(1L, p.captureHealthSnapshot().get("spool_append_failed_total"));
-		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+		assertEquals(1L, p.events.captureHealthSnapshot().get("spool_append_failed_total"));
+		assertEquals(0, p.spooler.spoolDurabilityPendingCountForTest());
 	}
 
 	@Test
@@ -980,7 +980,7 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
 		java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
-		p.spoolBeforeAppendHookForTest = () ->
+		p.spooler.spoolBeforeAppendHookForTest = () ->
 		{
 			try
 			{
@@ -992,20 +992,20 @@ public class EventSpoolPluginTest
 		};
 		for (int i = 0; i < 501; i++)
 		{
-			p.emitEvent("trade", fields("n", i));
+			p.events.emitEvent("trade", fields("n", i));
 		}
-		assertEquals("the cap dropped one event and released its id", 500, p.spoolDurabilityPendingCountForTest());
+		assertEquals("the cap dropped one event and released its id", 500, p.spooler.spoolDurabilityPendingCountForTest());
 		gate.countDown();
-		p.awaitSpoolIdleForTest();
-		assertEquals("never a stuck id", 0, p.spoolDurabilityPendingCountForTest());
+		p.spooler.awaitSpoolIdleForTest();
+		assertEquals("never a stuck id", 0, p.spooler.spoolDurabilityPendingCountForTest());
 	}
 
 	@Test
 	public void publicTokensNeverEnterTheDurabilityGate() throws Exception
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
-		p.emitEvent("trade", fields("item", "x"));
-		assertEquals(0, p.spoolDurabilityPendingCountForTest());
+		p.events.emitEvent("trade", fields("item", "x"));
+		assertEquals(0, p.spooler.spoolDurabilityPendingCountForTest());
 		flushAndWait(p, 1);
 		assertEquals(1, idsIn(bodies.get(0)).size());
 	}
@@ -1016,15 +1016,15 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin a = plugin(TOKEN_A, "111");
 		grant(a);
 		List<String> pointerAtFirstAppend = new CopyOnWriteArrayList<>();
-		a.spoolBeforeAppendHookForTest = () -> pointerAtFirstAppend.add(String.valueOf(EventSpool.readPointer(spoolRoot())));
-		a.spoolAfterAppendHookForTest = () ->
+		a.spooler.spoolBeforeAppendHookForTest = () -> pointerAtFirstAppend.add(String.valueOf(EventSpool.readPointer(spoolRoot())));
+		a.spooler.spoolAfterAppendHookForTest = () ->
 		{
 			throw new IllegalStateException("simulated process death right after the first durable append");
 		};
-		a.emitEvent("trade", fields("item", "Abyssal whip"));
-		a.awaitSpoolIdleForTest();
+		a.events.emitEvent("trade", fields("item", "Abyssal whip"));
+		a.spooler.awaitSpoolIdleForTest();
 		String aId = lastMemoryIds(a).get(0);
-		a.crashSpoolForTest();
+		a.spooler.crashSpoolForTest();
 		Path aDir = identityDir(TOKEN_A, "111");
 		assertTrue("the row is on disk", Files.isDirectory(aDir));
 		assertEquals("the pointer named this identity before its first row was written",
@@ -1092,8 +1092,8 @@ public class EventSpoolPluginTest
 		assertFalse(Files.exists(d2.resolve(EventSpool.MARKER)));
 		assertEquals(2, pendingIds(c1).size());
 		assertEquals(2, pendingIds(c2).size());
-		assertEquals(true, c1.captureHealthSnapshot().get("spool_active"));
-		assertEquals(true, c2.captureHealthSnapshot().get("spool_active"));
+		assertEquals(true, c1.events.captureHealthSnapshot().get("spool_active"));
+		assertEquals(true, c2.events.captureHealthSnapshot().get("spool_active"));
 
 		// each replays only its own rows, under its own token
 		releaseToReplay(c1);
@@ -1119,8 +1119,8 @@ public class EventSpoolPluginTest
 		emit(c1, "trade");
 		emit(c2, "trade");
 		String c2Row = pendingIds(c2).get(0);
-		c1.crashSpoolForTest();
-		c2.crashSpoolForTest();
+		c1.spooler.crashSpoolForTest();
+		c2.spooler.crashSpoolForTest();
 		AccountConnectPlugin c3 = plugin(t2, a2);
 		c3.startUp();
 		grant(c3);
@@ -1141,8 +1141,8 @@ public class EventSpoolPluginTest
 		Path aDir = identityDir(TOKEN_A, "111");
 		Path bDir = identityDir(TOKEN_A, "222");
 		assertTrue(Files.isDirectory(aDir));
-		a.crashSpoolForTest();
-		b.crashSpoolForTest();
+		a.spooler.crashSpoolForTest();
+		b.spooler.crashSpoolForTest();
 		assertEquals("the latest recorded identity is B", EventSpool.identityKey(TOKEN_A, "222"),
 			EventSpool.readPointer(spoolRoot()));
 
@@ -1165,13 +1165,13 @@ public class EventSpoolPluginTest
 		grant(p2);
 		emit(p2, "drop");
 		// p2 withdraws the identity (server says off) while p1 still holds its shard: p1 gets a marker.
-		p2.applyServerPolicy(policy("X-Event-Spool", "off"));
-		p2.awaitSpoolIdleForTest();
+		p2.grants.applyServerPolicy(policy("X-Event-Spool", "off"));
+		p2.spooler.awaitSpoolIdleForTest();
 		assertTrue(Files.exists(dir.resolve(EventSpool.MARKER)));
 		p1.shutDown();
-		p1.awaitSpoolIdleForTest();
+		p1.spooler.awaitSpoolIdleForTest();
 		assertFalse("nothing of a withdrawn identity survives a graceful close", Files.exists(dir));
-		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
+		assertEquals(false, p1.events.captureHealthSnapshot().get("spool_active"));
 	}
 
 	@Test
@@ -1182,7 +1182,7 @@ public class EventSpoolPluginTest
 		emit(p1, "trade");
 		Path dir = identityDir(TOKEN_A, "111");
 		Files.write(dir.resolve(EventSpool.MARKER), "{\"v\":1,\"requested_ms\":1}".getBytes(StandardCharsets.UTF_8));
-		p1.crashSpoolForTest();
+		p1.spooler.crashSpoolForTest();
 
 		AccountConnectPlugin p = plugin(TOKEN_A, "111");
 		p.startUp();
@@ -1191,7 +1191,7 @@ public class EventSpoolPluginTest
 		emit(p, "trade");
 		assertEquals(1, pendingIds(p).size());
 		assertFalse(Files.exists(dir.resolve(EventSpool.MARKER)));
-		assertEquals(true, p.captureHealthSnapshot().get("spool_active"));
+		assertEquals(true, p.events.captureHealthSnapshot().get("spool_active"));
 	}
 
 	@Test
@@ -1203,7 +1203,7 @@ public class EventSpoolPluginTest
 		Path dir = identityDir(TOKEN_A, "111");
 		Files.write(dir.resolve(EventSpool.MARKER), "{\"v\":1,\"requested_ms\":1}".getBytes(StandardCharsets.UTF_8));
 		emit(p1, "drop");	// the writer sees the marker and retires
-		assertEquals(false, p1.captureHealthSnapshot().get("spool_active"));
+		assertEquals(false, p1.events.captureHealthSnapshot().get("spool_active"));
 		assertFalse(Files.exists(dir));
 		emit(p1, "trade");
 		assertFalse("no write after retirement until a new grant", Files.exists(dir));
@@ -1218,7 +1218,7 @@ public class EventSpoolPluginTest
 		releaseToReplay(p);
 		String aId = pendingIds(p).get(0);
 		int before = bodies.size();
-		p.spoolReplayBeforeDispatchHookForTest = () ->
+		p.spooler.spoolReplayBeforeDispatchHookForTest = () ->
 		{
 			try
 			{
@@ -1229,15 +1229,15 @@ public class EventSpoolPluginTest
 				throw new IllegalStateException(e);
 			}
 		};
-		p.spoolReplayNotBeforeMs = 0L;
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.replaySpoolTick();
-		p.awaitSpoolIdleForTest();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.replaySpoolTick();
+		p.spooler.awaitSpoolIdleForTest();
 		Thread.sleep(300);
-		p.spoolReplayBeforeDispatchHookForTest = null;
+		p.spooler.spoolReplayBeforeDispatchHookForTest = null;
 		assertEquals("the old-identity batch is never dispatched", before, bodies.size());
 		assertFalse(postedIds().subList(Math.min(before, postedIds().size()), postedIds().size()).contains(aId));
-		assertFalse(p.spoolReplayInFlight);
+		assertFalse(p.spooler.spoolReplayInFlight);
 	}
 
 	// ------------------------------------------------------------------ round 4
@@ -1264,11 +1264,11 @@ public class EventSpoolPluginTest
 	{
 		fallback = this::dedupingServer;
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
-		p.durabilityGateMaxMs = 300L;
+		p.spooler.durabilityGateMaxMs = 300L;
 		grant(p);
 		java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
 		java.util.concurrent.CountDownLatch disk = new java.util.concurrent.CountDownLatch(1);
-		p.spoolBeforeAppendHookForTest = () ->
+		p.spooler.spoolBeforeAppendHookForTest = () ->
 		{
 			entered.countDown();
 			try
@@ -1279,28 +1279,28 @@ public class EventSpoolPluginTest
 			{
 			}
 		};
-		p.emitEvent("trade", fields("item", "Abyssal whip"));
+		p.events.emitEvent("trade", fields("item", "Abyssal whip"));
 		assertTrue(entered.await(3, TimeUnit.SECONDS));
-		p.emitEvent("chat", fields("text", "behind the hung write"));	// memory-only, queued behind it
+		p.events.emitEvent("chat", fields("text", "behind the hung write"));	// memory-only, queued behind it
 		List<String> order = lastMemoryIds(p);
 		String hung = order.get(0);
 
-		p.flushEvents();
+		p.events.flushEvents();
 		Thread.sleep(150);
 		assertEquals("before the bound, force-before-network still holds", 0, bodies.size());
 
 		Thread.sleep(300);	// past the bound
-		p.flushEvents();	// the spool thread is still hung: do not wait on it
-		waitFor(() -> bodies.size() >= 1 && !p.eventPostInFlight, "memory flush after the bound");
+		p.events.flushEvents();	// the spool thread is still hung: do not wait on it
+		waitFor(() -> bodies.size() >= 1 && !p.events.eventPostInFlight, "memory flush after the bound");
 		assertEquals("delivery resumes in order", order, idsIn(bodies.get(0)));
-		assertEquals(1L, p.captureHealthSnapshot().get("spool_gate_timeout_total"));
+		assertEquals(1L, p.events.captureHealthSnapshot().get("spool_gate_timeout_total"));
 
 		disk.countDown();	// the write completes late
-		p.spoolBeforeAppendHookForTest = null;
-		p.awaitSpoolIdleForTest();
+		p.spooler.spoolBeforeAppendHookForTest = null;
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals("the late row is durable with the SAME id", Collections.singletonList(hung), pendingIds(p));
 		assertEquals("the memory ack did not settle a row that was not durable when sent",
-			Collections.singletonList(hung), p.spoolReplayCandidatesForTest());
+			Collections.singletonList(hung), p.spooler.spoolReplayCandidatesForTest());
 
 		replayAndWait(p, 2);
 		assertEquals(Collections.singletonList(hung), idsIn(bodies.get(1)));
@@ -1320,7 +1320,7 @@ public class EventSpoolPluginTest
 		java.util.concurrent.CountDownLatch firstGo = new java.util.concurrent.CountDownLatch(1);
 		java.util.concurrent.CountDownLatch secondIn = new java.util.concurrent.CountDownLatch(1);
 		java.util.concurrent.CountDownLatch secondGo = new java.util.concurrent.CountDownLatch(1);
-		p.spoolBeforeAppendHookForTest = () ->
+		p.spooler.spoolBeforeAppendHookForTest = () ->
 		{
 			int n = calls.incrementAndGet();
 			try
@@ -1340,30 +1340,30 @@ public class EventSpoolPluginTest
 			{
 			}
 		};
-		p.emitEvent("trade", fields("n", 0));	// X, old generation; the spool thread is now busy
+		p.events.emitEvent("trade", fields("n", 0));	// X, old generation; the spool thread is now busy
 		assertTrue(firstIn.await(3, TimeUnit.SECONDS));
 
 		inject(p, "activeHash", "222");
-		p.syncSpoolState();						// X -> Y: "purge X" is queued behind the busy thread
+		p.spooler.syncSpoolState();						// X -> Y: "purge X" is queued behind the busy thread
 		inject(p, "activeHash", "111");
-		p.syncSpoolState();						// Y -> X: X is active again, a NEW generation
-		p.emitEvent("trade", fields("n", 1));	// X, new generation: gated until its own force
+		p.spooler.syncSpoolState();						// Y -> X: X is active again, a NEW generation
+		p.events.emitEvent("trade", fields("n", 1));	// X, new generation: gated until its own force
 		String fresh = lastMemoryIds(p).get(1);
 
 		firstGo.countDown();						// the old purge of X now runs, then the fresh append starts
 		assertTrue(secondIn.await(3, TimeUnit.SECONDS));
 		try
 		{
-			p.flushEvents();
+			p.events.flushEvents();
 			Thread.sleep(300);
 			assertFalse("the old purge must not release the new generation's gate", postedIds().contains(fresh));
-			assertEquals(1, p.spoolDurabilityPendingCountForTest());
+			assertEquals(1, p.spooler.spoolDurabilityPendingCountForTest());
 		}
 		finally
 		{
 			secondGo.countDown();
 		}
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals("the fresh row is durable in the re-activated identity", Collections.singletonList(fresh),
 			pendingIds(p));
 	}
@@ -1373,7 +1373,7 @@ public class EventSpoolPluginTest
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		final long[] offset = {-(EventSpool.MAX_AGE_MS - 2_000L)};
-		p.wallClock = () -> System.currentTimeMillis() + offset[0];
+		p.spooler.wallClock = () -> System.currentTimeMillis() + offset[0];
 		grant(p);
 		emit(p, "trade");						// created 47 h 59 m 58 s "ago"
 		String old = lastMemoryIds(p).get(0);
@@ -1383,17 +1383,17 @@ public class EventSpoolPluginTest
 		List<String> both = pendingIds(p);
 		assertEquals(2, both.size());
 		String fresh = both.get(1);
-		long droppedBefore = (Long) p.captureHealthSnapshot().get("spool_dropped_total");
+		long droppedBefore = (Long) p.events.captureHealthSnapshot().get("spool_dropped_total");
 
 		offset[0] = 3_000L;						// the old row crosses 48 h; no append, no recover
 		int before = bodies.size();
 		replayAndWait(p, before + 1);
 		assertEquals("only the fresh row replays", Collections.singletonList(fresh), idsIn(bodies.get(before)));
 		assertFalse("a row older than 48 h is never POSTed by replay", postedIds().subList(before, postedIds().size()).contains(old));
-		assertEquals(droppedBefore + 1, p.captureHealthSnapshot().get("spool_dropped_total"));
-		p.crashSpoolForTest();
+		assertEquals(droppedBefore + 1, p.events.captureHealthSnapshot().get("spool_dropped_total"));
+		p.spooler.crashSpoolForTest();
 		AccountConnectPlugin q = plugin(TOKEN_A, "12345");
-		q.wallClock = () -> System.currentTimeMillis() - 1_000L;	// even a clock that is back inside the window
+		q.spooler.wallClock = () -> System.currentTimeMillis() - 1_000L;	// even a clock that is back inside the window
 		q.startUp();
 		grant(q);
 		assertFalse("the age-out is durable (tombstoned)", pendingIds(q).contains(old));
@@ -1404,23 +1404,23 @@ public class EventSpoolPluginTest
 	{
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		final long[] offset = {-(EventSpool.MAX_AGE_MS - 2_000L)};
-		p.wallClock = () -> System.currentTimeMillis() + offset[0];
+		p.spooler.wallClock = () -> System.currentTimeMillis() + offset[0];
 		grant(p);
 		emit(p, "trade");
 		releaseToReplay(p);
 		String old = pendingIds(p).get(0);
 		int before = bodies.size();
 		// The batch is built inside the window; the clock then passes 48 h before OkHttp dispatches it.
-		p.spoolReplayBeforeDispatchHookForTest = () -> offset[0] = 3_000L;
-		p.spoolReplayNotBeforeMs = 0L;
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.replaySpoolTick();
-		waitFor(() -> !p.spoolReplayInFlight, "replay attempt settled");
-		p.awaitSpoolIdleForTest();
+		p.spooler.spoolReplayBeforeDispatchHookForTest = () -> offset[0] = 3_000L;
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.replaySpoolTick();
+		waitFor(() -> !p.spooler.spoolReplayInFlight, "replay attempt settled");
+		p.spooler.awaitSpoolIdleForTest();
 		Thread.sleep(200);
 		assertEquals("a row past 48 h at dispatch is never on the wire", before, bodies.size());
-		assertEquals(1L, p.captureHealthSnapshot().get("spool_replay_aged_at_dispatch_total"));
-		p.spoolReplayBeforeDispatchHookForTest = null;
+		assertEquals(1L, p.events.captureHealthSnapshot().get("spool_replay_aged_at_dispatch_total"));
+		p.spooler.spoolReplayBeforeDispatchHookForTest = null;
 		replayAndWaitNoRequest(p, before);
 		assertFalse("and the next tick ages it out durably", pendingIds(p).contains(old));
 	}
@@ -1431,7 +1431,7 @@ public class EventSpoolPluginTest
 		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
 		grant(p);
 		emit(p, "trade");
-		Map<String, Object> h = p.captureHealthSnapshot();
+		Map<String, Object> h = p.events.captureHealthSnapshot();
 		for (String k : Arrays.asList("spool_active", "spool_records_pending", "spool_bytes", "spool_oldest_age_s",
 			"spool_replayed_total", "spool_acked_total", "spool_dropped_total", "spool_corrupt_total",
 			"spool_quarantined_total", "spool_filtered_total", "spool_unacked_2xx_total", "spool_purged_total",
@@ -1455,11 +1455,11 @@ public class EventSpoolPluginTest
 
 	private void replayAndWaitNoRequest(AccountConnectPlugin p, int before) throws Exception
 	{
-		p.spoolReplayNotBeforeMs = 0L;
-		p.spoolReplayBackoffUntilMs = 0L;
-		p.replaySpoolTick();
+		p.spooler.spoolReplayNotBeforeMs = 0L;
+		p.spooler.spoolReplayBackoffUntilMs = 0L;
+		p.spooler.replaySpoolTick();
 		Thread.sleep(300);
-		p.awaitSpoolIdleForTest();
+		p.spooler.awaitSpoolIdleForTest();
 		assertEquals("no replay request expected", before, bodies.size());
 	}
 

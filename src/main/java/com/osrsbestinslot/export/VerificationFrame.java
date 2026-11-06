@@ -6,6 +6,7 @@ import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import net.runelite.api.widgets.Widget;
 
 /** Numeric screenshot evidence. Pixels outside the selected widget interiors are never retained. */
 final class VerificationFrame
@@ -18,7 +19,7 @@ final class VerificationFrame
         final Object value;
         final Map<String, Object> inputs;
         final String text;
-        net.runelite.api.widgets.Widget sourceWidget;
+        Widget sourceWidget;
         int sourceItemQuantity;
 
         Region(String key, int widget, Rectangle bounds, int value)

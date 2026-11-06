@@ -67,7 +67,7 @@ public class StaffStoreClipUploadTest
 		kept.add(new byte[]{4, 5, 6});
 		kept.add(new byte[]{7, 8, 9});
 
-		MultipartBody mb = AccountConnectPlugin.buildStoreClipBody(kept, TEST_TOKEN, 1700000000L, AccountConnectPlugin.CLIP_FPS);
+		MultipartBody mb = StoreClips.buildStoreClipBody(kept, TEST_TOKEN, 1700000000L, StoreClips.CLIP_FPS);
 
 		int frameParts = 0;
 		int declaredCount = -1;
@@ -113,18 +113,18 @@ public class StaffStoreClipUploadTest
 	{
 		List<byte[]> encoded = new ArrayList<>();
 		encoded.add(sized(500_000, 0));					// ok
-		encoded.add(sized(AccountConnectPlugin.MAX_CLIP_FRAME_BYTES + 1, 1));	// over per-frame cap -> dropped
+		encoded.add(sized(StoreClips.MAX_CLIP_FRAME_BYTES + 1, 1));	// over per-frame cap -> dropped
 		encoded.add(sized(500_000, 2));					// ok
 
-		List<byte[]> kept = AccountConnectPlugin.selectStoreClipFrames(
-			encoded, AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_FRAME_BYTES, AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		List<byte[]> kept = StoreClips.selectStoreClipFrames(
+			encoded, StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES);
 
 		assertEquals("oversized frame not dropped", 2, kept.size());
 		assertEquals("wrong survivor 0", 0, kept.get(0)[0]);
 		assertEquals("wrong survivor 1", 2, kept.get(1)[0]);
 
-		MultipartBody mb = AccountConnectPlugin.buildStoreClipBody(kept, TEST_TOKEN, 1700000000L, AccountConnectPlugin.CLIP_FPS);
+		MultipartBody mb = StoreClips.buildStoreClipBody(kept, TEST_TOKEN, 1700000000L, StoreClips.CLIP_FPS);
 		int frameParts = 0;
 		int declaredCount = -1;
 		for (int i = 0; i < mb.size(); i++)
@@ -154,9 +154,9 @@ public class StaffStoreClipUploadTest
 		{
 			encoded.add(sized(1_000_000, i));			// each == per-frame cap, allowed
 		}
-		List<byte[]> kept = AccountConnectPlugin.selectStoreClipFrames(
-			encoded, AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_FRAME_BYTES, AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		List<byte[]> kept = StoreClips.selectStoreClipFrames(
+			encoded, StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES);
 
 		assertEquals("16 MiB cap must keep exactly 16 x 1MB frames", 16, kept.size());
 		assertEquals("kept set must start at the tail (index 4)", 4, kept.get(0)[0]);
@@ -188,11 +188,11 @@ public class StaffStoreClipUploadTest
 		StoreVisitClip ring = newVisit();
 		ring.offer(jpeg(16, 12), 1_000L);
 		ring.offer(jpeg(16, 12), 1_033L);
-		inject(plugin, "clipVisit", ring);
-		inject(plugin, "clipCapturing", true);
-		plugin.storeTxThisVisit = false;			// the visit had NO buy/sell
+		plugin.clips.clipVisit = ring;
+		plugin.clips.clipCapturing = true;
+		plugin.clips.storeTxThisVisit = false;			// the visit had NO buy/sell
 
-		plugin.stopStoreClipCapture(true);			// upload requested, but tx flag is false
+		plugin.clips.stopStoreClipCapture(true);			// upload requested, but tx flag is false
 
 		assertFalse("no-transaction visit must NEVER upload", uploaded[0]);
 		assertEquals("frames must be discarded", 0, ring.size());
@@ -211,11 +211,11 @@ public class StaffStoreClipUploadTest
 		inject(plugin2, "drawManager", new DrawManager());
 		StoreVisitClip ring2 = newVisit();
 		ring2.offer(jpeg(16, 12), 1_000L);
-		inject(plugin2, "clipVisit", ring2);
-		inject(plugin2, "clipCapturing", true);
-		plugin2.storeTxThisVisit = true;			// a buy/sell happened
+		plugin2.clips.clipVisit = ring2;
+		plugin2.clips.clipCapturing = true;
+		plugin2.clips.storeTxThisVisit = true;			// a buy/sell happened
 
-		plugin2.stopStoreClipCapture(true);
+		plugin2.clips.stopStoreClipCapture(true);
 
 		assertTrue("a visit with a transaction must upload", uploaded2[0]);
 	}
@@ -276,8 +276,8 @@ public class StaffStoreClipUploadTest
 
 	private static StoreVisitClip newVisit()
 	{
-		return new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
+		return new StoreVisitClip(StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_BURST_BYTES, StoreClips.MAX_CLIP_FRAME_BYTES);
 	}
 
 	private static byte[] sized(int len, int tag)
@@ -316,20 +316,20 @@ public class StaffStoreClipUploadTest
 	public void clipUploadTimeoutIsSizedForTheChunkNotThePageFetchDefault()
 	{
 		final int okhttpDefaultSeconds = 10;
-		assertTrue("CLIP_UPLOAD_TIMEOUT_SECONDS=" + AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS
+		assertTrue("CLIP_UPLOAD_TIMEOUT_SECONDS=" + StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS
 				+ " is at or under OkHttp's " + okhttpDefaultSeconds
 				+ "s default; a real chunk cannot upload that fast and the burst is destroyed mid-body",
-			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS > okhttpDefaultSeconds);
+			StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS > okhttpDefaultSeconds);
 
 		// Sized against the measured worst case: ~37KB/frame, and a 100-frame chunk took up to 16.6s
 		// on a fast host. A 40-frame chunk on a slow domestic uplink must still fit.
 		final int worstCaseSecondsForAChunk = 45;
 		assertTrue("timeout must cover a slow uplink's worst case (" + worstCaseSecondsForAChunk + "s)",
-			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS >= worstCaseSecondsForAChunk);
+			StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS >= worstCaseSecondsForAChunk);
 
 		// But not unbounded: a hung socket must not pin an executor thread for the whole session.
 		assertTrue("an effectively-infinite timeout would hang the upload executor on a dead socket",
-			AccountConnectPlugin.CLIP_UPLOAD_TIMEOUT_SECONDS <= 300);
+			StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS <= 300);
 	}
 
 	/**
@@ -346,20 +346,20 @@ public class StaffStoreClipUploadTest
 	public void chunkSizeStaysInsideTheServerSubrequestBudget()
 	{
 		final int serverPerRequestMax = 40;	// osrsbis-web MEDIA.FRAMES_PER_REQUEST_MAX
-		assertTrue("CLIP_CHUNK_FRAMES=" + AccountConnectPlugin.CLIP_CHUNK_FRAMES
+		assertTrue("CLIP_CHUNK_FRAMES=" + StoreClips.CLIP_CHUNK_FRAMES
 				+ " exceeds the server's " + serverPerRequestMax
 				+ "-frame per-request budget; the worker dies mid-write and the clip is lost silently",
-			AccountConnectPlugin.CLIP_CHUNK_FRAMES <= serverPerRequestMax);
+			StoreClips.CLIP_CHUNK_FRAMES <= serverPerRequestMax);
 		assertTrue("a zero/negative chunk size would loop forever or upload nothing",
-			AccountConnectPlugin.CLIP_CHUNK_FRAMES >= 1);
+			StoreClips.CLIP_CHUNK_FRAMES >= 1);
 	}
 
 	/** A full-length visit must still be delivered — in more chunks, not fewer frames. */
 	@Test
 	public void aFullBurstIsSplitIntoWholeChunksWithNoFrameLost()
 	{
-		int total = AccountConnectPlugin.MAX_CLIP_FRAMES;
-		int chunk = AccountConnectPlugin.CLIP_CHUNK_FRAMES;
+		int total = StoreClips.MAX_CLIP_FRAMES;
+		int chunk = StoreClips.CLIP_CHUNK_FRAMES;
 		// Guard the loop bound FIRST. A zero or negative chunk makes `off += chunk` non-advancing, so
 		// this test would hang forever rather than fail — found by mutation on 2026-09-03, where the
 		// chunk=0 mutant produced a 120s timeout instead of a red assertion. A test that hangs on a

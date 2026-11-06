@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Locale;
 
 /**
  * Own fight, raid and lap timings from the game's own completion lines, and the count lines the kill_count gate
@@ -51,7 +52,7 @@ final class KillTiming
 	{
 		if (message == null || message.length() > 512) return "";
 		String s = message.replace("<br>", " ");
-		s = AccountConnectPlugin.CHAT_MARKUP_RE.matcher(s).replaceAll("");
+		s = KillActivity.CHAT_MARKUP_RE.matcher(s).replaceAll("");
 		return s.replace(' ', ' ').replaceAll("\\s+", " ").trim();
 	}
 
@@ -97,7 +98,7 @@ final class KillTiming
 			Matcher m = PART.matcher(text);
 			while (m.find() && timings.size() < 4)
 			{
-				String label = m.group(1).replaceAll(":$", "").trim().toLowerCase(java.util.Locale.ROOT);
+				String label = m.group(1).replaceAll(":$", "").trim().toLowerCase(Locale.ROOT);
 				timings.add(timing(label, m.group(2), m.group(3) != null, m.group(4)));
 			}
 		}
@@ -110,11 +111,9 @@ final class KillTiming
 	{
 		Double duration = seconds(time);
 		if (duration == null) return null;
-		Map<String, Object> t = new LinkedHashMap<>();
-		t.put("label", label);
-		t.put("duration_s", duration);
-		t.put("new_pb", newPb);
-		t.put("personal_best_s", newPb ? duration : seconds(pbTime));
+		Map<String, Object> t = Fields.of(
+			"label", label, "duration_s", duration, "new_pb", newPb,
+			"personal_best_s", newPb ? duration : seconds(pbTime));
 		return t;
 	}
 
@@ -147,10 +146,7 @@ final class KillTiming
 		{
 			return null;
 		}
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("source", source);
-		out.put("kind", kind);
-		out.put("count", n);
+		Map<String, Object> out = Fields.of("source", source, "kind", kind, "count", n);
 		return out;
 	}
 }

@@ -44,10 +44,9 @@ final class OwnBankTabsCapture
 
     void built(Client client, long at)
     {
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("basis", "inferred_raw_tab_ranges_same_session_cached_bank");
-        value.put("complete", false);
-        value.put("container_observed_at_ms", observed == null ? null : packetAt);
+        Map<String,Object> value = Fields.of(
+            "basis", "inferred_raw_tab_ranges_same_session_cached_bank", "complete", false,
+            "container_observed_at_ms", observed == null ? null : packetAt);
         value.put("tabs", null); value.put("untabbed", null);
         String status = "own_bank_packet_unavailable";
         if (observed != null)

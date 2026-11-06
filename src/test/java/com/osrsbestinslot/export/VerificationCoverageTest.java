@@ -48,7 +48,7 @@ public class VerificationCoverageTest
         String[] accountFields = {"VARP_QUEST_POINTS","VARP_SLAYER_TARGET","VARP_SLAYER_COUNT","ACCOUNT_TYPE_VARBIT","VARBIT_CA_POINTS"};
         for (String name : accountFields)
         {
-            Field field=AccountConnectPlugin.class.getDeclaredField(name);field.setAccessible(true);int id=field.getInt(null);
+            Field field=SnapshotBuilder.class.getDeclaredField(name);field.setAccessible(true);int id=field.getInt(null);
             String kind=name.contains("VARBIT")?"varbit":"varp";
             add(rows,kind+":"+id,name,kind+":"+id,"server-set versus client var","none selected","random sampling");
         }
@@ -58,7 +58,7 @@ public class VerificationCoverageTest
             add(rows,"varbit:"+id,"slayer_progress","varbit:"+id,"server-set versus client var","none selected","random sampling");
         for (int id : AccountReadiness.CA_TASK_VARPS) add(rows,"varp:"+id,"combat_achievement_word","varp:"+id,
             "server-set versus client packed word","none selected; not one target per decoded achievement","random sampling");
-        Field diaries=AccountConnectPlugin.class.getDeclaredField("DIARIES");diaries.setAccessible(true);
+        Field diaries=SnapshotBuilder.class.getDeclaredField("DIARIES");diaries.setAccessible(true);
         for (Object[] diary : (Object[][])diaries.get(null)) for(int tier=1;tier<=4;tier++)
             add(rows,"varbit:"+diary[tier],diary[0]+"_tier_"+tier,"varbit:"+diary[tier],
                 "server-set versus client diary var","none selected","random sampling");

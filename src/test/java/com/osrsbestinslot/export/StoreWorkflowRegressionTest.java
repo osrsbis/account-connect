@@ -96,7 +96,7 @@ public class StoreWorkflowRegressionTest
         doAnswer(call -> { registered.remove(call.getArgument(0)); return true; }).when(manager).remove(any(Overlay.class));
         inject(plugin, "activeHash", ACCOUNT);
         when(client.getAccountHash()).thenReturn(Long.parseLong(ACCOUNT));
-        plugin.staffApiBase = "http://localhost/never-networked";	// this rig's stand-in for osrsbestinslot.com
+        plugin.grants.staffApiBase = "http://localhost/never-networked";	// this rig's stand-in for osrsbestinslot.com
         bus.register(plugin);
         plugin.startUp();
         captureRegisteredOverlays();
@@ -116,7 +116,7 @@ public class StoreWorkflowRegressionTest
         try
         {
             bus.unregister(plugin);
-            plugin.pendingEvents.clear();
+            plugin.events.pendingEvents.clear();
             plugin.shutDown();
             assertTrue("shutdown left staff overlays registered", registered.isEmpty());
             if (!failures.isEmpty()) throw new AssertionError("RuneLite subscriber threw", failures.get(0));
@@ -149,7 +149,7 @@ public class StoreWorkflowRegressionTest
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Store-Tools", value)
             // The server names a staff account only for an approved staff token; "off" withdraws both.
             .header("X-Staff-Capture", value).header("X-Staff-Account", "on".equals(value) ? ACCOUNT : "").build();
-        plugin.applyServerPolicy(response, sentToken);
+        plugin.grants.applyServerPolicy(response, sentToken);
     }
 
     private void open()
@@ -224,13 +224,13 @@ public class StoreWorkflowRegressionTest
         open();
         assertUnknown();
         observeProbeReset();
-        Field anchor = AccountConnectPlugin.class.getDeclaredField("storeResetAnchorMs");
+        Field anchor = StoreTools.class.getDeclaredField("storeResetAnchorMs");
         anchor.setAccessible(true);
-        long observed = anchor.getLong(plugin);
+        long observed = anchor.getLong(plugin.store);
         sell(999);
         stock(new Item(999, 1));
         stock();
-        assertEquals("a customer's merchandise purchase must not reset the clock", observed, anchor.getLong(plugin));
+        assertEquals("a customer's merchandise purchase must not reset the clock", observed, anchor.getLong(plugin.store));
         post(new WidgetClosed(InterfaceID.SHOPMAIN, 0, true));
         assertHidden();
         open();
@@ -276,7 +276,7 @@ public class StoreWorkflowRegressionTest
         policy("on", token);
         open();
         observeProbeReset();
-        plugin.pendingEvents.clear();
+        plugin.events.pendingEvents.clear();
         plugin.shutDown();
         assertTrue("disable must remove both registered overlays", registered.isEmpty());
         plugin.startUp();

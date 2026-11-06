@@ -34,13 +34,10 @@ final class EventVerification
         }
         Map<String, Object> common(int readTick)
         {
-            Map<String, Object> out = new LinkedHashMap<>();
-            out.put("source_event_id", id);
-            out.put("source_event_type", type);
-            out.put("source_event_tick", tick);
-            out.put("source_event_revision", revision > 0 ? revision : null);
-            out.put("snapshot_revision", revision > 0 ? revision : null);
-            out.put("tick", readTick);
+            Map<String, Object> out = Fields.of(
+                "source_event_id", id, "source_event_type", type, "source_event_tick", tick,
+                "source_event_revision", revision > 0 ? revision : null,
+                "snapshot_revision", revision > 0 ? revision : null, "tick", readTick);
             return out;
         }
         boolean matches(String token, String account, long epoch)

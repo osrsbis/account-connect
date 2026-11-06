@@ -40,8 +40,8 @@ public class DropProofIntegrationTest
 			}
 
 		});
-		p.setStoreToolsForTest(true);		// the shop-overlay grant
-		p.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag (finding F4)
+		p.grants.setStoreToolsForTest(true);		// the shop-overlay grant
+		p.grants.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag (finding F4)
 		return p;
 	}
 
@@ -63,40 +63,40 @@ public class DropProofIntegrationTest
 	/** Drive the plugin's own drop-action entry point. */
 	private static void dropAction(AccountConnectPlugin p) throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod("onDropActionForProof");
+		Method m = DropProof.class.getDeclaredMethod("onDropActionForProof");
 		m.setAccessible(true);
-		m.invoke(p);
+		m.invoke(p.dropProof);
 	}
 
-	private static AccountConnectPlugin.DroppedGroundItem pile(int item, long qty, int x, int y)
+	private static OwnPiles.DroppedGroundItem pile(int item, long qty, int x, int y)
 	{
 		java.util.Map<String, Object> loc = new java.util.LinkedHashMap<>();
 		loc.put("region_id", 12853);
 		loc.put("plane", 0);
-		return new AccountConnectPlugin.DroppedGroundItem(item, qty, x, y, 0, loc, 100, 400);
+		return new OwnPiles.DroppedGroundItem(item, qty, x, y, 0, loc, 100, 400);
 	}
 
-	private static void attach(AccountConnectPlugin p, AccountConnectPlugin.DroppedGroundItem g)
+	private static void attach(AccountConnectPlugin p, OwnPiles.DroppedGroundItem g)
 		throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod(
-			"attachPileToDropSession", AccountConnectPlugin.DroppedGroundItem.class);
+		Method m = DropProof.class.getDeclaredMethod(
+			"attachPileToDropSession", OwnPiles.DroppedGroundItem.class);
 		m.setAccessible(true);
-		m.invoke(p, g);
+		m.invoke(p.dropProof, g);
 	}
 
-	private static void release(AccountConnectPlugin p, AccountConnectPlugin.DroppedGroundItem g)
+	private static void release(AccountConnectPlugin p, OwnPiles.DroppedGroundItem g)
 		throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod(
-			"releasePileFromDropSession", AccountConnectPlugin.DroppedGroundItem.class);
+		Method m = DropProof.class.getDeclaredMethod(
+			"releasePileFromDropSession", OwnPiles.DroppedGroundItem.class);
 		m.setAccessible(true);
-		m.invoke(p, g);
+		m.invoke(p.dropProof, g);
 	}
 
 	private static Map<String, Object> eventOfType(AccountConnectPlugin p, String type)
 	{
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{
@@ -113,15 +113,15 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		assertTrue("the ACTION starts the session, not the drop event", p.dropSession.active());
-		String sid = p.dropSession.sessionId();
+		assertTrue("the ACTION starts the session, not the drop event", p.dropProof.dropSession.active());
+		String sid = p.dropProof.dropSession.sessionId();
 		assertNotNull(sid);
 
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 1_000_000L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 1_000_000L, 3200, 3400);
 		attach(p, g);
-		assertEquals("the pile knows its drop sequence", 1, p.dropSeqForPile(g));
-		assertEquals("and its session", sid, p.dropSessionForPile(g));
-		assertEquals(1, p.dropSession.activePileCount());
+		assertEquals("the pile knows its drop sequence", 1, p.dropProof.dropSeqForPile(g));
+		assertEquals("and its session", sid, p.dropProof.dropSessionForPile(g));
+		assertEquals(1, p.dropProof.dropSession.activePileCount());
 	}
 
 	@Test
@@ -131,20 +131,20 @@ public class DropProofIntegrationTest
 		// nothing and the session's tail arms while a pile is still live.
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem a = pile(995, 500L, 3200, 3400);
+		OwnPiles.DroppedGroundItem a = pile(995, 500L, 3200, 3400);
 		attach(p, a);
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem b = pile(995, 500L, 3200, 3400);
+		OwnPiles.DroppedGroundItem b = pile(995, 500L, 3200, 3400);
 		attach(p, b);
 
-		assertEquals(1, p.dropSeqForPile(a));
-		assertEquals(2, p.dropSeqForPile(b));
-		assertEquals("two distinct live piles", 2, p.dropSession.activePileCount());
+		assertEquals(1, p.dropProof.dropSeqForPile(a));
+		assertEquals(2, p.dropProof.dropSeqForPile(b));
+		assertEquals("two distinct live piles", 2, p.dropProof.dropSession.activePileCount());
 
 		release(p, a);
-		assertFalse("one pile still live — no tail yet", p.dropSession.stopPending());
+		assertFalse("one pile still live — no tail yet", p.dropProof.dropSession.stopPending());
 		release(p, b);
-		assertTrue("last pile gone — tail armed", p.dropSession.stopPending());
+		assertTrue("last pile gone — tail armed", p.dropProof.dropSession.stopPending());
 	}
 
 	/** A removal emits ONE ground_removed carrying the session id, the sequence and the pile tile. */
@@ -153,11 +153,11 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		String sid = p.dropSession.sessionId();
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 1_000_000L, 3211, 3455);
+		String sid = p.dropProof.dropSession.sessionId();
+		OwnPiles.DroppedGroundItem g = pile(995, 1_000_000L, 3211, 3455);
 		attach(p, g);
 
-		p.emitGroundRemoval(g, 120, false);
+		p.piles.emitGroundRemoval(g, 120, false);
 
 		Map<String, Object> ev = eventOfType(p, "ground_removed");
 		assertNotNull("a removal was emitted", ev);
@@ -176,14 +176,14 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
-		assertEquals(1, p.dropSession.activePileCount());
+		assertEquals(1, p.dropProof.dropSession.activePileCount());
 
-		p.emitGroundRemoval(g, 120, false);
+		p.piles.emitGroundRemoval(g, 120, false);
 
-		assertEquals("emitting the removal releases the pile", 0, p.dropSession.activePileCount());
-		assertTrue(p.dropSession.stopPending());
+		assertEquals("emitting the removal releases the pile", 0, p.dropProof.dropSession.activePileCount());
+		assertTrue(p.dropProof.dropSession.stopPending());
 	}
 
 	// ---- causes, all preserved ----
@@ -194,9 +194,9 @@ public class DropProofIntegrationTest
 		// removed_early with nobody around
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem early = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem early = pile(995, 5L, 3200, 3400);
 		attach(p, early);
-		p.emitGroundRemoval(early, 120, false);
+		p.piles.emitGroundRemoval(early, 120, false);
 		Map<String, Object> ev = eventOfType(p, "ground_removed");
 		assertEquals("removed_early", ev.get("cause"));
 		assertEquals(DropCandidates.STATUS_UNKNOWN, ev.get("counterparty_status"));
@@ -205,10 +205,10 @@ public class DropProofIntegrationTest
 		// self_pickup — the cause must survive, and it must not be read as a counterparty case
 		AccountConnectPlugin p2 = plugin();
 		dropAction(p2);
-		AccountConnectPlugin.DroppedGroundItem self = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem self = pile(995, 5L, 3200, 3400);
 		self.selfPickedUp = true;
 		attach(p2, self);
-		p2.emitGroundRemoval(self, 120, false);
+		p2.piles.emitGroundRemoval(self, 120, false);
 		Map<String, Object> ev2 = eventOfType(p2, "ground_removed");
 		assertEquals("self_pickup", ev2.get("cause"));
 		assertEquals(DropCandidates.STATUS_UNKNOWN, ev2.get("counterparty_status"));
@@ -234,9 +234,9 @@ public class DropProofIntegrationTest
 		org.mockito.Mockito.when(c.getPlayers()).thenReturn(java.util.Arrays.asList(me, customer, bystander));
 		inject(p, "client", c);
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
-		p.emitGroundRemoval(g, 120, false);
+		p.piles.emitGroundRemoval(g, 120, false);
 		Map<String, Object> ev = eventOfType(p, "ground_removed");
 		assertEquals("removed_early", ev.get("cause"));
 		assertEquals("the player on the pile is named", "Customer", ev.get("counterparty_inferred"));
@@ -266,9 +266,9 @@ public class DropProofIntegrationTest
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
 		// dropTick 100, despawnTick 400: a removal AT the deadline, with the full timer elapsed.
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
-		p.emitGroundRemoval(g, 400, false);
+		p.piles.emitGroundRemoval(g, 400, false);
 		Map<String, Object> ev = eventOfType(p, "ground_removed");
 		assertEquals("despawn_timer", ev.get("cause"));
 		assertEquals(DropCandidates.STATUS_UNKNOWN, ev.get("counterparty_status"));
@@ -280,10 +280,10 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
 		// A scene reload despawns every pile at once, so nothing about a taker can be read from it.
-		p.emitGroundRemoval(g, 120, true);
+		p.piles.emitGroundRemoval(g, 120, true);
 		Map<String, Object> ev = eventOfType(p, "ground_removed");
 		assertEquals("unknown", ev.get("cause"));
 		assertEquals(DropCandidates.STATUS_UNKNOWN, ev.get("counterparty_status"));
@@ -296,15 +296,15 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		String sid = p.dropSession.sessionId();
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		String sid = p.dropProof.dropSession.sessionId();
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
 		// One real frame through the real accept path, so the manifest has something to report.
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1, 2, 3}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1, 2, 3}, 1_000L);
 
-		p.interruptDropSession();
+		p.dropProof.interruptDropSession();
 
-		assertFalse("the session is over", p.dropSession.active());
+		assertFalse("the session is over", p.dropProof.dropSession.active());
 		Map<String, Object> manifest = eventOfType(p, "drop_trade_clip");
 		assertNotNull("an interrupted session still publishes its manifest", manifest);
 		assertEquals(sid, manifest.get("drop_session_id"));
@@ -318,18 +318,18 @@ public class DropProofIntegrationTest
 	{
 		AccountConnectPlugin p = plugin();
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 9}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 9}, 1_000L);
 		release(p, g);
 
 		// Force the tail to be due, then poll exactly as the tick handler does.
-		p.dropSession.pileRemoved("no-such-pile", 0L);		// no-op; the tail is already armed
+		p.dropProof.dropSession.pileRemoved("no-such-pile", 0L);		// no-op; the tail is already armed
 		Thread.sleep(5);
 		forceTailDue(p);
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		Map<String, Object> manifest = eventOfType(p, "drop_trade_clip");
 		assertNotNull(manifest);
 		assertEquals("COMPLETE", manifest.get("outcome"));
@@ -342,7 +342,7 @@ public class DropProofIntegrationTest
 	{
 		Field f = DropSessionRecorder.class.getDeclaredField("stopAtMillis");
 		f.setAccessible(true);
-		f.setLong(p.dropSession, 1L);	// any past instant; 0 is not a sentinel here
+		f.setLong(p.dropProof.dropSession, 1L);	// any past instant; 0 is not a sentinel here
 	}
 
 	@Test
@@ -350,8 +350,8 @@ public class DropProofIntegrationTest
 	{
 		// A drop clip is not a shop visit. The collector, the stitcher and the staff surfaces all
 		// key off this string, so mislabelling one as the other mixes two kinds of evidence.
-		assertEquals("drop_frames", AccountConnectPlugin.DROP_MEDIA_KIND);
-		assertFalse("store_frames".equals(AccountConnectPlugin.DROP_MEDIA_KIND));
+		assertEquals("drop_frames", DropProof.DROP_MEDIA_KIND);
+		assertFalse("store_frames".equals(DropProof.DROP_MEDIA_KIND));
 	}
 
 	// ---- the gate ----
@@ -371,8 +371,8 @@ public class DropProofIntegrationTest
 		});
 		// setStoreToolsForTest NOT called: no grant.
 		dropAction(p);
-		assertFalse("an ungranted client records nothing", p.dropSession.active());
-		assertTrue(p.pendingEvents.isEmpty());
+		assertFalse("an ungranted client records nothing", p.dropProof.dropSession.active());
+		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -381,13 +381,13 @@ public class DropProofIntegrationTest
 		// The override exists so the field rig can reach the capture path on a non-staff token. It
 		// must be OFF by default, or a Hub build would capture for every granted user regardless of
 		// what the server said about clips.
-		assertFalse("no system property set", AccountConnectPlugin.dropProofDevOverride());
+		assertFalse("no system property set", ServerGrants.dropProofDevOverride());
 		try
 		{
 			System.setProperty("osrsbis.dropproof", "on");
-			assertTrue(AccountConnectPlugin.dropProofDevOverride());
+			assertTrue(ServerGrants.dropProofDevOverride());
 			System.setProperty("osrsbis.dropproof", "nonsense");
-			assertFalse("only on/true/1 enable it", AccountConnectPlugin.dropProofDevOverride());
+			assertFalse("only on/true/1 enable it", ServerGrants.dropProofDevOverride());
 		}
 		finally
 		{
@@ -410,12 +410,12 @@ public class DropProofIntegrationTest
 			}
 
 		});
-		p.setDropProofRolloutForTest(true);
+		p.grants.setDropProofRolloutForTest(true);
 		try
 		{
 			System.setProperty("osrsbis.dropproof", "on");
 			dropAction(p);
-			assertFalse("no store-tools grant means no session, override or not", p.dropSession.active());
+			assertFalse("no store-tools grant means no session, override or not", p.dropProof.dropSession.active());
 		}
 		finally
 		{
@@ -433,15 +433,15 @@ public class DropProofIntegrationTest
 		// 95 frames: two full 40-frame segments plus a 15-frame remainder.
 		for (int i = 0; i < 95; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
 		}
-		DropFrameSegmenter seg = (DropFrameSegmenter) get(p, "dropSegmenter");
+		DropFrameSegmenter seg = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertNotNull(seg);
 		assertEquals("two full segments handed over", 2, seg.segmentCount());
 		assertEquals("the remainder is still buffered", 15, seg.bufferedFrames());
 		assertEquals(95, seg.acceptedFrames());
 
-		p.interruptDropSession();
+		p.dropProof.interruptDropSession();
 		Map<String, Object> manifest = eventOfType(p, "drop_trade_clip");
 		assertEquals("the remainder is flushed as a third segment", 3, manifest.get("segments"));
 		assertEquals(95, manifest.get("frames"));
@@ -462,9 +462,9 @@ public class DropProofIntegrationTest
 		dropAction(p);
 		for (int i = 0; i < 45; i++)		// one full segment plus a remainder
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
 		}
-		p.interruptDropSession();
+		p.dropProof.interruptDropSession();
 
 		Map<String, Object> m = eventOfType(p, "drop_trade_clip");
 		assertNotNull(m);
@@ -487,9 +487,9 @@ public class DropProofIntegrationTest
 	public void acceptingAFrameWithNoSessionIsASafeNoOp() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8}, 1_000L);
-		assertNull(get(p, "dropSegmenter"));
-		assertTrue(p.pendingEvents.isEmpty());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8}, 1_000L);
+		assertNull(p.dropProof.dropSegmenter);
+		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 
 	// ---- candidate resolution through the plugin's own emit ----
@@ -520,11 +520,11 @@ public class DropProofIntegrationTest
 	{
 		for (int i = 0; i < 200; i++)
 		{
-			String id = AccountConnectPlugin.DROP_SESSION_ID_MAX > 0
+			String id = DropProof.DROP_SESSION_ID_MAX > 0
 				? newIdForTest() : "";
 			assertTrue("id '" + id + "' is " + id.length() + " chars, max is "
-					+ AccountConnectPlugin.DROP_SESSION_ID_MAX,
-				id.length() <= AccountConnectPlugin.DROP_SESSION_ID_MAX);
+					+ DropProof.DROP_SESSION_ID_MAX,
+				id.length() <= DropProof.DROP_SESSION_ID_MAX);
 			// The server sanitizes to [a-z0-9_-]. An id that loses characters there would stop
 			// matching the manifest the stitcher joins on.
 			assertTrue("id '" + id + "' must survive the server's key sanitizer unchanged",
@@ -540,14 +540,14 @@ public class DropProofIntegrationTest
 	@Test
 	public void thePluginAndServerAgreeOnTheIdLength()
 	{
-		assertEquals(24, AccountConnectPlugin.DROP_SESSION_ID_MAX);
+		assertEquals(24, DropProof.DROP_SESSION_ID_MAX);
 	}
 
 	private static String newIdForTest()
 	{
 		String id = Long.toHexString(System.currentTimeMillis())
 			+ Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(1 << 24));
-		return id.length() > AccountConnectPlugin.DROP_SESSION_ID_MAX
-			? id.substring(0, AccountConnectPlugin.DROP_SESSION_ID_MAX) : id;
+		return id.length() > DropProof.DROP_SESSION_ID_MAX
+			? id.substring(0, DropProof.DROP_SESSION_ID_MAX) : id;
 	}
 }

@@ -44,29 +44,29 @@ public class StaffCapabilitiesTest
     /** One server answer, through the same policy path a real upload response takes. */
     private void answer(String staffCapture, String staffAccount)
     {
-        Response.Builder b = new Response.Builder().request(new Request.Builder().url(AccountConnectPlugin.OFFICIAL_API_BASE + "/account-ingest").build())
+        Response.Builder b = new Response.Builder().request(new Request.Builder().url(ServerGrants.OFFICIAL_API_BASE + "/account-ingest").build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK")
             .header("X-Store-Tools", "on").header("X-Drop-Proof", "on")
             .header("X-Screenshots", "allow").header("X-Clips", "allow");
         if (staffCapture != null) b.header("X-Staff-Capture", staffCapture);
         if (staffAccount != null) b.header("X-Staff-Account", staffAccount);
-        plugin.applyServerPolicy(b.build(), TOKEN);
+        plugin.grants.applyServerPolicy(b.build(), TOKEN);
     }
 
     private void assertAllOff(String why)
     {
-        assertFalse(why + ": trade screenshots", plugin.screenshotsEnabled());
-        assertFalse(why + ": store clips", plugin.storeClipsEnabled());
-        assertFalse(why + ": drop proof", plugin.dropProofEnabled());
-        assertFalse(why + ": staff capture", plugin.staffCaptureEnabled());
+        assertFalse(why + ": trade screenshots", plugin.grants.screenshotsEnabled());
+        assertFalse(why + ": store clips", plugin.grants.storeClipsEnabled());
+        assertFalse(why + ": drop proof", plugin.grants.dropProofEnabled());
+        assertFalse(why + ": staff capture", plugin.grants.staffCaptureEnabled());
     }
 
     @Test public void staffGrantTurnsOnTradeStoreAndDropProof()
     {
         answer("on", ACCOUNT);
-        assertTrue("STAFF RELEASE BLOCKED: trade screenshots unavailable in candidate", plugin.screenshotsEnabled());
-        assertTrue("STAFF RELEASE BLOCKED: store clips unavailable in candidate", plugin.storeClipsEnabled());
-        assertTrue("STAFF RELEASE BLOCKED: drop proof unavailable in candidate", plugin.dropProofEnabled());
+        assertTrue("STAFF RELEASE BLOCKED: trade screenshots unavailable in candidate", plugin.grants.screenshotsEnabled());
+        assertTrue("STAFF RELEASE BLOCKED: store clips unavailable in candidate", plugin.grants.storeClipsEnabled());
+        assertTrue("STAFF RELEASE BLOCKED: drop proof unavailable in candidate", plugin.grants.dropProofEnabled());
     }
 
     @Test public void everyOtherAnswerLeavesThePlayerWithoutStaffTools()
@@ -84,7 +84,7 @@ public class StaffCapabilitiesTest
     @Test public void theGrantEndsWhenTheServerStopsSendingIt()
     {
         answer("on", ACCOUNT);
-        assertTrue(plugin.staffCaptureEnabled());
+        assertTrue(plugin.grants.staffCaptureEnabled());
         answer(null, null);
         assertAllOff("a later answer without the grant");
     }

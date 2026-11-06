@@ -1,10 +1,11 @@
 # Own-gameplay capture
 
 These contracts describe capture controlled by `X-Own-Gameplay: on`. The 0.7.66 candidate can receive that
-grant through collection rollout independently of staff identity. With no Queue scope, closed combat, signal,
-state and variable events use the existing granted, capped legacy receiver. That fallback is not a durable
-public journal across restart. Existing Queue-pinned retries keep their original writer and scope.
-The journal sections below describe negotiated Queue behavior, not a prerequisite for all collection.
+grant through collection rollout independently of staff identity. Closed combat, signal, state and variable
+events use the existing granted, capped legacy event receiver, and are not sent while a `ge-v1` or
+`own-history-v1` Queue grant is active. They are not kept in a durable public journal across a crash.
+No server grants a Queue scope for them: the server sends only `ge-v1`, `own-history-v1` or `off`, and the
+four `own-*` Queue scopes earlier candidates accepted were removed in the 0.7.67 simplification.
 
 ## Own-event provenance (0.7.37 candidate)
 
@@ -28,7 +29,7 @@ distinct. Duplicate item quantities use long totals; unpriced or unsafe referenc
 values stay unknown. No labels, victim fields or original-owner information are
 read. This is a cache valuation, not new loot or realized income. Closing the UI,
 a scene gap, account switch or grant reset clears the source cache. Exact-client
-verification remains open. The future own-state scope now adds bounded journal transport below.
+verification remains open. These caches are also sent as `own_state` events, described below.
 Source: [pinned personal-key container mapping](https://github.com/pk-enjoyer/real-loot-key-value/blob/938d5157fb8202f3766b358466743048e0ce44c4/src/main/java/com/reallootkeyvalue/LootKeyValueCalculator.java).
 
 The granted hunter snapshot history records a whistle's observed target from a
@@ -37,7 +38,7 @@ codes only, with no message, hunter or player names. These observations do not
 prove when an assignment began, a rare item was obtained or a rumour was turned
 in; missing activity remains unknown. Other chat and dialogue are excluded.
 Account/grant changes clear this recent snapshot history. Exact English client
-wording still needs game QA; the unreleased own-signals scope now adds durable transport for this family.
+wording still needs game QA; `own_signal` events below carry this family.
 Source: [pinned rumour-reminder acquisition](https://github.com/DrJam/rumour-reminder/blob/38a5b7aefc4314dc1f321bea74c994bcea23aa61/src/main/java/com/drjam/rumourreminder/RumoursManager.java).
 
 The granted own-gameplay snapshot also decodes carried rune-pouch cache slots.
@@ -46,7 +47,7 @@ read. Missing inventory, absent varbits and unknown rune mappings stay unknown;
 duplicate rune slots use 64-bit totals. These are cached absolute observations,
 not consumption events, complete storage or a wealth valuation. The original
 raw snapshot remains raw. This new decoder is local and still needs game-client
-verification; explicit future own-state scope adds bounded journal transport as described below.
+verification; `own_state` events below carry it.
 Source: [RuneLite1.13.1 rune-pouch overlay](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/runepouch/RunepouchOverlay.java).
 
 The same granted snapshot now qualifies bank-tab ranges and currency quantities.
@@ -58,7 +59,8 @@ ranges are explicitly inferred; tab 0 displays the whole bank, so the remainder
 is labelled untabbed. Only coins and platinum quantities are summed, using long
 values. Inventory is not added, and no gain, item-price valuation or spendable
 wealth is claimed. The packet observation time remains visible. This is bounded
-recent snapshot history. The future own-state scope also journals these typed observations; actual-client verification is still pending.
+recent snapshot history. `own_state` events below also carry these typed observations; actual-client
+verification is still pending.
 Sources: [reviewed tab-offset technique](https://github.com/BrastaSauce/purchase-progress/blob/9b190e3cdfee0c3848380e57d044028e63f05e34/src/main/java/com/brastasauce/purchaseprogress/BankCalculation.java) and [RuneLite1.13.1 bank interface](https://github.com/runelite/runelite/blob/runelite-parent-1.13.1/runelite-client/src/main/java/net/runelite/client/plugins/bank/BankPlugin.java).
 
 The granted seed-box snapshot now merges duplicate IDs with long quantities.
@@ -70,24 +72,23 @@ wealth nor a durable history stream. Container observation timestamps clear on
 relog, hop and disconnect; old-account timestamps cannot label a new cache.
 Source-specific callback and actual-client acceptance remain separate.
 
-The future own-state journal also preserves carried map/coordinate clue references
+`own_state` events also carry map/coordinate clue references
 against the 173 primary entries in the pinned RuneLite1.13.1 library. Unknown
 inventory and an empty supported subset stay distinct. These are public library
 locations, not the player's location or a resolved quest-dependent route. A
-future own-signals grant preserves SELF-owned ground-clue appearance/removal
+`own_signal` event carries SELF-owned ground-clue appearance/removal
 observations and explicit ground/object tracking-capacity gaps. Ground events
 contain no location or player labels. Drop origin, removal cause and timers
 across client sessions remain unknown; removal is never a claimed pickup,
 expiry or completion. These additions are LOCAL and not activated.
 
-## Own-state journal candidate
+## Own-signal, own-vars and own-state events (candidate)
 
-The future `own-signals-v1` scope adds seven closed system-message and visible-check
-families to the durable journal: coal bag, fish barrel, grape barrel, chompy count,
-construction totals, compost and hunter rumour signals. It requires the explicit
-`own_signals` grant plus the existing gameplay/combat/state/vars grants, with
-server schema7. Older scopes retain pending signal rows and never use the legacy
-writer. Only fixed numeric fields and allowlisted codes are projected; raw chat,
+`own_signal` events carry seven closed system-message and visible-check
+families: coal bag, fish barrel, grape barrel, chompy count,
+construction totals, compost and hunter rumour signals. They require the
+own-gameplay grant for the current token and a live client on the active account
+and profile. Only fixed numeric fields and allowlisted codes are projected; raw chat,
 player names and arbitrary labels are excluded. A notch does not supply a total,
 absolute totals are not new rewards, and no-active-rumour is not a verified turn-in.
 Observed storage checks are not continuous balances. Source time and observation
@@ -97,10 +98,9 @@ inventory changes with Magic XP, and own Eat/Drink/Chew intent followed by a slo
 change within two ticks. Missing position or sample gaps cannot close a stationary
 interval as movement. These records never prove input idleness, an aura, a cast,
 consumption effect, cooldown or income. No coordinates, input-device activity,
-menu target text or other-player fields are journaled. This extends the same
-unreleased own-signals contract; no capture scope is activated.
+menu target text or other-player fields are sent.
 
-Two own combat callbacks also enter that future journal: own ActorDeath with the observed ToB status and a fixed HUD
+Two own combat callbacks are also `own_signal` events: own ActorDeath with the observed ToB status and a fixed HUD
 room label (or unknown), and own tile overlap with a previously observed ToA
 acid object. Other actors and names are excluded. The death observation does not
 prove encounter membership or a team wipe; the overlap does not prove damage or
@@ -108,75 +108,65 @@ a mistake. No location is uploaded in these events. Existing scene/account/grant
 gaps clear source continuity. Exact game-client timing and release remain open.
 
 
-A change in the effective gameplay Queue scope or settlement of its current
-account/profile journal gate starts a new capture baseline after two client
-ticks. This prevents a state first seen under a narrower scope from staying
-absent forever when the scope expands. Unchanged policy responses and replies
-for an old token do not reset it. Only newly observed values form the baseline;
-the earlier snapshot is not replayed as current. Pending journal rows keep their
-original IDs and survive the capture reset. This behavior is locally tested;
-exact-client QA and activation remain open.
+A change of link token or of the own-gameplay grant starts a new capture baseline
+after two client ticks. Unchanged policy responses and replies for an old token do
+not reset it. Only newly observed values form the baseline; the earlier snapshot
+is not replayed as current. Rows already queued keep their original IDs. This
+behavior is locally tested; exact-client QA remains open.
 
-The separate future `own-vars-v1` scope journals seventeen closed own-player raw
+`own_vars` events carry seventeen closed own-player raw
 counter/settings families: Surge, Death Charge, escape crystal settings, arena,
 Barrows, personal raid points, Tears, own brewing contribution, restaurant order,
 Pyramid Plunder, Sailing trials, special energy, Sailing charting and port tasks,
-potion storage, totems and raw bank-tab counts. Schema6 requires an explicit
-current-token `own_vars` grant in addition to the existing gameplay/combat/state
-grants. Older scopes pause these rows; they never use the legacy writer. Missing
+potion storage, totems and raw bank-tab counts, under the same own-gameplay grant. Missing
 numeric fields stay unknown through JSON/restart; zero and negative raw values
 remain distinct. Only fixed fields are retained, with session, observation time
 and baseline/update provenance. No reward, completion or duration is inferred. Potion readings are not decoded
 as bottles or doses. Charting retains 358 pinned fields; missing values stay
-unknown. These five additions extend the unreleased scope, not a live grant.
+unknown.
 
-This is LOCAL tested transport, not activated capture or whole-intake coverage.
-The existing outbox bounds and counted overflow still apply. Natural per-family
-rates and cost need measurement before enabling this scope; the existing pilot
-cap and spending gates are unchanged. An active timer can change every game tick,
-so the earlier14-family budget must not be presented as a whole-gameplay quote.
+The existing memory-queue bounds and counted overflow apply. Natural per-family
+rates and cost need measurement; the existing pilot cap and spending gates are
+unchanged. An active timer can change every game tick, so the earlier 14-family
+budget must not be presented as a whole-gameplay quote.
 
-The future `own-state-v1` Queue scope adds one closed `own_state` event type for
+One closed `own_state` event type carries
 skill goal settings, carried rune-pouch cache, inferred bank-tab currency, visible
 fairy-ring favourites, mixology orders, Spirit Tree options, own raid context and
 carried clue-library references, plus personal key visibility and slot caches.
-The four interface/context additions extend an unreleased scope. Missing values
+Missing values
 remain unknown, repeated orders survive, and only fixed game codes/destinations
 are retained. Visible options do not prove permanent unlocks or house ownership;
 raid context excludes team details and completion claims.
-It requires current-token own-gameplay permission plus the explicit scope. The
-matched backend additionally requires `own_state`, `own_gameplay` and `own_combat`
-permissions before advertising this superset. Old grants do not enable it.
-Only these ten typed projections enter the journal; raw snapshots keep their
+It requires current-token own-gameplay permission.
+Only these ten typed projections are sent as events; raw snapshots keep their
 existing path. Unknown values stay unknown, goals remain settings rather than XP
 earned, and bank ranges remain inferred rather than a complete wealth balance.
 
-Personal loot-key journal records use one visibility state and up to five separate
+Personal loot-key records use one visibility state and up to five separate
 slot states, each bounded to the source's 128-entry limit. Unchanged slots and
 reference-price changes do not append new raw item records. Closing the chest
 marks visibility unavailable; reopening requires fresh packet evidence. The
 original snapshot is preserved without duplicating split item arrays in its
-recent-history buffer. Unknown and empty remain distinct. Journal records keep
+recent-history buffer. Unknown and empty remain distinct. Records keep
 item IDs, long quantities and packet time; estimates, victim fields and income
 claims are excluded. Scene/account/grant resets clear the six bounded dedupe
 states. These additions are unreleased and require exact-client acceptance.
 
-Each source baseline/change uses the existing per-ID journal and ACK path.
-Restart or scope rollback retains pending rows until the matching scope returns;
-explicit erasure still prevents replay. Process-local observed/handed-off/failure
-counters are not durable delivery counts. Schema5 and the separate state policy
-are LOCAL candidates; no server policy, public release or live retention scope
-has been activated. There is one plugin artifact; capture grants and staff rights are separate.
+Each source baseline/change is one event with its own `event_id` on the legacy receiver.
+Process-local observed/handed-off/failure counters are not durable delivery counts.
+There is one plugin artifact; capture grants and staff rights are separate.
 Exact-source review, a matched receiver and actual-client acceptance remain required before release.
 
-## Own-combat journal candidate
+## Own-combat events (candidate)
 
-With both the own-gameplay grant and explicit `own-combat-v1` Queue scope, own
-incoming hits and own hits on NPCs enter the bounded public journal. Observed NPC
-death and despawn remain distinct; neither establishes kill credit. No attacker,
-other-player name or player target is recorded. The existing snapshot remains.
-Restart and narrower Queue scopes retain pending records; explicit erasure keeps
-its tombstones. Session counters distinguish observations from event handoff;
+With the own-gameplay grant, own incoming hits and own hits on NPCs are sent as
+`combat_hit` and `combat_npc_end` events on the legacy receiver. Observed NPC
+death and despawn remain distinct; neither establishes kill credit. The first own hit on a new
+target event also carries the worn item IDs and quantities read at that hit (`worn`), so no separate gear row is
+needed; later hits on the same target do not repeat it. No attacker,
+other-player name or player target is recorded. The existing snapshot remains, and its hit rows carry no `worn`.
+Session counters distinguish observations from event handoff;
 handoff does not prove disk persistence or server acceptance.
 This extension is local, default off and separate from the frozen public build.
 Exact-source review, the matched backend, disclosure, client QA and normal release

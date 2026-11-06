@@ -117,14 +117,14 @@ public class AccountSwitchTest
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
 		plugin.onStatChanged(new StatChanged(Skill.ATTACK, 1_210_421, 74, 74));
 		plugin.onStatChanged(new StatChanged(Skill.COOKING, 21_750, 34, 34));
-		plugin.pendingEvents.clear();
+		plugin.events.pendingEvents.clear();
 	}
 
 	/** MAIN logs out to the login screen and the alt logs in to the same client. */
 	private void switchToAlt()
 	{
 		gameState(GameState.LOGIN_SCREEN);
-		plugin.pendingEvents.clear();	// MAIN's own logout row
+		plugin.events.pendingEvents.clear();	// MAIN's own logout row
 		hash = -1L;
 		gameState(GameState.LOGGING_IN);
 		hash = ALT;
@@ -141,7 +141,7 @@ public class AccountSwitchTest
 
 	private List<Map<String, Object>> of(String type)
 	{
-		return plugin.pendingEvents.stream().filter(e -> type.equals(e.get("type"))).collect(Collectors.toList());
+		return plugin.events.pendingEvents.stream().filter(e -> type.equals(e.get("type"))).collect(Collectors.toList());
 	}
 
 	@Test
@@ -159,17 +159,17 @@ public class AccountSwitchTest
 	{
 		mainLoggedIn();
 		switchToAlt();
-		plugin.emitEvent("level_up", null);			// before the alt's session starts, activeHash still names MAIN
-		assertEquals("never filed under MAIN", 0, plugin.pendingEvents.size());
+		plugin.events.emitEvent("level_up", null);			// before the alt's session starts, activeHash still names MAIN
+		assertEquals("never filed under MAIN", 0, plugin.events.pendingEvents.size());
 
 		tick += AccountConnectPlugin.LOGIN_SETTLE_TICKS;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.syncTask();							// the alt's session starts
-		plugin.pendingEvents.clear();
-		plugin.emitEvent("level_up", null);
-		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals(Long.toString(ALT), plugin.pendingEvents.get(0).get("account_hash"));
-		assertEquals("Fixture Alt", plugin.pendingEvents.get(0).get("rsn"));
+		plugin.events.pendingEvents.clear();
+		plugin.events.emitEvent("level_up", null);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		assertEquals(Long.toString(ALT), plugin.events.pendingEvents.get(0).get("account_hash"));
+		assertEquals("Fixture Alt", plugin.events.pendingEvents.get(0).get("rsn"));
 	}
 
 	@Test
@@ -203,18 +203,18 @@ public class AccountSwitchTest
 	{
 		mainLoggedIn();
 		gameState(GameState.LOGIN_SCREEN);
-		plugin.pendingEvents.clear();
+		plugin.events.pendingEvents.clear();
 		hash = -1L;
 		name = "Fixture Alt";
 		gameState(GameState.LOGGING_IN);
 		tick++;
 		gameState(GameState.LOGGED_IN);
-		plugin.emitEvent("level_up", null);
-		assertEquals("the alt's row never filed under MAIN", 0, plugin.pendingEvents.size());
+		plugin.events.emitEvent("level_up", null);
+		assertEquals("the alt's row never filed under MAIN", 0, plugin.events.pendingEvents.size());
 
 		name = "Fixture Main";
-		plugin.emitEvent("level_up", null);
-		assertEquals("MAIN back in the world: MAIN's own row is kept", 1, plugin.pendingEvents.size());
+		plugin.events.emitEvent("level_up", null);
+		assertEquals("MAIN back in the world: MAIN's own row is kept", 1, plugin.events.pendingEvents.size());
 	}
 
 	@Test
@@ -222,12 +222,12 @@ public class AccountSwitchTest
 	{
 		mainLoggedIn();
 		gameState(GameState.LOGIN_SCREEN);
-		plugin.pendingEvents.clear();
+		plugin.events.pendingEvents.clear();
 		gameState(GameState.LOGGING_IN);
 		tick++;
 		gameState(GameState.LOGGED_IN);
-		plugin.emitEvent("level_up", null);
-		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals(Long.toString(MAIN), plugin.pendingEvents.get(0).get("account_hash"));
+		plugin.events.emitEvent("level_up", null);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		assertEquals(Long.toString(MAIN), plugin.events.pendingEvents.get(0).get("account_hash"));
 	}
 }

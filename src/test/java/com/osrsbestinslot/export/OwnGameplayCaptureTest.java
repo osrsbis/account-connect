@@ -390,10 +390,10 @@ public class OwnGameplayCaptureTest
         AccountConnectPlugin p=plugin();TileItem own=groundClue(TileItem.OWNERSHIP_SELF,23182,500);
         ItemSpawned spawn=new ItemSpawned(null,own);p.onItemSpawned(spawn);assertNull(p.gameplayBlock());
         verify(own,never()).getOwnership();
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemSpawned(spawn);
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemSpawned(spawn);
         assertEquals(1,((List<?>)p.gameplayBlock().get("observations")).size());
-        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemDespawned(new ItemDespawned(null,own));assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemDespawned(new ItemDespawned(null,own));assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;
         p.onItemDespawned(new ItemDespawned(null,own));assertTrue(((List<?>)p.gameplayBlock().get("observations")).isEmpty());
     }
     private AccountConnectPlugin plugin() throws Exception
@@ -411,52 +411,58 @@ public class OwnGameplayCaptureTest
         f.setAccessible(true); return (OwnGameplayCapture) f.get(p);
     }
 
-    @Test public void actualDeathHandlerClosesOnlyOwnEncounterAndRevocationClearsIt() throws Exception
+    @Test public void ownDeathKeepsItsClientTickOnTheExistingDeathEventWithoutAGameplayRow() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
         p.gameplayBlock(); tick += 2;
-        HitsplatApplied hit = new HitsplatApplied(); hit.setActor(npc(123)); hit.setHitsplat(splat(4, true));
-        p.onHitsplatApplied(hit);
-        p.onActorDeath(new ActorDeath(mock(Player.class)));
-        OwnGameplayCapture own = pluginCapture(p);
-        Map<?,?> encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
-        assertEquals("open", encounter.get("status"));
         p.onActorDeath(new ActorDeath(self));
-        encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
-        assertEquals("own_death", encounter.get("outcome"));
-        assertFalse("local death input is not a new wire row", new com.google.gson.Gson().toJson(p.gameplayBlock()).contains("combat.own_death"));
-        p.applyServerPolicy(policy("X-Own-Gameplay", "off", 200), TOKEN);
-        p.onActorDeath(new ActorDeath(self));
-        assertTrue(((List<?>)own.encounterSummary(tick).get("encounters")).isEmpty());
+        assertEquals("the death event keeps the client tick", tick, p.death.deathPending.tick);
+        assertFalse("own death is not a new gameplay row", new com.google.gson.Gson().toJson(p.gameplayBlock()).contains("combat.own_death"));
     }
 
-    @Test public void actualNpcLootHandlerLinksLocalEncounterWithoutAddingWireRows() throws Exception
+    @Test public void npcLootKeepsTheNpcIdAndFirstHitKeepsWornGearOnExistingRows() throws Exception
     {
         AccountConnectPlugin p = plugin();
         NPCComposition comp = mock(NPCComposition.class); when(comp.getId()).thenReturn(123);
         when(comp.getName()).thenReturn("fixture NPC");
         net.runelite.client.events.ServerNpcLoot loot = new net.runelite.client.events.ServerNpcLoot(comp,
             List.of(new net.runelite.client.game.ItemStack(526, 1)));
-        p.onServerNpcLoot(loot); // no gameplay grant: ordinary loot behavior only
-        OwnGameplayCapture own = pluginCapture(p);
-        assertTrue(((List<?>)own.encounterSummary(tick).get("loot_not_matched")).isEmpty());
-        p.pendingEvents.clear();
-        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
+        ItemContainer worn = mock(ItemContainer.class);
+        when(worn.getItems()).thenReturn(new Item[]{new Item(4151, 1), new Item(-1, 0), new Item(892, 75)});
+        when(client.getItemContainer(InventoryID.EQUIPMENT)).thenReturn(worn);
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN);
         p.gameplayBlock(); tick += 2;
         NPC target = npc(123);
         HitsplatApplied hit = new HitsplatApplied(); hit.setActor(target); hit.setHitsplat(splat(4, true));
         p.onHitsplatApplied(hit); tick++;
-        p.onActorDeath(new ActorDeath(target));
-        int rawCount = ((List<?>)p.gameplayBlock().get("observations")).size();
+        HitsplatApplied second = new HitsplatApplied(); second.setActor(target); second.setHitsplat(splat(3, true));
+        p.onHitsplatApplied(second);
+        List<?> rows = (List<?>)p.gameplayBlock().get("observations");
+        assertFalse("the snapshot rows keep their 0.7.66 shape", new com.google.gson.Gson().toJson(rows).contains("worn"));
+        // The combat_hit events, as the capture hands them to the plugin's event sink.
+        List<Map<String,Object>> hits = new ArrayList<>();
+        OwnGameplayCapture direct = new OwnGameplayCapture(e -> { if ("combat_hit".equals(e.get("type"))) hits.add(e); return true; });
+        assertFalse(direct.ready(client, TOKEN)); tick += 2; assertTrue(direct.ready(client, TOKEN));
+        NPC other = npc(124);
+        direct.hit(client, other, splat(4, true), 1L); tick++;
+        direct.hit(client, other, splat(3, true), 2L);
+        assertFalse("the direct snapshot rows carry no worn either", new com.google.gson.Gson().toJson(direct.snapshot()).contains("worn"));
+        assertEquals(2, hits.size());
+        List<?> gear = (List<?>) hits.get(0).get("worn");
+        assertEquals(2, gear.size());
+        assertArrayEquals(new long[]{4151, 1}, (long[]) gear.get(0));
+        assertArrayEquals(new long[]{892, 75}, (long[]) gear.get(1));
+        assertFalse("worn is sent once per new target", hits.get(1).containsKey("worn"));
+        assertEquals(2, ((List<?>) PublicTransport.event(new LinkedHashMap<>(hits.get(0))).get("worn")).size());
+        int rawCount = rows.size();
+        p.events.pendingEvents.clear();
         p.onServerNpcLoot(loot);
-        Map<?,?> encounter = (Map<?,?>)((List<?>)own.encounterSummary(tick).get("encounters")).get(0);
-        assertEquals("matched", encounter.get("loot_status"));
-        assertEquals(1, ((List<?>)encounter.get("loot")).size());
-        assertEquals("local input does not increment the uploaded observation sequence", rawCount,
-            ((List<?>)p.gameplayBlock().get("observations")).size());
-        assertFalse(new com.google.gson.Gson().toJson(encounter).contains("fixture NPC"));
-        assertEquals(1L, p.pendingEvents.stream().filter(e -> "loot".equals(e.get("type"))).count());
+        assertEquals("loot adds no gameplay row", rawCount, ((List<?>)p.gameplayBlock().get("observations")).size());
+        Map<?,?> event = p.events.pendingEvents.stream().filter(e -> "loot".equals(e.get("type"))).findFirst().orElse(null);
+        assertEquals(123, ((Number) event.get("npc_id")).intValue());
+        assertEquals(123, ((Number) PublicTransport.event(new LinkedHashMap<String,Object>((Map<String,Object>) event)).get("npc_id")).intValue());
+        assertEquals(1L, p.events.pendingEvents.stream().filter(e -> "loot".equals(e.get("type"))).count());
     }
 
     @Test public void lootKeyContainerHandlerReadsOnlyWithCurrentGameplayGrantAndClearsAfterRevocation() throws Exception
@@ -466,14 +472,14 @@ public class OwnGameplayCaptureTest
         net.runelite.api.widgets.Widget tabs=mock(net.runelite.api.widgets.Widget.class);
         when(client.getWidget(net.runelite.api.gameval.InterfaceID.WildyLootChest.TABS)).thenReturn(tabs);
         ItemContainerChanged change=new ItemContainerChanged(558,c);p.onItemContainerChanged(change);verify(c,never()).getItems();
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onItemContainerChanged(change);verify(c,never()).getItems();
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemContainerChanged(change);
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onItemContainerChanged(change);verify(c,never()).getItems();
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onItemContainerChanged(change);
         Field field=AccountConnectPlugin.class.getDeclaredField("ownGameplay");field.setAccessible(true);
         OwnGameplayCapture own=(OwnGameplayCapture)field.get(p);own.lootKeys.poll(client,System.currentTimeMillis());
         Map<?,?> value=(Map<?,?>)((Map<?,?>)((Map<?,?>)p.gameplayBlock().get("states")).get("loot.owned_key_contents")).get("value");
         assertEquals("cached_items",((Map<?,?>)((List<?>)value.get("slots")).get(0)).get("status"));
-        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemContainerChanged(change);assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;assertNotNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onItemContainerChanged(change);assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;assertNotNull(p.gameplayBlock());
         own.lootKeys.poll(client,System.currentTimeMillis());
         value=(Map<?,?>)((Map<?,?>)((Map<?,?>)p.gameplayBlock().get("states")).get("loot.owned_key_contents")).get("value");
         assertEquals("not_observed_in_session",((Map<?,?>)((List<?>)value.get("slots")).get(0)).get("status"));
@@ -484,7 +490,7 @@ public class OwnGameplayCaptureTest
     {
         AccountConnectPlugin p = plugin(); ScriptPostFired build = new ScriptPostFired(ScriptID.BANKMAIN_BUILD);
         p.onScriptPostFired(build); verify(client, never()).getWidget(net.runelite.api.gameval.InterfaceID.Bankmain.ITEMS);
-        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
         ItemContainer bank = mock(ItemContainer.class); when(bank.getItems()).thenReturn(new Item[]{new Item(995, 100)});
         when(client.getItemContainer(95)).thenReturn(bank);
         net.runelite.api.widgets.Widget widget = mock(net.runelite.api.widgets.Widget.class);
@@ -493,8 +499,8 @@ public class OwnGameplayCaptureTest
         p.onItemContainerChanged(new ItemContainerChanged(95, bank)); p.onScriptPostFired(build);
         Map<?,?> states = (Map<?,?>)p.gameplayBlock().get("states");
         assertEquals("observed_cache_ranges", ((Map<?,?>)((Map<?,?>)states.get("storage.bank_tab_currency")).get("value")).get("status"));
-        p.applyServerPolicy(policy("X-Own-Gameplay", "off", 200), TOKEN); assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay", "off", 200), TOKEN); assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay", "on", 200), TOKEN); p.gameplayBlock(); tick += 2;
         p.onScriptPostFired(build); states = (Map<?,?>)p.gameplayBlock().get("states");
         assertEquals("own_bank_packet_unavailable", ((Map<?,?>)((Map<?,?>)states.get("storage.bank_tab_currency")).get("value")).get("status"));
     }
@@ -508,31 +514,31 @@ public class OwnGameplayCaptureTest
     {
         AccountConnectPlugin p=plugin(); settle(); capture.poll(client,1000);
         Map<String,Object> snapshot=new LinkedHashMap<>(); snapshot.put("own_gameplay",capture.snapshot());
-        String before=p.canonicalHash(snapshot);
+        String before=p.snapshots.canonicalHash(snapshot);
         tick++; capture.poll(client,2000); snapshot.put("own_gameplay",capture.snapshot());
-        assertEquals(before,p.canonicalHash(snapshot));
+        assertEquals(before,p.snapshots.canonicalHash(snapshot));
         assertEquals(2000L,((Map<?,?>)snapshot.get("own_gameplay")).get("last_authoritative_read_ms"));
         vars[1253]=100000; tick++; capture.poll(client,3000); snapshot.put("own_gameplay",capture.snapshot());
-        String changed=p.canonicalHash(snapshot); assertNotEquals(before,changed);
+        String changed=p.snapshots.canonicalHash(snapshot); assertNotEquals(before,changed);
         capture.hit(client,self,splat(7,false),3001); snapshot.put("own_gameplay",capture.snapshot());
-        assertNotEquals(changed,p.canonicalHash(snapshot));
+        assertNotEquals(changed,p.snapshots.canonicalHash(snapshot));
     }
 
     @Test public void grantDefaultsOffAndCannotComeFromBroadProgressOldTokenOrFailedResponse() throws Exception
     {
         AccountConnectPlugin p=plugin(); assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Broad-Capture","on",200),TOKEN);
-        p.applyServerPolicy(policy("X-Account-Progress","on",200),TOKEN); assertFalse(p.gameplayGranted());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token"); assertFalse(p.gameplayGranted());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",500),TOKEN); assertFalse(p.gameplayGranted());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);
+        p.grants.applyServerPolicy(policy("X-Broad-Capture","on",200),TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress","on",200),TOKEN); assertFalse(p.grants.gameplayGranted());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token"); assertFalse(p.grants.gameplayGranted());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",500),TOKEN); assertFalse(p.grants.gameplayGranted());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);
         assertNull(p.gameplayBlock()); tick+=2; assertNotNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Other","on",200),TOKEN); assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Other","on",200),TOKEN); assertNull(p.gameplayBlock());
     }
 
     @Test public void actualHandlersCaptureOwnHitsOnlyAndRevocationStripsCachedWirePayload() throws Exception
     {
-        AccountConnectPlugin p=plugin(); p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);
+        AccountConnectPlugin p=plugin(); p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);
         p.gameplayBlock(); tick+=2;
         HitsplatApplied e=new HitsplatApplied(); e.setActor(self); e.setHitsplat(splat(7,false));
         p.onHitsplatApplied(e);
@@ -540,9 +546,9 @@ public class OwnGameplayCaptureTest
         Map<String,Object> cached=new LinkedHashMap<>(); cached.put("own_gameplay",p.gameplayBlock());
         OkHttpClient http=mock(OkHttpClient.class); when(http.newCall(any(Request.class))).thenReturn(mock(Call.class));
         inject(p,"okHttpClient",http);
-        Method send=AccountConnectPlugin.class.getDeclaredMethod("postSnapshot",String.class,Map.class,String.class);
-        send.setAccessible(true); send.invoke(p,TOKEN,cached,"hash");
-        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); send.invoke(p,TOKEN,cached,"hash");
+        Method send=SnapshotUploader.class.getDeclaredMethod("postSnapshot",String.class,Map.class,String.class);
+        send.setAccessible(true); send.invoke(p.uploader,TOKEN,cached,"hash");
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); send.invoke(p.uploader,TOKEN,cached,"hash");
         org.mockito.ArgumentCaptor<Request> requests=org.mockito.ArgumentCaptor.forClass(Request.class);
         verify(http,times(2)).newCall(requests.capture());
         okio.Buffer first=new okio.Buffer(), second=new okio.Buffer();
@@ -557,11 +563,11 @@ public class OwnGameplayCaptureTest
         AccountConnectPlugin p=plugin(); ChatMessage msg=new ChatMessage();msg.setType(ChatMessageType.GAMEMESSAGE);
         msg.setMessage("Your current rumour target is a red chinchompa. You'll need to find it.");
         p.onChatMessage(msg);assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onChatMessage(msg);assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onChatMessage(msg);
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),"old-token");p.onChatMessage(msg);assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN);p.gameplayBlock();tick+=2;p.onChatMessage(msg);
         List<?> observations=(List<?>)p.gameplayBlock().get("observations");assertEquals(1,observations.size());
         Map<?,?> value=(Map<?,?>)((Map<?,?>)observations.get(0)).get("value");assertEquals("red_chinchompa",value.get("target_observed"));
-        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onChatMessage(msg);assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN);p.onChatMessage(msg);assertNull(p.gameplayBlock());
     }
 
     @Test public void newSystemAndClientTickHandlersRequireSeparateGrantAndRevocationClearsThem() throws Exception
@@ -571,73 +577,10 @@ public class OwnGameplayCaptureTest
         msg.setMessage("Your quetzal whistle has 42 charges remaining.");
         p.onChatMessage(msg); p.onClientTick(new ClientTick());
         verify(client,never()).getWidget(193,2); assertNull(p.gameplayBlock());
-        p.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN); p.gameplayBlock(); tick+=2;
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","on",200),TOKEN); p.gameplayBlock(); tick+=2;
         p.onChatMessage(msg);
         assertEquals(1,((List<?>)p.gameplayBlock().get("observations")).size());
-        p.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); assertNull(p.gameplayBlock());
+        p.grants.applyServerPolicy(policy("X-Own-Gameplay","off",200),TOKEN); assertNull(p.gameplayBlock());
         p.onChatMessage(msg); assertNull(p.gameplayBlock());
-    }
-
-    @Test public void loadoutRevisionsFollowWornContainerPerSession()
-    {
-        settle();
-        capture.poll(client, 1000L); // worn container not loaded: no revision, gear unknown
-        assertTrue(capture.loadouts.revisions().isEmpty());
-        ItemContainer worn = mock(ItemContainer.class);
-        Item[] items = new Item[14]; items[3] = new Item(4151, 1); items[13] = new Item(11212, 50);
-        when(worn.getItems()).thenAnswer(i -> items.clone());
-        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
-        tick++; capture.poll(client, 2000L);
-        tick++; items[13] = new Item(11212, 49); capture.poll(client, 3000L); // ammo shot: same gear
-        tick++; items[3] = new Item(12006, 1); capture.poll(client, 4000L);
-        List<Map<String,Object>> revs = capture.loadouts.revisions();
-        assertEquals(2, revs.size());
-        assertEquals("baseline", revs.get(0).get("provenance"));
-        assertEquals("observed_change", revs.get(1).get("provenance"));
-        assertEquals(12006, ((Map<?,?>) revs.get(1).get("slots")).get("weapon"));
-        capture.gap(); // scene reload keeps the worn container and the tracker
-        tick++; capture.poll(client, 5000L);
-        assertEquals(2, capture.loadouts.revisions().size());
-        String generation = capture.loadouts.generation();
-        tick = 5; capture.poll(client, 6000L); // tick counter went back: new generation, new baseline
-        assertNotEquals(generation, capture.loadouts.generation());
-        assertEquals("baseline", capture.loadouts.revisions().get(0).get("provenance"));
-        when(client.getAccountHash()).thenReturn(43L);
-        assertFalse(capture.ready(client, TOKEN)); // account switch resets the tracker
-        assertNull(capture.loadouts);
-    }
-
-    @Test public void missingWornReadEndsRevisionUntilAFreshBaseline()
-    {
-        settle();
-        ItemContainer worn = mock(ItemContainer.class);
-        when(worn.getItems()).thenReturn(new Item[]{new Item(-1, 0), new Item(-1, 0),
-            new Item(-1, 0), new Item(4151, 1)});
-        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
-        capture.poll(client, 1000L);
-        assertNotNull(capture.loadouts.activeAt(tick));
-        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(null);
-        tick++; capture.poll(client, 1600L);
-        assertNull(capture.loadouts.activeAt(tick));
-        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
-        tick++; capture.poll(client, 2200L);
-        assertEquals(2, capture.loadouts.revisions().size());
-        assertEquals("baseline", capture.loadouts.activeAt(tick).get("provenance"));
-    }
-
-    @Test public void sceneGapCannotMaskALoadoutTickCounterRestart()
-    {
-        settle();
-        ItemContainer worn = mock(ItemContainer.class);
-        when(worn.getItems()).thenReturn(new Item[]{new Item(-1, 0), new Item(-1, 0),
-            new Item(-1, 0), new Item(4151, 1)});
-        when(client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN)).thenReturn(worn);
-        capture.poll(client, 1000L);
-        String before = capture.loadouts.generation();
-        capture.gap(); // clears general lastTick before the next poll
-        tick = 5; capture.poll(client, 1600L);
-        assertNotEquals(before, capture.loadouts.generation());
-        assertEquals("baseline", capture.loadouts.activeAt(tick).get("provenance"));
-        assertEquals(1, capture.loadouts.revisions().size());
     }
 }

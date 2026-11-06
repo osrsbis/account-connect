@@ -24,7 +24,7 @@ public class OwnCombatSignalTest {
    ((Map<String,Object>)e.get("signal_value")).put("player_name","PRIVATE");e.put("location","PRIVATE");
    Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));
    assertEquals(OwnSignalEvent.wire(wire),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
-   assertTrue(EventQueueProtocol.allows("own-signals-v1",wire));assertFalse(EventQueueProtocol.allows("own-vars-v1",wire));
+   assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
    e.put("source","own_client_system");assertNull(OwnSignalEvent.wire(e));
   }
   Map<String,Object> e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("room_observed","PRIVATE");assertNull(OwnSignalEvent.wire(e));

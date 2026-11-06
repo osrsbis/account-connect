@@ -87,9 +87,9 @@ public class GeRestartTest
 		when(client.getWorldType()).thenAnswer(i -> world);
 		when(client.getGrandExchangeOffers()).thenAnswer(i -> new GrandExchangeOffer[8]);
 		inject("client", client);
-		p.setSpoolDataRootForTest(data);
+		p.spooler.setSpoolDataRootForTest(data);
 		p.startUp();
-		p.pendingEvents.clear();	// rows the last close wrote to pending-events.json, already counted above
+		p.events.pendingEvents.clear();	// rows the last close wrote to pending-events.json, already counted above
 	}
 
 	private void inject(String field, Object value) throws Exception
@@ -142,7 +142,7 @@ public class GeRestartTest
 	private List<Map<String, Object>> ge()
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (String.valueOf(e.get("type")).startsWith("ge_"))
 			{
@@ -170,7 +170,7 @@ public class GeRestartTest
 		login(A, () -> { });
 		offer(0, GrandExchangeOfferState.BUYING, 0, 60, 110, 0);
 		offer(0, GrandExchangeOfferState.BUYING, 40, 60, 110, 3760);
-		tick += AccountConnectPlugin.GE_PROGRESS_MIN_TICKS;
+		tick += GeSlots.PROGRESS_MIN_TICKS;
 		offer(0, GrandExchangeOfferState.BUYING, 40, 60, 110, 3760);
 		Object key = ge().get(0).get("offer_key");
 		assertEquals("ge_offer", ge().get(0).get("type"));
@@ -295,7 +295,7 @@ public class GeRestartTest
 	public void theFileHoldsNoTokenAndSurvivesARestartWithoutLogin() throws Exception
 	{
 		Object key = placeAndFill40ThenRestart();
-		Path file = data.resolve("osrsbis").resolve(AccountConnectPlugin.GE_SLOTS_FILE);
+		Path file = data.resolve("osrsbis").resolve(GeSlots.FILE);
 		assertTrue(Files.exists(file));
 		assertTrue("the token itself is never written", !new String(Files.readAllBytes(file)).contains(TOKEN));
 		p.shutDown();

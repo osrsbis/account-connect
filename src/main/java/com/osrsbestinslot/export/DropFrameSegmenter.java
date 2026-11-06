@@ -26,6 +26,8 @@ package com.osrsbestinslot.export;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** Accumulates encoded frames and yields bounded, ordered segments ready for upload. */
 public class DropFrameSegmenter
@@ -70,7 +72,7 @@ public class DropFrameSegmenter
 	private int rejectedFrames;
 	private boolean truncated;
 	/** Bytes of each segment handed out and not yet settled, keyed by segment index. */
-	private final java.util.Map<Integer, Integer> outstanding = new java.util.LinkedHashMap<>();
+	private final Map<Integer, Integer> outstanding = new LinkedHashMap<>();
 	/** Sum of the map above, kept alongside it so the hot path does not walk the map. */
 	private long outstandingBytes;
 	/** The highest heldBytes() ever reached. Reported, so "bounded memory" is measured not claimed. */

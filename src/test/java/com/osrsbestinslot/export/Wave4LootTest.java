@@ -47,10 +47,10 @@ public class Wave4LootTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		plugin.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(995, 40), new ItemStack(526, 1)));
+		plugin.kills.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(995, 40), new ItemStack(526, 1)));
 
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("loot", ev.get("type"));
 		assertEquals("Goblin", ev.get("source_name"));
 		assertEquals("npc", ev.get("source_type"));
@@ -72,9 +72,9 @@ public class Wave4LootTest
 		when(im.getItemPrice(560)).thenReturn(200L);
 		inject(plugin, "itemManager", im);
 
-		plugin.emitLoot("Vorkath", "npc", Arrays.asList(new ItemStack(995, 5000), new ItemStack(560, 100)));
+		plugin.kills.emitLoot("Vorkath", "npc", Arrays.asList(new ItemStack(995, 5000), new ItemStack(560, 100)));
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals(5000L + 200L * 100L, ev.get("value")); // 5000 + 20000 = 25000
 	}
 
@@ -84,16 +84,16 @@ public class Wave4LootTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 
-		plugin.emitLoot("Goblin", "npc", Collections.emptyList());
-		assertTrue("empty drop → no event", plugin.pendingEvents.isEmpty());
+		plugin.kills.emitLoot("Goblin", "npc", Collections.emptyList());
+		assertTrue("empty drop → no event", plugin.events.pendingEvents.isEmpty());
 
-		plugin.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(-1, 5), new ItemStack(995, 0)));
-		assertTrue("all-blank drop → no event", plugin.pendingEvents.isEmpty());
+		plugin.kills.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(-1, 5), new ItemStack(995, 0)));
+		assertTrue("all-blank drop → no event", plugin.events.pendingEvents.isEmpty());
 
-		plugin.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(-1, 5), new ItemStack(526, 3)));
-		assertEquals(1, plugin.pendingEvents.size());
+		plugin.kills.emitLoot("Goblin", "npc", Arrays.asList(new ItemStack(-1, 5), new ItemStack(526, 3)));
+		assertEquals(1, plugin.events.pendingEvents.size());
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> items = (List<Map<String, Object>>) plugin.pendingEvents.get(0).get("items");
+		List<Map<String, Object>> items = (List<Map<String, Object>>) plugin.events.pendingEvents.get(0).get("items");
 		assertEquals("only the real item survives", 1, items.size());
 		assertEquals(526, items.get(0).get("id"));
 	}
@@ -109,7 +109,7 @@ public class Wave4LootTest
 
 		plugin.onServerNpcLoot(event);
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("loot", ev.get("type"));
 		assertEquals("npc", ev.get("source_type"));
 		assertEquals("Zulrah", ev.get("source_name"));
@@ -126,7 +126,7 @@ public class Wave4LootTest
 
 		plugin.onPlayerLootReceived(event);
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("loot", ev.get("type"));
 		assertEquals("player", ev.get("source_type"));
 		assertFalse("victim name must NOT be sent", ev.containsKey("source_name"));
@@ -142,8 +142,8 @@ public class Wave4LootTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig() {
 });
-		plugin.emitLoot("Goblin", "npc", Collections.singletonList(new ItemStack(995, 10)));
-		assertTrue(plugin.pendingEvents.isEmpty());
+		plugin.kills.emitLoot("Goblin", "npc", Collections.singletonList(new ItemStack(995, 10)));
+		assertTrue(plugin.events.pendingEvents.isEmpty());
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

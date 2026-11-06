@@ -18,10 +18,18 @@ import net.runelite.api.widgets.Widget;
 import net.runelite.api.VarbitComposition;
 import net.runelite.client.config.RuneScapeProfileType;
 import net.runelite.client.util.Text;
+import java.util.List;
+import java.util.Locale;
 
 /** Own-account observations only. No persistence or third-party plugin dependencies. Only the permitted collection Search action. */
 final class AccountProgressCapture
 {
+    /** CA_TASK_COMPLETED_0..20. Task id = 32 * word + bit (cs2 proc script4834, pinned exporter sources). */
+    static final int[] CA_TASK_VARPS = {3116, 3117, 3118, 3119, 3120, 3121, 3122, 3123, 3124, 3125, 3126, 3127, 3128,
+        3387, 3718, 3773, 3774, 4204, 4496, 4721, 5673};
+    static final java.util.List<String> CA_TIERS = java.util.Collections.unmodifiableList(java.util.Arrays.asList(
+        "easy", "medium", "hard", "elite", "master", "grandmaster"));
+
     // Cache-generated gameval 1.13.1 IDs; numeric IDs avoid linking newer enum fields on older clients.
     private static final Pattern CLUE = Pattern.compile("^You have completed ([0-9,]+) (beginner|easy|medium|hard|elite|master) Treasure Trails?\\.$");
     private static final Pattern COLLECTION = Pattern.compile("^New item added to your collection log: (.{1,160})$");
@@ -244,7 +252,7 @@ final class AccountProgressCapture
         {
             return null;
         }
-        java.util.List<Integer> ids = new ArrayList<>();
+        List<Integer> ids = new ArrayList<>();
         for (Map.Entry<Integer, Integer> e : collectionItems.entrySet())
         {
             if (e.getValue() > 0)
@@ -252,11 +260,9 @@ final class AccountProgressCapture
                 ids.add(e.getKey());
             }
         }
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("obtained_item_ids", ids);
-        out.put("game_obtained_count", varp(vars, 2943));
-        out.put("game_total_count", varp(vars, 2944));
-        out.put("verified_at_ms", scanVerifiedAt);
+        Map<String, Object> out = Fields.of(
+            "obtained_item_ids", ids, "game_obtained_count", varp(vars, 2943), "game_total_count", varp(vars, 2944),
+            "verified_at_ms", scanVerifiedAt);
         return out;
     }
 
@@ -320,14 +326,14 @@ final class AccountProgressCapture
             {
                 out.put("kind", "combat_achievement");
                 out.put("subject", m.group(3));
-                out.put("tier", m.group(2).toLowerCase(java.util.Locale.ROOT));
+                out.put("tier", m.group(2).toLowerCase(Locale.ROOT));
                 out.put("task_id", m.group(1) == null ? null : Long.parseLong(m.group(1)));
             }
             else if ((m = SALVAGE.matcher(text)).matches())
             {
                 out.put("kind", "salvage_sort");
                 out.put("subject", m.group(3));
-                out.put("shipwreck_type", m.group(1).toLowerCase(java.util.Locale.ROOT));
+                out.put("shipwreck_type", m.group(1).toLowerCase(Locale.ROOT));
                 out.put("quantity", positiveCount(m.group(2)));
             }
             else
@@ -430,9 +436,9 @@ final class AccountProgressCapture
     static Map<String, Object> caTasks(int[] vars, Map<Integer, String> catalog)
     {
         Map<String, Object> out = new LinkedHashMap<>();
-        java.util.List<Integer> words = new ArrayList<>();
+        List<Integer> words = new ArrayList<>();
         boolean known = vars != null;
-        for (int id : AccountReadiness.CA_TASK_VARPS)
+        for (int id : CA_TASK_VARPS)
         {
             Integer w = varp(vars, id);
             known &= w != null;
@@ -450,7 +456,7 @@ final class AccountProgressCapture
         Map<String, Object> byTier = new LinkedHashMap<>();
         Map<String, Integer> totals = new LinkedHashMap<>();
         StringBuilder canon = new StringBuilder();
-        for (String tier : AccountReadiness.CA_TIERS)
+        for (String tier : CA_TIERS)
         {
             byTier.put(tier, new ArrayList<Integer>());
             totals.put(tier, 0);
@@ -460,10 +466,10 @@ final class AccountProgressCapture
             totals.put(e.getValue(), totals.get(e.getValue()) + 1);
             canon.append(e.getKey()).append('=').append(e.getValue()).append(';');
             int w = e.getKey() / 32, b = e.getKey() % 32;
-            if ((words.get(w) & (1 << b)) != 0) ((java.util.List<Integer>) byTier.get(e.getValue())).add(e.getKey());
+            if ((words.get(w) & (1 << b)) != 0) ((List<Integer>) byTier.get(e.getValue())).add(e.getKey());
         }
         out.put("catalog_source", "enum:3981..3986,param:1306");
-        out.put("catalog_sha256", AccountConnectPlugin.sha256Hex(canon.toString()));
+        out.put("catalog_sha256", SnapshotBuilder.sha256Hex(canon.toString()));
         out.put("completed_by_tier", byTier);
         out.put("catalog_task_totals", totals);
         return out;
@@ -475,7 +481,7 @@ final class AccountProgressCapture
         try
         {
             Map<Integer, String> catalog = new TreeMap<>();
-            for (int t = 0; t < AccountReadiness.CA_TIERS.size(); t++)
+            for (int t = 0; t < CA_TIERS.size(); t++)
             {
                 EnumComposition tier = client.getEnum(3981 + t);
                 int[] structs = tier == null ? null : tier.getIntVals();
@@ -486,8 +492,8 @@ final class AccountProgressCapture
                     if (struct == null) return null;
                     int task = struct.getIntValue(1306);
                     // A duplicate or out-of-range id means the cache layout changed: refuse the whole catalogue.
-                    if (task < 0 || task >= 32 * AccountReadiness.CA_TASK_VARPS.length || catalog.containsKey(task)) return null;
-                    catalog.put(task, AccountReadiness.CA_TIERS.get(t));
+                    if (task < 0 || task >= 32 * CA_TASK_VARPS.length || catalog.containsKey(task)) return null;
+                    catalog.put(task, CA_TIERS.get(t));
                 }
             }
             return catalog;

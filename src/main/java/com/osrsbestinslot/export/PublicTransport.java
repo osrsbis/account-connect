@@ -9,7 +9,6 @@ import java.util.*;
 final class PublicTransport
 {
     private PublicTransport() {}
-    static boolean firehoseAllowed() { return false; }
 
     private static final Map<String, Set<String>> FIELDS = new HashMap<>();
     private static final Set<String> ENVELOPE = keys("type ts event_id account_hash rsn profile_type world world_members verification_tick verification_revision verification_text");
@@ -27,9 +26,9 @@ final class PublicTransport
         allow("logout", "wealth session_ms reason world world_members");
         allow("world_hop", "from to");
         allow("region", "from to x y");
-        allow("death", "location death_kind items_lost");
+        allow("death", "location death_kind death_tick items_lost");
         allow("equip_change", "equipped unequipped");
-        allow("loot", "source_name source_type items value");
+        allow("loot", "source_name source_type npc_id items value");
         allow("kill_count", "source kind count");
         allow("kill_timing", "seq label duration_s new_pb personal_best_s team_size room");
         allow("kill_context", "source count worn inventory levels_boosted_real special_energy world_members toa_raid_level");
@@ -44,7 +43,7 @@ final class PublicTransport
         allow("level_up", "skill level xp");
         allow("xp_gain", "gains total");
         allow("bank_session", "deposited withdrawn complete truncated");
-        allow("combat_hit combat_npc_end", "combat_schema gameplay_session source_sequence source_tick observed_at_ms source direction amount hitsplat_type npc_id target_key first_own_hit_tick end kill_credit");
+        allow("combat_hit combat_npc_end", "combat_schema gameplay_session source_sequence source_tick observed_at_ms source direction amount hitsplat_type npc_id target_key worn first_own_hit_tick end kill_credit");
         allow("own_vars", "");
         allow("own_signal", "");
         allow("own_state", ""); // the nested body uses the closed OwnStateEvent projection below

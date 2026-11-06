@@ -86,18 +86,18 @@ public class TradeLeakAndFlushWedgeTest
 		bandos.put("id", 11832);
 		bandos.put("qty", 1);
 		bobsOffer.add(bandos);
-		inject("pendingCounterparty", "Bob");
-		inject("pendingTradeReceived", bobsOffer);
-		inject("pendingReceivedText", "Bandos chestplate x 1");
+		plugin.trade.pendingCounterparty = "Bob";
+		plugin.trade.pendingTradeReceived = bobsOffer;
+		plugin.trade.pendingReceivedText = "Bandos chestplate x 1";
 
 		// Trade 2 opens. The 335-load must wipe Bob's residue before any polling happens.
 		plugin.handleActivityWidgetLoaded(TRADE_MAIN_GROUP_ID);
 
-		assertNull("counterparty from the abandoned trade must not survive", get("pendingCounterparty"));
+		assertNull("counterparty from the abandoned trade must not survive", plugin.trade.pendingCounterparty);
 		assertNull("received items must not survive — this is the field the release exists to fix",
-			get("pendingTradeReceived"));
-		assertNull("the text fallback must not survive either", get("pendingReceivedText"));
-		assertTrue("polling must still be armed for the new trade", plugin.tradeMainOpen);
+			plugin.trade.pendingTradeReceived);
+		assertNull("the text fallback must not survive either", plugin.trade.pendingReceivedText);
+		assertTrue("polling must still be armed for the new trade", plugin.trade.tradeMainOpen);
 	}
 
 	@Test
@@ -106,18 +106,18 @@ public class TradeLeakAndFlushWedgeTest
 		configWith("https://example.invalid/api");
 		for (int i = 0; i < 3; i++)
 		{
-			inject("pendingCounterparty", "Ghost" + i);
+			plugin.trade.pendingCounterparty = "Ghost" + i;
 			List<Map<String, Object>> junk = new ArrayList<>();
 			Map<String, Object> it = new LinkedHashMap<>();
 			it.put("id", 4151 + i);
 			it.put("qty", 1);
 			junk.add(it);
-			inject("pendingTradeReceived", junk);
+			plugin.trade.pendingTradeReceived = junk;
 
 			plugin.handleActivityWidgetLoaded(TRADE_MAIN_GROUP_ID);
 
-			assertNull("each new trade starts clean", get("pendingCounterparty"));
-			assertNull(get("pendingTradeReceived"));
+			assertNull("each new trade starts clean", plugin.trade.pendingCounterparty);
+			assertNull(plugin.trade.pendingTradeReceived);
 		}
 	}
 
@@ -140,21 +140,21 @@ public class TradeLeakAndFlushWedgeTest
 
 		Map<String, Object> ev = new LinkedHashMap<>();
 		ev.put("type", "trade");
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			plugin.pendingEvents.add(ev);
+			plugin.events.pendingEvents.add(ev);
 		}
 
-		plugin.flushEvents();	// must not propagate
+		plugin.events.flushEvents();	// must not propagate
 
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
 			assertEquals("the batch must be preserved, not destroyed by the throw",
-				1, plugin.pendingEvents.size());
+				1, plugin.events.pendingEvents.size());
 		}
 		assertFalse("the in-flight flag MUST be cleared, or every later flush early-returns forever",
-			plugin.eventPostInFlight);
-		assertTrue("the failure must arm the backoff like any other", plugin.eventRetryBackoffUntilMs > 0);
+			plugin.events.eventPostInFlight);
+		assertTrue("the failure must arm the backoff like any other", plugin.events.eventRetryBackoffUntilMs > 0);
 	}
 
 	/**
@@ -167,22 +167,22 @@ public class TradeLeakAndFlushWedgeTest
 		configWith("not a url at all");
 		Map<String, Object> ev = new LinkedHashMap<>();
 		ev.put("type", "trade");
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			plugin.pendingEvents.add(ev);
+			plugin.events.pendingEvents.add(ev);
 		}
-		plugin.flushEvents();
-		assertFalse(plugin.eventPostInFlight);
+		plugin.events.flushEvents();
+		assertFalse(plugin.events.eventPostInFlight);
 
 		// User fixes the config; the next tick must actually attempt a send rather than early-return.
 		configWith("http://127.0.0.1:1/api");	// refused connection, but a VALID url
-		plugin.eventRetryBackoffUntilMs = 0L;
-		plugin.flushEvents();
+		plugin.events.eventRetryBackoffUntilMs = 0L;
+		plugin.events.flushEvents();
 
 		// The batch left the buffer (a real attempt happened) or came back via onFailure — either way
 		// the flag must not be stuck true, which is what "wedged" means.
 		Thread.sleep(500);
 		assertFalse("delivery must not be permanently wedged after a corrected config",
-			plugin.eventPostInFlight);
+			plugin.events.eventPostInFlight);
 	}
 }

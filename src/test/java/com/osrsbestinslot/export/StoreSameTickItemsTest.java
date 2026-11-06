@@ -55,7 +55,7 @@ public class StoreSameTickItemsTest
 		when(inv.getItems()).thenAnswer(i -> inventory);
 		when(client.getItemContainer(any(InventoryID.class))).thenReturn(inv);
 		inject("client", client);
-		inject("shopOpen", true);
+		plugin.store.shopOpen = true;
 		inventory = new Item[]{new Item(COINS, 300_000_000)};
 	}
 
@@ -87,7 +87,7 @@ public class StoreSameTickItemsTest
 
 	private List<Map<String, Object>> storeBuys()
 	{
-		return plugin.pendingEvents.stream().filter(e -> "store_buy".equals(e.get("type"))).collect(Collectors.toList());
+		return plugin.events.pendingEvents.stream().filter(e -> "store_buy".equals(e.get("type"))).collect(Collectors.toList());
 	}
 
 	@Test
@@ -107,7 +107,7 @@ public class StoreSameTickItemsTest
 			assertEquals(1, e.get("qty"));
 			assertFalse("one coin change cannot be split between two items", e.containsKey("gp_total"));
 		}
-		assertEquals(0, plugin.storePendings.size());
+		assertEquals(0, plugin.store.storePendings.size());
 	}
 
 	@Test
@@ -134,13 +134,13 @@ public class StoreSameTickItemsTest
 		buy(FURY);					// the fury buy fails: out of stock
 		tick++;
 		inventoryNow(300_000_000L - 216_042_420L, HELM);
-		tick += AccountConnectPlugin.STORE_PENDING_MAX_TICKS + 1;
+		tick += StoreTools.STORE_PENDING_MAX_TICKS + 1;
 		inventoryNow(300_000_000L - 216_042_420L - 10L, HELM);	// an unrelated later change
 
 		List<Map<String, Object>> buys = storeBuys();
 		assertEquals(1, buys.size());
 		assertEquals(216_042_420L, buys.get(0).get("gp_total"));
-		assertEquals(0, plugin.storePendings.size());
+		assertEquals(0, plugin.store.storePendings.size());
 	}
 
 	@Test
@@ -148,7 +148,7 @@ public class StoreSameTickItemsTest
 	{
 		buy(HELM);
 		buy(FURY);
-		plugin.flushStorePendingOnShopClose();
+		plugin.store.flushStorePendingOnShopClose();
 		assertEquals(2, storeBuys().size());
 	}
 }

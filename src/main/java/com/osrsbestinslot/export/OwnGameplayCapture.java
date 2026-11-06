@@ -6,13 +6,17 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Hitsplat;
 import net.runelite.api.InventoryID;
-import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.config.RuneScapeProfileType;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.IntToLongFunction;
+import java.util.function.Predicate;
 
 /**
  * Bounded, passive first-party observations. No scene sweep, player target reads, raw chat, actions,
@@ -39,14 +43,14 @@ final class OwnGameplayCapture
     private final Deque<Map<String,Object>> observations = new ArrayDeque<>();
     private final Deque<Integer> observationBytes = new ArrayDeque<>();
     private int bufferedBytes;
-    private final java.util.function.Predicate<Map<String,Object>> eventSink;
+    private final Predicate<Map<String,Object>> eventSink;
     private long combatObserved, combatHandedOff, combatNotHandedOff;
     private long stateObserved, stateHandedOff, stateNotHandedOff;
     private long varsObserved, varsHandedOff, varsNotHandedOff;
     private long signalsObserved,signalsHandedOff,signalsNotHandedOff;
     OwnGameplayCapture() { this(row -> false); }
-    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink) { this(sink,id -> -1); }
-    OwnGameplayCapture(java.util.function.Predicate<Map<String,Object>> sink,java.util.function.IntToLongFunction prices)
+    OwnGameplayCapture(Predicate<Map<String,Object>> sink) { this(sink,id -> -1); }
+    OwnGameplayCapture(Predicate<Map<String,Object>> sink,IntToLongFunction prices)
     { eventSink = sink;lootKeys=new OwnLootKeysCapture(this,prices); }
     private final Map<String,Map<String,Object>> states = new LinkedHashMap<>();
     final OwnInterfaceCapture interfaces = new OwnInterfaceCapture(this);
@@ -57,21 +61,13 @@ final class OwnGameplayCapture
     final OwnGroundClueCapture groundClues = new OwnGroundClueCapture(this);
     final OwnLootKeysCapture lootKeys;
     final OwnBankTabsCapture bankTabs = new OwnBankTabsCapture(this);
-    /**
-     * Worn-equipment revisions for this capture session (loadout.revision.v1), read in-process by encounter code.
-     * Null until the first settled poll. Generation = session plus a restart count for a tick-counter reset.
-     */
-    LoadoutRevision loadouts;
-    private int loadoutRestarts;
-    // Keep this across scene gaps: gap() clears lastTick before a resumed poll can detect a reset.
-    private int loadoutLastTick = -1;
     private final Map<NPC,Target> targets = new IdentityHashMap<>();
     private final Set<Hitsplat> splats = Collections.newSetFromMap(new IdentityHashMap<>());
     // NPCs whose ActorDeath was observed on deathTick. In the real client the killing splat can arrive in the
     // same tick AFTER ActorDeath; that hit belongs to the dying target, not to a new target.
     private final Map<NPC,Target> deaths = new IdentityHashMap<>();
     private int deathTick = -1;
-    private CombatEncounterTracker encounters = new CombatEncounterTracker(null);
+    private List<long[]> wornAtHit;
 
     private static final class Target
     {
@@ -84,7 +80,6 @@ final class OwnGameplayCapture
     {
         identity = session = profile = null;
         accountType = null;
-        loadouts = null; loadoutRestarts = 0; loadoutLastTick = -1;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
         states.clear(); targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
         lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
@@ -92,7 +87,7 @@ final class OwnGameplayCapture
         stateObserved = stateHandedOff = stateNotHandedOff = 0;
         varsObserved = varsHandedOff = varsNotHandedOff = 0;
         signalsObserved=signalsHandedOff=signalsNotHandedOff=0;
-        gapReason = "not_observed"; encounters = new CombatEncounterTracker(null); wornSession = null; wornSlots = null; localInputs = 0;
+        gapReason = "not_observed";
     }
 
     boolean ready(Client client, String grantIdentity)
@@ -125,7 +120,6 @@ final class OwnGameplayCapture
     {
         // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
         targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
-        encounters.interrupt("scene_gap", lastTick); wornSlots = null; wornSession = null;
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -175,9 +169,9 @@ final class OwnGameplayCapture
             for (Object o : (Iterable<?>) v) { n += jsonBytes(o); members++; }
             return n + Math.max(0, members - 1);
         }
-        if (v instanceof int[]) { java.util.List<Integer> l = new java.util.ArrayList<>(); for (int i : (int[]) v) l.add(i); return jsonBytes(l); }
-        if (v instanceof long[]) { java.util.List<Long> l = new java.util.ArrayList<>(); for (long i : (long[]) v) l.add(i); return jsonBytes(l); }
-        if (v instanceof Object[]) return jsonBytes(java.util.Arrays.asList((Object[]) v));
+        if (v instanceof int[]) { List<Integer> l = new ArrayList<>(); for (int i : (int[]) v) l.add(i); return jsonBytes(l); }
+        if (v instanceof long[]) { List<Long> l = new ArrayList<>(); for (long i : (long[]) v) l.add(i); return jsonBytes(l); }
+        if (v instanceof Object[]) return jsonBytes(Arrays.asList((Object[]) v));
         if (v instanceof Enum) return stringBytes(((Enum<?>) v).name());
         return stringBytes(v.toString());
     }
@@ -231,8 +225,8 @@ final class OwnGameplayCapture
             }
             observations.addLast(row); observationBytes.addLast(bytes); bufferedBytes += bytes;
         }
-        if (session != null) track(row);
         Map<String,Object> combat = OwnCombatEvent.from(session, row);
+        if (combat != null && wornAtHit != null && "combat_hit".equals(combat.get("type"))) combat.put("worn", wornAtHit);
         if (combat != null)
         {
             combatObserved++;
@@ -291,16 +285,7 @@ final class OwnGameplayCapture
         int tick = client.getTickCount();
         if (tick == lastTick) return;
         if (lastTick >= 0 && tick < lastTick) gap();
-        if (loadoutLastTick >= 0 && tick < loadoutLastTick) { loadouts = null; loadoutRestarts++; }
-        loadoutLastTick = tick;
         lastTick = tick; lastReadAt = at;
-        // A scene reload keeps the worn container, so gap() does not end gear knowledge. Unchanged gear is a no-op.
-        String generation = session + "/" + loadoutRestarts;
-        if (loadouts == null || !loadouts.generation().equals(generation)) loadouts = new LoadoutRevision(generation);
-        net.runelite.api.ItemContainer worn = client.getItemContainer(net.runelite.api.gameval.InventoryID.WORN);
-        Map<Integer, Integer> wornSlots = worn == null ? null : LoadoutRevision.slotsOf(worn.getItems());
-        if (wornSlots == null) loadouts.gap(tick);
-        else loadouts.observe(wornSlots, tick, at);
         int[] live = client.getVarps(), vars = live == null ? null : live.clone();
         Map<String,Object> barrows = new LinkedHashMap<>();
         String[] brothers = {"ahrim", "dharok", "guthan", "karil", "torag", "verac"};
@@ -318,22 +303,22 @@ final class OwnGameplayCapture
         Map<String,Object> surge = new LinkedHashMap<>();
         surge.put("timer_raw", AccountProgressCapture.bit(client, vars, 16270));
         state("effects.surge", "varbit:16270", surge, tick, at);
-        Map<String,Object> charge = new LinkedHashMap<>();
-        charge.put("active_raw", AccountProgressCapture.bit(client, vars, 12411));
-        charge.put("cooldown_raw", AccountProgressCapture.bit(client, vars, 12138));
+        Map<String,Object> charge = Fields.of(
+            "active_raw", AccountProgressCapture.bit(client, vars, 12411),
+            "cooldown_raw", AccountProgressCapture.bit(client, vars, 12138));
         state("effects.death_charge", "varbits:12411,12138", charge, tick, at);
 
-        Map<String,Object> escape = new LinkedHashMap<>();
-        escape.put("afk_mode_raw", AccountProgressCapture.bit(client, vars, 14838));
-        escape.put("afk_delay_raw", AccountProgressCapture.bit(client, vars, 14849));
-        escape.put("ring_of_life_raw", AccountProgressCapture.bit(client, vars, 14857));
+        Map<String,Object> escape = Fields.of(
+            "afk_mode_raw", AccountProgressCapture.bit(client, vars, 14838),
+            "afk_delay_raw", AccountProgressCapture.bit(client, vars, 14849),
+            "ring_of_life_raw", AccountProgressCapture.bit(client, vars, 14857));
         // Settings are not possession, server idle time, or a promise that teleport will occur.
         state("effects.escape_crystal", "varbits:14838,14849,14857", escape, tick, at);
 
-        Map<String,Object> arena = new LinkedHashMap<>();
-        arena.put("entry_paid_raw", AccountProgressCapture.bit(client, vars, 5964));
-        arena.put("cooldown_raw", AccountProgressCapture.bit(client, vars, 10732));
-        arena.put("ticket_available_raw", AccountProgressCapture.bit(client, vars, 5962));
+        Map<String,Object> arena = Fields.of(
+            "entry_paid_raw", AccountProgressCapture.bit(client, vars, 5964),
+            "cooldown_raw", AccountProgressCapture.bit(client, vars, 10732),
+            "ticket_available_raw", AccountProgressCapture.bit(client, vars, 5962));
         // Ticket availability is not lifetime currency and no path/action is inferred.
         state("minigame.arena_state", "varbits:5964,10732,5962", arena, tick, at);
 
@@ -381,114 +366,24 @@ final class OwnGameplayCapture
             boolean dying = deathTick == tick && deaths.containsKey(npc);
             Target target = dying ? deaths.get(npc) : targets.get(npc);
             boolean deathWithoutEarlierHit = dying && target == null;
-            if (target == null)
+            boolean fresh = target == null;
+            if (fresh)
             {
                 if (!dying && targets.size() >= MAX_TARGETS) { targets.clear(); gapReason = "target_capacity_gap"; }
                 target = new Target(npc, tick);
                 if (dying) deaths.put(npc, target); else targets.put(npc, target);
             }
             value.put("npc_id", npc.getId()); value.put("target_observation_id", target.id);
-            worn(client, tick, at);
-            append("combat.own_hits", "HitsplatApplied", tick, at, value);
+            // Worn item IDs and quantities at the first own hit on a new target, for the combat_hit event only;
+            // the snapshot row stays as it was. Absent when unreadable.
+            wornAtHit = fresh ? KillActivity.itemPairs(client.getItemContainer(InventoryID.EQUIPMENT)) : null;
+            try { append("combat.own_hits", "HitsplatApplied", tick, at, value); }
+            finally { wornAtHit = null; }
             // The NPC died this tick before our only observed hit: record its death for that new target.
             if (deathWithoutEarlierHit) npcEnd(target, true, "actor_death_before_own_hit_same_tick", tick, at);
             return;
         }
         append("combat.own_hits", "HitsplatApplied", tick, at, value);
-    }
-
-    // Own worn item IDs only, read at an own hit and recorded when the ID set changes. Quantities
-    // (ammunition) are excluded. A new session, a scene gap or an unreadable read starts a new baseline.
-    private String wornSession;
-    private Map<String,Object> wornSlots;
-    private void worn(Client client, int tick, long at)
-    {
-        ItemContainer container = client.getItemContainer(InventoryID.EQUIPMENT);
-        Item[] items = container == null ? null : container.getItems();
-        if (items == null)
-        {
-            // Unknown is not an empty loadout, and earlier gear is no longer known to be worn.
-            if (wornSlots == null && session != null && session.equals(wornSession)) return;
-            wornSession = session; wornSlots = null;
-            Map<String,Object> value = new LinkedHashMap<>(); value.put("observation", "unreadable");
-            combatOnly("combat.worn_unknown", "own_worn_container_at_own_hit", tick, at, value);
-            return;
-        }
-        Map<String,Object> slots = new LinkedHashMap<>();
-        for (int i = 0; i < items.length && i < CombatEncounterTracker.SLOT_NAMES.length; i++)
-            if (CombatEncounterTracker.SLOT_NAMES[i] != null && items[i] != null && items[i].getId() > 0 && items[i].getQuantity() > 0)
-                slots.put(CombatEncounterTracker.SLOT_NAMES[i], items[i].getId());
-        boolean sameSession = session != null && session.equals(wornSession);
-        if (sameSession && slots.equals(wornSlots)) return;
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("observation", sameSession && wornSlots != null ? "observed_change" : "baseline");
-        value.put("content_id", CombatEncounterTracker.contentId(slots)); value.put("slots", slots);
-        wornSession = session; wornSlots = slots;
-        combatOnly("combat.worn_revision", "own_worn_container_at_own_hit", tick, at, value);
-    }
-
-    /** Own death only. Another actor's death never produces this row. */
-    void ownDeath(Client client, Actor actor, long at)
-    {
-        Player self = client.getLocalPlayer();
-        if (self == null || actor != self) return;
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("actor", "self"); value.put("classification", "observed_own_death");
-        combatOnly("combat.own_death", "ActorDeath:self", client.getTickCount(), at, value);
-    }
-
-    /** Own NPC loot from ServerNpcLoot. A reward observation, not kill credit. No NPC or item names. */
-    void loot(Client client, int npcId, Collection<net.runelite.client.game.ItemStack> stacks, long at)
-    {
-        if (stacks == null || stacks.isEmpty()) return;
-        Map<Integer,Long> merged = new TreeMap<>();
-        for (net.runelite.client.game.ItemStack s : stacks)
-        {
-            if (s == null || s.getId() <= 0 || s.getQuantity() <= 0) continue;
-            if (!merged.containsKey(s.getId()) && merged.size() >= 28) continue;
-            merged.merge(s.getId(), (long) s.getQuantity(), Long::sum);
-        }
-        if (merged.isEmpty()) return;
-        List<Map<String,Object>> items = new ArrayList<>();
-        for (Map.Entry<Integer,Long> e : merged.entrySet())
-        {
-            Map<String,Object> item = new LinkedHashMap<>(); item.put("id", e.getKey()); item.put("qty", e.getValue()); items.add(item);
-        }
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("npc_id", npcId >= 0 ? npcId : null); value.put("items", items);
-        value.put("classification", "reward_observation_not_kill_credit");
-        combatOnly("combat.loot_observed", "ServerNpcLoot", client.getTickCount(), at, value);
-    }
-
-    // New encounter inputs stay out of the uploaded snapshot, out of every transport projection and
-    // out of the shared sequence, so source_sequence gaps never appear. Only the local tracker reads them.
-    private long localInputs;
-    private void combatOnly(String kind, String source, int tick, long at, Map<String,Object> value)
-    {
-        if (session == null) return;
-        Map<String,Object> row = new LinkedHashMap<>();
-        row.put("local_input_id", "local:" + (++localInputs)); row.put("after_sequence", sequence);
-        row.put("kind", kind); row.put("source", source); row.put("tick", tick);
-        row.put("observed_at_ms", at); row.put("direct", true); row.put("value", value);
-        track(row);
-    }
-
-    private void track(Map<String,Object> row)
-    {
-        try
-        {
-            if (!session.replace("-", "").equals(encounters.session())) encounters = new CombatEncounterTracker(session);
-            encounters.accept(row);
-        }
-        catch (RuntimeException failure) { /* A derived-model failure must not block raw capture or handoff. */ }
-    }
-
-    /** Derived encounter summary for this gameplay session. Not a complete combat history. */
-    Map<String,Object> encounterSummary(int asOfTick)
-    {
-        Map<String,Object> out = encounters.summary(asOfTick);
-        out.put("input_gap_reason", gapReason);
-        return out;
     }
 
     void endNpc(Client client, NPC npc, boolean death, long at)

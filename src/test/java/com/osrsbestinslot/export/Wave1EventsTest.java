@@ -67,18 +67,18 @@ public class Wave1EventsTest
 	public void firstEquipChangeOnlyBaselines() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.handleEquipmentChanged(worn(new int[]{1234, 1}));
-		assertTrue("first observation = baseline, no event", p.pendingEvents.isEmpty());
+		p.session.handleEquipmentChanged(worn(new int[]{1234, 1}));
+		assertTrue("first observation = baseline, no event", p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
 	public void equipThenUnequipEmitted() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.handleEquipmentChanged(worn(new int[]{1234, 1}));					// baseline: helm
-		p.handleEquipmentChanged(worn(new int[]{1234, 1}, new int[]{5678, 1}));	// + weapon
-		assertEquals(1, p.pendingEvents.size());
-		Map<String, Object> ev = p.pendingEvents.get(0);
+		p.session.handleEquipmentChanged(worn(new int[]{1234, 1}));					// baseline: helm
+		p.session.handleEquipmentChanged(worn(new int[]{1234, 1}, new int[]{5678, 1}));	// + weapon
+		assertEquals(1, p.events.pendingEvents.size());
+		Map<String, Object> ev = p.events.pendingEvents.get(0);
 		assertEquals("equip_change", ev.get("type"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> equipped = (List<Map<String, Object>>) ev.get("equipped");
@@ -86,8 +86,8 @@ public class Wave1EventsTest
 		assertEquals(5678, equipped.get(0).get("id"));
 		assertNull(ev.get("unequipped"));
 
-		p.handleEquipmentChanged(worn(new int[]{5678, 1}));					// unequip helm
-		Map<String, Object> ev2 = p.pendingEvents.get(1);
+		p.session.handleEquipmentChanged(worn(new int[]{5678, 1}));					// unequip helm
+		Map<String, Object> ev2 = p.events.pendingEvents.get(1);
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> un = (List<Map<String, Object>>) ev2.get("unequipped");
 		assertEquals(1, un.size());
@@ -107,9 +107,9 @@ public class Wave1EventsTest
 				return "";
 			}
 		});
-		p.handleEquipmentChanged(worn(new int[]{1234, 1}));
-		p.handleEquipmentChanged(worn(new int[]{1234, 1}, new int[]{5678, 1}));
-		assertTrue("no token = no events", p.pendingEvents.isEmpty());
+		p.session.handleEquipmentChanged(worn(new int[]{1234, 1}));
+		p.session.handleEquipmentChanged(worn(new int[]{1234, 1}, new int[]{5678, 1}));
+		assertTrue("no token = no events", p.events.pendingEvents.isEmpty());
 	}
 
 	// ---- parsed milestones ----
@@ -118,9 +118,9 @@ public class Wave1EventsTest
 	public void killCountParsedAndCommaStripped() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitParsedMilestones("Your Zulrah kill count is: 1,024");
-		assertEquals("exactly one event", 1, p.pendingEvents.size());
-		Map<String, Object> e = p.pendingEvents.get(0);
+		p.kills.emitParsedMilestones("Your Zulrah kill count is: 1,024");
+		assertEquals("exactly one event", 1, p.events.pendingEvents.size());
+		Map<String, Object> e = p.events.pendingEvents.get(0);
 		assertEquals("kill_count", e.get("type"));
 		assertEquals("comma-stripped count", 1024L, e.get("count"));
 		assertNull("raw chat text is excluded", e.get("text"));
@@ -131,48 +131,48 @@ public class Wave1EventsTest
 	public void raidWintertodtAndLapCountsAreSent() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitParsedMilestones("Your completed Tombs of Amascut: Expert Mode count is: 214.");
-		p.emitParsedMilestones("Your subdued Wintertodt count is: 1,302.");
-		p.emitParsedMilestones("Your Seers' Village Rooftop lap count is: 88.");
-		p.emitParsedMilestones("Your completion count for the Theatre of Blood is: 12.");
-		assertEquals(4, p.pendingEvents.size());
-		Map<String, Object> raid = p.pendingEvents.get(0);
+		p.kills.emitParsedMilestones("Your completed Tombs of Amascut: Expert Mode count is: 214.");
+		p.kills.emitParsedMilestones("Your subdued Wintertodt count is: 1,302.");
+		p.kills.emitParsedMilestones("Your Seers' Village Rooftop lap count is: 88.");
+		p.kills.emitParsedMilestones("Your completion count for the Theatre of Blood is: 12.");
+		assertEquals(4, p.events.pendingEvents.size());
+		Map<String, Object> raid = p.events.pendingEvents.get(0);
 		assertEquals("Tombs of Amascut: Expert Mode", raid.get("source"));
 		assertEquals("completed", raid.get("kind"));
 		assertEquals(214L, raid.get("count"));
-		assertEquals("Wintertodt", p.pendingEvents.get(1).get("source"));
-		assertEquals("subdued", p.pendingEvents.get(1).get("kind"));
-		assertEquals(1302L, p.pendingEvents.get(1).get("count"));
-		assertEquals("Seers' Village Rooftop lap", p.pendingEvents.get(2).get("source"));
-		assertEquals("count", p.pendingEvents.get(2).get("kind"));
-		assertEquals(88L, p.pendingEvents.get(2).get("count"));
-		assertEquals("Theatre of Blood", p.pendingEvents.get(3).get("source"));
+		assertEquals("Wintertodt", p.events.pendingEvents.get(1).get("source"));
+		assertEquals("subdued", p.events.pendingEvents.get(1).get("kind"));
+		assertEquals(1302L, p.events.pendingEvents.get(1).get("count"));
+		assertEquals("Seers' Village Rooftop lap", p.events.pendingEvents.get(2).get("source"));
+		assertEquals("count", p.events.pendingEvents.get(2).get("kind"));
+		assertEquals(88L, p.events.pendingEvents.get(2).get("count"));
+		assertEquals("Theatre of Blood", p.events.pendingEvents.get(3).get("source"));
 	}
 
 	@Test
 	public void aCountWordElsewhereInALineIsNotACount() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitParsedMilestones("Your reward is: 5 coins.");
-		p.emitParsedMilestones("Your completed tasks are shown in the journal.");
-		assertTrue(p.pendingEvents.isEmpty());
+		p.kills.emitParsedMilestones("Your reward is: 5 coins.");
+		p.kills.emitParsedMilestones("Your completed tasks are shown in the journal.");
+		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
 	public void petParsed() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitParsedMilestones("You have a funny feeling like you're being followed.");
-		assertEquals(1, p.pendingEvents.size());
-		assertEquals("pet", p.pendingEvents.get(0).get("type"));
+		p.kills.emitParsedMilestones("You have a funny feeling like you're being followed.");
+		assertEquals(1, p.events.pendingEvents.size());
+		assertEquals("pet", p.events.pendingEvents.get(0).get("type"));
 	}
 
 	@Test
 	public void ordinaryGameMessageEmitsNothing() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitParsedMilestones("Oh dear, you are dead!");
-		assertTrue("no milestone false-positive, and no raw chat line either", p.pendingEvents.isEmpty());
+		p.kills.emitParsedMilestones("Oh dear, you are dead!");
+		assertTrue("no milestone false-positive, and no raw chat line either", p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -187,8 +187,8 @@ public class Wave1EventsTest
 				return "";
 			}
 		});
-		p.emitParsedMilestones("Your Zulrah kill count is: 1,024");
-		assertTrue("no token = no events", p.pendingEvents.isEmpty());
+		p.kills.emitParsedMilestones("Your Zulrah kill count is: 1,024");
+		assertTrue("no token = no events", p.events.pendingEvents.isEmpty());
 	}
 
 	// ---- world_hop ----
@@ -201,10 +201,10 @@ public class Wave1EventsTest
 		inject(p, "client", c);
 		when(c.getWorld()).thenReturn(302);
 		p.onWorldChanged(mock(WorldChanged.class));		// first change = login, suppressed
-		assertTrue("login world change suppressed", p.pendingEvents.isEmpty());
+		assertTrue("login world change suppressed", p.events.pendingEvents.isEmpty());
 		when(c.getWorld()).thenReturn(330);
 		p.onWorldChanged(mock(WorldChanged.class));		// real hop 302 -> 330
-		Map<String, Object> e = p.pendingEvents.get(0);
+		Map<String, Object> e = p.events.pendingEvents.get(0);
 		assertEquals("world_hop", e.get("type"));
 		assertEquals(302, e.get("from"));
 		assertEquals(330, e.get("to"));
@@ -224,16 +224,14 @@ public class Wave1EventsTest
 		when(c.getGameState()).thenReturn(GameState.HOPPING);
 		p.onWorldChanged(mock(WorldChanged.class));
 		assertTrue("not while the mode is unknown", hops(p).isEmpty());
-		java.lang.reflect.Method finish = AccountConnectPlugin.class.getDeclaredMethod("finishPendingWorldHop");
-		finish.setAccessible(true);
-		finish.invoke(p);
+		p.session.finishPendingWorldHop();
 		assertTrue("still hopping", hops(p).isEmpty());
 		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
-		finish.invoke(p);
+		p.session.finishPendingWorldHop();
 		assertEquals(1, hops(p).size());
 		assertEquals(302, hops(p).get(0).get("from"));
 		assertEquals(330, hops(p).get(0).get("to"));
-		finish.invoke(p);
+		p.session.finishPendingWorldHop();
 		assertEquals("once", 1, hops(p).size());
 	}
 
@@ -249,11 +247,9 @@ public class Wave1EventsTest
 		p.onWorldChanged(mock(WorldChanged.class));
 		when(c.getWorld()).thenReturn(330);
 		p.onWorldChanged(mock(WorldChanged.class));
-		p.pendingEvents.clear();
+		p.events.pendingEvents.clear();
 		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
-		java.lang.reflect.Method finish = AccountConnectPlugin.class.getDeclaredMethod("finishPendingWorldHop");
-		finish.setAccessible(true);
-		finish.invoke(p);
+		p.session.finishPendingWorldHop();
 		assertTrue(hops(p).isEmpty());
 	}
 
@@ -271,7 +267,7 @@ public class Wave1EventsTest
 		p.onGameStateChanged(gameState(GameState.LOGIN_SCREEN));
 		p.onGameStateChanged(gameState(GameState.LOGGING_IN));
 		p.onGameStateChanged(gameState(GameState.LOGGED_IN));	// no WorldChanged: same world as the login screen
-		p.pendingEvents.clear();								// drop login/logout rows; only the hop is under test
+		p.events.pendingEvents.clear();								// drop login/logout rows; only the hop is under test
 		when(c.getWorld()).thenReturn(301);
 		p.onWorldChanged(mock(WorldChanged.class));
 		assertEquals("first hop of the session is logged", 1, hops(p).size());
@@ -288,7 +284,7 @@ public class Wave1EventsTest
 		inject(p, "client", c);
 		when(c.getWorld()).thenReturn(308);
 		p.onGameStateChanged(gameState(GameState.LOGGED_IN));
-		p.pendingEvents.clear();
+		p.events.pendingEvents.clear();
 		p.onGameStateChanged(gameState(GameState.HOPPING));
 		when(c.getWorld()).thenReturn(301);
 		p.onWorldChanged(mock(WorldChanged.class));
@@ -352,7 +348,7 @@ public class Wave1EventsTest
 	private static List<Map<String, Object>> hops(AccountConnectPlugin p)
 	{
 		List<Map<String, Object>> out = new java.util.ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("world_hop".equals(e.get("type")))
 			{

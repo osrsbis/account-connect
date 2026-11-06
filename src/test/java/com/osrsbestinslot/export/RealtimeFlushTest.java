@@ -100,12 +100,12 @@ public class RealtimeFlushTest
 		ScheduledExecutorService exec = mock(ScheduledExecutorService.class);
 		inject("executor", exec);
 
-		plugin.emitEvent("level_up", field("skill", "line one"));
-		plugin.emitEvent("level_up", field("skill", "line two"));
-		plugin.emitEvent("level_up", field("skill", "line three"));
+		plugin.events.emitEvent("level_up", field("skill", "line one"));
+		plugin.events.emitEvent("level_up", field("skill", "line two"));
+		plugin.events.emitEvent("level_up", field("skill", "line three"));
 
 		verify(exec, times(1)).schedule(any(Runnable.class), anyLong(), eq(TimeUnit.MILLISECONDS));
-		assertEquals("all three buffered for a single coalesced flush", 3, plugin.pendingEvents.size());
+		assertEquals("all three buffered for a single coalesced flush", 3, plugin.events.pendingEvents.size());
 	}
 
 	/** A rapid burst becomes exactly ONE /event-ingest POST carrying every event; a later event opens a new window. */
@@ -118,13 +118,13 @@ public class RealtimeFlushTest
 		inject("okHttpClient", new OkHttpClient());
 		ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor();
 		inject("executor", exec);
-		plugin.eventCoalesceMillis = 120L;
+		plugin.events.eventCoalesceMillis = 120L;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
-		plugin.emitEvent("level_up", field("skill", "a"));
-		plugin.emitEvent("level_up", field("skill", "b"));
-		plugin.emitEvent("level_up", field("skill", "c"));
+		plugin.events.emitEvent("level_up", field("skill", "a"));
+		plugin.events.emitEvent("level_up", field("skill", "b"));
+		plugin.events.emitEvent("level_up", field("skill", "c"));
 
 		RecordedRequest r1 = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("the burst must flush", r1);
@@ -133,7 +133,7 @@ public class RealtimeFlushTest
 		assertEquals("three events coalesced into one POST", 3, ((List<?>) body.get("events")).size());
 		assertNull("no second POST for the same burst", server.takeRequest(300, TimeUnit.MILLISECONDS));
 
-		plugin.emitEvent("level_up", field("skill", "d"));
+		plugin.events.emitEvent("level_up", field("skill", "d"));
 		RecordedRequest r2 = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("a later event opens a fresh window -> a second POST", r2);
 		exec.shutdownNow();
@@ -159,11 +159,11 @@ public class RealtimeFlushTest
 		inject("gson", new Gson());
 		inject("okHttpClient", new OkHttpClient());
 		inject("executor", Executors.newSingleThreadScheduledExecutor());
-		plugin.eventCoalesceMillis = 60L;
+		plugin.events.eventCoalesceMillis = 60L;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
-		plugin.emitEvent("ge_buy", field("item", 4151));
+		plugin.events.emitEvent("ge_buy", field("item", 4151));
 
 		boolean sawSnapshot = false;
 		boolean sawEvent = false;

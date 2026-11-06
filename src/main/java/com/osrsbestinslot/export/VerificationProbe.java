@@ -3,6 +3,8 @@ package com.osrsbestinslot.export;
 import java.util.*;
 import java.util.regex.Pattern;
 import net.runelite.api.Experience;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.IntUnaryOperator;
 
 /**
  * Verification rows: the plugin checks its own readings against a second source on the same tick, so production
@@ -36,7 +38,7 @@ final class VerificationProbe
 		"kill_count", "activity_counter", "minigame", "level_up", "slayer_task", "progress", "loot", "death",
 		"login", "pet", "attempt_end", "kill_context", "verification_ready"));
 
-	private final java.util.function.IntUnaryOperator random;
+	private final IntUnaryOperator random;
 	private final ArrayDeque<Long> samples = new ArrayDeque<>();
 	private final ArrayDeque<Long> frames = new ArrayDeque<>();
 	private long lastSampleMs = Long.MIN_VALUE / 2;
@@ -44,14 +46,14 @@ final class VerificationProbe
 	private String pendingKey;
 	private Integer pendingValue;
 
-	VerificationProbe(java.util.function.IntUnaryOperator random)
+	VerificationProbe(IntUnaryOperator random)
 	{
 		this.random = random;
 	}
 
 	VerificationProbe()
 	{
-		this(n -> java.util.concurrent.ThreadLocalRandom.current().nextInt(n));
+		this(n -> ThreadLocalRandom.current().nextInt(n));
 	}
 
 	/** Forget the queued occasion. The hourly budgets are kept: a relog does not refill them. */
@@ -156,10 +158,7 @@ final class VerificationProbe
 	/** An observation with no second source: recorded for the screen check, never a match. */
 	static Map<String, Object> observed(String key, Object observed)
 	{
-		Map<String, Object> r = new LinkedHashMap<>();
-		r.put("key", key);
-		r.put("observed", observed);
-		r.put("match", null);
+		Map<String, Object> r = Fields.of("key", key, "observed", observed, "match", null);
 		return r;
 	}
 

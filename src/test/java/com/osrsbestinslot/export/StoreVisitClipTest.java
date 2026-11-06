@@ -21,12 +21,12 @@ public class StoreVisitClipTest
 {
 	/** Measured mean frame size at 704px / q0.55 (StoreClipCaptureTest pins the width). */
 	private static final int FRAME_BYTES = 30 * 1024;
-	private static final long FRAME_MS = 1000L / AccountConnectPlugin.CLIP_FPS;
+	private static final long FRAME_MS = 1000L / StoreClips.CLIP_FPS;
 
 	private static StoreVisitClip visit()
 	{
-		return new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
+		return new StoreVisitClip(StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_BURST_BYTES, StoreClips.MAX_CLIP_FRAME_BYTES);
 	}
 
 	/** Drive a visit: a frame every 1/30s from 0 to closeMs, a moment at each sale time. */
@@ -61,13 +61,13 @@ public class StoreVisitClipTest
 	private static void assertWithinBudget(StoreVisitClip v, StoreVisitClip.Snapshot s)
 	{
 		assertTrue("frame budget exceeded: " + s.frames.size(),
-			s.frames.size() <= AccountConnectPlugin.MAX_CLIP_FRAMES);
+			s.frames.size() <= StoreClips.MAX_CLIP_FRAMES);
 		long bytes = 0;
 		for (byte[] f : s.frames)
 		{
 			bytes += f.length;
 		}
-		assertTrue("byte budget exceeded: " + bytes, bytes <= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		assertTrue("byte budget exceeded: " + bytes, bytes <= StoreClips.MAX_CLIP_BURST_BYTES);
 		assertEquals("byteSize must match the snapshot", bytes, v.byteSize());
 		for (int i = 1; i < s.capturedAtMillis.size(); i++)
 		{
@@ -143,7 +143,7 @@ public class StoreVisitClipTest
 
 		assertWithinBudget(v, s);
 		assertEquals("the frame cap must be reached, not exceeded",
-			AccountConnectPlugin.MAX_CLIP_FRAMES, s.frames.size());
+			StoreClips.MAX_CLIP_FRAMES, s.frames.size());
 		for (long sale : sales)
 		{
 			assertSaleVisible(s, sale, 3);
@@ -183,7 +183,7 @@ public class StoreVisitClipTest
 		long[] sales = {2_000L, 5_000L, 8_000L, 11_000L};	// windows cover the whole 12 s
 		int next = 0;
 		int offered = 0;
-		for (long t = 0; offered < AccountConnectPlugin.MAX_CLIP_FRAMES; t += FRAME_MS)
+		for (long t = 0; offered < StoreClips.MAX_CLIP_FRAMES; t += FRAME_MS)
 		{
 			while (next < sales.length && sales[next] <= t)
 			{
@@ -195,16 +195,16 @@ public class StoreVisitClipTest
 		StoreVisitClip.Snapshot s = v.snapshot();
 		assertEquals("every frame of a 360-frame visit at 44 KB is kept", 360, s.frames.size());
 		assertWithinBudget(v, s);
-		assertEquals(360, AccountConnectPlugin.selectStoreClipFrames(s.frames, AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_FRAME_BYTES, AccountConnectPlugin.MAX_CLIP_BURST_BYTES).size());
-		assertEquals("the retry budget is two visits (32 MiB)", 32L * 1024 * 1024, AccountConnectPlugin.CLIP_RETRY_BYTE_BUDGET);
+		assertEquals(360, StoreClips.selectStoreClipFrames(s.frames, StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES).size());
+		assertEquals("the retry budget is two visits (32 MiB)", 32L * 1024 * 1024, StoreClips.CLIP_RETRY_BYTE_BUDGET);
 	}
 
 	@Test
 	public void theByteCapIsRespectedWithLargeFrames()
 	{
-		StoreVisitClip v = new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
+		StoreVisitClip v = new StoreVisitClip(StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_BURST_BYTES, StoreClips.MAX_CLIP_FRAME_BYTES);
 		long[] sales = {3_000L, 40_000L, 80_000L};
 		int next = 0;
 		for (long t = 0; t <= 100_000L; t += FRAME_MS)
@@ -216,7 +216,7 @@ public class StoreVisitClipTest
 			v.offer(new byte[100_000], t);	// 100KB: the byte cap (16 MiB = 167 frames) binds first
 		}
 		StoreVisitClip.Snapshot s = v.snapshot();
-		assertTrue("16 MiB cap", v.byteSize() <= AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		assertTrue("16 MiB cap", v.byteSize() <= StoreClips.MAX_CLIP_BURST_BYTES);
 		assertTrue("bytes cap bound the frame count", s.frames.size() <= 167);
 		for (long sale : sales)
 		{
@@ -231,7 +231,7 @@ public class StoreVisitClipTest
 		StoreVisitClip v = visit();
 		v.offer(null, 0L);
 		v.offer(new byte[0], 10L);
-		v.offer(new byte[AccountConnectPlugin.MAX_CLIP_FRAME_BYTES + 1], 20L);
+		v.offer(new byte[StoreClips.MAX_CLIP_FRAME_BYTES + 1], 20L);
 		assertEquals(0, v.size());
 		v.offer(new byte[10], 30L);
 		assertEquals(1, v.size());
@@ -248,9 +248,9 @@ public class StoreVisitClipTest
 		inject(plugin, "config", new AccountConnectConfig() { });
 		inject(plugin, "client", org.mockito.Mockito.mock(net.runelite.api.Client.class));
 		StoreVisitClip v = visit();
-		inject(plugin, "clipVisit", v);
-		inject(plugin, "clipCapturing", true);
-		inject(plugin, "shopOpen", true);
+		plugin.clips.clipVisit = v;
+		plugin.clips.clipCapturing = true;
+		plugin.store.shopOpen = true;
 
 		net.runelite.api.events.MenuOptionClicked sell =
 			org.mockito.Mockito.mock(net.runelite.api.events.MenuOptionClicked.class);
@@ -259,10 +259,10 @@ public class StoreVisitClipTest
 		plugin.onMenuOptionClicked(sell);
 
 		assertEquals("the sell click must mark one moment", 1, v.momentCount());
-		assertTrue("and still flag the visit for upload", plugin.storeTxThisVisit);
+		assertTrue("and still flag the visit for upload", plugin.clips.storeTxThisVisit);
 
 		// Outside a capturing visit nothing is marked.
-		inject(plugin, "clipCapturing", false);
+		plugin.clips.clipCapturing = false;
 		plugin.onMenuOptionClicked(sell);
 		assertEquals(1, v.momentCount());
 	}
@@ -273,15 +273,15 @@ public class StoreVisitClipTest
 	{
 		StoreVisitClip v = visit();
 		StoreVisitClip.Snapshot s = run(v, 125_000L, 0L, 60_000L, 110_000L);
-		List<Integer> idx = AccountConnectPlugin.selectStoreClipFrameIndexes(s.frames,
-			AccountConnectPlugin.MAX_CLIP_FRAMES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES,
-			AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+		List<Integer> idx = StoreClips.selectStoreClipFrameIndexes(s.frames,
+			StoreClips.MAX_CLIP_FRAMES, StoreClips.MAX_CLIP_FRAME_BYTES,
+			StoreClips.MAX_CLIP_BURST_BYTES);
 		assertEquals("the visit clip is already inside the budget, so nothing is trimmed",
 			s.frames.size(), idx.size());
-		int chunks = (idx.size() + AccountConnectPlugin.CLIP_CHUNK_FRAMES - 1) / AccountConnectPlugin.CLIP_CHUNK_FRAMES;
+		int chunks = (idx.size() + StoreClips.CLIP_CHUNK_FRAMES - 1) / StoreClips.CLIP_CHUNK_FRAMES;
 		assertTrue("a full visit is still at most 9 chunks of 40", chunks <= 9);
 		long prev = -1;
-		for (int off = 0; off < idx.size(); off += AccountConnectPlugin.CLIP_CHUNK_FRAMES)
+		for (int off = 0; off < idx.size(); off += StoreClips.CLIP_CHUNK_FRAMES)
 		{
 			// captured_at goes on the wire in whole SECONDS and the collector orders chunks on it, so
 			// two chunks sharing a second would be ordered by a random burst id. 40 frames at 30fps

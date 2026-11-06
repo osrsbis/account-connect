@@ -45,10 +45,8 @@ final class GameVarsCapture
 				canon.append(i).append('=').append(varps[i]).append(';');
 			}
 		}
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("n", varps.length);
-		out.put("nz", nz);
-		out.put("sha", AccountConnectPlugin.sha256Hex(canon.toString()));
+		Map<String, Object> out = Fields.of(
+			"n", varps.length, "nz", nz, "sha", SnapshotBuilder.sha256Hex(canon.toString()));
 		return out;
 	}
 

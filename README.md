@@ -52,7 +52,8 @@ carries:
 - the plank sack and recently seen bank and inventory contents
 
 The plugin also sends account activity as events: Grand Exchange and store buys and sells, completed trades,
-loot, items you drop, pick up or alch, when your dropped items leave the ground, deaths, kill counts, level-ups and XP,
+loot (with the NPC's id for NPC kills), items you drop, pick up or alch, when your dropped items leave the ground,
+deaths (with the game tick), kill counts, level-ups and XP,
 gear changes, bank visits, region changes, world hops, and login and logout times.
 
 Two further parts send nothing unless the site turns them on for your link (they are off by default):

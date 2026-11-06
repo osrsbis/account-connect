@@ -87,8 +87,7 @@ public class OwnStateEventTest
             assertFalse(gson.toJson(projected).contains("NEVER_SEND"));
             Map<String,Object> replay = PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class));
             assertNotNull(replay); assertEquals(projected.get("state_value"),replay.get("state_value"));
-            assertTrue(EventQueueProtocol.allows("own-state-v1",projected));
-            assertFalse(EventQueueProtocol.allows("own-combat-v1",projected));
+            assertFalse(EventQueueProtocol.allows("ge-v1",projected));
             assertFalse(EventQueueProtocol.allows("own-history-v1",projected));
         }
         Map<?,?> pouch = (Map<?,?>)pouchEvent().get("state_value");
@@ -119,11 +118,9 @@ public class OwnStateEventTest
         try
         {
             e.put("event_id","b".repeat(32)); e.put("account_hash","123"); e.put("ts",AT);
-            assertFalse(box.append(owner,"own-history-v1",e)); assertTrue(box.append(owner,"own-state-v1",e));
-            box.crashForTest(); box = new PublicEventOutbox(dir,new Gson(),()->AT);
-            assertTrue(box.pending(owner,"own-combat-v1",10).isEmpty()); assertEquals(1,box.size());
-            assertEquals(1,box.pending(owner,"own-state-v1",10).size()); box.erase(owner);
-            assertTrue(box.pending(owner,"own-state-v1",10).isEmpty());
+            // No Queue scope journals own-state rows: they use the granted legacy receiver.
+            assertFalse(box.append(owner,"own-history-v1",e)); assertFalse(box.append(owner,"ge-v1",e));
+            assertFalse(box.append(owner,"own-state-v1",e)); assertEquals(0,box.size());
         }
         finally
         {

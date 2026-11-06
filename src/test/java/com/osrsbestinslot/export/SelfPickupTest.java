@@ -45,9 +45,9 @@ public class SelfPickupTest
 		plugin.onMenuOptionClicked(menu("Drop", "", COINS));
 
 		setInventory(plugin);	// inventory now empty of all three
-		plugin.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
-		plugin.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
-		plugin.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
 
 		assertEquals("all three drops must emit", 3, eventsOfType(plugin, "drop").size());
 
@@ -78,7 +78,7 @@ public class SelfPickupTest
 		tick(plugin, 100);
 		plugin.onMenuOptionClicked(menu("Drop", "", DIAMOND));
 		setInventory(plugin);
-		plugin.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 100);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 100);
 		assertEquals("the single drop must emit", 1, eventsOfType(plugin, "drop").size());
 
 		tick(plugin, 140);
@@ -144,7 +144,7 @@ public class SelfPickupTest
 		when(drop.getItemId()).thenReturn(-1);
 		when(drop.getId()).thenReturn(7);          // the real Drop entry's identifier: option index
 		assertEquals("a Drop must never adopt the option index as an item id",
-			-1, AccountConnectPlugin.offBookItemId(drop, "drop"));
+			-1, OffBookPendings.offBookItemId(drop, "drop"));
 	}
 
 	/**
@@ -163,7 +163,7 @@ public class SelfPickupTest
 		when(m.getId()).thenReturn(9764864);	// a widget id, not an item
 		when(m.getMenuAction()).thenReturn(net.runelite.api.MenuAction.CC_OP_LOW_PRIORITY);
 		assertEquals("only a ground-item opcode puts an item id in the identifier",
-			-1, AccountConnectPlugin.offBookItemId(m, "pickup"));
+			-1, OffBookPendings.offBookItemId(m, "pickup"));
 	}
 
 	/** Every ground-item option index is a valid source, not just the third. */
@@ -181,7 +181,7 @@ public class SelfPickupTest
 			when(m.getItemId()).thenReturn(-1);
 			when(m.getId()).thenReturn(POT);
 			when(m.getMenuAction()).thenReturn(a);
-			assertEquals(a.toString(), POT, AccountConnectPlugin.offBookItemId(m, "pickup"));
+			assertEquals(a.toString(), POT, OffBookPendings.offBookItemId(m, "pickup"));
 		}
 	}
 
@@ -192,7 +192,7 @@ public class SelfPickupTest
 		MenuOptionClicked drop = mock(MenuOptionClicked.class);
 		when(drop.getItemId()).thenReturn(1931);
 		when(drop.getId()).thenReturn(7);
-		assertEquals(1931, AccountConnectPlugin.offBookItemId(drop, "drop"));
+		assertEquals(1931, OffBookPendings.offBookItemId(drop, "drop"));
 	}
 
 
@@ -203,13 +203,13 @@ public class SelfPickupTest
 		AccountConnectPlugin plugin = newPlugin(CHAPS, 1, DIAMOND, 1, COINS, 10);
 		tick(plugin, 100);
 		plugin.onMenuOptionClicked(menu("Drop", "", CHAPS));
-		plugin.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
 		tick(plugin, 105);
 		plugin.onMenuOptionClicked(menu("Drop", "", DIAMOND));
-		plugin.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
 		tick(plugin, 108);
 		plugin.onMenuOptionClicked(menu("Drop", "", COINS));
-		plugin.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
 		setInventory(plugin);
 		assertEquals("live shape: all three drops emitted", 3, eventsOfType(plugin, "drop").size());
 
@@ -292,7 +292,7 @@ public class SelfPickupTest
 	private static List<Integer> eventsOfType(AccountConnectPlugin plugin, String type)
 	{
 		List<Integer> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{

@@ -8,6 +8,7 @@ import net.runelite.api.MenuAction;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.config.RuneScapeProfileType;
+import net.runelite.api.ItemComposition;
 
 /** Bounded evidence, never a writer to legacy bank state. All calls use the progress grant/identity gate. */
 final class StorageRecoveryCapture
@@ -159,13 +160,10 @@ final class StorageRecoveryCapture
 
     private Map<String, Object> row(Client client, long now, String source)
     {
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("sequence", ++sequence);
-        row.put("observed_at_ms", now);
-        row.put("source", source);
-        row.put("account_hash", Long.toString(client.getAccountHash()));
-        row.put("profile_type", RuneScapeProfileType.getCurrent(client).name());
-        row.put("world", client.getWorld());
+        Map<String, Object> row = Fields.of(
+            "sequence", ++sequence, "observed_at_ms", now, "source", source,
+            "account_hash", Long.toString(client.getAccountHash()),
+            "profile_type", RuneScapeProfileType.getCurrent(client).name(), "world", client.getWorld());
         return row;
     }
 
@@ -177,15 +175,12 @@ final class StorageRecoveryCapture
 
     Map<String, Object> snapshot(Client client)
     {
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("schema_v", 1);
-        out.put("plank_sack", plankSack == null ? null : new LinkedHashMap<>(plankSack));
-        out.put("collector_session", session);
-        out.put("complete", false);
-        out.put("observations_evicted", evicted);
-        out.put("observations", new ArrayList<>(observations));
-        out.put("bank", containerBlock(bank, bankSeen, gap || !bankVisible(client)));
-        out.put("inventory", containerBlock(inventory, inventorySeen, inventoryUncertain));
+        Map<String, Object> out = Fields.of(
+            "schema_v", 1, "plank_sack", plankSack == null ? null : new LinkedHashMap<>(plankSack),
+            "collector_session", session, "complete", false, "observations_evicted", evicted,
+            "observations", new ArrayList<>(observations),
+            "bank", containerBlock(bank, bankSeen, gap || !bankVisible(client)),
+            "inventory", containerBlock(inventory, inventorySeen, inventoryUncertain));
         return out;
     }
 
@@ -210,12 +205,9 @@ final class StorageRecoveryCapture
 
     private static Map<String, Object> containerBlock(Map<Integer, Long> items, Long seen, boolean uncertain)
     {
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("items", items == null ? null : new TreeMap<>(items));
-        out.put("last_seen_ms", seen);
-        out.put("full_or_partial", "partial"); // all observed slots, no protocol completeness proof
-        out.put("source", "item_container_changed");
-        out.put("uncertain", uncertain);
+        Map<String, Object> out = Fields.of(
+            "items", items == null ? null : new TreeMap<>(items), "last_seen_ms", seen, "full_or_partial", "partial",
+            "source", "item_container_changed", "uncertain", uncertain);
         return out;
     }
 
@@ -240,7 +232,7 @@ final class StorageRecoveryCapture
 
     private static boolean placeholder(Client client, int id)
     {
-        net.runelite.api.ItemComposition c = client == null ? null : client.getItemDefinition(id);
+        ItemComposition c = client == null ? null : client.getItemDefinition(id);
         return c != null && c.getPlaceholderTemplateId() != -1;
     }
 

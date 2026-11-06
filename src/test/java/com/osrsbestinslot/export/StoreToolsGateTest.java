@@ -42,7 +42,7 @@ public class StoreToolsGateTest
 	public void aFreshPluginGrantsNothing() throws Exception
 	{
 		System.clearProperty("osrsbis.storetools");
-		assertFalse("default must be closed", withToken("0123456789abcdef0123456789abcdef").storeToolsEnabled());
+		assertFalse("default must be closed", withToken("0123456789abcdef0123456789abcdef").grants.storeToolsEnabled());
 	}
 
 	/** No token means no account is linked at all — the grant cannot apply to anybody. */
@@ -52,8 +52,8 @@ public class StoreToolsGateTest
 		for (String bad : new String[]{"", "   ", "not-a-token", "0123456789abcdef"})
 		{
 			AccountConnectPlugin p = withToken(bad);
-			p.setStoreToolsForTest(true);
-			assertFalse("token '" + bad + "' must not enable store tools", p.storeToolsEnabled());
+			p.grants.setStoreToolsForTest(true);
+			assertFalse("token '" + bad + "' must not enable store tools", p.grants.storeToolsEnabled());
 		}
 	}
 
@@ -62,7 +62,7 @@ public class StoreToolsGateTest
 	public void neitherOverlayDrawsWithoutTheGrant() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.setShopOpenForTest(true);		// shop open, grant withheld
+		p.store.setShopOpenForTest(true);		// shop open, grant withheld
 		assertNull("reset overlay must stay hidden", new StoreResetOverlay(p).render(g()));
 		assertNull("nearby overlay must stay hidden", new StoreNearbyOverlay(p).render(g()));
 	}
@@ -72,8 +72,8 @@ public class StoreToolsGateTest
 	public void bothOverlaysDrawWhenGrantedInsideAShop() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.setShopOpenForTest(true);
-		p.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		org.junit.Assert.assertNotNull(new StoreResetOverlay(p).render(g()));
 		org.junit.Assert.assertNotNull(new StoreNearbyOverlay(p).render(g()));
 	}
@@ -83,7 +83,7 @@ public class StoreToolsGateTest
 	public void theGrantDoesNotFollowTheUserOutOfTheShop() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.setStoreToolsForTest(true);		// granted, but no shop open
+		p.grants.setStoreToolsForTest(true);		// granted, but no shop open
 		assertNull(new StoreResetOverlay(p).render(g()));
 		assertNull(new StoreNearbyOverlay(p).render(g()));
 	}
@@ -97,11 +97,11 @@ public class StoreToolsGateTest
 	public void theOverrideIsAJvmPropertyAndNothingElse() throws Exception
 	{
 		System.clearProperty("osrsbis.storetools");
-		assertFalse(AccountConnectPlugin.storeToolsDevOverride());
+		assertFalse(ServerGrants.storeToolsDevOverride());
 		try
 		{
 			System.setProperty("osrsbis.storetools", "on");
-			assertTrue(AccountConnectPlugin.storeToolsDevOverride());
+			assertTrue(ServerGrants.storeToolsDevOverride());
 		}
 		finally
 		{
@@ -120,11 +120,11 @@ public class StoreToolsGateTest
 	public void aRevokeClosesTheGate() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.setStoreToolsForTest(true);
-		p.setShopOpenForTest(true);
-		assertTrue(p.storeToolsEnabled());
-		p.setStoreToolsForTest(false);
-		assertFalse("revoke must take effect at once", p.storeToolsEnabled());
+		p.grants.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		assertTrue(p.grants.storeToolsEnabled());
+		p.grants.setStoreToolsForTest(false);
+		assertFalse("revoke must take effect at once", p.grants.storeToolsEnabled());
 		assertNull(new StoreNearbyOverlay(p).render(g()));
 	}
 }

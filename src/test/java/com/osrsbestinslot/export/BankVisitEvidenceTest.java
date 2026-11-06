@@ -90,24 +90,24 @@ public class BankVisitEvidenceTest
 
 		void grant(String value)
 		{
-			p.applyServerPolicy(value == null ? policy() : policy("X-Bank-Evidence", value), TOKEN);
+			p.grants.applyServerPolicy(value == null ? policy() : policy("X-Bank-Evidence", value), TOKEN);
 		}
 
 		void open(ItemContainer b)
 		{
 			when(client.getItemContainer(InventoryID.BANK)).thenReturn(b);
-			p.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+			p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		}
 
 		void change(ItemContainer b)
 		{
 			when(client.getItemContainer(InventoryID.BANK)).thenReturn(b);
-			p.handleBankContainerChanged(b);
+			p.bankVisit.handleBankContainerChanged(b);
 		}
 
 		void close()
 		{
-			p.handleBankWidgetClosed(BANK_GROUP);
+			p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		}
 
 		void state(GameState s)
@@ -121,7 +121,7 @@ public class BankVisitEvidenceTest
 		List<Map<String, Object>> of(String type)
 		{
 			List<Map<String, Object>> out = new ArrayList<>();
-			for (Map<String, Object> e : p.pendingEvents)
+			for (Map<String, Object> e : p.events.pendingEvents)
 			{
 				if (type.equals(e.get("type")))
 				{
@@ -207,7 +207,7 @@ public class BankVisitEvidenceTest
 	public void grantForAnotherTokenDoesNotCount() throws Exception
 	{
 		Rig r = rig();
-		r.p.applyServerPolicy(policy("X-Bank-Evidence", "on"), "ffffffffffffffffffffffffffffffff");
+		r.p.grants.applyServerPolicy(policy("X-Bank-Evidence", "on"), "ffffffffffffffffffffffffffffffff");
 		r.open(bank(new int[]{995, 10}));
 		r.close();
 		assertTrue(r.of("bank_visit_open").isEmpty());
@@ -341,7 +341,7 @@ public class BankVisitEvidenceTest
 		assertEquals(false, close.get("manifest_complete"));
 		assertEquals(false, close.get("moves_complete"));
 		assertNull("an empty end read is not an end manifest", close.get("end_manifest_sha256"));
-		for (Map<String, Object> e : r.p.pendingEvents)
+		for (Map<String, Object> e : r.p.events.pendingEvents)
 		{
 			assertFalse("verified_empty is never sent by this build", "verified_empty".equals(e.get("bank_state")));
 		}
@@ -384,7 +384,7 @@ public class BankVisitEvidenceTest
 		r.grant("on");
 		r.open(bank(new int[]{995, 10}));
 		when(r.client.getGameState()).thenReturn(GameState.HOPPING);
-		r.p.handleBankWidgetClosed(BANK_GROUP, true);
+		r.p.bankVisit.handleBankWidgetClosed(BANK_GROUP, true);
 		assertEquals("hop", r.of("bank_visit_close").get(0).get("close_reason"));
 		r.state(GameState.HOPPING);	// the game state change that follows must not close it twice
 		assertEquals(1, r.of("bank_visit_close").size());
@@ -427,7 +427,7 @@ public class BankVisitEvidenceTest
 		assertTrue(r.of("bank_visit_close").isEmpty());
 		ItemContainer laterBank = bank(new int[]{995, 999});
 		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(laterBank);
-		r.p.handleBankContainerChanged(laterBank);
+		r.p.bankVisit.handleBankContainerChanged(laterBank);
 		r.p.onGameTick(new GameTick());
 		assertEquals(1, r.of("bank_visit_close").size());
 		Map<String, Object> close = r.of("bank_visit_close").get(0);
@@ -504,7 +504,7 @@ public class BankVisitEvidenceTest
 		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
 		r.p.shutDown();
 		r.p.onGameTick(new GameTick());
-		r.p.handleBankWidgetClosed(BANK_GROUP);	// a close after re-enable must not finish the old visit
+		r.p.bankVisit.handleBankWidgetClosed(BANK_GROUP);	// a close after re-enable must not finish the old visit
 		assertTrue(r.of("bank_visit_close").isEmpty());
 	}
 
@@ -525,7 +525,7 @@ public class BankVisitEvidenceTest
 		r.p.onGameTick(new GameTick());
 		r.close();
 		assertTrue(r.of("bank_visit_close").isEmpty());
-		assertFalse(r.p.bankEvidenceEnabled());
+		assertFalse(r.p.bankVisit.bankEvidenceEnabled());
 	}
 
 	// ---- size limits ----
@@ -614,10 +614,10 @@ public class BankVisitEvidenceTest
 	@Test
 	public void bankVisitTypesAreSpooled() throws Exception
 	{
-		assertTrue(AccountConnectPlugin.SPOOL_ALLOWLIST.contains("bank_visit_open"));
-		assertTrue(AccountConnectPlugin.SPOOL_ALLOWLIST.contains("bank_visit_manifest_chunk"));
-		assertTrue(AccountConnectPlugin.SPOOL_ALLOWLIST.contains("bank_visit_close"));
-		assertTrue(AccountConnectPlugin.SPOOL_ALLOWLIST.contains("bank_session"));
+		assertTrue(SpoolDriver.SPOOL_ALLOWLIST.contains("bank_visit_open"));
+		assertTrue(SpoolDriver.SPOOL_ALLOWLIST.contains("bank_visit_manifest_chunk"));
+		assertTrue(SpoolDriver.SPOOL_ALLOWLIST.contains("bank_visit_close"));
+		assertTrue(SpoolDriver.SPOOL_ALLOWLIST.contains("bank_session"));
 	}
 
 	@Test
@@ -629,7 +629,7 @@ public class BankVisitEvidenceTest
 		r.close();
 		java.util.Set<Object> ids = new java.util.HashSet<>();
 		int n = 0;
-		for (Map<String, Object> e : r.p.pendingEvents)
+		for (Map<String, Object> e : r.p.events.pendingEvents)
 		{
 			if (((String) e.get("type")).startsWith("bank_visit_"))
 			{

@@ -451,7 +451,7 @@ public class EventSpoolCodecTest
 		String k = EventSpool.identityKey(TOKEN, "12345");
 		assertTrue(k.matches("^[0-9a-f]{32}$"));
 		assertFalse(k.contains(TOKEN.substring(0, 12)));
-		assertEquals(AccountConnectPlugin.sha256Hex("spool-identity:" + TOKEN + ":12345").substring(0, 32), k);
+		assertEquals(SnapshotBuilder.sha256Hex("spool-identity:" + TOKEN + ":12345").substring(0, 32), k);
 		assertNotEquals(k, EventSpool.identityKey(TOKEN, "12346"));
 		assertNotEquals(k, EventSpool.identityKey("fedcba9876543210fedcba9876543210", "12345"));
 	}

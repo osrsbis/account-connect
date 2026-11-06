@@ -4,6 +4,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Minigame results from the game's own chat lines: a game or unit completed, and the points, tokens or rewards it
@@ -139,8 +141,8 @@ final class MinigameLines
 	};
 
 	/** The interface groups of SCREENS, for the WidgetLoaded check, and the labels the public wire accepts. */
-	static final java.util.Set<Integer> SCREEN_GROUPS = new java.util.HashSet<>();
-	static final java.util.Set<String> SCREEN_LABELS = new java.util.HashSet<>();
+	static final Set<Integer> SCREEN_GROUPS = new HashSet<>();
+	static final Set<String> SCREEN_LABELS = new HashSet<>();
 
 	static
 	{
@@ -165,10 +167,7 @@ final class MinigameLines
 			if (v != null) values.put(e.getKey(), v);
 		}
 		if (values.isEmpty()) return null;
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("minigame", minigame);
-		out.put("result", "screen");
-		out.put("screen", values);
+		Map<String, Object> out = Fields.of("minigame", minigame, "result", "screen", "screen", values);
 		return out;
 	}
 
@@ -199,9 +198,7 @@ final class MinigameLines
 		{
 			Matcher m = compiled[i].matcher(text);
 			if (!m.matches()) continue;
-			Map<String, Object> out = new LinkedHashMap<>();
-			out.put("minigame", table[i][0]);
-			out.put("result", table[i][1]);
+			Map<String, Object> out = Fields.of("minigame", table[i][0], "result", table[i][1]);
 			if (table[i][2] != null) out.put("detail", table[i][2]);
 			Long count = number(m, (int) table[i][4]);
 			Long total = number(m, (int) table[i][5]);

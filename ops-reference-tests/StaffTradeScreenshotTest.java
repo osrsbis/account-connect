@@ -73,15 +73,15 @@ public class StaffTradeScreenshotTest
 		inject(plugin, "config", new AccountConnectConfig() {
 });
 
-		plugin.handleTradeContainerChanged(90);
-		assertFalse("toggle off must not arm tradeActive", plugin.tradeActive);
+		plugin.trade.handleTradeContainerChanged(90);
+		assertFalse("toggle off must not arm tradeActive", plugin.trade.tradeActive);
 
-		plugin.handleTradeWidgetLoaded(334);
-		assertNull("toggle off must not buffer a frame", plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeWidgetLoaded(334);
+		assertNull("toggle off must not buffer a frame", plugin.trade.pendingTradeFrame.get());
 
-		plugin.handleTradeChat("Accepted trade.");
-		assertFalse(plugin.tradeActive);
-		assertNull(plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeChat("Accepted trade.");
+		assertFalse(plugin.trade.tradeActive);
+		assertNull(plugin.trade.pendingTradeFrame.get());
 	}
 
 	@Test
@@ -91,12 +91,12 @@ public class StaffTradeScreenshotTest
 		inject(plugin, "config", new AccountConnectConfig() {
 });
 		// Simulate a frame buffered while the toggle was on, then the toggle switched off:
-		plugin.tradeActive = true;
-		plugin.pendingTradeFrame.set(syntheticFrame(8, 8));
+		plugin.trade.tradeActive = true;
+		plugin.trade.pendingTradeFrame.set(syntheticFrame(8, 8));
 
-		plugin.handleTradeChat("Accepted trade.");	// guard runs first — must clear, never upload
-		assertFalse(plugin.tradeActive);
-		assertNull("disabled guard must drop the stale frame", plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeChat("Accepted trade.");	// guard runs first — must clear, never upload
+		assertFalse(plugin.trade.tradeActive);
+		assertNull("disabled guard must drop the stale frame", plugin.trade.pendingTradeFrame.get());
 	}
 
 	// ---- toggle ON: arm -> frame -> commit uploads one multipart PNG ----
@@ -130,16 +130,16 @@ public class StaffTradeScreenshotTest
 			inject(plugin, "executor", Executors.newSingleThreadScheduledExecutor());
 			inject(plugin, "okHttpClient", new OkHttpClient());
 
-			plugin.handleTradeContainerChanged(90);	// trade genuinely in progress
-			assertTrue(plugin.tradeActive);
+			plugin.trade.handleTradeContainerChanged(90);	// trade genuinely in progress
+			assertTrue(plugin.trade.tradeActive);
 
-			plugin.handleTradeWidgetLoaded(334);	// confirm screen -> one-shot frame request
+			plugin.trade.handleTradeWidgetLoaded(334);	// confirm screen -> one-shot frame request
 			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the confirm frame
-			assertNotNull("frame must be buffered after 334-load + draw", plugin.pendingTradeFrame.get());
+			assertNotNull("frame must be buffered after 334-load + draw", plugin.trade.pendingTradeFrame.get());
 
-			plugin.handleTradeChat("Accepted trade.");	// commit: uploads confirm + arms the completed grab
-			assertFalse(plugin.tradeActive);
-			assertNull("commit must consume the buffered frame", plugin.pendingTradeFrame.get());
+			plugin.trade.handleTradeChat("Accepted trade.");	// commit: uploads confirm + arms the completed grab
+			assertFalse(plugin.trade.tradeActive);
+			assertNull("commit must consume the buffered frame", plugin.trade.pendingTradeFrame.get());
 			drawManager.processDrawComplete(() -> syntheticFrame(320, 240));	// deliver the completed frame
 
 			Capture a = received.poll(15, TimeUnit.SECONDS);
@@ -176,25 +176,25 @@ public class StaffTradeScreenshotTest
 	public void declineDiscardsFrameWithoutUpload() throws Exception
 	{
 		AccountConnectPlugin plugin = armedPluginWithoutNetwork();
-		plugin.handleTradeChat("Other player declined trade.");
-		assertFalse(plugin.tradeActive);
-		assertNull(plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeChat("Other player declined trade.");
+		assertFalse(plugin.trade.tradeActive);
+		assertNull(plugin.trade.pendingTradeFrame.get());
 	}
 
 	@Test
 	public void widgetClosedDiscardsFrameWithoutUpload() throws Exception
 	{
 		AccountConnectPlugin plugin = armedPluginWithoutNetwork();
-		plugin.handleTradeWidgetClosed(334);
-		assertFalse(plugin.tradeActive);
-		assertFalse(plugin.tradeArmed);
-		assertNull(plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeWidgetClosed(334);
+		assertFalse(plugin.trade.tradeActive);
+		assertFalse(plugin.trade.tradeArmed);
+		assertNull(plugin.trade.pendingTradeFrame.get());
 
 		plugin = armedPluginWithoutNetwork();
-		plugin.handleTradeWidgetClosed(335);	// first trade screen closing while ARMED also discards
-		assertFalse(plugin.tradeActive);
-		assertFalse(plugin.tradeArmed);
-		assertNull(plugin.pendingTradeFrame.get());
+		plugin.trade.handleTradeWidgetClosed(335);	// first trade screen closing while ARMED also discards
+		assertFalse(plugin.trade.tradeActive);
+		assertFalse(plugin.trade.tradeArmed);
+		assertNull(plugin.trade.pendingTradeFrame.get());
 	}
 
 	@Test
@@ -204,10 +204,10 @@ public class StaffTradeScreenshotTest
 		// not yet ARMED. That close must NOT reset state, or the confirm screen could never arm.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", enabledConfig(null));
-		plugin.tradeActive = true;
+		plugin.trade.tradeActive = true;
 
-		plugin.handleTradeWidgetClosed(335);
-		assertTrue("335 closing pre-ARMED must not clear tradeActive", plugin.tradeActive);
+		plugin.trade.handleTradeWidgetClosed(335);
+		assertTrue("335 closing pre-ARMED must not clear tradeActive", plugin.trade.tradeActive);
 	}
 
 	@Test
@@ -217,8 +217,8 @@ public class StaffTradeScreenshotTest
 		GameStateChanged event = new GameStateChanged();
 		event.setGameState(GameState.CONNECTION_LOST);
 		plugin.onGameStateChanged(event);
-		assertFalse(plugin.tradeActive);
-		assertNull(plugin.pendingTradeFrame.get());
+		assertFalse(plugin.trade.tradeActive);
+		assertNull(plugin.trade.pendingTradeFrame.get());
 	}
 
 	@Test
@@ -238,12 +238,12 @@ public class StaffTradeScreenshotTest
 				return "not-a-valid-token";	// fails ^[a-f0-9]{32}$
 			}
 		});
-		plugin.tradeActive = true;
-		plugin.pendingTradeFrame.set(syntheticFrame(8, 8));
+		plugin.trade.tradeActive = true;
+		plugin.trade.pendingTradeFrame.set(syntheticFrame(8, 8));
 
-		plugin.handleTradeChat("Accepted trade.");
-		assertNull(plugin.pendingTradeFrame.get());
-		assertFalse(plugin.tradeActive);
+		plugin.trade.handleTradeChat("Accepted trade.");
+		assertNull(plugin.trade.pendingTradeFrame.get());
+		assertFalse(plugin.trade.tradeActive);
 	}
 
 	// ---- helpers ----
@@ -253,9 +253,9 @@ public class StaffTradeScreenshotTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", enabledConfig(null));
-		plugin.tradeActive = true;
-		plugin.tradeArmed = true;
-		plugin.pendingTradeFrame.set(syntheticFrame(8, 8));
+		plugin.trade.tradeActive = true;
+		plugin.trade.tradeArmed = true;
+		plugin.trade.pendingTradeFrame.set(syntheticFrame(8, 8));
 		return plugin;
 	}
 

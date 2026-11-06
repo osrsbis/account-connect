@@ -20,6 +20,7 @@ import javax.swing.JTextField;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import net.runelite.client.ui.PluginPanel;
+import java.awt.Image;
 
 final class FlipperPanel extends PluginPanel
 {
@@ -46,7 +47,7 @@ final class FlipperPanel extends PluginPanel
         JPanel heading = new JPanel(new BorderLayout(8, 0));
         heading.setOpaque(false);
         heading.setAlignmentX(LEFT_ALIGNMENT);
-        heading.add(new JLabel(new ImageIcon(logo.getScaledInstance(90, 48, java.awt.Image.SCALE_SMOOTH))),
+        heading.add(new JLabel(new ImageIcon(logo.getScaledInstance(90, 48, Image.SCALE_SMOOTH))),
             BorderLayout.WEST);
         JLabel title = new JLabel("<html>Grand Exchange<br><small>Profit calculator</small></html>");
         heading.add(title, BorderLayout.CENTER);

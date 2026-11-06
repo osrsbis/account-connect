@@ -120,7 +120,7 @@ public class StoreClipRetryTest
 		for (int i = 0; i < n; i++)
 		{
 			frames.add(new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) i, 1, 2, 3});
-			times.add(1_700_000_000_000L + (i / AccountConnectPlugin.CLIP_CHUNK_FRAMES) * 1000L + i);
+			times.add(1_700_000_000_000L + (i / StoreClips.CLIP_CHUNK_FRAMES) * 1000L + i);
 		}
 		p.submitStoreClipUpload(frames, times);
 	}
@@ -128,7 +128,7 @@ public class StoreClipRetryTest
 	private static void awaitFinished(AccountConnectPlugin p, int chunks) throws InterruptedException
 	{
 		long end = System.currentTimeMillis() + 20_000L;
-		while (p.clipChunksSent.get() + p.clipChunksLost.get() < chunks
+		while (p.clips.clipChunksSent.get() + p.clips.clipChunksLost.get() < chunks
 			&& System.currentTimeMillis() < end)
 		{
 			Thread.sleep(20);
@@ -144,7 +144,7 @@ public class StoreClipRetryTest
 			? new Reply(500, "{\"ok\":false,\"error\":\"Storage failed.\"}", null)
 			: new Reply(200, "{\"ok\":true,\"id\":1}", null));
 		RecordingPlugin p = plugin(base);
-		upload(p, AccountConnectPlugin.CLIP_CHUNK_FRAMES + 5);	// two chunks
+		upload(p, StoreClips.CLIP_CHUNK_FRAMES + 5);	// two chunks
 		awaitFinished(p, 2);
 
 		assertEquals("two chunks, two distinct captured_at values", 2, requestsPerChunk.size());
@@ -154,11 +154,11 @@ public class StoreClipRetryTest
 			assertEquals("chunk " + e.getKey() + " must be stored exactly once",
 				1, storedPerChunk.get(e.getKey()).get());
 		}
-		assertEquals("both chunks stored", 2, p.clipChunksSent.get());
-		assertEquals("nothing lost", 0, p.clipChunksLost.get());
-		assertEquals("retry bytes must be released", 0L, p.clipRetryHeldBytes.get());
+		assertEquals("both chunks stored", 2, p.clips.clipChunksSent.get());
+		assertEquals("nothing lost", 0, p.clips.clipChunksLost.get());
+		assertEquals("retry bytes must be released", 0L, p.clips.clipRetryHeldBytes.get());
 		assertEquals("first retry waits the first ladder step",
-			AccountConnectPlugin.CLIP_CHUNK_RETRY_DELAYS_MS[0], (long) p.delays.get(0));
+			StoreClips.CLIP_CHUNK_RETRY_DELAYS_MS[0], (long) p.delays.get(0));
 	}
 
 	/** Every attempt 503: give up after CLIP_CHUNK_ATTEMPTS, and release the bytes. */
@@ -170,24 +170,24 @@ public class StoreClipRetryTest
 		upload(p, 3);
 		awaitFinished(p, 1);
 
-		assertEquals("exactly CLIP_CHUNK_ATTEMPTS POSTs", AccountConnectPlugin.CLIP_CHUNK_ATTEMPTS, totalRequests.get());
-		assertEquals("the chunk is counted lost", 1, p.clipChunksLost.get());
-		assertEquals("nothing stored", 0, p.clipChunksSent.get());
-		assertEquals("retry memory released after giving up", 0L, p.clipRetryHeldBytes.get());
+		assertEquals("exactly CLIP_CHUNK_ATTEMPTS POSTs", StoreClips.CLIP_CHUNK_ATTEMPTS, totalRequests.get());
+		assertEquals("the chunk is counted lost", 1, p.clips.clipChunksLost.get());
+		assertEquals("nothing stored", 0, p.clips.clipChunksSent.get());
+		assertEquals("retry memory released after giving up", 0L, p.clips.clipRetryHeldBytes.get());
 		List<Long> expected = new ArrayList<>();
-		for (long d : AccountConnectPlugin.CLIP_CHUNK_RETRY_DELAYS_MS)
+		for (long d : StoreClips.CLIP_CHUNK_RETRY_DELAYS_MS)
 		{
 			expected.add(d);
 		}
 		assertEquals("backoff ladder", expected, p.delays);
 		long sum = 0;
-		for (long d : AccountConnectPlugin.CLIP_CHUNK_RETRY_DELAYS_MS)
+		for (long d : StoreClips.CLIP_CHUNK_RETRY_DELAYS_MS)
 		{
 			sum += d;
 		}
 		assertTrue("the retry window must stay bounded (waits " + sum + "ms)", sum <= 10 * 60_000L);
-		assertEquals("one delay per retry", AccountConnectPlugin.CLIP_CHUNK_ATTEMPTS - 1,
-			AccountConnectPlugin.CLIP_CHUNK_RETRY_DELAYS_MS.length);
+		assertEquals("one delay per retry", StoreClips.CLIP_CHUNK_ATTEMPTS - 1,
+			StoreClips.CLIP_CHUNK_RETRY_DELAYS_MS.length);
 	}
 
 	/** A network failure (nothing listening) is retried too. */
@@ -204,9 +204,9 @@ public class StoreClipRetryTest
 		awaitFinished(p, 1);
 
 		assertEquals("a refused connection must be retried the full ladder",
-			AccountConnectPlugin.CLIP_CHUNK_ATTEMPTS - 1, p.delays.size());
-		assertEquals(1, p.clipChunksLost.get());
-		assertEquals(0L, p.clipRetryHeldBytes.get());
+			StoreClips.CLIP_CHUNK_ATTEMPTS - 1, p.delays.size());
+		assertEquals(1, p.clips.clipChunksLost.get());
+		assertEquals(0L, p.clips.clipRetryHeldBytes.get());
 	}
 
 	/** A 400 fails the same way forever: exactly one POST, no retry. */
@@ -220,8 +220,8 @@ public class StoreClipRetryTest
 
 		assertEquals("a 400 must be sent once", 1, totalRequests.get());
 		assertTrue("no retry may be scheduled for a 400", p.delays.isEmpty());
-		assertEquals(1, p.clipChunksLost.get());
-		assertEquals(0L, p.clipRetryHeldBytes.get());
+		assertEquals(1, p.clips.clipChunksLost.get());
+		assertEquals(0L, p.clips.clipRetryHeldBytes.get());
 	}
 
 	/** A 200 {"dropped":...} is a deliberate refusal: not retried, not counted as stored. */
@@ -240,8 +240,8 @@ public class StoreClipRetryTest
 
 		assertEquals("a refusal must be sent once", 1, totalRequests.get());
 		assertTrue("no retry for a refusal", p.delays.isEmpty());
-		assertEquals("a refusal is not a store", 0, p.clipChunksSent.get());
-		assertEquals("a refusal is not a loss either", 0, p.clipChunksLost.get());
+		assertEquals("a refusal is not a store", 0, p.clips.clipChunksSent.get());
+		assertEquals("a refusal is not a loss either", 0, p.clips.clipChunksLost.get());
 	}
 
 	/** 429 with Retry-After: the retry waits at least that long. */
@@ -257,8 +257,8 @@ public class StoreClipRetryTest
 
 		assertEquals("one retry", 1, p.delays.size());
 		assertEquals("the retry waits the server's Retry-After", 100_000L, (long) p.delays.get(0));
-		assertEquals(1, p.clipChunksSent.get());
-		assertEquals(0L, p.clipRetryHeldBytes.get());
+		assertEquals(1, p.clips.clipChunksSent.get());
+		assertEquals(0L, p.clips.clipRetryHeldBytes.get());
 	}
 
 	/** 429 without Retry-After falls back to the ladder; one longer than the window gives up. */
@@ -271,8 +271,8 @@ public class StoreClipRetryTest
 		RecordingPlugin p = plugin(base);
 		upload(p, 3);
 		awaitFinished(p, 1);
-		assertEquals(AccountConnectPlugin.CLIP_CHUNK_RETRY_DELAYS_MS[0], (long) p.delays.get(0));
-		assertEquals(1, p.clipChunksSent.get());
+		assertEquals(StoreClips.CLIP_CHUNK_RETRY_DELAYS_MS[0], (long) p.delays.get(0));
+		assertEquals(1, p.clips.clipChunksSent.get());
 		stop();
 
 		requestsPerChunk.clear();
@@ -283,8 +283,8 @@ public class StoreClipRetryTest
 		awaitFinished(p2, 1);
 		assertEquals("an hour-long Retry-After is not waited out with the bytes held", 1, totalRequests.get());
 		assertTrue(p2.delays.isEmpty());
-		assertEquals(1, p2.clipChunksLost.get());
-		assertEquals(0L, p2.clipRetryHeldBytes.get());
+		assertEquals(1, p2.clips.clipChunksLost.get());
+		assertEquals(0L, p2.clips.clipRetryHeldBytes.get());
 	}
 
 	/** With the retry byte budget full, a failing chunk is given up instead of held. */
@@ -293,16 +293,16 @@ public class StoreClipRetryTest
 	{
 		String base = startServer((key, attempt) -> new Reply(500, "{}", null));
 		RecordingPlugin p = plugin(base);
-		p.clipRetryHeldBytes.set(AccountConnectPlugin.CLIP_RETRY_BYTE_BUDGET);
+		p.clips.clipRetryHeldBytes.set(StoreClips.CLIP_RETRY_BYTE_BUDGET);
 		upload(p, 3);
 		awaitFinished(p, 1);
 
 		assertEquals("no room: one POST, no retry", 1, totalRequests.get());
 		assertTrue(p.delays.isEmpty());
-		assertEquals(1, p.clipChunksLost.get());
-		assertEquals("the budget is not exceeded", AccountConnectPlugin.CLIP_RETRY_BYTE_BUDGET, p.clipRetryHeldBytes.get());
+		assertEquals(1, p.clips.clipChunksLost.get());
+		assertEquals("the budget is not exceeded", StoreClips.CLIP_RETRY_BYTE_BUDGET, p.clips.clipRetryHeldBytes.get());
 		assertTrue("the budget is bounded to a small number of visits",
-			AccountConnectPlugin.CLIP_RETRY_BYTE_BUDGET <= 3L * AccountConnectPlugin.MAX_CLIP_BURST_BYTES);
+			StoreClips.CLIP_RETRY_BYTE_BUDGET <= 3L * StoreClips.MAX_CLIP_BURST_BYTES);
 	}
 
 	/** A retry after the user linked another token is dropped, never filed under the new token. */
@@ -341,8 +341,8 @@ public class StoreClipRetryTest
 		awaitFinished(p, 1);
 
 		assertEquals("the retry must not be sent under the new token", 1, totalRequests.get());
-		assertEquals(1, p.clipChunksLost.get());
-		assertEquals(0L, p.clipRetryHeldBytes.get());
+		assertEquals(1, p.clips.clipChunksLost.get());
+		assertEquals(0L, p.clips.clipRetryHeldBytes.get());
 	}
 
 	// ---- helpers ----

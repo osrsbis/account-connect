@@ -59,9 +59,8 @@ final class OwnInterfaceCapture
             result.add(CODES[index]); // duplicate orders are real, preserve order and multiplicity
             if(result.size()>3) { valid=false; break; }
         }
-        Map<String,Object> mix=new LinkedHashMap<>();
-        mix.put("orders_observed",valid && result.size()==3?result:null);
-        mix.put("authority","visible_ui_not_completion");
+        Map<String,Object> mix = Fields.of(
+            "orders_observed", valid && result.size()==3?result:null, "authority", "visible_ui_not_completion");
         out.state("minigame.mixology_orders","widget:882.2 exact potion-name projection",mix,client.getTickCount(),at);
         spirit(client,at);
         clues(client,at);

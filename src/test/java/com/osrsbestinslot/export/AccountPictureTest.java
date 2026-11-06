@@ -40,9 +40,9 @@ public class AccountPictureTest
 		config.set(p, new AccountConnectConfig()
 		{
 		});
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		return (Map<String, Object>) build.invoke(p);
+		return (Map<String, Object>) build.invoke(p.snapshots);
 	}
 
 	private static Client client()

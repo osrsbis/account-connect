@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+import java.util.Arrays;
 
 /** Session-local purchase receipts. A recorded average is a calculation basis, not inventory accounting. */
 final class FlipperBuyHistory
@@ -27,7 +28,7 @@ final class FlipperBuyHistory
     void clear()
     {
         purchases.clear();
-        java.util.Arrays.fill(slots, null);
+        Arrays.fill(slots, null);
     }
 
     void seed(GrandExchangeOffer[] offers)

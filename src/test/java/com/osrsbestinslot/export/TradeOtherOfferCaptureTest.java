@@ -87,15 +87,15 @@ public class TradeOtherOfferCaptureTest
 		when(client.getWidget(TRADE_TITLE)).thenReturn(title);
 		inject(plugin, "client", client);
 
-		plugin.captureOtherOfferWhileMainOpen();
+		plugin.trade.captureOtherOfferWhileMainOpen();
 
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> recv = (List<Map<String, Object>>) field(plugin, "pendingTradeReceived");
+		List<Map<String, Object>> recv = (List<Map<String, Object>>) plugin.trade.pendingTradeReceived;
 		assertEquals(2, recv.size());
 		assertEquals(20997, recv.get(0).get("id"));
 		assertEquals(3, recv.get(0).get("qty"));
 		assertEquals(22486, recv.get(1).get("id"));
-		assertNull("partner title is never read", field(plugin, "pendingCounterparty"));
+		assertNull("partner title is never read", plugin.trade.pendingCounterparty);
 	}
 
 	@Test
@@ -103,7 +103,6 @@ public class TradeOtherOfferCaptureTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "serverMaxCaptureEnabled", true);
 		Client client = mock(Client.class);
 		Player self = mock(Player.class);
 		Player customer = mock(Player.class);
@@ -119,11 +118,11 @@ public class TradeOtherOfferCaptureTest
 		when(client.getWorldType()).thenReturn(EnumSet.noneOf(WorldType.class));
 		inject(plugin, "client", client);
 
-		plugin.captureOtherOfferWhileMainOpen();
-		inject(plugin, "pendingTradeGiven", itemList(995, 50_000_000));
-		plugin.emitTradeEvent();
+		plugin.trade.captureOtherOfferWhileMainOpen();
+		plugin.trade.pendingTradeGiven = itemList(995, 50_000_000);
+		plugin.trade.emitTradeEvent();
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertNull(ev.get("counterparty"));
 		assertNull(ev.get("counterparty_combat_level"));
 		assertEquals(380, ev.get("world"));
@@ -135,7 +134,6 @@ public class TradeOtherOfferCaptureTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "serverMaxCaptureEnabled", true);
 		Client client = mock(Client.class);
 		Player self = mock(Player.class);
 		Player customer = mock(Player.class);
@@ -145,7 +143,7 @@ public class TradeOtherOfferCaptureTest
 		when(customer.getCombatLevel()).thenReturn(77);
 		inject(plugin, "client", client);
 
-		assertNull("public build does not collect target combat level", plugin.visibleCounterpartyCombatLevel("Space_Name"));
+		assertNull("public build does not collect target combat level", plugin.trade.visibleCounterpartyCombatLevel("Space_Name"));
 	}
 
 	@Test
@@ -166,8 +164,8 @@ public class TradeOtherOfferCaptureTest
 		when(client.getWidget(TRADE_TITLE)).thenReturn(tradeTitle);
 		inject(plugin, "client", client);
 
-		plugin.captureOtherOfferWhileMainOpen();
-		assertNull(field(plugin, "pendingCounterpartyCombatLevel"));
+		plugin.trade.captureOtherOfferWhileMainOpen();
+		assertNull(plugin.trade.pendingCounterpartyCombatLevel);
 	}
 
 	@Test
@@ -184,13 +182,13 @@ public class TradeOtherOfferCaptureTest
 
 		// tradeMainOpen == false → tick is a no-op
 		plugin.onGameTick(mock(GameTick.class));
-		assertNull("no capture while main screen closed", field(plugin, "pendingTradeReceived"));
+		assertNull("no capture while main screen closed", plugin.trade.pendingTradeReceived);
 
 		// tradeMainOpen == true → tick captures
-		inject(plugin, "tradeMainOpen", true);
+		plugin.trade.tradeMainOpen = true;
 		plugin.onGameTick(mock(GameTick.class));
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> recv = (List<Map<String, Object>>) field(plugin, "pendingTradeReceived");
+		List<Map<String, Object>> recv = (List<Map<String, Object>>) plugin.trade.pendingTradeReceived;
 		assertEquals(1, recv.size());
 		assertEquals(995, recv.get(0).get("id"));
 	}
@@ -202,9 +200,9 @@ public class TradeOtherOfferCaptureTest
 		// (334) loads with only a "Lots!" text column. The confirm branch must NOT clobber the good capture.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "tradeMainOpen", true);
-		inject(plugin, "pendingTradeReceived", itemList(20997, 3));
-		inject(plugin, "pendingCounterparty", "Snaauz");
+		plugin.trade.tradeMainOpen = true;
+		plugin.trade.pendingTradeReceived = itemList(20997, 3);
+		plugin.trade.pendingCounterparty = "Snaauz";
 		Client client = mock(Client.class);
 		Widget textOnly = mock(Widget.class);
 		when(textOnly.getItemId()).thenReturn(-1);
@@ -215,13 +213,13 @@ public class TradeOtherOfferCaptureTest
 
 		plugin.handleActivityWidgetLoaded(TRADE_CONFIRM_GROUP);
 
-		assertFalse("polling stopped at confirm", (boolean) field(plugin, "tradeMainOpen"));
+		assertFalse("polling stopped at confirm", (boolean) plugin.trade.tradeMainOpen);
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> recv = (List<Map<String, Object>>) field(plugin, "pendingTradeReceived");
+		List<Map<String, Object>> recv = (List<Map<String, Object>>) plugin.trade.pendingTradeReceived;
 		assertEquals("main-screen items preserved", 1, recv.size());
 		assertEquals(20997, recv.get(0).get("id"));
-		assertNull("partner title is never read", field(plugin, "pendingCounterparty"));
-		assertNull("no text fallback when items already captured", field(plugin, "pendingReceivedText"));
+		assertNull("partner title is never read", plugin.trade.pendingCounterparty);
+		assertNull("no text fallback when items already captured", plugin.trade.pendingReceivedText);
 	}
 
 	@Test
@@ -231,7 +229,7 @@ public class TradeOtherOfferCaptureTest
 		// read must not wipe the captured offer.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "tradeMainOpen", true);
+		plugin.trade.tradeMainOpen = true;
 		Client client = mock(Client.class);
 		Widget title = titleOf("Trading With: Bob");
 		Widget empty1 = gridOf();
@@ -244,12 +242,12 @@ public class TradeOtherOfferCaptureTest
 			.thenReturn(empty2);  // 3rd poll: transient empty read
 		inject(plugin, "client", client);
 
-		plugin.captureOtherOfferWhileMainOpen();
-		assertNull("empty offer leaves buffer null", field(plugin, "pendingTradeReceived"));
-		plugin.captureOtherOfferWhileMainOpen();
-		plugin.captureOtherOfferWhileMainOpen();
+		plugin.trade.captureOtherOfferWhileMainOpen();
+		assertNull("empty offer leaves buffer null", plugin.trade.pendingTradeReceived);
+		plugin.trade.captureOtherOfferWhileMainOpen();
+		plugin.trade.captureOtherOfferWhileMainOpen();
 		@SuppressWarnings("unchecked")
-		List<Map<String, Object>> recv = (List<Map<String, Object>>) field(plugin, "pendingTradeReceived");
+		List<Map<String, Object>> recv = (List<Map<String, Object>>) plugin.trade.pendingTradeReceived;
 		assertEquals("last NON-EMPTY read retained", 1, recv.size());
 		assertEquals(11832, recv.get(0).get("id"));
 	}
@@ -258,11 +256,9 @@ public class TradeOtherOfferCaptureTest
 	public void resetClearsTradeMainOpen() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "tradeMainOpen", true);
-		java.lang.reflect.Method m = AccountConnectPlugin.class.getDeclaredMethod("resetTradeState");
-		m.setAccessible(true);
-		m.invoke(plugin);
-		assertFalse((boolean) field(plugin, "tradeMainOpen"));
+		plugin.trade.tradeMainOpen = true;
+		plugin.trade.resetTradeState();
+		assertFalse((boolean) plugin.trade.tradeMainOpen);
 	}
 
 	private static List<Map<String, Object>> itemList(int id, int qty)

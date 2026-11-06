@@ -63,43 +63,43 @@ public class DropStopContractTest
 		Field f = AccountConnectPlugin.class.getDeclaredField("config");
 		f.setAccessible(true);
 		f.set(r.plugin, r.config);
-		r.plugin.setStoreToolsForTest(true);		// the shop-overlay grant
-		r.plugin.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag
+		r.plugin.grants.setStoreToolsForTest(true);		// the shop-overlay grant
+		r.plugin.grants.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag
 		StaffGrant.give(r.plugin);					// the server's staff-capture grant for this token and account
 		return r;
 	}
 
 	private static void dropAction(AccountConnectPlugin p) throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod("onDropActionForProof");
+		Method m = DropProof.class.getDeclaredMethod("onDropActionForProof");
 		m.setAccessible(true);
-		m.invoke(p);
+		m.invoke(p.dropProof);
 	}
 
-	private static AccountConnectPlugin.DroppedGroundItem pile(int item, long qty, int x, int y)
+	private static OwnPiles.DroppedGroundItem pile(int item, long qty, int x, int y)
 	{
 		Map<String, Object> loc = new java.util.LinkedHashMap<>();
 		loc.put("region_id", 12853);
 		loc.put("plane", 0);
-		return new AccountConnectPlugin.DroppedGroundItem(item, qty, x, y, 0, loc, 100, 400);
+		return new OwnPiles.DroppedGroundItem(item, qty, x, y, 0, loc, 100, 400);
 	}
 
-	private static void attach(AccountConnectPlugin p, AccountConnectPlugin.DroppedGroundItem g)
+	private static void attach(AccountConnectPlugin p, OwnPiles.DroppedGroundItem g)
 		throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod(
-			"attachPileToDropSession", AccountConnectPlugin.DroppedGroundItem.class);
+		Method m = DropProof.class.getDeclaredMethod(
+			"attachPileToDropSession", OwnPiles.DroppedGroundItem.class);
 		m.setAccessible(true);
-		m.invoke(p, g);
+		m.invoke(p.dropProof, g);
 	}
 
-	private static void release(AccountConnectPlugin p, AccountConnectPlugin.DroppedGroundItem g)
+	private static void release(AccountConnectPlugin p, OwnPiles.DroppedGroundItem g)
 		throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod(
-			"releasePileFromDropSession", AccountConnectPlugin.DroppedGroundItem.class);
+		Method m = DropProof.class.getDeclaredMethod(
+			"releasePileFromDropSession", OwnPiles.DroppedGroundItem.class);
 		m.setAccessible(true);
-		m.invoke(p, g);
+		m.invoke(p.dropProof, g);
 	}
 
 	private static Object field(AccountConnectPlugin p, String name) throws Exception
@@ -111,7 +111,7 @@ public class DropStopContractTest
 
 	private static Map<String, Object> manifest(AccountConnectPlugin p)
 	{
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("drop_trade_clip".equals(e.get("type")))
 			{
@@ -126,7 +126,7 @@ public class DropStopContractTest
 	{
 		Field f = DropSessionRecorder.class.getDeclaredField("stopAtMillis");
 		f.setAccessible(true);
-		f.setLong(p.dropSession, 1L);
+		f.setLong(p.dropProof.dropSession, 1L);
 	}
 
 	/**
@@ -141,7 +141,7 @@ public class DropStopContractTest
 	{
 		Field f = DropSessionRecorder.class.getDeclaredField("pendingDrops");
 		f.setAccessible(true);
-		Map<Integer, Long> pendings = (Map<Integer, Long>) f.get(p.dropSession);
+		Map<Integer, Long> pendings = (Map<Integer, Long>) f.get(p.dropProof.dropSession);
 		for (Map.Entry<Integer, Long> e : pendings.entrySet())
 		{
 			e.setValue(1L);
@@ -153,7 +153,7 @@ public class DropStopContractTest
 	{
 		for (int i = 0; i < times; i++)
 		{
-			p.pollDropSession();
+			p.dropProof.pollDropSession();
 		}
 	}
 
@@ -165,24 +165,24 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 1_000_000L, 3200, 3400);
+		OwnPiles.DroppedGroundItem g = pile(995, 1_000_000L, 3200, 3400);
 		attach(p, g);
-		assertEquals("the pile resolves the pending", 0, p.dropSession.pendingDropCount());
-		assertEquals(1, p.dropSession.activePileCount());
+		assertEquals("the pile resolves the pending", 0, p.dropProof.dropSession.pendingDropCount());
+		assertEquals(1, p.dropProof.dropSession.activePileCount());
 
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		poll(p, 5);
-		assertTrue("a live pile means no stop, however long we poll", p.dropSession.active());
-		assertFalse(p.dropSession.stopPending());
+		assertTrue("a live pile means no stop, however long we poll", p.dropProof.dropSession.active());
+		assertFalse(p.dropProof.dropSession.stopPending());
 
 		release(p, g);
-		assertTrue("the last pile going arms the tail", p.dropSession.stopPending());
+		assertTrue("the last pile going arms the tail", p.dropProof.dropSession.stopPending());
 		poll(p, 1);
-		assertTrue("and the tail has NOT elapsed yet", p.dropSession.active());
+		assertTrue("and the tail has NOT elapsed yet", p.dropProof.dropSession.active());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("the tail elapsed, so the session is over", p.dropSession.active());
+		assertFalse("the tail elapsed, so the session is over", p.dropProof.dropSession.active());
 		Map<String, Object> m = manifest(p);
 		assertNotNull(m);
 		assertEquals("COMPLETE", m.get("outcome"));
@@ -206,37 +206,37 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals("the first drop makes one real pile", 1, p.dropSession.activePileCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the first drop makes one real pile", 1, p.dropProof.dropSession.activePileCount());
 
 		dropAction(p);
 		// The SECOND drop arrives as a quantity growth on the same tile — a merge, not a spawn.
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
 
 		assertEquals("the game has ONE pile, so the session must hold ONE key",
-			1, p.dropSession.activePileCount());
+			1, p.dropProof.dropSession.activePileCount());
 		assertEquals("and the merged drop's pending is resolved, not left outstanding",
-			0, p.dropSession.pendingDropCount());
-		assertEquals("two drops are still counted", 2, p.dropSession.dropCount());
+			0, p.dropProof.dropSession.pendingDropCount());
+		assertEquals("two drops are still counted", 2, p.dropProof.dropSession.dropCount());
 
 		// The one despawn the client will actually fire.
-		AccountConnectPlugin.DroppedGroundItem tracked = onlyTrackedPile(p);
+		OwnPiles.DroppedGroundItem tracked = onlyTrackedPile(p);
 		release(p, tracked);
-		assertTrue("the single despawn must arm the tail", p.dropSession.stopPending());
+		assertTrue("the single despawn must arm the tail", p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the session must actually end", p.dropSession.active());
+		assertFalse("and the session must actually end", p.dropProof.dropSession.active());
 		assertEquals("every drop was observed on the merged pile, so this IS complete",
 			"COMPLETE", manifest(p).get("outcome"));
 	}
 
 	@SuppressWarnings("unchecked")
-	private static AccountConnectPlugin.DroppedGroundItem onlyTrackedPile(AccountConnectPlugin p)
+	private static OwnPiles.DroppedGroundItem onlyTrackedPile(AccountConnectPlugin p)
 		throws Exception
 	{
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q =
-			(java.util.Deque<AccountConnectPlugin.DroppedGroundItem>) field(p, "groundDrops");
+		java.util.Deque<OwnPiles.DroppedGroundItem> q =
+			(java.util.Deque<OwnPiles.DroppedGroundItem>) p.piles.groundDrops;
 		assertEquals("exactly one tracked pile", 1, q.size());
 		return q.peekFirst();
 	}
@@ -248,30 +248,30 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		AccountConnectPlugin.DroppedGroundItem[] piles = new AccountConnectPlugin.DroppedGroundItem[8];
+		OwnPiles.DroppedGroundItem[] piles = new OwnPiles.DroppedGroundItem[8];
 		String sid = null;
 		for (int i = 0; i < 8; i++)
 		{
 			dropAction(p);
 			if (sid == null)
 			{
-				sid = p.dropSession.sessionId();
+				sid = p.dropProof.dropSession.sessionId();
 			}
-			assertEquals("eight drops, ONE session", sid, p.dropSession.sessionId());
+			assertEquals("eight drops, ONE session", sid, p.dropProof.dropSession.sessionId());
 			// Eight DIFFERENT tiles, so these are eight genuinely separate piles.
 			piles[i] = pile(4151, 1L, 3200 + i, 3400);
 			attach(p, piles[i]);
 		}
-		assertEquals(8, p.dropSession.activePileCount());
-		assertEquals(0, p.dropSession.pendingDropCount());
+		assertEquals(8, p.dropProof.dropSession.activePileCount());
+		assertEquals(0, p.dropProof.dropSession.pendingDropCount());
 
 		for (int i = 0; i < 7; i++)
 		{
 			release(p, piles[i]);
-			assertFalse("seven gone, one live — still no stop", p.dropSession.stopPending());
+			assertFalse("seven gone, one live — still no stop", p.dropProof.dropSession.stopPending());
 		}
 		release(p, piles[7]);
-		assertTrue("the eighth arms the tail", p.dropSession.stopPending());
+		assertTrue("the eighth arms the tail", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
 		assertEquals("COMPLETE", manifest(p).get("outcome"));
@@ -286,26 +286,26 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		String sid = p.dropSession.sessionId();
-		AccountConnectPlugin.DroppedGroundItem a = pile(995, 5L, 3200, 3400);
+		String sid = p.dropProof.dropSession.sessionId();
+		OwnPiles.DroppedGroundItem a = pile(995, 5L, 3200, 3400);
 		attach(p, a);
 		release(p, a);
-		assertTrue("the tail is armed", p.dropSession.stopPending());
+		assertTrue("the tail is armed", p.dropProof.dropSession.stopPending());
 
 		dropAction(p);
-		assertFalse("a drop inside the tail cancels the stop", p.dropSession.stopPending());
-		assertEquals("and never starts a second session", sid, p.dropSession.sessionId());
+		assertFalse("a drop inside the tail cancels the stop", p.dropProof.dropSession.stopPending());
+		assertEquals("and never starts a second session", sid, p.dropProof.dropSession.sessionId());
 		assertEquals("the new drop is outstanding until its pile lands",
-			1, p.dropSession.pendingDropCount());
+			1, p.dropProof.dropSession.pendingDropCount());
 
-		AccountConnectPlugin.DroppedGroundItem b = pile(4151, 1L, 3201, 3400);
+		OwnPiles.DroppedGroundItem b = pile(4151, 1L, 3201, 3400);
 		attach(p, b);
 		poll(p, 3);
-		assertTrue("still recording with a live pile", p.dropSession.active());
+		assertTrue("still recording with a live pile", p.dropProof.dropSession.active());
 		release(p, b);
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("COMPLETE", manifest(p).get("outcome"));
 		assertEquals("both drops belong to the one session", 2, manifest(p).get("drops"));
 	}
@@ -323,22 +323,22 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		assertTrue(p.dropSession.active());
-		assertEquals("nothing on the ground", 0, p.dropSession.activePileCount());
-		assertEquals("but the drop IS outstanding", 1, p.dropSession.pendingDropCount());
+		assertTrue(p.dropProof.dropSession.active());
+		assertEquals("nothing on the ground", 0, p.dropProof.dropSession.activePileCount());
+		assertEquals("but the drop IS outstanding", 1, p.dropProof.dropSession.pendingDropCount());
 
 		poll(p, 50);
-		assertTrue("before its deadline the drop still holds the session open", p.dropSession.active());
-		assertFalse(p.dropSession.stopPending());
+		assertTrue("before its deadline the drop still holds the session open", p.dropProof.dropSession.active());
+		assertFalse(p.dropProof.dropSession.stopPending());
 
 		forcePendingsExpired(p);
 		poll(p, 1);
-		assertEquals("the expired pending is gone", 0, p.dropSession.pendingDropCount());
-		assertTrue("and the tail is armed", p.dropSession.stopPending());
+		assertEquals("the expired pending is gone", 0, p.dropProof.dropSession.pendingDropCount());
+		assertTrue("and the tail is armed", p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("the session ends without any despawn, hop or logout", p.dropSession.active());
+		assertFalse("the session ends without any despawn, hop or logout", p.dropProof.dropSession.active());
 		Map<String, Object> m = manifest(p);
 		assertEquals("a drop nobody saw land is NOT provable coverage",
 			"INTERRUPTED", m.get("outcome"));
@@ -357,27 +357,27 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		int over = AccountConnectPlugin.GROUND_TRACK_MAX + 3;
+		int over = OwnPiles.GROUND_TRACK_MAX + 3;
 		for (int i = 0; i < over; i++)
 		{
 			dropAction(p);
 			// A distinct tile each time, so every one of these is a genuine separate pile.
-			p.trackGroundDrop(4151, 1L, 3200 + i, 3400, 0, null, 100 + i, 400, false);
+			p.piles.trackGroundDrop(4151, 1L, 3200 + i, 3400, 0, null, 100 + i, 400, false);
 		}
 		assertEquals("the session never holds more keys than the client tracks piles",
-			AccountConnectPlugin.GROUND_TRACK_MAX, p.dropSession.activePileCount());
-		assertEquals("no drop is left outstanding either", 0, p.dropSession.pendingDropCount());
-		assertTrue("an evicted pile makes the session unprovable", p.dropSession.unprovable());
+			OwnPiles.GROUND_TRACK_MAX, p.dropProof.dropSession.activePileCount());
+		assertEquals("no drop is left outstanding either", 0, p.dropProof.dropSession.pendingDropCount());
+		assertTrue("an evicted pile makes the session unprovable", p.dropProof.dropSession.unprovable());
 
 		// Release every pile the client still tracks. That must be enough to stop the recorder.
-		for (AccountConnectPlugin.DroppedGroundItem g : trackedPiles(p))
+		for (OwnPiles.DroppedGroundItem g : trackedPiles(p))
 		{
 			release(p, g);
 		}
-		assertTrue("with nothing outstanding the tail arms", p.dropSession.stopPending());
+		assertTrue("with nothing outstanding the tail arms", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("no immortal recorder", p.dropSession.active());
+		assertFalse("no immortal recorder", p.dropProof.dropSession.active());
 		Map<String, Object> m = manifest(p);
 		assertEquals("three piles were never observed leaving, so coverage is not proven",
 			"INTERRUPTED", m.get("outcome"));
@@ -385,11 +385,11 @@ public class DropStopContractTest
 	}
 
 	@SuppressWarnings("unchecked")
-	private static java.util.List<AccountConnectPlugin.DroppedGroundItem> trackedPiles(
+	private static java.util.List<OwnPiles.DroppedGroundItem> trackedPiles(
 		AccountConnectPlugin p) throws Exception
 	{
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q =
-			(java.util.Deque<AccountConnectPlugin.DroppedGroundItem>) field(p, "groundDrops");
+		java.util.Deque<OwnPiles.DroppedGroundItem> q =
+			(java.util.Deque<OwnPiles.DroppedGroundItem>) p.piles.groundDrops;
 		return new java.util.ArrayList<>(q);
 	}
 
@@ -440,16 +440,16 @@ public class DropStopContractTest
 		dropAction(p);
 		// A REAL tracked pile, not a bare attach: the ground-tracking teardown assertion below is
 		// meaningless against a session whose pile was never in groundDrops.
-		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 7}, 1_000L);
-		assertEquals("the pile is tracked before the end", 1, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 7}, 1_000L);
+		assertEquals("the pile is tracked before the end", 1, p.piles.groundDropCount());
 
 		p.onGameStateChanged(gameState(state));
 
-		assertFalse(state + " must end the session", p.dropSession.active());
+		assertFalse(state + " must end the session", p.dropProof.dropSession.active());
 		assertEquals("ROUND 4: and it must untrack the session's pile, or a later merged re-drop "
 			+ "onto that tile mints a second entry for one physical pile (finding B)",
-			0, p.groundDropCount());
+			0, p.piles.groundDropCount());
 		Map<String, Object> m = manifest(p);
 		assertNotNull("an interrupted session still publishes its manifest", m);
 		assertEquals("INTERRUPTED", m.get("outcome"));
@@ -469,23 +469,23 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		assertNotNull(field(p, "dropSegmenter"));
-		assertEquals("the pile is tracked before the withdrawal", 1, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertNotNull(p.dropProof.dropSegmenter);
+		assertEquals("the pile is tracked before the withdrawal", 1, p.piles.groundDropCount());
 
 		r.config.upload = false;
 
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
 		poll(p, 1);
 
-		assertFalse("the session is over", p.dropSession.active());
-		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
-		assertNull("and the buffer is gone", field(p, "dropSegmenter"));
+		assertFalse("the session is over", p.dropProof.dropSession.active());
+		assertFalse("capture is disarmed", (Boolean) p.dropProof.dropCapturing);
+		assertNull("and the buffer is gone", p.dropProof.dropSegmenter);
 		assertEquals("ROUND 4, FINDING B: the ground tracking is reset too. Without this the pile "
 			+ "stays tracked and unowned, and the next merged re-drop onto that tile makes a "
 			+ "second entry for one physical pile",
-			0, p.groundDropCount());
+			0, p.piles.groundDropCount());
 		assertNull("no manifest either: publishing one is itself an upload about withdrawn consent",
 			manifest(p));
 	}
@@ -499,31 +499,31 @@ public class DropStopContractTest
 		dropAction(cleared.plugin);
 		attach(cleared.plugin, pile(995, 5L, 3200, 3400));
 		cleared.config.token = "";
-		cleared.plugin.pollDropSession();
-		assertFalse("a cleared token stops it", cleared.plugin.dropSession.active());
-		assertNull(field(cleared.plugin, "dropSegmenter"));
+		cleared.plugin.dropProof.pollDropSession();
+		assertFalse("a cleared token stops it", cleared.plugin.dropProof.dropSession.active());
+		assertNull(cleared.plugin.dropProof.dropSegmenter);
 
 		Rig changed = rig();
 		dropAction(changed.plugin);
 		attach(changed.plugin, pile(995, 5L, 3200, 3400));
-		changed.plugin.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 3}, 1_000L);
+		changed.plugin.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 3}, 1_000L);
 		changed.config.token = OTHER_TOKEN;
-		changed.plugin.pollDropSession();
+		changed.plugin.dropProof.pollDropSession();
 		// ROUND 3 CORRECTION. Round 2 pinned the opposite here, because the code did not stop on a
 		// swap to another VALID token and the arm recorded that honestly. It is an identity
 		// boundary, not accounting: frames captured under token A would upload under token B and
 		// attribute one account's evidence to another. Cases 14 to 20 below own the full contract.
 		assertFalse("a swap to a DIFFERENT valid token stops it too",
-			changed.plugin.dropSession.active());
-		assertNull(field(changed.plugin, "dropSegmenter"));
+			changed.plugin.dropProof.dropSession.active());
+		assertNull(changed.plugin.dropProof.dropSegmenter);
 
 		Rig malformed = rig();
 		dropAction(malformed.plugin);
 		attach(malformed.plugin, pile(995, 5L, 3200, 3400));
 		malformed.config.token = "not-a-token";
-		malformed.plugin.pollDropSession();
-		assertFalse("an INVALID token does stop it", malformed.plugin.dropSession.active());
-		assertNull(field(malformed.plugin, "dropSegmenter"));
+		malformed.plugin.dropProof.pollDropSession();
+		assertFalse("an INVALID token does stop it", malformed.plugin.dropProof.dropSession.active());
+		assertNull(malformed.plugin.dropProof.dropSegmenter);
 	}
 
 	// ===== CASE 12 — OFF then ON must not upload the OFF-window frames =====
@@ -542,42 +542,42 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		for (int i = 0; i < 10; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
 		}
-		DropFrameSegmenter before = (DropFrameSegmenter) field(p, "dropSegmenter");
+		DropFrameSegmenter before = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertEquals("ten frames were captured while consent held", 10, before.acceptedFrames());
-		assertEquals("the pile is tracked before the withdrawal", 1, p.groundDropCount());
+		assertEquals("the pile is tracked before the withdrawal", 1, p.piles.groundDropCount());
 
 		r.config.upload = false;
 		poll(p, 1);
 		assertNull("the buffer is destroyed at the moment consent is withdrawn",
-			field(p, "dropSegmenter"));
+			p.dropProof.dropSegmenter);
 		assertEquals("and the frames it held are gone", 0, before.bufferedFrames());
 		assertEquals("ROUND 4, FINDING B: the ground tracking is reset too",
-			0, p.groundDropCount());
+			0, p.piles.groundDropCount());
 
 		// Frames offered while OFF are refused outright.
 		for (int i = 0; i < 10; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) (100 + i)}, 3_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) (100 + i)}, 3_000L + i);
 		}
-		assertNull("no buffer is resurrected by an offered frame", field(p, "dropSegmenter"));
+		assertNull("no buffer is resurrected by an offered frame", p.dropProof.dropSegmenter);
 
 		// The switch goes back on an hour later.
 		r.config.upload = true;
 		poll(p, 3);
 		assertNull("turning the switch back on must not resurrect anything",
-			field(p, "dropSegmenter"));
-		assertFalse("and it must not restart the old session", p.dropSession.active());
+			p.dropProof.dropSegmenter);
+		assertFalse("and it must not restart the old session", p.dropProof.dropSession.active());
 		assertNull("nothing from the withdrawn session is published", manifest(p));
 
 		// A NEW drop after re-enabling records normally, and carries none of the old frames.
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 42}, 9_000L);
-		DropFrameSegmenter after = (DropFrameSegmenter) field(p, "dropSegmenter");
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 42}, 9_000L);
+		DropFrameSegmenter after = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertNotNull("a fresh session records again", after);
 		assertEquals("starting from zero, not from the withdrawn session's frames",
 			1, after.acceptedFrames());
@@ -599,7 +599,7 @@ public class DropStopContractTest
 		// Path A: pile released.
 		assertNeverRecordsWithNothingOutstanding(p ->
 		{
-			AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+			OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 			attach(p, g);
 			release(p, g);
 		});
@@ -607,24 +607,24 @@ public class DropStopContractTest
 		assertNeverRecordsWithNothingOutstanding(p ->
 		{
 			forcePendingsExpired(p);
-			p.pollDropSession();
+			p.dropProof.pollDropSession();
 		});
 		// Path C: pile abandoned by eviction.
 		assertNeverRecordsWithNothingOutstanding(p ->
 		{
-			AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+			OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 			attach(p, g);
-			Method m = AccountConnectPlugin.class.getDeclaredMethod(
-				"abandonPileFromDropSession", AccountConnectPlugin.DroppedGroundItem.class);
+			Method m = DropProof.class.getDeclaredMethod(
+				"abandonPileFromDropSession", OwnPiles.DroppedGroundItem.class);
 			m.setAccessible(true);
-			m.invoke(p, g);
+			m.invoke(p.dropProof, g);
 		});
 		// Path D: a merged second drop, then the one despawn.
 		assertNeverRecordsWithNothingOutstanding(p ->
 		{
-			p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+			p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 			dropAction(p);
-			p.trackGroundDrop(995, 10L, 3200, 3400, 0, null, 101, 400, true);
+			p.piles.trackGroundDrop(995, 10L, 3200, 3400, 0, null, 101, 400, true);
 			release(p, onlyTrackedPile(p));
 		});
 	}
@@ -640,23 +640,23 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
 		step.run(p);
-		if (!p.dropSession.active())
+		if (!p.dropProof.dropSession.active())
 		{
 			return;		// already stopped is the strongest form of the property
 		}
 		boolean nothingOutstanding =
-			p.dropSession.activePileCount() == 0 && p.dropSession.pendingDropCount() == 0;
+			p.dropProof.dropSession.activePileCount() == 0 && p.dropProof.dropSession.pendingDropCount() == 0;
 		if (nothingOutstanding)
 		{
-			assertTrue("nothing outstanding, so a stop MUST be armed", p.dropSession.stopPending());
+			assertTrue("nothing outstanding, so a stop MUST be armed", p.dropProof.dropSession.stopPending());
 			forceTailDue(p);
 			poll(p, 1);
-			assertFalse("and the poll must actually end it", p.dropSession.active());
+			assertFalse("and the poll must actually end it", p.dropProof.dropSession.active());
 		}
 		else
 		{
 			assertTrue("something is outstanding, so recording legitimately continues",
-				p.dropSession.activePileCount() > 0 || p.dropSession.pendingDropCount() > 0);
+				p.dropProof.dropSession.activePileCount() > 0 || p.dropProof.dropSession.pendingDropCount() > 0);
 		}
 	}
 
@@ -689,9 +689,9 @@ public class DropStopContractTest
 	{
 		for (int i = 0; i <= DropFrameSegmenter.SEGMENT_FRAMES; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i, 7, 7, 7}, 1_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i, 7, 7, 7}, 1_000L + i);
 		}
-		DropFrameSegmenter seg = (DropFrameSegmenter) field(p, "dropSegmenter");
+		DropFrameSegmenter seg = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertNotNull(seg);
 		assertTrue("a whole segment must have been handed to the uploader", seg.segmentCount() >= 1);
 		return seg;
@@ -705,30 +705,30 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
 		// Baseline-cadence frames are HELD as pre-roll rather than kept, which is the thing that
 		// has to die: a pre-roll survivor would be flushed into the next burst's clip.
 		for (int i = 0; i < 12; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i * 5L);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i * 5L);
 		}
-		DropCaptureRate rateUnderA = (DropCaptureRate) field(p, "dropRate");
+		DropCaptureRate rateUnderA = (DropCaptureRate) p.dropProof.dropRate;
 		assertNotNull(rateUnderA);
-		assertNotNull("a session is recording under token A", field(p, "dropSegmenter"));
-		assertTrue(p.dropSession.active());
+		assertNotNull("a session is recording under token A", p.dropProof.dropSegmenter);
+		assertTrue(p.dropProof.dropSession.active());
 
 		r.config.token = OTHER_TOKEN;		// still 32 hex characters, still perfectly valid
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 
-		assertFalse("the session ends the moment the identity changes", p.dropSession.active());
-		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
-		assertNull("the frame buffer is destroyed", field(p, "dropSegmenter"));
-		assertNull("the pre-roll controller is destroyed", field(p, "dropRate"));
+		assertFalse("the session ends the moment the identity changes", p.dropProof.dropSession.active());
+		assertFalse("capture is disarmed", (Boolean) p.dropProof.dropCapturing);
+		assertNull("the frame buffer is destroyed", p.dropProof.dropSegmenter);
+		assertNull("the pre-roll controller is destroyed", p.dropProof.dropRate);
 		assertEquals("and the frames it was holding are gone, not merely unreferenced",
 			0, rateUnderA.preRollSize());
-		assertNull("and no pending session state survives", field(p, "pendingDropSessionId"));
+		assertNull("and no pending session state survives", p.dropProof.pendingDropSessionId);
 		assertEquals("ROUND 4, FINDING B: the ground tracking is reset on the identity path too",
-			0, p.groundDropCount());
+			0, p.piles.groundDropCount());
 	}
 
 	// ===== CASE 15 — A -> empty =====
@@ -743,11 +743,11 @@ public class DropStopContractTest
 		DropFrameSegmenter seg = fillOneWholeSegment(p);
 
 		r.config.token = "";
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 
-		assertFalse(p.dropSession.active());
-		assertNull(field(p, "dropSegmenter"));
-		assertNull(field(p, "dropRate"));
+		assertFalse(p.dropProof.dropSession.active());
+		assertNull(p.dropProof.dropSegmenter);
+		assertNull(p.dropProof.dropRate);
 		assertEquals("the filling segment is emptied", 0, seg.bufferedFrames());
 		assertTrue("and the retry buffer is discarded, not merely emptied", seg.discarded());
 		assertEquals("nothing is held at all", 0L, seg.heldBytes());
@@ -763,14 +763,14 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
 		attach(p, pile(995, 5L, 3200, 3400));
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 
 		r.config.token = "zzzz-not-a-token";
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 
-		assertFalse(p.dropSession.active());
-		assertNull(field(p, "dropSegmenter"));
-		assertNull(field(p, "dropRate"));
+		assertFalse(p.dropProof.dropSession.active());
+		assertNull(p.dropProof.dropSegmenter);
+		assertNull(p.dropProof.dropRate);
 	}
 
 	// ===== CASE 17 — A -> B -> A, the returning token =====
@@ -785,7 +785,7 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		String firstSessionId = p.dropSession.sessionId();
+		String firstSessionId = p.dropProof.dropSession.sessionId();
 		assertNotNull(firstSessionId);
 		attach(p, pile(995, 5L, 3200, 3400));
 		DropFrameSegmenter seg = fillOneWholeSegment(p);
@@ -793,16 +793,16 @@ public class DropStopContractTest
 		assertTrue(framesUnderA > 0);
 
 		r.config.token = OTHER_TOKEN;
-		p.pollDropSession();
-		assertFalse(p.dropSession.active());
+		p.dropProof.pollDropSession();
+		assertFalse(p.dropProof.dropSession.active());
 
 		// A comes back.
 		r.config.token = TOKEN;
 		poll(p, 5);
 
-		assertFalse("the old session must not restart", p.dropSession.active());
-		assertNull("no buffer is resurrected", field(p, "dropSegmenter"));
-		assertNull("no pre-roll is resurrected", field(p, "dropRate"));
+		assertFalse("the old session must not restart", p.dropProof.dropSession.active());
+		assertNull("no buffer is resurrected", p.dropProof.dropSegmenter);
+		assertNull("no pre-roll is resurrected", p.dropProof.dropRate);
 		assertNull("and no manifest appears for the abandoned session", manifest(p));
 		assertTrue("the old segmenter stays discarded forever", seg.discarded());
 		assertNull("it yields nothing even when asked directly", seg.flushRemainder());
@@ -812,9 +812,9 @@ public class DropStopContractTest
 
 		// A genuinely new drop is allowed, and it is a DIFFERENT session.
 		dropAction(p);
-		assertTrue("token A may start a NEW session", p.dropSession.active());
+		assertTrue("token A may start a NEW session", p.dropProof.dropSession.active());
 		assertFalse("with a new id, never the old one",
-			firstSessionId.equals(p.dropSession.sessionId()));
+			firstSessionId.equals(p.dropProof.dropSession.sessionId()));
 	}
 
 	// ===== CASE 18 — frames buffered before the swap reach NEITHER upload =====
@@ -854,11 +854,11 @@ public class DropStopContractTest
 		assertTrue("so real bytes are held for a retry", heldUnderA > 0L);
 		int framesUnderA = seg.acceptedFrames();
 		java.util.concurrent.atomic.AtomicInteger sent =
-			(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsSent");
+			(java.util.concurrent.atomic.AtomicInteger) p.dropProof.dropSegmentsSent;
 		assertEquals("nothing reached the server under token A either", 0, sent.get());
 
 		r.config.token = OTHER_TOKEN;
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 		// The staff grant is bound to the token, so the swap ended it. The new staff token gets its own
 		// grant on its first accepted upload; that answer arrives here.
 		StaffGrant.give(p);
@@ -895,9 +895,9 @@ public class DropStopContractTest
 		// And frames offered to the PLUGIN after the swap are refused before any buffer exists.
 		for (int i = 0; i < 10; i++)
 		{
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) (200 + i)}, 30_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) (200 + i)}, 30_000L + i);
 		}
-		assertNull("no buffer is created by a post-swap frame", field(p, "dropSegmenter"));
+		assertNull("no buffer is created by a post-swap frame", p.dropProof.dropSegmenter);
 	}
 
 	/** One real Segment, made by a standalone segmenter so no plugin state is disturbed. */
@@ -917,14 +917,14 @@ public class DropStopContractTest
 	private static boolean postDropSegmentReachedTheNetwork(AccountConnectPlugin p, String token,
 		DropFrameSegmenter.Segment segment) throws Exception
 	{
-		Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+		Method m = DropProof.class.getDeclaredMethod("postDropSegment", String.class,
 			String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
 		m.setAccessible(true);
-		long lostBefore = ((Number) p.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
-		long refusedBefore = ((Number) p.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
-		m.invoke(p, "https://example.invalid", token, segment, "sid", 0);
-		long lostAfter = ((Number) p.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
-		long refusedAfter = ((Number) p.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
+		long lostBefore = ((Number) p.events.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		long refusedBefore = ((Number) p.events.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
+		m.invoke(p.dropProof, "https://example.invalid", token, segment, "sid", 0);
+		long lostAfter = ((Number) p.events.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		long refusedAfter = ((Number) p.events.captureHealthSnapshot().get("drop_segments_refused_total")).longValue();
 		if (lostAfter > lostBefore)
 		{
 			return true; // passed every authority guard and reached request construction/network setup
@@ -938,12 +938,12 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		DropFrameSegmenter.Segment segment = takeOneSegment();
-		long before = ((Number) r.plugin.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
-		Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+		long before = ((Number) r.plugin.events.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		Method m = DropProof.class.getDeclaredMethod("postDropSegment", String.class,
 			String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
 		m.setAccessible(true);
-		m.invoke(r.plugin, ":// definitely not a URL", TOKEN, segment, "bad-url-session", 0);
-		long after = ((Number) r.plugin.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
+		m.invoke(r.plugin.dropProof, ":// definitely not a URL", TOKEN, segment, "bad-url-session", 0);
+		long after = ((Number) r.plugin.events.captureHealthSnapshot().get("drop_segments_lost_total")).longValue();
 		assertEquals("malformed media URL must terminate the segment instead of stranding it", before + 1, after);
 	}
 
@@ -961,13 +961,13 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		String swappedAwayId = p.dropSession.sessionId();
-		AccountConnectPlugin.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
+		String swappedAwayId = p.dropProof.dropSession.sessionId();
+		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
 		fillOneWholeSegment(p);
 
 		r.config.token = OTHER_TOKEN;
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 		assertNull("no manifest at the moment of the swap", manifest(p));
 
 		// NOTHING AFTERWARDS MAY PUBLISH IT EITHER, and the session is driven all the way to the
@@ -984,7 +984,7 @@ public class DropStopContractTest
 		poll(p, 5);
 		assertNull("nor when the original token returns", manifest(p));
 
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			assertFalse("no event may carry the swapped-away session id",
 				swappedAwayId.equals(e.get("drop_session_id")));
@@ -1006,37 +1006,37 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		String oldId = p.dropSession.sessionId();
+		String oldId = p.dropProof.dropSession.sessionId();
 		attach(p, pile(995, 5L, 3200, 3400));
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 
 		r.config.token = OTHER_TOKEN;
-		p.pollDropSession();
+		p.dropProof.pollDropSession();
 		// The staff grant is bound to the token, so the swap ended it. The new staff token gets its own
 		// grant on its first accepted upload; that answer arrives here.
 		StaffGrant.give(p);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 
 		// A NEW drop, under the NEW token.
 		dropAction(p);
-		assertTrue("recording still works after the swap", p.dropSession.active());
-		String newId = p.dropSession.sessionId();
+		assertTrue("recording still works after the swap", p.dropProof.dropSession.active());
+		String newId = p.dropProof.dropSession.sessionId();
 		assertNotNull(newId);
 		assertFalse("and it is a different session", newId.equals(oldId));
 
-		AccountConnectPlugin.DroppedGroundItem g2 = pile(995, 7L, 3201, 3400);
+		OwnPiles.DroppedGroundItem g2 = pile(995, 7L, 3201, 3400);
 		attach(p, g2);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
-		DropFrameSegmenter fresh = (DropFrameSegmenter) field(p, "dropSegmenter");
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		DropFrameSegmenter fresh = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertNotNull("a fresh buffer exists", fresh);
 		assertFalse("and it is not a discarded one", fresh.discarded());
 		assertEquals("carrying only the frames taken under the new token", 1, fresh.acceptedFrames());
 
 		release(p, g2);
-		assertTrue(p.dropSession.stopPending());
+		assertTrue(p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("the fresh session ends normally", p.dropSession.active());
+		assertFalse("the fresh session ends normally", p.dropProof.dropSession.active());
 
 		Map<String, Object> m = manifest(p);
 		assertNotNull("and it DOES publish its own manifest", m);
@@ -1077,10 +1077,10 @@ public class DropStopContractTest
 	private static void despawnTrackedPileAt(AccountConnectPlugin p, int item, int x, int y)
 		throws Exception
 	{
-		AccountConnectPlugin.DroppedGroundItem g =
-			p.resolveDespawnedGroundDrop(item, x, y, 0);
+		OwnPiles.DroppedGroundItem g =
+			p.piles.resolveDespawnedGroundDrop(item, x, y, 0);
 		assertNotNull("the despawn must resolve to a tracked pile", g);
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		java.util.Deque<OwnPiles.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
 		{
 			q.remove(g);
@@ -1092,18 +1092,18 @@ public class DropStopContractTest
 	 * The same despawn, but PUBLISHING the ground_removed row, which is what onItemDespawned does
 	 * for a pile with no live Take against it. Returns the record the resolver chose.
 	 */
-	private static AccountConnectPlugin.DroppedGroundItem despawnAndPublishAt(
+	private static OwnPiles.DroppedGroundItem despawnAndPublishAt(
 		AccountConnectPlugin p, int item, int x, int y, int tick) throws Exception
 	{
-		AccountConnectPlugin.DroppedGroundItem g =
-			p.resolveDespawnedGroundDrop(item, x, y, 0);
+		OwnPiles.DroppedGroundItem g =
+			p.piles.resolveDespawnedGroundDrop(item, x, y, 0);
 		assertNotNull("the despawn must resolve to a tracked pile", g);
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		java.util.Deque<OwnPiles.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
 		{
 			q.remove(g);
 		}
-		p.emitGroundRemoval(g, tick, false);	// this also releases the pile from the session
+		p.piles.emitGroundRemoval(g, tick, false);	// this also releases the pile from the session
 		return g;
 	}
 
@@ -1111,7 +1111,7 @@ public class DropStopContractTest
 	private static Map<String, Object> lastRemoval(AccountConnectPlugin p)
 	{
 		Map<String, Object> last = null;
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("ground_removed".equals(e.get("type")))
 			{
@@ -1122,10 +1122,10 @@ public class DropStopContractTest
 	}
 
 	@SuppressWarnings("unchecked")
-	private static java.util.Deque<AccountConnectPlugin.DroppedGroundItem> groundDrops(
+	private static java.util.Deque<OwnPiles.DroppedGroundItem> groundDrops(
 		AccountConnectPlugin p) throws Exception
 	{
-		return (java.util.Deque<AccountConnectPlugin.DroppedGroundItem>) field(p, "groundDrops");
+		return (java.util.Deque<OwnPiles.DroppedGroundItem>) p.piles.groundDrops;
 	}
 
 	// ===== CASE 21 — the USER's own switch, off then on, then a merged re-drop =====
@@ -1138,39 +1138,39 @@ public class DropStopContractTest
 
 		// Session 1: a real tracked pile of a stackable on one tile.
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals(1, p.groundDropCount());
-		assertEquals(1, p.dropSession.activePileCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.piles.groundDropCount());
+		assertEquals(1, p.dropProof.dropSession.activePileCount());
 
 		// The user unticks the upload switch. The pile is still physically on the ground.
 		r.config.upload = false;
 		poll(p, 1);
-		assertFalse("the withdrawal ends the session", p.dropSession.active());
+		assertFalse("the withdrawal ends the session", p.dropProof.dropSession.active());
 		assertEquals("FINDING B: and it must not leave the pile tracked but unowned",
-			0, p.groundDropCount());
+			0, p.piles.groundDropCount());
 
 		// The switch goes back on and session 2 drops the SAME stackable onto the SAME tile.
 		r.config.upload = true;
 		dropAction(p);
-		assertTrue("a new session starts", p.dropSession.active());
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
-		assertEquals("one physical pile means ONE tracked entry", 1, p.groundDropCount());
+		assertTrue("a new session starts", p.dropProof.dropSession.active());
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		assertEquals("one physical pile means ONE tracked entry", 1, p.piles.groundDropCount());
 		dropAction(p);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
-		assertEquals("a merge is still ONE tracked entry", 1, p.groundDropCount());
-		assertEquals("and the session holds ONE key for it", 1, p.dropSession.activePileCount());
-		assertEquals("with no pending left outstanding", 0, p.dropSession.pendingDropCount());
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		assertEquals("a merge is still ONE tracked entry", 1, p.piles.groundDropCount());
+		assertEquals("and the session holds ONE key for it", 1, p.dropProof.dropSession.activePileCount());
+		assertEquals("with no pending left outstanding", 0, p.dropProof.dropSession.pendingDropCount());
 
 		// The ONE despawn the game fires.
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		forcePendingsExpired(p);
 		poll(p, 50);
-		assertTrue("the single despawn must arm the tail", p.dropSession.stopPending());
+		assertTrue("the single despawn must arm the tail", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
 		assertFalse("NO IMMORTAL RECORDER: the session must actually end",
-			p.dropSession.active());
-		assertFalse("and capture must be disarmed", (Boolean) field(p, "dropCapturing"));
+			p.dropProof.dropSession.active());
+		assertFalse("and capture must be disarmed", (Boolean) p.dropProof.dropCapturing);
 	}
 
 	// ===== CASE 22 — the OPERATOR withdrawing and restoring the grant =====
@@ -1182,33 +1182,33 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals(1, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.piles.groundDropCount());
 
 		// The operator sets drop_proof: false. This is the path ops/ACTIVATION.md A0d documents.
-		p.setDropProofRolloutForTest(false);
-		p.onDropProofCapabilityChanged();
-		assertFalse("the withdrawn grant ends the session", p.dropSession.active());
-		assertEquals("FINDING B: and it must not strand the pile", 0, p.groundDropCount());
+		p.grants.setDropProofRolloutForTest(false);
+		p.dropProof.onDropProofCapabilityChanged();
+		assertFalse("the withdrawn grant ends the session", p.dropProof.dropSession.active());
+		assertEquals("FINDING B: and it must not strand the pile", 0, p.piles.groundDropCount());
 
 		// The grant comes back.
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 
 		dropAction(p);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
 		dropAction(p);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
-		assertEquals("one physical pile, one tracked entry", 1, p.groundDropCount());
-		assertEquals("one session key", 1, p.dropSession.activePileCount());
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		assertEquals("one physical pile, one tracked entry", 1, p.piles.groundDropCount());
+		assertEquals("one session key", 1, p.dropProof.dropSession.activePileCount());
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		forcePendingsExpired(p);
 		poll(p, 50);
-		assertTrue(p.dropSession.stopPending());
+		assertTrue(p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("NO IMMORTAL RECORDER on the operator path either", p.dropSession.active());
+		assertFalse("NO IMMORTAL RECORDER on the operator path either", p.dropProof.dropSession.active());
 	}
 
 	// ===== CASE 23 — THE CONTROL: the teardown must untrack only the SESSION's piles =====
@@ -1225,33 +1225,33 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		// A pile tracked with NO drop session running. Nothing about it belongs to drop proof.
-		p.trackGroundDrop(4151, 1L, 3300, 3500, 0, null, 50, 400, false);
-		assertEquals(1, p.groundDropCount());
-		assertNull("it belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+		p.piles.trackGroundDrop(4151, 1L, 3300, 3500, 0, null, 50, 400, false);
+		assertEquals(1, p.piles.groundDropCount());
+		assertNull("it belongs to no session", p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 
 		// Now a real session with its own pile on a different tile.
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals(2, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(2, p.piles.groundDropCount());
 
 		r.config.upload = false;
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
-		assertEquals("the unrelated pile MUST survive the teardown", 1, p.groundDropCount());
-		AccountConnectPlugin.DroppedGroundItem survivor = onlyTrackedPile(p);
+		assertFalse(p.dropProof.dropSession.active());
+		assertEquals("the unrelated pile MUST survive the teardown", 1, p.piles.groundDropCount());
+		OwnPiles.DroppedGroundItem survivor = onlyTrackedPile(p);
 		assertEquals("and it is the unrelated one, not the session's", 4151, survivor.item);
 
 		// And recording still works afterwards, so this is not a fix that broke capture.
 		r.config.upload = true;
 		dropAction(p);
-		assertTrue("a fresh session still records", p.dropSession.active());
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		assertNotNull("with a live buffer", field(p, "dropSegmenter"));
-		p.trackGroundDrop(995, 5L, 3201, 3400, 0, null, 300, 400, false);
+		assertTrue("a fresh session still records", p.dropProof.dropSession.active());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertNotNull("with a live buffer", p.dropProof.dropSegmenter);
+		p.piles.trackGroundDrop(995, 5L, 3201, 3400, 0, null, 300, 400, false);
 		despawnTrackedPileAt(p, 995, 3201, 3400);
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and it ends normally", p.dropSession.active());
+		assertFalse("and it ends normally", p.dropProof.dropSession.active());
 		assertNotNull("publishing its own manifest", manifest(p));
 	}
 
@@ -1280,18 +1280,18 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
 
 		r.config.upload = false;
 		poll(p, 1);
 		r.config.upload = true;
 
 		dropAction(p);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 200, 400, false);
 		dropAction(p);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		assertTrue("the second session is recording", (Boolean) field(p, "dropCapturing"));
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 201, 400, true);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue("the second session is recording", (Boolean) p.dropProof.dropCapturing);
 
 		// The ONE despawn the game fires for the merged pile. Every pending is expired and the
 		// poll is driven 50 times, so only a genuinely stranded key can hold the session open.
@@ -1300,16 +1300,16 @@ public class DropStopContractTest
 		poll(p, 50);
 
 		assertEquals("the despawn released the session's only pile key",
-			0, p.dropSession.activePileCount());
-		assertEquals("and nothing is pending", 0, p.dropSession.pendingDropCount());
+			0, p.dropProof.dropSession.activePileCount());
+		assertEquals("and nothing is pending", 0, p.dropProof.dropSession.pendingDropCount());
 		assertTrue("NO IMMORTAL RECORDER: with nothing outstanding the tail MUST have armed itself",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
+		assertFalse("and the armed tail really ends the recording", p.dropProof.dropSession.active());
 		assertFalse("and the screen is no longer being captured",
-			(Boolean) field(p, "dropCapturing"));
+			(Boolean) p.dropProof.dropCapturing);
 	}
 
 	// ================================================================
@@ -1354,7 +1354,7 @@ public class DropStopContractTest
 
 		// The operator sets drop_proof: false. Nothing else changes: the user's switch is still on
 		// and the token is unchanged and still the one the bytes were captured under.
-		p.setDropProofRolloutForTest(false);
+		p.grants.setDropProofRolloutForTest(false);
 		assertTrue("the user's own switch is untouched", p.uploadAllowed());
 		assertEquals("and so is the token", TOKEN, p.currentLinkToken());
 
@@ -1362,7 +1362,7 @@ public class DropStopContractTest
 			postDropSegmentReachedTheNetwork(p, TOKEN, seg));
 
 		// And it comes back when the operator restores the grant, so this is a gate and not a latch.
-		p.setDropProofRolloutForTest(true);
+		p.grants.setDropProofRolloutForTest(true);
 		assertTrue("CONTROL: restoring the grant restores the upload",
 			postDropSegmentReachedTheNetwork(p, TOKEN, seg));
 	}
@@ -1397,14 +1397,14 @@ public class DropStopContractTest
 		// 3. The OPERATOR's grant. This is the one that leaked.
 		Rig c = rig();
 		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(c.plugin, TOKEN, seg));
-		c.plugin.setDropProofRolloutForTest(false);
+		c.plugin.grants.setDropProofRolloutForTest(false);
 		assertFalse("and a withdrawn grant must strand it too",
 			postDropSegmentReachedTheNetwork(c.plugin, TOKEN, seg));
 
 		// 4. X-Clips forced off, which is the state every non-staff token is in.
 		Rig d = rig();
 		assertTrue("CONTROL", postDropSegmentReachedTheNetwork(d.plugin, TOKEN, seg));
-		d.plugin.applyServerPolicy(policyResponse("X-Clips", "off"));
+		d.plugin.grants.applyServerPolicy(policyResponse("X-Clips", "off"));
 		assertFalse("clips forced off strands it as well",
 			postDropSegmentReachedTheNetwork(d.plugin, TOKEN, seg));
 	}
@@ -1422,7 +1422,7 @@ public class DropStopContractTest
 	private static okhttp3.Response policyResponse(String... headerKV)
 	{
 		okhttp3.Response.Builder b = new okhttp3.Response.Builder()
-			.request(new okhttp3.Request.Builder().url(AccountConnectPlugin.OFFICIAL_API_BASE + "/account-ingest").build())
+			.request(new okhttp3.Request.Builder().url(ServerGrants.OFFICIAL_API_BASE + "/account-ingest").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1)
 			.code(200)
 			.message("OK")
@@ -1446,14 +1446,14 @@ public class DropStopContractTest
 		{
 			Rig r = rig();
 			AccountConnectPlugin p = r.plugin;
-			p.setDropProofRolloutForTest(false);
-			assertFalse("starts off", p.dropProofEnabled());
+			p.grants.setDropProofRolloutForTest(false);
+			assertFalse("starts off", p.grants.dropProofEnabled());
 
-			p.applyServerPolicy(policyResponse("X-Drop-Proof", on));
+			p.grants.applyServerPolicy(policyResponse("X-Drop-Proof", on));
 
-			assertTrue("X-Drop-Proof: " + on + " must grant the rollout", p.dropProofEnabled());
+			assertTrue("X-Drop-Proof: " + on + " must grant the rollout", p.grants.dropProofEnabled());
 			dropAction(p);
-			assertTrue("and a drop must then start a session", p.dropSession.active());
+			assertTrue("and a drop must then start a session", p.dropProof.dropSession.active());
 		}
 	}
 
@@ -1468,22 +1468,22 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+		p.grants.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
 
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		assertTrue(p.dropSession.active());
-		assertNotNull(field(p, "dropSegmenter"));
-		assertEquals(1, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue(p.dropProof.dropSession.active());
+		assertNotNull(p.dropProof.dropSegmenter);
+		assertEquals(1, p.piles.groundDropCount());
 
-		p.applyServerPolicy(policyResponse("X-Drop-Proof", "off"));
+		p.grants.applyServerPolicy(policyResponse("X-Drop-Proof", "off"));
 
-		assertFalse("the grant is gone", p.dropProofEnabled());
-		assertFalse("the session ends on that response", p.dropSession.active());
-		assertFalse("capture is disarmed", (Boolean) field(p, "dropCapturing"));
-		assertNull("the buffer is destroyed", field(p, "dropSegmenter"));
-		assertEquals("and the ground tracking is reset (finding B)", 0, p.groundDropCount());
+		assertFalse("the grant is gone", p.grants.dropProofEnabled());
+		assertFalse("the session ends on that response", p.dropProof.dropSession.active());
+		assertFalse("capture is disarmed", (Boolean) p.dropProof.dropCapturing);
+		assertNull("the buffer is destroyed", p.dropProof.dropSegmenter);
+		assertEquals("and the ground tracking is reset (finding B)", 0, p.piles.groundDropCount());
 		assertNull("no manifest is published about a withdrawn recording", manifest(p));
 	}
 
@@ -1499,17 +1499,17 @@ public class DropStopContractTest
 	public void case29_anAbsentHeaderChangesNothingInEitherDirection() throws Exception
 	{
 		Rig granted = rig();
-		granted.plugin.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
-		assertTrue(granted.plugin.dropProofEnabled());
-		granted.plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		granted.plugin.grants.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+		assertTrue(granted.plugin.grants.dropProofEnabled());
+		granted.plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
 		assertTrue("an absent header must not revoke a live grant",
-			granted.plugin.dropProofEnabled());
+			granted.plugin.grants.dropProofEnabled());
 
 		Rig never = rig();
-		never.plugin.setDropProofRolloutForTest(false);
-		never.plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		never.plugin.grants.setDropProofRolloutForTest(false);
+		never.plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
 		assertFalse("and it must not grant one that was never made",
-			never.plugin.dropProofEnabled());
+			never.plugin.grants.dropProofEnabled());
 	}
 
 	// ===== CASE 30 — GARBAGE fails CLOSED =====
@@ -1527,21 +1527,21 @@ public class DropStopContractTest
 		{
 			Rig r = rig();
 			AccountConnectPlugin p = r.plugin;
-			p.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
-			assertTrue("the grant is live before the junk arrives", p.dropProofEnabled());
+			p.grants.applyServerPolicy(policyResponse("X-Drop-Proof", "on"));
+			assertTrue("the grant is live before the junk arrives", p.grants.dropProofEnabled());
 
 			// A session is running when the junk lands, so the arm also proves it is torn down.
 			dropAction(p);
-			p.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
-			assertTrue(p.dropSession.active());
+			p.piles.trackGroundDrop(995, 5L, 3200, 3400, 0, null, 100, 400, false);
+			assertTrue(p.dropProof.dropSession.active());
 
-			p.applyServerPolicy(policyResponse("X-Drop-Proof", junk));
+			p.grants.applyServerPolicy(policyResponse("X-Drop-Proof", junk));
 
-			assertFalse("X-Drop-Proof: '" + junk + "' must fail closed", p.dropProofEnabled());
-			assertFalse("and end the running session", p.dropSession.active());
-			assertEquals("and reset the ground tracking", 0, p.groundDropCount());
+			assertFalse("X-Drop-Proof: '" + junk + "' must fail closed", p.grants.dropProofEnabled());
+			assertFalse("and end the running session", p.dropProof.dropSession.active());
+			assertEquals("and reset the ground tracking", 0, p.piles.groundDropCount());
 			dropAction(p);
-			assertFalse("and no new session may start", p.dropSession.active());
+			assertFalse("and no new session may start", p.dropProof.dropSession.active());
 		}
 	}
 
@@ -1572,26 +1572,26 @@ public class DropStopContractTest
 	public void case31_a200CarryingDroppedIsCountedAsARefusalNotAnUpload() throws Exception
 	{
 		// THE REFUSALS the server actually sends.
-		assertTrue("not_staff is a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+		assertTrue("not_staff is a refusal", DropProof.dropSegmentWasRefused(
 			jsonResponse(200, "{\"ok\":true,\"dropped\":\"not_staff\"}")));
-		assertTrue("clips_disabled is a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+		assertTrue("clips_disabled is a refusal", DropProof.dropSegmentWasRefused(
 			jsonResponse(200, "{\"ok\":true,\"dropped\":\"clips_disabled\"}")));
 
 		// THE CONTROL SIDE, and it is what stops this becoming "no drop upload ever counts".
-		assertFalse("a real store is NOT a refusal", AccountConnectPlugin.dropSegmentWasRefused(
+		assertFalse("a real store is NOT a refusal", DropProof.dropSegmentWasRefused(
 			jsonResponse(200, "{\"ok\":true,\"key\":\"drop/abc/0.jpg\"}")));
 		assertFalse("an empty body is not a refusal",
-			AccountConnectPlugin.dropSegmentWasRefused(jsonResponse(200, "")));
+			DropProof.dropSegmentWasRefused(jsonResponse(200, "")));
 		assertFalse("and neither is a body that merely mentions the word",
-			AccountConnectPlugin.dropSegmentWasRefused(
+			DropProof.dropSegmentWasRefused(
 				jsonResponse(200, "{\"ok\":true,\"note\":\"nothing dropped here\"}")));
 		assertFalse("a null response can never invent a failure",
-			AccountConnectPlugin.dropSegmentWasRefused(null));
+			DropProof.dropSegmentWasRefused(null));
 
 		// THE BODY IS NOT CONSUMED. peekBody must leave the response readable, or the real callback
 		// would break the paths that read a body after this check.
 		okhttp3.Response live = jsonResponse(200, "{\"ok\":true,\"dropped\":\"not_staff\"}");
-		assertTrue(AccountConnectPlugin.dropSegmentWasRefused(live));
+		assertTrue(DropProof.dropSegmentWasRefused(live));
 		assertTrue("the body survives the peek",
 			live.body().string().contains("not_staff"));
 	}
@@ -1650,18 +1650,18 @@ public class DropStopContractTest
 			ok.set(p, new okhttp3.OkHttpClient());
 
 			String base = "http://127.0.0.1:" + server.getAddress().getPort();
-			Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+			Method m = DropProof.class.getDeclaredMethod("postDropSegment", String.class,
 				String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
 			m.setAccessible(true);
-			m.invoke(p, base, TOKEN, takeOneSegment(), "sid", 0);
+			m.invoke(p.dropProof, base, TOKEN, takeOneSegment(), "sid", 0);
 
 			assertTrue("the server never received the upload",
 				hit.await(15, java.util.concurrent.TimeUnit.SECONDS));
 
 			java.util.concurrent.atomic.AtomicInteger sent =
-				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsSent");
+				(java.util.concurrent.atomic.AtomicInteger) p.dropProof.dropSegmentsSent;
 			java.util.concurrent.atomic.AtomicInteger failed =
-				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsFailed");
+				(java.util.concurrent.atomic.AtomicInteger) p.dropProof.dropSegmentsFailed;
 			// The counter is written on the OkHttp callback thread, so wait for it rather than
 			// reading it the instant the server's handler returned.
 			long deadline = System.currentTimeMillis() + 15_000L;
@@ -1694,19 +1694,19 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 
-		p.setDropProofRolloutForTest(false);
-		assertFalse("absent or false disables capture", p.dropProofEnabled());
+		p.grants.setDropProofRolloutForTest(false);
+		assertFalse("absent or false disables capture", p.grants.dropProofEnabled());
 		dropAction(p);
-		assertFalse("and no session starts", p.dropSession.active());
+		assertFalse("and no session starts", p.dropProof.dropSession.active());
 
-		p.setStoreToolsForTest(false);
-		p.setDropProofRolloutForTest(true);
+		p.grants.setStoreToolsForTest(false);
+		p.grants.setDropProofRolloutForTest(true);
 		assertFalse("the rollout flag alone grants nothing without the store-tools grant",
-			p.dropProofEnabled());
+			p.grants.dropProofEnabled());
 
-		p.setStoreToolsForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		r.config.upload = false;
-		assertFalse("and it can never override the user's own switch", p.dropProofEnabled());
+		assertFalse("and it can never override the user's own switch", p.grants.dropProofEnabled());
 	}
 
 	/** A brand new plugin has never heard from the server, and must not record. */
@@ -1718,8 +1718,8 @@ public class DropStopContractTest
 		f.setAccessible(true);
 		MutableConfig c = new MutableConfig();
 		f.set(p, c);
-		p.setStoreToolsForTest(true);		// even with the shop grant already in hand
-		assertFalse("no policy response yet means no recording", p.dropProofEnabled());
+		p.grants.setStoreToolsForTest(true);		// even with the shop grant already in hand
+		assertFalse("no policy response yet means no recording", p.grants.dropProofEnabled());
 	}
 
 	// ================================================================
@@ -1764,37 +1764,37 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		// No grant yet. Ground tracking still runs: its gate is the link token, not the grant.
-		p.setDropProofRolloutForTest(false);
-		assertFalse("the narrow gate is shut", p.dropProofEnabled());
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals("the pile is tracked anyway", 1, p.groundDropCount());
-		assertFalse("and no session exists to own it", p.dropSession.active());
-		assertNull("so it is unowned", p.dropSessionForPile(onlyTrackedPile(p)));
+		p.grants.setDropProofRolloutForTest(false);
+		assertFalse("the narrow gate is shut", p.grants.dropProofEnabled());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the pile is tracked anyway", 1, p.piles.groundDropCount());
+		assertFalse("and no session exists to own it", p.dropProof.dropSession.active());
+		assertNull("so it is unowned", p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 
 		// The grant lands. The pile is still physically on the ground.
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 
 		// The staff member drops the same stackable onto the same tile. The game MERGES it.
 		dropAction(p);
-		assertTrue("a session starts", p.dropSession.active());
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		assertTrue("a session starts", p.dropProof.dropSession.active());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
 
-		assertEquals("FINDING B2: one physical pile is ONE tracked entry", 1, p.groundDropCount());
+		assertEquals("FINDING B2: one physical pile is ONE tracked entry", 1, p.piles.groundDropCount());
 		assertEquals("and the session holds exactly ONE key for it",
-			1, p.dropSession.activePileCount());
-		assertEquals("with nothing left pending", 0, p.dropSession.pendingDropCount());
+			1, p.dropProof.dropSession.activePileCount());
+		assertEquals("with nothing left pending", 0, p.dropProof.dropSession.pendingDropCount());
 
 		// The ONE despawn the game fires.
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 		assertTrue("NO IMMORTAL RECORDER: the single despawn MUST arm the tail on its own",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the armed tail really ends it", p.dropSession.active());
-		assertFalse("and the screen is no longer captured", (Boolean) field(p, "dropCapturing"));
+		assertFalse("and the armed tail really ends it", p.dropProof.dropSession.active());
+		assertFalse("and the screen is no longer captured", (Boolean) p.dropProof.dropCapturing);
 	}
 
 	// ===== CASE 34 — the USER's own switch, off while the pile is tracked, then on =====
@@ -1811,27 +1811,27 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		r.config.upload = false;
-		assertFalse("the switch off shuts the narrow gate", p.dropProofEnabled());
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals("the pile is tracked with the switch off", 1, p.groundDropCount());
-		assertNull("and belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+		assertFalse("the switch off shuts the narrow gate", p.grants.dropProofEnabled());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the pile is tracked with the switch off", 1, p.piles.groundDropCount());
+		assertNull("and belongs to no session", p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 
 		r.config.upload = true;
 		dropAction(p);
-		assertTrue(p.dropSession.active());
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
+		assertTrue(p.dropProof.dropSession.active());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
 
-		assertEquals("FINDING B2: still ONE tracked entry", 1, p.groundDropCount());
-		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
+		assertEquals("FINDING B2: still ONE tracked entry", 1, p.piles.groundDropCount());
+		assertEquals("and ONE session key", 1, p.dropProof.dropSession.activePileCount());
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 		assertTrue("NO IMMORTAL RECORDER on the user's own path either",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 	}
 
 	// ===== CASE 35 — a LATE pile, after its own pending expired, with no gate moving =====
@@ -1850,33 +1850,33 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		forcePendingsExpired(p);
 		poll(p, 1);
-		assertTrue("the session is still running, in its tail", p.dropSession.active());
+		assertTrue("the session is still running, in its tail", p.dropProof.dropSession.active());
 		assertEquals("the pending expired, so nothing is outstanding",
-			0, p.dropSession.pendingDropCount());
+			0, p.dropProof.dropSession.pendingDropCount());
 
 		// The pile finally lands. attachPileToDropSession refuses it: pendingDropSeq is 0.
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 120, 400, false);
-		assertEquals(1, p.groundDropCount());
-		assertNull("the late pile is unowned", p.dropSessionForPile(onlyTrackedPile(p)));
-		assertEquals("and the session holds no key for it", 0, p.dropSession.activePileCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 120, 400, false);
+		assertEquals(1, p.piles.groundDropCount());
+		assertNull("the late pile is unowned", p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
+		assertEquals("and the session holds no key for it", 0, p.dropProof.dropSession.activePileCount());
 
 		// A second Drop onto the same tile. The game MERGES it into that same pile.
 		dropAction(p);
-		p.trackGroundDrop(995, 900L, 3200, 3400, 0, null, 130, 400, true);
+		p.piles.trackGroundDrop(995, 900L, 3200, 3400, 0, null, 130, 400, true);
 
-		assertEquals("FINDING B2: still ONE tracked entry", 1, p.groundDropCount());
-		assertEquals("and ONE session key", 1, p.dropSession.activePileCount());
-		assertEquals("with nothing pending", 0, p.dropSession.pendingDropCount());
+		assertEquals("FINDING B2: still ONE tracked entry", 1, p.piles.groundDropCount());
+		assertEquals("and ONE session key", 1, p.dropProof.dropSession.activePileCount());
+		assertEquals("with nothing pending", 0, p.dropProof.dropSession.pendingDropCount());
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
-		assertTrue("NO IMMORTAL RECORDER after a late pile either", p.dropSession.stopPending());
+		assertTrue("NO IMMORTAL RECORDER after a late pile either", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("an expired pending can never be called COMPLETE",
 			"INTERRUPTED", manifest(p).get("outcome"));
 	}
@@ -1899,25 +1899,25 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		// A pile of a DIFFERENT item, on the tile the session will use, tracked with no session.
-		p.trackGroundDrop(4151, 1L, 3200, 3400, 0, null, 50, 400, false);
-		assertEquals(1, p.groundDropCount());
-		assertNull("it belongs to no session", p.dropSessionForPile(onlyTrackedPile(p)));
+		p.piles.trackGroundDrop(4151, 1L, 3200, 3400, 0, null, 50, 400, false);
+		assertEquals(1, p.piles.groundDropCount());
+		assertNull("it belongs to no session", p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 
 		// The session runs on that same tile with its own stackable.
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals("two different items on one tile are two piles", 2, p.groundDropCount());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("two different items on one tile are two piles", 2, p.piles.groundDropCount());
 		dropAction(p);
-		p.trackGroundDrop(995, 800L, 3200, 3400, 0, null, 101, 400, true);
-		assertEquals("the merge adds no third entry", 2, p.groundDropCount());
-		assertEquals("and the session owns exactly one key", 1, p.dropSession.activePileCount());
+		p.piles.trackGroundDrop(995, 800L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("the merge adds no third entry", 2, p.piles.groundDropCount());
+		assertEquals("and the session owns exactly one key", 1, p.dropProof.dropSession.activePileCount());
 
 		// End the session through a withdrawal, which is the teardown path case 23 uses.
 		r.config.upload = false;
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("the unrelated pile on the SAME tile MUST survive the teardown",
-			1, p.groundDropCount());
+			1, p.piles.groundDropCount());
 		assertEquals("and it is the unrelated one", 4151, onlyTrackedPile(p).item);
 	}
 
@@ -1946,30 +1946,30 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 
 		dropAction(p);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		assertTrue("the session is recording", (Boolean) field(p, "dropCapturing"));
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		assertTrue("the session is recording", (Boolean) p.dropProof.dropCapturing);
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 
 		assertEquals("the despawn released the session's only pile key",
-			0, p.dropSession.activePileCount());
-		assertEquals("and nothing is pending", 0, p.dropSession.pendingDropCount());
+			0, p.dropProof.dropSession.activePileCount());
+		assertEquals("and nothing is pending", 0, p.dropProof.dropSession.pendingDropCount());
 		assertTrue("NO IMMORTAL RECORDER: with nothing outstanding the tail MUST have armed itself",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
+		assertFalse("and the armed tail really ends the recording", p.dropProof.dropSession.active());
 		assertFalse("and the screen is no longer being captured",
-			(Boolean) field(p, "dropCapturing"));
+			(Boolean) p.dropProof.dropCapturing);
 	}
 
 	// ================================================================
@@ -1998,17 +1998,17 @@ public class DropStopContractTest
 	private static void leakOneOwnedKey(AccountConnectPlugin p) throws Exception
 	{
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals(1, p.dropSession.activePileCount());
-		AccountConnectPlugin.DroppedGroundItem g = onlyTrackedPile(p);
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals(1, p.dropProof.dropSession.activePileCount());
+		OwnPiles.DroppedGroundItem g = onlyTrackedPile(p);
+		java.util.Deque<OwnPiles.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
 		{
 			q.remove(g);		// the pile is gone from the tracker; the KEY is not released
 		}
-		assertEquals("the caller tracks nothing", 0, p.groundDropCount());
-		assertEquals("and the recorder still waits on a key", 1, p.dropSession.activePileCount());
-		assertFalse("so the tail can never arm by itself", p.dropSession.stopPending());
+		assertEquals("the caller tracks nothing", 0, p.piles.groundDropCount());
+		assertEquals("and the recorder still waits on a key", 1, p.dropProof.dropSession.activePileCount());
+		assertFalse("so the tail can never arm by itself", p.dropProof.dropSession.stopPending());
 	}
 
 	/** Rewind the recorder's orphan stopwatch, so the grace elapses without sleeping 30 seconds. */
@@ -2016,9 +2016,9 @@ public class DropStopContractTest
 	{
 		Field f = DropSessionRecorder.class.getDeclaredField("orphanedSinceMillis");
 		f.setAccessible(true);
-		long since = f.getLong(p.dropSession);
+		long since = f.getLong(p.dropProof.dropSession);
 		assertTrue("the invariant must already be tripped before the grace can elapse", since > 0L);
-		f.setLong(p.dropSession, since - DropSessionRecorder.ORPHANED_STATE_GRACE_MILLIS);
+		f.setLong(p.dropProof.dropSession, since - DropSessionRecorder.ORPHANED_STATE_GRACE_MILLIS);
 	}
 
 	// ===== CASE 37 — the invariant backstop ends a session with a leaked key =====
@@ -2028,19 +2028,19 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		leakOneOwnedKey(p);
-		assertTrue("the recorder is capturing", (Boolean) field(p, "dropCapturing"));
+		assertTrue("the recorder is capturing", (Boolean) p.dropProof.dropCapturing);
 
 		poll(p, 1);			// first poll: the invariant trips and the stopwatch starts
-		assertTrue("the grace has not elapsed yet, so the session runs on", p.dropSession.active());
+		assertTrue("the grace has not elapsed yet, so the session runs on", p.dropProof.dropSession.active());
 
 		forceOrphanGraceElapsed(p);
 		poll(p, 2);
 
 		assertFalse("THE BACKSTOP: an immortal recorder must be ended by the bound",
-			p.dropSession.active());
-		assertFalse("and capture disarmed", (Boolean) field(p, "dropCapturing"));
+			p.dropProof.dropSession.active());
+		assertFalse("and capture disarmed", (Boolean) p.dropProof.dropCapturing);
 		Map<String, Object> m = manifest(p);
 		assertNotNull("the footage is still published", m);
 		assertEquals("a backstop end can NEVER be COMPLETE", "INTERRUPTED", m.get("outcome"));
@@ -2061,35 +2061,35 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 
 		poll(p, 200);
 		assertTrue("a live pile is a healthy session, however long it waits",
-			p.dropSession.active());
-		assertFalse("and no stop is armed while it is on the ground", p.dropSession.stopPending());
+			p.dropProof.dropSession.active());
+		assertFalse("and no stop is armed while it is on the ground", p.dropProof.dropSession.stopPending());
 
 		// A pending drop with no pile yet is healthy too.
 		Rig r2 = rig();
 		AccountConnectPlugin p2 = r2.plugin;
 		dropAction(p2);
-		assertEquals(1, p2.dropSession.pendingDropCount());
+		assertEquals(1, p2.dropProof.dropSession.pendingDropCount());
 		poll(p2, 3);
-		assertTrue("an outstanding pending is healthy", p2.dropSession.active());
+		assertTrue("an outstanding pending is healthy", p2.dropProof.dropSession.active());
 
 		// And the stopwatch does not accumulate across a healthy poll: the pile goes, the tail arms
 		// the ordinary way, and the manifest says COMPLETE rather than naming a backstop.
-		AccountConnectPlugin.DroppedGroundItem g = onlyTrackedPile(p);
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		OwnPiles.DroppedGroundItem g = onlyTrackedPile(p);
+		java.util.Deque<OwnPiles.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
 		{
 			q.remove(g);
 		}
 		release(p, g);
-		assertTrue("the ordinary tail still arms", p.dropSession.stopPending());
+		assertTrue("the ordinary tail still arms", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("an ordinary end is COMPLETE, not a backstop end",
 			"COMPLETE", manifest(p).get("outcome"));
 		assertNull("and names no reason", manifest(p).get("outcome_reason"));
@@ -2112,22 +2112,22 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 		dropAction(p);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
 		assertEquals("a live pile, so the invariant can never fire",
-			1, p.dropSession.activePileCount());
+			1, p.dropProof.dropSession.activePileCount());
 
 		poll(p, 5);
-		assertTrue("well inside the cap, the session runs", p.dropSession.active());
+		assertTrue("well inside the cap, the session runs", p.dropProof.dropSession.active());
 
 		// Rewind the session's start past MAX_SESSION_MILLIS, rather than record for half an hour.
 		Field started = DropSessionRecorder.class.getDeclaredField("startedAtMillis");
 		started.setAccessible(true);
-		started.setLong(p.dropSession,
-			started.getLong(p.dropSession) - DropSessionRecorder.MAX_SESSION_MILLIS);
+		started.setLong(p.dropProof.dropSession,
+			started.getLong(p.dropProof.dropSession) - DropSessionRecorder.MAX_SESSION_MILLIS);
 
 		poll(p, 2);
-		assertFalse("THE HARD CAP: no recording may outlive it", p.dropSession.active());
+		assertFalse("THE HARD CAP: no recording may outlive it", p.dropProof.dropSession.active());
 		assertEquals("a capped session can NEVER be COMPLETE",
 			"INTERRUPTED", manifest(p).get("outcome"));
 		assertEquals("and the manifest names the cap",
@@ -2198,35 +2198,35 @@ public class DropStopContractTest
 
 			// A real session, recording, exactly as it would be when the revocation lands.
 			dropAction(p);
-			p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-			assertTrue("CONTROL: the grant is held before the upload", p.dropProofEnabled());
-			assertTrue(p.dropSession.active());
+			p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			assertTrue("CONTROL: the grant is held before the upload", p.grants.dropProofEnabled());
+			assertTrue(p.dropProof.dropSession.active());
 
 			String base = "http://127.0.0.1:" + server.getAddress().getPort();
-			Method m = AccountConnectPlugin.class.getDeclaredMethod("postDropSegment", String.class,
+			Method m = DropProof.class.getDeclaredMethod("postDropSegment", String.class,
 				String.class, DropFrameSegmenter.Segment.class, String.class, int.class);
 			m.setAccessible(true);
-			m.invoke(p, base, TOKEN, takeOneSegment(), "sid", 0);
+			m.invoke(p.dropProof, base, TOKEN, takeOneSegment(), "sid", 0);
 
 			assertTrue("the server never received the upload",
 				hit.await(15, java.util.concurrent.TimeUnit.SECONDS));
 
 			// The flag is written on the OkHttp callback thread, so wait for the counter first.
 			java.util.concurrent.atomic.AtomicInteger failed =
-				(java.util.concurrent.atomic.AtomicInteger) field(p, "dropSegmentsFailed");
+				(java.util.concurrent.atomic.AtomicInteger) p.dropProof.dropSegmentsFailed;
 			long deadline = System.currentTimeMillis() + 15_000L;
 			while (System.currentTimeMillis() < deadline && failed.get() == 0)
 			{
 				Thread.sleep(20L);
 			}
 			assertEquals("the segment is counted failed either way", 1, failed.get());
-			assertEquals(why, expectGrantHeld, p.dropProofEnabled());
+			assertEquals(why, expectGrantHeld, p.grants.dropProofEnabled());
 
 			// And when the grant is gone, the next poll runs the ordinary withdrawal path.
 			poll(p, 1);
 			assertEquals(why + " — and the session follows the grant",
-				expectGrantHeld, p.dropSession.active());
+				expectGrantHeld, p.dropProof.dropSession.active());
 		}
 		finally
 		{
@@ -2266,18 +2266,18 @@ public class DropStopContractTest
 	/** Two records for ONE physical pile, made with no session running, then one despawn. */
 	private static void seedPhantomRecordWithNoSession(AccountConnectPlugin p) throws Exception
 	{
-		assertFalse("the phantom is seeded with NO session running", p.dropSession.active());
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertFalse("the phantom is seeded with NO session running", p.dropProof.dropSession.active());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
 		assertEquals("the merge branch is scoped out, so one real stack is tracked twice",
-			2, p.groundDropCount());
+			2, p.piles.groundDropCount());
 
 		// The customer takes the stack. The game fires exactly ONE ItemDespawned for it.
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		assertEquals("the tile is now physically EMPTY and one record lingers",
-			1, p.groundDropCount());
+			1, p.piles.groundDropCount());
 		assertNull("and the lingering record belongs to no session",
-			p.dropSessionForPile(onlyTrackedPile(p)));
+			p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 	}
 
 	// ===== CASE 41 — a phantom left by an earlier no-session drop, then a session on that tile =====
@@ -2287,22 +2287,22 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.setDropProofRolloutForTest(false);
+		p.grants.setDropProofRolloutForTest(false);
 		seedPhantomRecordWithNoSession(p);
 
 		// The grant lands and an ordinary drop trade runs on that same tile. The pile SPAWNS, so
 		// the merge branch is never even reached and the phantom is untouched by it.
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
-		assertEquals("the session owns exactly one key", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("the session owns exactly one key", 1, p.dropProof.dropSession.activePileCount());
 
 		// The resolver's own answer, read BEFORE the despawn consumes it, asserted after the
 		// outcome below. Held here because the record is gone once the despawn is driven.
-		AccountConnectPlugin.GroundDespawnMatch match =
-			p.matchDespawnedGroundDrop(995, 3200, 3400, 0);
+		OwnPiles.GroundDespawnMatch match =
+			p.piles.matchDespawnedGroundDrop(995, 3200, 3400, 0);
 
 		// The customer takes it. The ONE despawn must resolve to the SESSION'S record, not the
 		// older phantom, or the key is never released.
@@ -2310,15 +2310,15 @@ public class DropStopContractTest
 		poll(p, 50);
 
 		assertEquals("FINDING R1: the despawn must release the session's own key",
-			0, p.dropSession.activePileCount());
-		assertEquals("and nothing is left pending", 0, p.dropSession.pendingDropCount());
+			0, p.dropProof.dropSession.activePileCount());
+		assertEquals("and nothing is left pending", 0, p.dropProof.dropSession.pendingDropCount());
 		assertTrue("NO 30-MINUTE OVERRUN: the tail MUST arm on its own",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the armed tail really ends the recording", p.dropSession.active());
-		assertFalse("and the screen is no longer captured", (Boolean) field(p, "dropCapturing"));
+		assertFalse("and the armed tail really ends the recording", p.dropProof.dropSession.active());
+		assertFalse("and the screen is no longer captured", (Boolean) p.dropProof.dropCapturing);
 
 		// ROUND 7. The same resolution, pinned at the resolver. The phantom is a merge SHADOW: one
 		// physical pile tracked twice, standing for no pile of its own, so it is NOT a rival and
@@ -2342,44 +2342,44 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
-		assertEquals("one physical pile, two records", 2, p.groundDropCount());
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("one physical pile, two records", 2, p.piles.groundDropCount());
 
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 
 		// DROP 1 of the recorded trade merges into that same pile and adopts a record.
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
-		assertEquals("the merge adds no third record", 2, p.groundDropCount());
-		assertEquals("and the session holds one key", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		assertEquals("the merge adds no third record", 2, p.piles.groundDropCount());
+		assertEquals("and the session holds one key", 1, p.dropProof.dropSession.activePileCount());
 
 		// The customer takes it: ONE despawn. A phantom record survives on an empty tile.
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 2);
-		assertTrue("the first take arms the tail", p.dropSession.stopPending());
-		assertEquals("and leaves the phantom behind", 1, p.groundDropCount());
+		assertTrue("the first take arms the tail", p.dropProof.dropSession.stopPending());
+		assertEquals("and leaves the phantom behind", 1, p.piles.groundDropCount());
 
 		// DROP 2, inside the tail. Physically a NEW pile on the same tile.
 		dropAction(p);
-		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
-		assertEquals("the second drop re-arms the session", 1, p.dropSession.activePileCount());
-		assertFalse("so the tail is disarmed again", p.dropSession.stopPending());
+		p.piles.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("the second drop re-arms the session", 1, p.dropProof.dropSession.activePileCount());
+		assertFalse("so the tail is disarmed again", p.dropProof.dropSession.stopPending());
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 
 		assertEquals("FINDING R1: the second despawn must release the session's own key",
-			0, p.dropSession.activePileCount());
+			0, p.dropProof.dropSession.activePileCount());
 		assertTrue("NO 30-MINUTE OVERRUN inside one trade: the tail MUST re-arm on its own",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 	}
 
 	// ===== CASE 43 — the phantom outlives a CLEAN session end and strands the NEXT session =====
@@ -2389,44 +2389,44 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
 
 		// SESSION ONE. It merges into the pile, the customer takes it, and it ends normally.
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 1_500L, 3200, 3400, 0, null, 200, 400, true);
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 5);
-		assertTrue("session one arms its tail", p.dropSession.stopPending());
+		assertTrue("session one arms its tail", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("session one is over", p.dropSession.active());
-		assertEquals("but the phantom outlives it", 1, p.groundDropCount());
+		assertFalse("session one is over", p.dropProof.dropSession.active());
+		assertEquals("but the phantom outlives it", 1, p.piles.groundDropCount());
 		assertNull("unowned, so no teardown removed it",
-			p.dropSessionForPile(onlyTrackedPile(p)));
+			p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 
 		// SESSION TWO, on that same tile, with the phantom already sitting there.
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
-		p.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
-		assertTrue("a second session is running", p.dropSession.active());
-		assertEquals("holding one key", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.piles.trackGroundDrop(995, 700L, 3200, 3400, 0, null, 300, 400, false);
+		assertTrue("a second session is running", p.dropProof.dropSession.active());
+		assertEquals("holding one key", 1, p.dropProof.dropSession.activePileCount());
 
 		despawnTrackedPileAt(p, 995, 3200, 3400);
 		poll(p, 50);
 
 		assertEquals("FINDING R1: a phantom from an earlier session must not absorb this despawn",
-			0, p.dropSession.activePileCount());
+			0, p.dropProof.dropSession.activePileCount());
 		assertTrue("NO 30-MINUTE OVERRUN across sessions: the tail MUST arm on its own",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 	}
 
 	// ===== CASE 44 — TWO REAL PILES, THE SESSION'S THE OLDER ONE: still a refusal =====
@@ -2458,32 +2458,32 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
-		assertEquals("the session owns its pile", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		assertEquals("the session owns its pile", 1, p.dropProof.dropSession.activePileCount());
 
 		// A second Drop whose pending expires before its pile lands. The pile is tracked and
 		// unowned, and it is NEWER than the session's own record.
 		dropAction(p);
 		forcePendingsExpired(p);
 		poll(p, 1);
-		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 130, 400, false);
-		assertEquals("two real piles on one tile", 2, p.groundDropCount());
+		p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 130, 400, false);
+		assertEquals("two real piles on one tile", 2, p.piles.groundDropCount());
 		assertEquals("and the session still holds exactly one key",
-			1, p.dropSession.activePileCount());
+			1, p.dropProof.dropSession.activePileCount());
 
 		despawnTrackedPileAt(p, 1931, 3200, 3400);
 		poll(p, 50);
 
-		assertTrue("FINDING R2: the recording must still be running", p.dropSession.active());
+		assertTrue("FINDING R2: the recording must still be running", p.dropProof.dropSession.active());
 		assertFalse("NO EARLY STOP: the tail must not arm while the session's pile may be down",
-			p.dropSession.stopPending());
-		assertEquals("FINDING R2: the session's key is KEPT", 1, p.dropSession.activePileCount());
-		assertTrue("and the session can never be proven complete", p.dropSession.unprovable());
+			p.dropProof.dropSession.stopPending());
+		assertEquals("FINDING R2: the session's key is KEPT", 1, p.dropProof.dropSession.activePileCount());
+		assertTrue("and the session can never be proven complete", p.dropProof.dropSession.unprovable());
 
-		assertEquals("the record the resolver took is the one left gone", 1, p.groundDropCount());
+		assertEquals("the record the resolver took is the one left gone", 1, p.piles.groundDropCount());
 		assertNotNull("so what is left tracked is the session's own",
-			p.dropSessionForPile(onlyTrackedPile(p)));
+			p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 	}
 
 	// ===== CASE 45 — THE CONTROL: with no session, the OLDEST record still answers =====
@@ -2498,18 +2498,18 @@ public class DropStopContractTest
 	{
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.setDropProofRolloutForTest(false);
+		p.grants.setDropProofRolloutForTest(false);
 
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
-		assertEquals("one real stack is tracked twice, as it always was", 2, p.groundDropCount());
-		assertFalse("and no session exists", p.dropSession.active());
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 1_000L, 3200, 3400, 0, null, 101, 400, true);
+		assertEquals("one real stack is tracked twice, as it always was", 2, p.piles.groundDropCount());
+		assertFalse("and no session exists", p.dropProof.dropSession.active());
 
-		Method find = AccountConnectPlugin.class.getDeclaredMethod(
+		Method find = OwnPiles.class.getDeclaredMethod(
 			"findGroundDrop", int.class, int.class, int.class, int.class);
 		find.setAccessible(true);
-		AccountConnectPlugin.DroppedGroundItem resolved =
-			(AccountConnectPlugin.DroppedGroundItem) find.invoke(p, 995, 3200, 3400, 0);
+		OwnPiles.DroppedGroundItem resolved =
+			(OwnPiles.DroppedGroundItem) find.invoke(p.piles, 995, 3200, 3400, 0);
 		assertNotNull(resolved);
 		assertEquals("with no session the OLDEST record answers, unchanged", 500L, resolved.qty);
 	}
@@ -2548,18 +2548,18 @@ public class DropStopContractTest
 	 */
 	private static void seedTwoRealUnstackablePiles(AccountConnectPlugin p) throws Exception
 	{
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
 		assertFalse("the pre-grant pile is laid down with no session running",
-			p.dropSession.active());
+			p.dropProof.dropSession.active());
 
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200, 400, false);
-		assertEquals("two REAL piles of an unstackable are two records", 2, p.groundDropCount());
-		assertEquals("and the session owns exactly one of them", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200, 400, false);
+		assertEquals("two REAL piles of an unstackable are two records", 2, p.piles.groundDropCount());
+		assertEquals("and the session owns exactly one of them", 1, p.dropProof.dropSession.activePileCount());
 	}
 
 	// ===== CASE 46 — the recording MUST keep running while the session's pile is still down =====
@@ -2582,23 +2582,23 @@ public class DropStopContractTest
 		poll(p, 50);
 
 		// THE OUTCOME, asserted first.
-		assertTrue("FINDING R2: the recording must still be running", p.dropSession.active());
-		assertTrue("and the screen must still be captured", (Boolean) field(p, "dropCapturing"));
+		assertTrue("FINDING R2: the recording must still be running", p.dropProof.dropSession.active());
+		assertTrue("and the screen must still be captured", (Boolean) p.dropProof.dropCapturing);
 		assertFalse("NO EARLY STOP: the tail must NOT arm while a session pile is still tracked",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 		assertEquals("because the session's key is KEPT: its pile may still be down",
-			1, p.dropSession.activePileCount());
+			1, p.dropProof.dropSession.activePileCount());
 		assertTrue("and the caller still tracks a pile for this session",
-			p.dropSessionHoldsOwnedPile());
+			p.dropProof.dropSessionHoldsOwnedPile());
 
 		// The bookkeeping behind it.
 		assertTrue("FINDING R2: the session can never be proven complete from here",
-			p.dropSession.unprovable());
+			p.dropProof.dropSession.unprovable());
 		assertEquals("and it names the ambiguity",
-			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropSession.reason());
-		assertEquals("one real pile is left on the ground", 1, p.groundDropCount());
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropProof.dropSession.reason());
+		assertEquals("one real pile is left on the ground", 1, p.piles.groundDropCount());
 		assertNotNull("and it is the session's own",
-			p.dropSessionForPile(onlyTrackedPile(p)));
+			p.dropProof.dropSessionForPile(onlyTrackedPile(p)));
 	}
 
 	// ===== CASE 47 — the manifest may never say COMPLETE on that session =====
@@ -2618,17 +2618,17 @@ public class DropStopContractTest
 		despawnTrackedPileAt(p, 1931, 3200, 3400);
 		poll(p, 5);
 		assertTrue("the recording is still running after the ambiguous take",
-			p.dropSession.active());
+			p.dropProof.dropSession.active());
 
 		// The customer takes the second pile too. Only one record is left, so this one is certain.
 		despawnTrackedPileAt(p, 1931, 3200, 3400);
 		poll(p, 2);
-		assertEquals("the last key is released", 0, p.dropSession.activePileCount());
+		assertEquals("the last key is released", 0, p.dropProof.dropSession.activePileCount());
 		assertTrue("so the session ends on ITS OWN tail, not on a backstop",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse("and the recording really ends", p.dropSession.active());
+		assertFalse("and the recording really ends", p.dropProof.dropSession.active());
 
 		Map<String, Object> m = manifest(p);
 		assertNotNull("the footage is still published", m);
@@ -2651,16 +2651,16 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 
 		// Distinct recorded quantities, so the row names which record answered.
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 400, false);
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 400, false);
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 400, false);
-		assertEquals("two REAL piles", 2, p.groundDropCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 400, false);
+		assertEquals("two REAL piles", 2, p.piles.groundDropCount());
 
-		AccountConnectPlugin.DroppedGroundItem chosen =
+		OwnPiles.DroppedGroundItem chosen =
 			despawnAndPublishAt(p, 1931, 3200, 3400, 500);
 
 		Map<String, Object> row = lastRemoval(p);
@@ -2671,13 +2671,13 @@ public class DropStopContractTest
 
 		// And the attribution itself went back to the pre-round-6 answer: the unowned record.
 		assertEquals("ATTRIBUTION falls back to the other pile's OWN record", 11L, chosen.qty);
-		assertNull("which belongs to no session", p.dropSessionForPile(chosen));
+		assertNull("which belongs to no session", p.dropProof.dropSessionForPile(chosen));
 		assertEquals("so the row reports that record's quantity", 11L, row.get("qty"));
 		assertEquals("and that record's time on the ground", 400, row.get("ticks_on_ground"));
 
 		// The recorder is untouched by the row: its pile may still be down.
-		assertTrue("the recording continues", p.dropSession.active());
-		assertEquals("holding its own key", 1, p.dropSession.activePileCount());
+		assertTrue("the recording continues", p.dropProof.dropSession.active());
+		assertEquals("holding its own key", 1, p.dropProof.dropSession.activePileCount());
 	}
 
 	// ===== CASE 49 — the realistic five-plus-five trade =====
@@ -2693,21 +2693,21 @@ public class DropStopContractTest
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
 
-		p.setDropProofRolloutForTest(false);
+		p.grants.setDropProofRolloutForTest(false);
 		for (int i = 0; i < 5; i++)
 		{
-			p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100 + i, 900, false);
+			p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100 + i, 900, false);
 		}
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		for (int i = 0; i < 5; i++)
 		{
 			dropAction(p);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L + i);
-			p.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200 + i, 900, false);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L + i);
+			p.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 200 + i, 900, false);
 		}
-		assertEquals("ten REAL piles on one tile", 10, p.groundDropCount());
-		assertEquals("five of them the session's", 5, p.dropSession.activePileCount());
+		assertEquals("ten REAL piles on one tile", 10, p.piles.groundDropCount());
+		assertEquals("five of them the session's", 5, p.dropProof.dropSession.activePileCount());
 
 		// The customer takes them one at a time.
 		for (int take = 1; take <= 10; take++)
@@ -2717,18 +2717,18 @@ public class DropStopContractTest
 			if (take < 10)
 			{
 				assertTrue("FINDING R2: take " + take + " of 10 must not end the recording while "
-						+ p.groundDropCount() + " piles are still on the ground",
-					p.dropSession.active());
+						+ p.piles.groundDropCount() + " piles are still on the ground",
+					p.dropProof.dropSession.active());
 			}
 		}
 
 		// Only the tenth take, which empties the tile, may arm the tail.
-		assertEquals("every pile is gone", 0, p.groundDropCount());
-		assertEquals("and every key with it", 0, p.dropSession.activePileCount());
-		assertTrue("only now does the tail arm", p.dropSession.stopPending());
+		assertEquals("every pile is gone", 0, p.piles.groundDropCount());
+		assertEquals("and every key with it", 0, p.dropProof.dropSession.activePileCount());
+		assertTrue("only now does the tail arm", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 
 		Map<String, Object> m = manifest(p);
 		assertEquals("FINDING R2: a trade this ambiguous is never COMPLETE",
@@ -2740,7 +2740,7 @@ public class DropStopContractTest
 		// session's own remain, so those removals ARE ours and keep their honest linkage. Refusing
 		// attribution where it is unknowable must not become refusing it everywhere.
 		java.util.List<Map<String, Object>> rows = new java.util.ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("ground_removed".equals(e.get("type")))
 			{
@@ -2778,22 +2778,22 @@ public class DropStopContractTest
 		// it. The game merges, so trackGroundDrop is called with quantityMerge=true and adopts.
 		Rig r = rig();
 		AccountConnectPlugin p = r.plugin;
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 100, 400, false);
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
-		assertEquals("CONTROL: a stackable merge is ONE record", 1, p.groundDropCount());
-		assertEquals("and ONE key", 1, p.dropSession.activePileCount());
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(995, 1_200L, 3200, 3400, 0, null, 200, 400, true);
+		assertEquals("CONTROL: a stackable merge is ONE record", 1, p.piles.groundDropCount());
+		assertEquals("and ONE key", 1, p.dropProof.dropSession.activePileCount());
 
 		despawnAndPublishAt(p, 995, 3200, 3400, 500);
 		poll(p, 2);
-		assertEquals("CONTROL: the one despawn releases the key", 0, p.dropSession.activePileCount());
+		assertEquals("CONTROL: the one despawn releases the key", 0, p.dropProof.dropSession.activePileCount());
 		assertTrue("CONTROL: and the tail arms, because nothing was ambiguous",
-			p.dropSession.stopPending());
-		assertFalse("CONTROL: nothing marked this session unprovable", p.dropSession.unprovable());
+			p.dropProof.dropSession.stopPending());
+		assertFalse("CONTROL: nothing marked this session unprovable", p.dropProof.dropSession.unprovable());
 		assertNotNull("CONTROL: and the row keeps its honest session linkage",
 			lastRemoval(p).get("drop_session_id"));
 		forceTailDue(p);
@@ -2805,16 +2805,16 @@ public class DropStopContractTest
 		Rig r2 = rig();
 		AccountConnectPlugin p2 = r2.plugin;
 		dropAction(p2);
-		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p2.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
+		p2.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 100, 400, false);
 		despawnAndPublishAt(p2, 1931, 3200, 3400, 200);
 		poll(p2, 2);
 		assertTrue("CONTROL: an unambiguous single-pile session arms its own tail",
-			p2.dropSession.stopPending());
-		assertFalse("CONTROL: and is never marked unprovable", p2.dropSession.unprovable());
+			p2.dropProof.dropSession.stopPending());
+		assertFalse("CONTROL: and is never marked unprovable", p2.dropProof.dropSession.unprovable());
 		forceTailDue(p2);
 		poll(p2, 1);
-		assertFalse(p2.dropSession.active());
+		assertFalse(p2.dropProof.dropSession.active());
 		assertEquals("CONTROL: it ends COMPLETE", "COMPLETE", manifest(p2).get("outcome"));
 		assertNull("naming no reason", manifest(p2).get("outcome_reason"));
 	}
@@ -2841,7 +2841,7 @@ public class DropStopContractTest
 	 * implementing {@link AccountConnectPlugin.DespawnQuantity} is how the harness answers the same
 	 * question without implementing the whole TileItem interface.
 	 */
-	private static final class FakePile implements AccountConnectPlugin.DespawnQuantity
+	private static final class FakePile implements OwnPiles.DespawnQuantity
 	{
 		final int item;
 		final int x;
@@ -2874,7 +2874,7 @@ public class DropStopContractTest
 	 * rival removed, OUR pile removed, and a tile OUT OF SCENE. The last one is separate from an
 	 * empty tile on purpose: collapsing them is mutation (c).
 	 */
-	private static final class FakeScene implements AccountConnectPlugin.SceneGroundReader
+	private static final class FakeScene implements OwnPiles.SceneGroundReader
 	{
 		final java.util.List<FakePile> piles = new java.util.ArrayList<>();
 		final java.util.Set<String> outOfScene = new java.util.LinkedHashSet<>();
@@ -2907,12 +2907,12 @@ public class DropStopContractTest
 		 * does. Round 8 returned on the first match, which is the shape FINDING R7 lived in.
 		 */
 		@Override
-		public AccountConnectPlugin.SceneTileItems itemsOnTile(int item, int x, int y, int plane,
+		public OwnPiles.SceneTileItems itemsOnTile(int item, int x, int y, int plane,
 			Object excluding)
 		{
 			if (outOfScene.contains(x + ":" + y + ":" + plane))
 			{
-				return AccountConnectPlugin.SceneTileItems.unknown();
+				return OwnPiles.SceneTileItems.unknown();
 			}
 			java.util.List<Long> q = new java.util.ArrayList<>();
 			for (FakePile f : piles)
@@ -2927,7 +2927,7 @@ public class DropStopContractTest
 			{
 				qs[i] = q.get(i);
 			}
-			return AccountConnectPlugin.SceneTileItems.of(qs.length, qs);
+			return OwnPiles.SceneTileItems.of(qs.length, qs);
 		}
 	}
 
@@ -2941,15 +2941,15 @@ public class DropStopContractTest
 	 *                             despawning TileItem by identity, so both orders must agree.
 	 * @return the record the resolver chose, or null when it refused the despawn.
 	 */
-	private static AccountConnectPlugin.DroppedGroundItem despawnInScene(AccountConnectPlugin p,
+	private static OwnPiles.DroppedGroundItem despawnInScene(AccountConnectPlugin p,
 		FakeScene scene, FakePile going, int tick, boolean alreadyGoneFromScene) throws Exception
 	{
 		if (alreadyGoneFromScene)
 		{
 			scene.remove(going);
 		}
-		AccountConnectPlugin.DroppedGroundItem g =
-			p.resolveDespawnedGroundDrop(going.item, going.x, going.y, going.plane, going);
+		OwnPiles.DroppedGroundItem g =
+			p.piles.resolveDespawnedGroundDrop(going.item, going.x, going.y, going.plane, going);
 		if (!alreadyGoneFromScene)
 		{
 			scene.remove(going);
@@ -2958,12 +2958,12 @@ public class DropStopContractTest
 		{
 			return null;	// the resolver refused this despawn: no record removed, no row published
 		}
-		java.util.Deque<AccountConnectPlugin.DroppedGroundItem> q = groundDrops(p);
+		java.util.Deque<OwnPiles.DroppedGroundItem> q = groundDrops(p);
 		synchronized (q)
 		{
 			q.remove(g);
 		}
-		p.emitGroundRemoval(g, tick, false);
+		p.piles.emitGroundRemoval(g, tick, false);
 		return g;
 	}
 
@@ -2971,7 +2971,7 @@ public class DropStopContractTest
 	private static FakeScene withScene(AccountConnectPlugin p)
 	{
 		FakeScene s = new FakeScene();
-		p.setSceneReaderForTest(s);
+		p.piles.setSceneReaderForTest(s);
 		return s;
 	}
 
@@ -2997,41 +2997,41 @@ public class DropStopContractTest
 		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
-		assertEquals("the plugin tracks only OUR pile", 1, p.groundDropCount());
-		assertEquals("and holds one key", 1, p.dropSession.activePileCount());
+		assertEquals("the plugin tracks only OUR pile", 1, p.piles.groundDropCount());
+		assertEquals("and holds one key", 1, p.dropProof.dropSession.activePileCount());
 		assertFalse("the RECORD-only matcher still sees no rival at all",
-			p.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
+			p.piles.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
 
 		// The customer takes the RIVAL. Our pile is still physically down.
-		AccountConnectPlugin.DroppedGroundItem chosen =
+		OwnPiles.DroppedGroundItem chosen =
 			despawnInScene(p, scene, rival, 500, true);
 		poll(p, 50);
 
 		// THE OUTCOME, asserted first.
 		assertTrue("FINDING R4: NO EARLY STOP while our pile is physically on the ground",
-			p.dropSession.active());
-		assertTrue("and the screen is still being captured", (Boolean) field(p, "dropCapturing"));
-		assertFalse("and the tail must NOT arm", p.dropSession.stopPending());
-		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropSession.unprovable());
+			p.dropProof.dropSession.active());
+		assertTrue("and the screen is still being captured", (Boolean) p.dropProof.dropCapturing);
+		assertFalse("and the tail must NOT arm", p.dropProof.dropSession.stopPending());
+		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropProof.dropSession.unprovable());
 		assertNull("FINDING R4: no row may be published from our record for another pile's despawn",
 			lastRemoval(p));
 		// The mechanism behind it.
 		assertNull("the despawn itself is refused, because our pile may still be the one down",
 			chosen);
-		assertEquals("the session KEEPS its key", 1, p.dropSession.activePileCount());
+		assertEquals("the session KEEPS its key", 1, p.dropProof.dropSession.activePileCount());
 
 		// The customer then takes OUR pile too, and the tile is finally clear.
-		AccountConnectPlugin.DroppedGroundItem mine = despawnInScene(p, scene, ours, 600, true);
+		OwnPiles.DroppedGroundItem mine = despawnInScene(p, scene, ours, 600, true);
 		assertNotNull("with nothing left on the tile, our own despawn resolves normally", mine);
 		poll(p, 2);
-		assertEquals("the key is released", 0, p.dropSession.activePileCount());
-		assertTrue("so the session ends on its own tail", p.dropSession.stopPending());
+		assertEquals("the key is released", 0, p.dropProof.dropSession.activePileCount());
+		assertTrue("so the session ends on its own tail", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("FINDING R4: a session that shared its tile with an untracked pile is NOT complete",
 			"INTERRUPTED", manifest(p).get("outcome"));
 
@@ -3041,14 +3041,14 @@ public class DropStopContractTest
 		AccountConnectPlugin p2 = r2.plugin;
 		FakeScene clean = withScene(p2);
 		dropAction(p2);
-		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p2.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		FakePile only = clean.lay("OURS", 1931, 3200, 3400);
-		AccountConnectPlugin.DroppedGroundItem got = despawnInScene(p2, clean, only, 500, true);
+		OwnPiles.DroppedGroundItem got = despawnInScene(p2, clean, only, 500, true);
 		poll(p2, 2);
 		assertNotNull("CONTROL: an empty tile resolves the despawn normally", got);
-		assertTrue("CONTROL: the tail arms", p2.dropSession.stopPending());
-		assertFalse("CONTROL: nothing is unprovable", p2.dropSession.unprovable());
+		assertTrue("CONTROL: the tail arms", p2.dropProof.dropSession.stopPending());
+		assertFalse("CONTROL: nothing is unprovable", p2.dropProof.dropSession.unprovable());
 		assertNotNull("CONTROL: and the row keeps its honest linkage",
 			lastRemoval(p2).get("drop_session_id"));
 		forceTailDue(p2);
@@ -3076,34 +3076,34 @@ public class DropStopContractTest
 
 		// SESSION 1 drops a real unstackable. The pile is never taken.
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
 		FakePile old = scene.lay("OLD", 1931, 3200, 3400);
 
 		// The user unticks the upload switch.
 		r.config.upload = false;
 		poll(p, 1);
-		assertFalse("the session ended on the withdrawal", p.dropSession.active());
-		assertEquals("and its RECORD is gone", 0, p.groundDropCount());
+		assertFalse("the session ended on the withdrawal", p.dropProof.dropSession.active());
+		assertEquals("and its RECORD is gone", 0, p.piles.groundDropCount());
 		assertEquals("while the PILE is still physically on the ground", 1, scene.piles.size());
 
 		// The switch goes back on and SESSION 2 drops on the same tile.
 		r.config.upload = true;
-		p.onDropProofCapabilityChanged();
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene.lay("OURS", 1931, 3200, 3400);
-		assertEquals("session 2 tracks only its own pile", 1, p.groundDropCount());
+		assertEquals("session 2 tracks only its own pile", 1, p.piles.groundDropCount());
 
 		// The customer takes the OLD pile.
-		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
+		OwnPiles.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
 		poll(p, 50);
 
 		assertTrue("FINDING R4: session 2 keeps recording, its own pile is still down",
-			p.dropSession.active());
-		assertFalse("NO EARLY STOP", p.dropSession.stopPending());
-		assertTrue("and it can never be proven complete", p.dropSession.unprovable());
+			p.dropProof.dropSession.active());
+		assertFalse("NO EARLY STOP", p.dropProof.dropSession.stopPending());
+		assertTrue("and it can never be proven complete", p.dropProof.dropSession.unprovable());
 		assertNull("no row is published for a pile we cannot claim", lastRemoval(p));
 		assertNull("the despawn itself is refused", chosen);
 	}
@@ -3124,25 +3124,25 @@ public class DropStopContractTest
 		FakeScene scene = withScene(p);
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
 		FakePile old = scene.lay("OLD", 1931, 3200, 3400);
-		p.interruptDropSession();
-		assertFalse("session 1 ended on the hop", p.dropSession.active());
-		assertEquals("its record is gone", 0, p.groundDropCount());
+		p.dropProof.interruptDropSession();
+		assertFalse("session 1 ended on the hop", p.dropProof.dropSession.active());
+		assertEquals("its record is gone", 0, p.piles.groundDropCount());
 		assertEquals("its pile is not", 1, scene.piles.size());
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene.lay("OURS", 1931, 3200, 3400);
 
-		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
+		OwnPiles.DroppedGroundItem chosen = despawnInScene(p, scene, old, 500, true);
 		poll(p, 50);
 
-		assertTrue("FINDING R4: session 2 keeps recording", p.dropSession.active());
-		assertFalse("NO EARLY STOP", p.dropSession.stopPending());
-		assertTrue("COMPLETE is out of reach", p.dropSession.unprovable());
+		assertTrue("FINDING R4: session 2 keeps recording", p.dropProof.dropSession.active());
+		assertFalse("NO EARLY STOP", p.dropProof.dropSession.stopPending());
+		assertTrue("COMPLETE is out of reach", p.dropProof.dropSession.unprovable());
 		assertNull("and no fabricated row is published", lastRemoval(p));
 		assertNull("the despawn itself is refused", chosen);
 	}
@@ -3168,30 +3168,30 @@ public class DropStopContractTest
 
 		// The rival record is minted from a MERGE report, so mergeShadow=true, but it stands for a
 		// REAL separate pile. That is the premise being broken on purpose.
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, true);
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, true);
 		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
 		assertTrue("the rival record really carries the wrong flag",
 			onlyTrackedPile(p).mergeShadow);
 
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene.lay("OURS", 1931, 3200, 3400);
 		assertFalse("the RECORD-only matcher is fooled by the flag, exactly as R5ShadowB measured",
-			p.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
+			p.piles.matchDespawnedGroundDrop(1931, 3200, 3400, 0).ambiguous);
 
 		// The customer physically takes the RIVAL. Ours is still down.
-		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, rival, 500, true);
+		OwnPiles.DroppedGroundItem chosen = despawnInScene(p, scene, rival, 500, true);
 		poll(p, 50);
 
 		assertTrue("FINDING R6: NO EARLY STOP with our pile still physically down",
-			p.dropSession.active());
-		assertFalse("the tail must not arm", p.dropSession.stopPending());
+			p.dropProof.dropSession.active());
+		assertFalse("the tail must not arm", p.dropProof.dropSession.stopPending());
 		assertTrue("FINDING R6: a forced wrong shadow state can never reach COMPLETE",
-			p.dropSession.unprovable());
+			p.dropProof.dropSession.unprovable());
 		assertNull("the scene refuses the despawn the flag would have waved through", chosen);
 	}
 
@@ -3217,45 +3217,45 @@ public class DropStopContractTest
 		FakeScene scene = withScene(p);
 
 		// The round-7 route: two REAL tracked piles of an unstackable, one of them ours.
-		p.setDropProofRolloutForTest(false);
-		p.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
+		p.grants.setDropProofRolloutForTest(false);
+		p.piles.trackGroundDrop(1931, 11L, 3200, 3400, 0, null, 100, 900, false);
 		FakePile rival = scene.lay("RIVAL", 1931, 3200, 3400);
-		p.setDropProofRolloutForTest(true);
-		p.onDropProofCapabilityChanged();
+		p.grants.setDropProofRolloutForTest(true);
+		p.dropProof.onDropProofCapabilityChanged();
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
 
 		// The customer takes OUR pile and walks away, leaving the rival's pile down. The despawn is
 		// ambiguous, so it is credited to the RIVAL's record and OUR record lingers for a pile that
 		// is physically gone. This is R5Linger's exact state.
-		AccountConnectPlugin.DroppedGroundItem chosen = despawnInScene(p, scene, ours, 500, true);
+		OwnPiles.DroppedGroundItem chosen = despawnInScene(p, scene, ours, 500, true);
 		assertNotNull("the round-7 refusal still answers with the rival's own record", chosen);
 		assertEquals("which is the rival's record, not ours", 11L, chosen.qty);
 		poll(p, 5);
 
 		// EARLY DIRECTION. An item of that id is still on the tile, so nothing may be released.
-		assertTrue("the recording is still running", p.dropSession.active());
-		assertEquals("our key is still held", 1, p.dropSession.activePileCount());
+		assertTrue("the recording is still running", p.dropProof.dropSession.active());
+		assertEquals("our key is still held", 1, p.dropProof.dropSession.activePileCount());
 		assertFalse("NOT EARLY: the tail must not arm while an item of that id is still on the tile",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 
 		// LATE DIRECTION. The rival's pile finally leaves. The tile is clear of item 1931, so the
 		// scene proves our pile is gone too, and the ordinary tail ends the recording.
 		scene.remove(rival);
 		poll(p, 1);
 		assertEquals("NOT LATE: the physical check releases the key on the very next poll",
-			0, p.dropSession.activePileCount());
-		assertTrue("so the ordinary five-second tail arms", p.dropSession.stopPending());
-		assertTrue("and the session is still running until it elapses", p.dropSession.active());
+			0, p.dropProof.dropSession.activePileCount());
+		assertTrue("so the ordinary five-second tail arms", p.dropProof.dropSession.stopPending());
+		assertTrue("and the session is still running until it elapses", p.dropProof.dropSession.active());
 		assertEquals("the recorder names the physical evidence",
-			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropSession.reason());
+			DropSessionRecorder.REASON_AMBIGUOUS_DESPAWN, p.dropProof.dropSession.reason());
 
 		forceTailDue(p);
 		poll(p, 1);
 		assertFalse("the recording ends on the tail, NOT on the 30-minute cap",
-			p.dropSession.active());
+			p.dropProof.dropSession.active());
 		Map<String, Object> m = manifest(p);
 		assertEquals("a despawn it could not attribute is never COMPLETE",
 			"INTERRUPTED", m.get("outcome"));
@@ -3283,17 +3283,17 @@ public class DropStopContractTest
 		AccountConnectPlugin p = r.plugin;
 		FakeScene scene = withScene(p);
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene.leaveScene(3200, 3400, 0);
 		assertEquals("the scene cannot answer for a tile it does not hold",
-			AccountConnectPlugin.ScenePileState.UNKNOWN,
-			p.scenePileState(1931, 3200, 3400, 0, null));
+			OwnPiles.ScenePileState.UNKNOWN,
+			p.piles.scenePileState(1931, 3200, 3400, 0, null));
 		poll(p, 50);
-		assertEquals("UNKNOWN must NOT release the key", 1, p.dropSession.activePileCount());
-		assertTrue("so the recording keeps running", p.dropSession.active());
-		assertFalse("and the tail stays unarmed", p.dropSession.stopPending());
-		assertFalse("nothing marked it unprovable either", p.dropSession.unprovable());
+		assertEquals("UNKNOWN must NOT release the key", 1, p.dropProof.dropSession.activePileCount());
+		assertTrue("so the recording keeps running", p.dropProof.dropSession.active());
+		assertFalse("and the tail stays unarmed", p.dropProof.dropSession.stopPending());
+		assertFalse("nothing marked it unprovable either", p.dropProof.dropSession.unprovable());
 
 		// B — the tile is IN scene and holds a DIFFERENT item. Our pile of 1931 is not there, so the
 		// key is released; a pile of item 995 on the tile must not keep it alive.
@@ -3301,17 +3301,17 @@ public class DropStopContractTest
 		AccountConnectPlugin p2 = r2.plugin;
 		FakeScene scene2 = withScene(p2);
 		dropAction(p2);
-		p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p2.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p2.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene2.lay("SOMEBODY ELSE'S COINS", 995, 3200, 3400);
 		poll(p2, 1);
 		assertEquals("a pile of another item is not our pile",
-			0, p2.dropSession.activePileCount());
-		assertTrue("so the tail arms", p2.dropSession.stopPending());
+			0, p2.dropProof.dropSession.activePileCount());
+		assertTrue("so the tail arms", p2.dropProof.dropSession.stopPending());
 		assertTrue("and the session can never claim it watched the pile go",
-			p2.dropSession.unprovable());
+			p2.dropProof.dropSession.unprovable());
 		assertEquals("the reason names the physical evidence",
-			DropSessionRecorder.REASON_PILE_SCENE_GONE, p2.dropSession.reason());
+			DropSessionRecorder.REASON_PILE_SCENE_GONE, p2.dropProof.dropSession.reason());
 		forceTailDue(p2);
 		poll(p2, 1);
 		assertEquals("a pile that vanished without an attributable despawn is NOT complete",
@@ -3322,13 +3322,13 @@ public class DropStopContractTest
 		AccountConnectPlugin p3 = r3.plugin;
 		FakeScene scene3 = withScene(p3);
 		dropAction(p3);
-		p3.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p3.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+		p3.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p3.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 		scene3.lay("OURS", 1931, 3200, 3400);
 		poll(p3, 50);
 		assertEquals("our pile is still physically there, so the key is kept",
-			1, p3.dropSession.activePileCount());
-		assertFalse("and the tail stays unarmed", p3.dropSession.stopPending());
+			1, p3.dropProof.dropSession.activePileCount());
+		assertFalse("and the tail stays unarmed", p3.dropProof.dropSession.stopPending());
 
 		// D — TWO of the session's own piles of DIFFERENT items on ONE tile, and only one of them
 		// has gone. A drop trade of a rune platebody and a stack of coins onto the same tile is
@@ -3340,23 +3340,23 @@ public class DropStopContractTest
 		AccountConnectPlugin p4 = r4.plugin;
 		FakeScene scene4 = withScene(p4);
 		dropAction(p4);
-		p4.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p4.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 300, 900, false);
+		p4.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p4.piles.trackGroundDrop(1931, 1L, 3200, 3400, 0, null, 300, 900, false);
 		dropAction(p4);
-		p4.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
-		p4.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 301, 900, false);
-		assertEquals("the session holds two keys on one tile", 2, p4.dropSession.activePileCount());
+		p4.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 2_000L);
+		p4.piles.trackGroundDrop(995, 500L, 3200, 3400, 0, null, 301, 900, false);
+		assertEquals("the session holds two keys on one tile", 2, p4.dropProof.dropSession.activePileCount());
 		// Only the COINS are still physically on the tile. The 1931 pile has gone.
 		scene4.lay("OUR COINS", 995, 3200, 3400);
 		poll(p4, 50);
 		assertFalse("NO EARLY STOP: the coins are still physically down, so no tail may arm",
-			p4.dropSession.stopPending());
-		assertTrue("and the recording is still running", p4.dropSession.active());
-		assertTrue("and the screen is still being captured", (Boolean) field(p4, "dropCapturing"));
+			p4.dropProof.dropSession.stopPending());
+		assertTrue("and the recording is still running", p4.dropProof.dropSession.active());
+		assertTrue("and the screen is still being captured", (Boolean) p4.dropProof.dropCapturing);
 		// The mechanism behind it.
 		assertEquals("exactly ONE key is released: the pile whose OWN item left the tile",
-			1, p4.dropSession.activePileCount());
-		assertEquals("only the departed pile's record was dropped", 1, p4.groundDropCount());
+			1, p4.dropProof.dropSession.activePileCount());
+		assertEquals("only the departed pile's record was dropped", 1, p4.piles.groundDropCount());
 		assertEquals("and it is the coins that are still tracked", 995, onlyTrackedPile(p4).item);
 	}
 
@@ -3383,15 +3383,15 @@ public class DropStopContractTest
 			AccountConnectPlugin p = r.plugin;
 			FakeScene scene = withScene(p);
 			dropAction(p);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-			p.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			p.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 			FakePile ours = scene.lay("OURS", 1931, 3200, 3400);
 			assertNotNull("the despawning pile itself must never make its own despawn ambiguous ("
 					+ order + ")",
 				despawnInScene(p, scene, ours, 500, alreadyGone));
 			poll(p, 2);
-			assertTrue("so the tail arms (" + order + ")", p.dropSession.stopPending());
-			assertFalse("and nothing is unprovable (" + order + ")", p.dropSession.unprovable());
+			assertTrue("so the tail arms (" + order + ")", p.dropProof.dropSession.stopPending());
+			assertFalse("and nothing is unprovable (" + order + ")", p.dropProof.dropSession.unprovable());
 
 			// B — an untracked rival is also on the tile: the despawn must be refused, in BOTH orders.
 			Rig r2 = rig();
@@ -3399,15 +3399,15 @@ public class DropStopContractTest
 			FakeScene scene2 = withScene(p2);
 			FakePile rival = scene2.lay("RIVAL", 1931, 3200, 3400);
 			dropAction(p2);
-			p2.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-			p2.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
+			p2.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+			p2.piles.trackGroundDrop(1931, 99L, 3200, 3400, 0, null, 300, 900, false);
 			scene2.lay("OURS", 1931, 3200, 3400);
-			AccountConnectPlugin.DroppedGroundItem refused =
+			OwnPiles.DroppedGroundItem refused =
 				despawnInScene(p2, scene2, rival, 500, alreadyGone);
 			poll(p2, 2);
 			assertFalse("a rival on the tile arms no tail (" + order + ")",
-				p2.dropSession.stopPending());
-			assertTrue("COMPLETE is out of reach (" + order + ")", p2.dropSession.unprovable());
+				p2.dropProof.dropSession.stopPending());
+			assertTrue("COMPLETE is out of reach (" + order + ")", p2.dropProof.dropSession.unprovable());
 			assertNull("and the despawn itself is refused (" + order + ")", refused);
 		}
 	}
@@ -3431,7 +3431,7 @@ public class DropStopContractTest
 	private static java.util.List<Map<String, Object>> allRemovals(AccountConnectPlugin p)
 	{
 		java.util.List<Map<String, Object>> out = new java.util.ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("ground_removed".equals(e.get("type")))
 			{
@@ -3466,19 +3466,19 @@ public class DropStopContractTest
 		for (int i = 0; i < 10; i++)
 		{
 			dropAction(p);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
 			// Distinct quantities and distinct drop ticks, so a WRONG choice is visible on the row.
-			p.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
+			p.piles.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
 			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 11L * (i + 1));
 		}
-		assertEquals("ten of our own piles on one tile", 10, p.groundDropCount());
-		assertEquals("and ten keys held", 10, p.dropSession.activePileCount());
+		assertEquals("ten of our own piles on one tile", 10, p.piles.groundDropCount());
+		assertEquals("and ten keys held", 10, p.dropProof.dropSession.activePileCount());
 
 		// The customer takes them NEWEST FIRST, which is the order that exposed the wrong
 		// attribution in R6Attrib.
 		for (int i = 9; i >= 0; i--)
 		{
-			AccountConnectPlugin.DroppedGroundItem chosen =
+			OwnPiles.DroppedGroundItem chosen =
 				despawnInScene(p, scene, physical[i], 500 + (9 - i), true);
 			assertNotNull("FINDING R7: take " + (10 - i) + " of 10 must NOT be refused; every pile "
 					+ "on this tile is ours and the count proves one of ours went", chosen);
@@ -3490,13 +3490,13 @@ public class DropStopContractTest
 		// THE OUTCOME, asserted first.
 		assertEquals("FINDING R7: all TEN evidence rows are published, not one",
 			10, allRemovals(p).size());
-		assertEquals("every key is released", 0, p.dropSession.activePileCount());
-		assertTrue("so the tail arms", p.dropSession.stopPending());
+		assertEquals("every key is released", 0, p.dropProof.dropSession.activePileCount());
+		assertTrue("so the tail arms", p.dropProof.dropSession.stopPending());
 		assertFalse("FINDING R7: an honest same-item multi-pile trade is NOT unprovable",
-			p.dropSession.unprovable());
+			p.dropProof.dropSession.unprovable());
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("FINDING R7: a trade in which every pile was ours ends COMPLETE",
 			"COMPLETE", manifest(p).get("outcome"));
 		assertNull("naming no reason", manifest(p).get("outcome_reason"));
@@ -3543,8 +3543,8 @@ public class DropStopContractTest
 			for (int i = 0; i < 3; i++)
 			{
 				dropAction(p);
-				p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
-				p.trackGroundDrop(1931, qty[i], 3200, 3400, 0, null, 100 + i, 900, false);
+				p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+				p.piles.trackGroundDrop(1931, qty[i], 3200, 3400, 0, null, 100 + i, 900, false);
 				physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, qty[i]);
 			}
 
@@ -3552,7 +3552,7 @@ public class DropStopContractTest
 			for (int t = 0; t < 3; t++)
 			{
 				int i = takeOrder[t];
-				AccountConnectPlugin.DroppedGroundItem chosen =
+				OwnPiles.DroppedGroundItem chosen =
 					despawnInScene(p, scene, physical[i], 500 + t * 10, true);
 				assertNotNull("FINDING R7 (" + order + "): take " + (t + 1) + " must not be refused",
 					chosen);
@@ -3565,7 +3565,7 @@ public class DropStopContractTest
 			}
 
 			assertEquals("all three rows published (" + order + ")", 3, allRemovals(p).size());
-			assertFalse("nothing is unprovable (" + order + ")", p.dropSession.unprovable());
+			assertFalse("nothing is unprovable (" + order + ")", p.dropProof.dropSession.unprovable());
 			forceTailDue(p);
 			poll(p, 1);
 			assertEquals("FINDING R7 (" + order + "): the trade ends COMPLETE",
@@ -3599,26 +3599,26 @@ public class DropStopContractTest
 		for (int i = 0; i < 10; i++)
 		{
 			dropAction(p);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
-			p.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.piles.trackGroundDrop(1931, 11L * (i + 1), 3200, 3400, 0, null, 100 + i, 900, false);
 			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 11L * (i + 1));
 		}
-		assertEquals("the plugin tracks only OUR ten", 10, p.groundDropCount());
+		assertEquals("the plugin tracks only OUR ten", 10, p.piles.groundDropCount());
 
 		// The customer takes one of OURS while the stranger's pile is still down.
-		AccountConnectPlugin.DroppedGroundItem chosen =
+		OwnPiles.DroppedGroundItem chosen =
 			despawnInScene(p, scene, physical[0], 500, true);
 		poll(p, 5);
 
 		// THE OUTCOME, asserted first.
 		assertTrue("FINDING R4: NO EARLY STOP while a pile we do not own is on the tile",
-			p.dropSession.active());
-		assertFalse("and the tail must NOT arm", p.dropSession.stopPending());
-		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropSession.unprovable());
+			p.dropProof.dropSession.active());
+		assertFalse("and the tail must NOT arm", p.dropProof.dropSession.stopPending());
+		assertTrue("FINDING R4: COMPLETE is out of reach", p.dropProof.dropSession.unprovable());
 		assertEquals("FINDING R4: NO row may be fabricated for an ambiguous take",
 			0, allRemovals(p).size());
 		assertNull("the despawn itself is refused", chosen);
-		assertEquals("the session keeps every key", 10, p.dropSession.activePileCount());
+		assertEquals("the session keeps every key", 10, p.dropProof.dropSession.activePileCount());
 
 		// The whole tile then clears, ours and the stranger's alike.
 		for (int i = 1; i < 10; i++)
@@ -3630,7 +3630,7 @@ public class DropStopContractTest
 		poll(p, 5);
 		forceTailDue(p);
 		poll(p, 1);
-		assertFalse(p.dropSession.active());
+		assertFalse(p.dropProof.dropSession.active());
 		assertEquals("FINDING R4: a session that shared its tile with a stranger's pile is "
 				+ "INTERRUPTED, never COMPLETE", "INTERRUPTED", manifest(p).get("outcome"));
 	}
@@ -3658,14 +3658,14 @@ public class DropStopContractTest
 		for (int i = 0; i < 3; i++)
 		{
 			dropAction(p);
-			p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
-			p.trackGroundDrop(1931, 50L, 3200, 3400, 0, null, 100 + i, 900, false);
+			p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, (byte) i}, 1_000L + i);
+			p.piles.trackGroundDrop(1931, 50L, 3200, 3400, 0, null, 100 + i, 900, false);
 			physical[i] = scene.lay("OURS" + i, 1931, 3200, 3400, 50L);
 		}
 
 		for (int t = 0; t < 3; t++)
 		{
-			AccountConnectPlugin.DroppedGroundItem chosen =
+			OwnPiles.DroppedGroundItem chosen =
 				despawnInScene(p, scene, physical[t], 500 + t, true);
 			assertNotNull("equal quantities are OURS either way, so the take is not refused", chosen);
 			poll(p, 2);
@@ -3674,8 +3674,8 @@ public class DropStopContractTest
 		// THE OUTCOME, asserted first.
 		assertEquals("all three rows are published", 3, allRemovals(p).size());
 		assertFalse("the session is NOT unprovable: every candidate pile was ours",
-			p.dropSession.unprovable());
-		assertTrue("the tail arms", p.dropSession.stopPending());
+			p.dropProof.dropSession.unprovable());
+		assertTrue("the tail arms", p.dropProof.dropSession.stopPending());
 		forceTailDue(p);
 		poll(p, 1);
 		assertEquals("and the trade ends COMPLETE", "COMPLETE", manifest(p).get("outcome"));
@@ -3716,14 +3716,14 @@ public class DropStopContractTest
 		FakeScene scene = withScene(p);
 
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
-		p.trackGroundDrop(1931, 7L, 3200, 3400, 0, null, 100, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 1}, 1_000L);
+		p.piles.trackGroundDrop(1931, 7L, 3200, 3400, 0, null, 100, 900, false);
 		FakePile seven = scene.lay("OURS7", 1931, 3200, 3400, 7L);
 		dropAction(p);
-		p.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 1_001L);
-		p.trackGroundDrop(1931, 9L, 3200, 3400, 0, null, 101, 900, false);
+		p.dropProof.acceptDropFrame(new byte[]{(byte) 0xff, (byte) 0xd8, 2}, 1_001L);
+		p.piles.trackGroundDrop(1931, 9L, 3200, 3400, 0, null, 101, 900, false);
 		scene.lay("OURS9", 1931, 3200, 3400, 9L);
-		assertEquals("two own piles of one item on one tile", 2, p.dropSession.activePileCount());
+		assertEquals("two own piles of one item on one tile", 2, p.dropProof.dropSession.activePileCount());
 
 		// The pile of 7 physically leaves and NO despawn event reaches the plugin.
 		scene.remove(seven);
@@ -3734,24 +3734,24 @@ public class DropStopContractTest
 		// every one of those frames uploads. Releasing BOTH would be the EARLY direction.
 		assertEquals("FINDING R8: NOT LATE and NOT EARLY — exactly ONE key is released, because "
 				+ "exactly one of our two piles left the tile",
-			1, p.dropSession.activePileCount());
+			1, p.dropProof.dropSession.activePileCount());
 		assertTrue("the session is still recording, because our other pile is still down",
-			p.dropSession.active());
+			p.dropProof.dropSession.active());
 		assertFalse("NO EARLY STOP: the tail must not arm while a session pile is on the ground",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 		assertTrue("a pile released without being observed to leave makes the session unprovable",
-			p.dropSession.unprovable());
+			p.dropProof.dropSession.unprovable());
 
 		// And it released the RIGHT one: the surviving record is the pile still physically down.
-		assertEquals("one record survives", 1, p.groundDropCount());
+		assertEquals("one record survives", 1, p.piles.groundDropCount());
 		assertEquals("FINDING R8: and it is the pile of 9, which is still on the tile",
 			9L, groundDrops(p).iterator().next().qty);
 
 		// When the second pile goes too, the tail arms on the very next poll.
 		scene.piles.clear();
 		poll(p, 2);
-		assertEquals("both keys released", 0, p.dropSession.activePileCount());
+		assertEquals("both keys released", 0, p.dropProof.dropSession.activePileCount());
 		assertTrue("NOT LATE: the tail arms one poll after the tile is clear",
-			p.dropSession.stopPending());
+			p.dropProof.dropSession.stopPending());
 	}
 }

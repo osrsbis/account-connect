@@ -48,13 +48,13 @@ public class Wave1bTradeReceivedTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "pendingTradeGiven", itemList(20997, 1));      // twisted bow given
-		inject(plugin, "pendingCounterparty", "Bob");
-		inject(plugin, "pendingTradeReceived", itemList(995, 5000));  // 5000 coins received
+		plugin.trade.pendingTradeGiven = itemList(20997, 1);      // twisted bow given
+		plugin.trade.pendingCounterparty = "Bob";
+		plugin.trade.pendingTradeReceived = itemList(995, 5000);  // 5000 coins received
 
-		plugin.emitTradeEvent();
+		plugin.trade.emitTradeEvent();
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("trade", ev.get("type"));
 		assertNull("partner name is excluded from the public event", ev.get("counterparty"));
 		assertTrue("given present", ev.containsKey("given"));
@@ -71,13 +71,13 @@ public class Wave1bTradeReceivedTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "pendingTradeGiven", itemList(20997, 1));
-		inject(plugin, "pendingTradeReceived", new ArrayList<Map<String, Object>>()); // empty structured read
-		inject(plugin, "pendingReceivedText", "Blood rune x 100");
+		plugin.trade.pendingTradeGiven = itemList(20997, 1);
+		plugin.trade.pendingTradeReceived = new ArrayList<Map<String, Object>>(); // empty structured read
+		plugin.trade.pendingReceivedText = "Blood rune x 100";
 
-		plugin.emitTradeEvent();
+		plugin.trade.emitTradeEvent();
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertNull("unstructured trade text is excluded", ev.get("received_text"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> received = (List<Map<String, Object>>) ev.get("received");
@@ -90,11 +90,11 @@ public class Wave1bTradeReceivedTest
 		// Nothing captured for the received side (widget was absent): received[] must still be present + empty.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "pendingTradeGiven", itemList(20997, 1));
+		plugin.trade.pendingTradeGiven = itemList(20997, 1);
 
-		plugin.emitTradeEvent();
+		plugin.trade.emitTradeEvent();
 
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertTrue(ev.containsKey("received"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> received = (List<Map<String, Object>>) ev.get("received");
@@ -120,7 +120,7 @@ public class Wave1bTradeReceivedTest
 		when(blank.getItemId()).thenReturn(-1);
 		inject(plugin, "client", client);
 
-		List<Map<String, Object>> got = plugin.readReceivedOffer();
+		List<Map<String, Object>> got = plugin.trade.readReceivedOffer();
 		assertEquals(2, got.size());
 		assertEquals(995, got.get(0).get("id"));
 		assertEquals(5000, got.get(0).get("qty"));
@@ -143,7 +143,7 @@ public class Wave1bTradeReceivedTest
 		when(slot.getItemQuantity()).thenReturn(1);
 		inject(plugin, "client", client);
 
-		List<Map<String, Object>> got = plugin.readReceivedOffer();
+		List<Map<String, Object>> got = plugin.trade.readReceivedOffer();
 		assertEquals(1, got.size());
 		assertEquals(4151, got.get(0).get("id"));
 	}
@@ -158,10 +158,10 @@ public class Wave1bTradeReceivedTest
 		when(root.getText()).thenReturn("Blood rune x 100<br>Coins x 5,000"); // raw, tags intact
 		inject(plugin, "client", client);
 
-		String text = plugin.readReceivedText();
+		String text = plugin.trade.readReceivedText();
 		assertEquals("Blood rune x 100<br>Coins x 5,000", text);
 		// and the structured read finds no items on a text-only widget
-		assertTrue(plugin.readReceivedOffer().isEmpty());
+		assertTrue(plugin.trade.readReceivedOffer().isEmpty());
 	}
 
 	@Test
@@ -172,27 +172,27 @@ public class Wave1bTradeReceivedTest
 		when(client.getWidget(RECEIVE_COMPONENT)).thenReturn(null);
 		inject(plugin, "client", client);
 
-		assertTrue("no widget → empty structured read", plugin.readReceivedOffer().isEmpty());
-		assertNull("no widget → null text", plugin.readReceivedText());
+		assertTrue("no widget → empty structured read", plugin.trade.readReceivedOffer().isEmpty());
+		assertNull("no widget → null text", plugin.trade.readReceivedText());
 	}
 
 	@Test
 	public void readReceivedNullSafeWhenClientNull() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin(); // client not injected
-		assertTrue(plugin.readReceivedOffer().isEmpty());
-		assertNull(plugin.readReceivedText());
+		assertTrue(plugin.trade.readReceivedOffer().isEmpty());
+		assertNull(plugin.trade.readReceivedText());
 	}
 
 	@Test
 	public void resetTradeStateClearsReceived() throws Exception
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		inject(plugin, "pendingTradeReceived", itemList(995, 1));
-		inject(plugin, "pendingReceivedText", "something");
+		plugin.trade.pendingTradeReceived = itemList(995, 1);
+		plugin.trade.pendingReceivedText = "something";
 		invokeReset(plugin);
-		assertNull(field(plugin, "pendingTradeReceived"));
-		assertNull(field(plugin, "pendingReceivedText"));
+		assertNull(plugin.trade.pendingTradeReceived);
+		assertNull(plugin.trade.pendingReceivedText);
 	}
 
 	private static List<Map<String, Object>> itemList(int id, int qty)
@@ -207,9 +207,7 @@ public class Wave1bTradeReceivedTest
 
 	private static void invokeReset(AccountConnectPlugin plugin) throws Exception
 	{
-		java.lang.reflect.Method m = AccountConnectPlugin.class.getDeclaredMethod("resetTradeState");
-		m.setAccessible(true);
-		m.invoke(plugin);
+		plugin.trade.resetTradeState();
 	}
 
 	private static Object field(AccountConnectPlugin plugin, String name) throws Exception

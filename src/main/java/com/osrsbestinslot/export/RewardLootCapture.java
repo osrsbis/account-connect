@@ -96,9 +96,7 @@ final class RewardLootCapture
 			if (id > 0 && now > was) gained.add(new long[]{id, now - was});
 		}
 		if (gained.isEmpty()) return null; // a change that only removed items: keep waiting for the reward
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("source", armedSource);
-		out.put("items", gained);
+		Map<String, Object> out = Fields.of("source", armedSource, "items", gained);
 		reset();
 		return out;
 	}

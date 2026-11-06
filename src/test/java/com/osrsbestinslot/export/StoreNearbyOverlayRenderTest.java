@@ -44,7 +44,7 @@ public class StoreNearbyOverlayRenderTest
 		java.lang.reflect.Field f = AccountConnectPlugin.class.getDeclaredField("activeHash");
 		f.setAccessible(true);
 		f.set(p, ACCOUNT);
-		p.setStaffCaptureForTest(TOKEN, ACCOUNT);
+		p.grants.setStaffCapture(TOKEN, ACCOUNT);
 	}
 
 	private static Graphics2D graphics()
@@ -57,7 +57,7 @@ public class StoreNearbyOverlayRenderTest
 	public void drawsNothingWhileNoShopIsOpen() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(false);
+		plugin.store.setShopOpenForTest(false);
 		StoreNearbyOverlay overlay = new StoreNearbyOverlay(plugin);
 		assertNull("overlay must not render outside a shop", overlay.render(graphics()));
 	}
@@ -66,8 +66,8 @@ public class StoreNearbyOverlayRenderTest
 	public void drawsWhileAShopIsOpen() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(true);
-		plugin.setStoreToolsForTest(true);
+		plugin.store.setShopOpenForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		StoreNearbyOverlay overlay = new StoreNearbyOverlay(plugin);
 		// No client is injected, so the display reader returns empty — the panel must still draw
 		// its title and the explicit "nobody nearby" line rather than vanishing.
@@ -76,7 +76,7 @@ public class StoreNearbyOverlayRenderTest
 		// OverlayPanel clears its children at the END of render, so inspect what it BUILT. A panel
 		// with only a title is indistinguishable from one whose data source silently broke — the
 		// explicit empty-state line is what tells those apart, so assert it is actually produced.
-		java.util.List<String[]> rows = StoreNearbyOverlay.visibleRows(plugin.nearbyPlayersForOverlay(6));
+		java.util.List<String[]> rows = StoreNearbyOverlay.visibleRows(plugin.store.nearbyPlayersForOverlay(6));
 		org.junit.Assert.assertTrue("no client injected, so the row list must be empty", rows.isEmpty());
 		// One line: the "Nobody nearby" heading. The reset countdown is its own overlay now.
 		org.junit.Assert.assertEquals("empty-state heading only",
@@ -93,7 +93,7 @@ public class StoreNearbyOverlayRenderTest
 	public void drawsNothingWhenTheServerHasNotGrantedStoreTools() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(true);
+		plugin.store.setShopOpenForTest(true);
 		// store tools deliberately NOT granted — this is every ordinary player's state
 		StoreNearbyOverlay overlay = new StoreNearbyOverlay(plugin);
 		assertNull("ungranted tokens must see no overlay", overlay.render(graphics()));
@@ -108,20 +108,20 @@ public class StoreNearbyOverlayRenderTest
 	{
 		System.clearProperty("osrsbis.storetools");
 		org.junit.Assert.assertFalse("no flag = no override",
-			AccountConnectPlugin.storeToolsDevOverride());
+			ServerGrants.storeToolsDevOverride());
 		try
 		{
 			for (String bad : new String[]{"", " ", "off", "false", "0", "yes", "ON"})
 			{
 				System.setProperty("osrsbis.storetools", bad);
 				org.junit.Assert.assertFalse("'" + bad + "' must not grant",
-					AccountConnectPlugin.storeToolsDevOverride());
+					ServerGrants.storeToolsDevOverride());
 			}
 			for (String good : new String[]{"on", "true", "1"})
 			{
 				System.setProperty("osrsbis.storetools", good);
 				org.junit.Assert.assertTrue("'" + good + "' must grant",
-					AccountConnectPlugin.storeToolsDevOverride());
+					ServerGrants.storeToolsDevOverride());
 			}
 		}
 		finally
@@ -149,8 +149,8 @@ public class StoreNearbyOverlayRenderTest
 				}
 			});
 			org.junit.Assert.assertFalse("no token = no overlays even with the flag",
-				unlinked.storeToolsEnabled());
-			org.junit.Assert.assertTrue("linked token + flag = granted", plugin().storeToolsEnabled());
+				unlinked.grants.storeToolsEnabled());
+			org.junit.Assert.assertTrue("linked token + flag = granted", plugin().grants.storeToolsEnabled());
 		}
 		finally
 		{
@@ -162,7 +162,7 @@ public class StoreNearbyOverlayRenderTest
 	public void theGateDefaultsToOff() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		org.junit.Assert.assertFalse("store tools must default OFF", plugin.storeToolsEnabled());
+		org.junit.Assert.assertFalse("store tools must default OFF", plugin.grants.storeToolsEnabled());
 	}
 
 	@Test
@@ -171,8 +171,8 @@ public class StoreNearbyOverlayRenderTest
 		// OverlayPanel clears its children between frames only when clearChildren is on. If it is
 		// not, the panel grows one row per frame and covers the screen within seconds.
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(true);
-		plugin.setStoreToolsForTest(true);
+		plugin.store.setShopOpenForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		StoreNearbyOverlay overlay = new StoreNearbyOverlay(plugin);
 		overlay.render(graphics());
 		int afterFirst = overlay.getPanelComponent().getChildren().size();
@@ -187,8 +187,8 @@ public class StoreNearbyOverlayRenderTest
 	public void drawsNearbyPlayerFromClientInsteadOfAnAlwaysEmptyCaptureReader() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(true);
-		plugin.setStoreToolsForTest(true);
+		plugin.store.setShopOpenForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		staff(plugin);
 		net.runelite.api.Client client = org.mockito.Mockito.mock(net.runelite.api.Client.class);
 		net.runelite.api.Player self = org.mockito.Mockito.mock(net.runelite.api.Player.class);
@@ -212,12 +212,12 @@ public class StoreNearbyOverlayRenderTest
 			assertNotNull(overlay.render(g));
 			org.junit.Assert.assertEquals("heading plus the nearby player's row",
 				2, overlay.builtRowCountForTest());
-			plugin.setStaffCaptureForTest(null, null);
+			plugin.grants.setStaffCapture(null, null);
 			assertNotNull(overlay.render(g));
 			org.junit.Assert.assertEquals("store tools without the staff-capture grant show nobody",
 				1, overlay.builtRowCountForTest());
 			org.junit.Assert.assertTrue("and read no player for an upload",
-				plugin.nearbyPlayersSnapshot(6).isEmpty());
+				plugin.store.nearbyPlayersSnapshot(6).isEmpty());
 		}
 		finally
 		{
@@ -239,8 +239,8 @@ public class StoreNearbyOverlayRenderTest
 	public void displayReadsOnlyCurrentNearbyRowsAndKeepsCaptureReadersEmpty() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setShopOpenForTest(true);
-		plugin.setStoreToolsForTest(true);
+		plugin.store.setShopOpenForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		staff(plugin);
 		net.runelite.api.Client client = org.mockito.Mockito.mock(net.runelite.api.Client.class);
 		net.runelite.api.Player self = visiblePlayer("Self", 3210, 3210);
@@ -255,38 +255,38 @@ public class StoreNearbyOverlayRenderTest
 		f.setAccessible(true);
 		f.set(plugin, client);
 
-		java.util.List<java.util.Map<String, Object>> rows = plugin.nearbyPlayersForOverlay(6);
+		java.util.List<java.util.Map<String, Object>> rows = plugin.store.nearbyPlayersForOverlay(6);
 		org.junit.Assert.assertEquals(2, rows.size());
 		org.junit.Assert.assertEquals("Near", rows.get(0).get("rsn"));
 		org.junit.Assert.assertEquals(1, rows.get(0).get("dist"));
 		org.junit.Assert.assertEquals(80, rows.get(0).get("cb"));
 		org.junit.Assert.assertEquals("Farther", rows.get(1).get("rsn"));
-		org.junit.Assert.assertEquals(1, plugin.nearbyPlayersForOverlay(1).size());
+		org.junit.Assert.assertEquals(1, plugin.store.nearbyPlayersForOverlay(1).size());
 		// The display reader itself never asks for animation or target: those belong to the staff upload readers.
 		org.mockito.Mockito.verify(near, org.mockito.Mockito.never()).getAnimation();
 		org.mockito.Mockito.verify(near, org.mockito.Mockito.never()).getInteracting();
 
 		// Store tools without the staff-capture grant: the upload readers stay empty and read nothing.
-		plugin.setStaffCaptureForTest(null, null);
-		org.junit.Assert.assertTrue(plugin.nearbyPlayersForOverlay(6).isEmpty());
-		org.junit.Assert.assertTrue(plugin.nearbyPlayersSnapshot(6, true).isEmpty());
-		plugin.accumulateShopNearby();
-		f = AccountConnectPlugin.class.getDeclaredField("shopVisitNearby");
+		plugin.grants.setStaffCapture(null, null);
+		org.junit.Assert.assertTrue(plugin.store.nearbyPlayersForOverlay(6).isEmpty());
+		org.junit.Assert.assertTrue(plugin.store.nearbyPlayersSnapshot(6, true).isEmpty());
+		plugin.store.accumulateShopNearby();
+		f = StoreTools.class.getDeclaredField("shopVisitNearby");
 		f.setAccessible(true);
-		org.junit.Assert.assertTrue(((java.util.Map<?, ?>) f.get(plugin)).isEmpty());
+		org.junit.Assert.assertTrue(((java.util.Map<?, ?>) f.get(plugin.store)).isEmpty());
 		org.mockito.Mockito.verify(near, org.mockito.Mockito.never()).getAnimation();
 		org.mockito.Mockito.verify(near, org.mockito.Mockito.never()).getInteracting();
 
 		staff(plugin);
 		org.mockito.Mockito.when(client.getPlayers()).thenReturn(java.util.Collections.singletonList(self));
 		org.junit.Assert.assertTrue("leaving players must not remain in a display cache",
-			plugin.nearbyPlayersForOverlay(6).isEmpty());
+			plugin.store.nearbyPlayersForOverlay(6).isEmpty());
 		org.mockito.Mockito.clearInvocations(client);
-		plugin.setStoreToolsForTest(false);
-		org.junit.Assert.assertTrue(plugin.nearbyPlayersForOverlay(6).isEmpty());
-		plugin.setStoreToolsForTest(true);
-		plugin.setShopOpenForTest(false);
-		org.junit.Assert.assertTrue(plugin.nearbyPlayersForOverlay(6).isEmpty());
+		plugin.grants.setStoreToolsForTest(false);
+		org.junit.Assert.assertTrue(plugin.store.nearbyPlayersForOverlay(6).isEmpty());
+		plugin.grants.setStoreToolsForTest(true);
+		plugin.store.setShopOpenForTest(false);
+		org.junit.Assert.assertTrue(plugin.store.nearbyPlayersForOverlay(6).isEmpty());
 		org.mockito.Mockito.verify(client, org.mockito.Mockito.never()).getPlayers();
 	}
 

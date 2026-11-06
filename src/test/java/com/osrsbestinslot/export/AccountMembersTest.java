@@ -71,9 +71,9 @@ public class AccountMembersTest
 	@SuppressWarnings("unchecked")
 	private Object members() throws Exception
 	{
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		Map<String, Object> snap = (Map<String, Object>) build.invoke(plugin);
+		Map<String, Object> snap = (Map<String, Object>) build.invoke(plugin.snapshots);
 		return ((Map<String, Object>) snap.get("account")).get("members");
 	}
 

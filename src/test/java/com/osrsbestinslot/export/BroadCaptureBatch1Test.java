@@ -83,7 +83,7 @@ public class BroadCaptureBatch1Test
 	private List<Map<String, Object>> ge()
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (String.valueOf(e.get("type")).startsWith("ge_"))
 			{
@@ -128,13 +128,13 @@ public class BroadCaptureBatch1Test
 	public void aFullBufferKeepsGeRowsWhileRegionRowsAreDropped() throws Exception
 	{
 		setUp();
-		p.emitEvent("ge_buy", new HashMap<>());
+		p.events.emitEvent("ge_buy", new HashMap<>());
 		for (int i = 0; i < 600; i++)
 		{
-			p.emitEvent("region", new HashMap<>());
+			p.events.emitEvent("region", new HashMap<>());
 		}
 		int geLeft = 0;
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("ge_buy".equals(e.get("type")))
 			{
@@ -142,8 +142,8 @@ public class BroadCaptureBatch1Test
 			}
 		}
 		assertEquals("the GE row must survive 600 later region rows", 1, geLeft);
-		assertEquals(500, p.pendingEvents.size());
-		Map<String, Object> h = p.captureHealthSnapshot();
+		assertEquals(500, p.events.pendingEvents.size());
+		Map<String, Object> h = p.events.captureHealthSnapshot();
 		assertEquals(101L, h.get("events_overflow_p2_total"));
 		assertEquals(0L, h.get("events_overflow_p0_total"));
 		assertEquals(101L, h.get("events_lost_total"));
@@ -300,14 +300,14 @@ public class BroadCaptureBatch1Test
 		setUp();
 		when(client.getWorldType()).thenReturn(java.util.EnumSet.of(net.runelite.api.WorldType.SEASONAL));
 		p.onGameStateChanged(gs(GameState.LOGGED_IN));
-		p.emitEvent("loot", new HashMap<>());
-		assertEquals("DEMONIC_PACTS_LEAGUE", p.pendingEvents.get(0).get("profile_type"));
+		p.events.emitEvent("loot", new HashMap<>());
+		assertEquals("DEMONIC_PACTS_LEAGUE", p.events.pendingEvents.get(0).get("profile_type"));
 		p.onGameStateChanged(gs(GameState.LOGIN_SCREEN));
 		assertNull(read("activeProfileType"));
 		when(client.getWorldType()).thenReturn(java.util.EnumSet.noneOf(net.runelite.api.WorldType.class));
 		p.onGameStateChanged(gs(GameState.LOGGED_IN));
-		p.emitEvent("loot", new HashMap<>());
-		assertEquals("STANDARD", p.pendingEvents.get(p.pendingEvents.size()-1).get("profile_type"));
+		p.events.emitEvent("loot", new HashMap<>());
+		assertEquals("STANDARD", p.events.pendingEvents.get(p.events.pendingEvents.size()-1).get("profile_type"));
 	}
 
 	@Test
@@ -355,13 +355,13 @@ public class BroadCaptureBatch1Test
 		setUp();
 		when(client.getVarps()).thenReturn(new int[]{0, 7, 0});
 		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
-		assertNull("not granted = never sent", p.gameVarsBlock(1_000_000L));
-		p.applyServerPolicy(broadResponse("on"), TOKEN);
-		Map<String, Object> gv = p.gameVarsBlock(1_000_000L);
+		assertNull("not granted = never sent", p.snapshots.gameVarsBlock(1_000_000L));
+		p.grants.applyServerPolicy(broadResponse("on"), TOKEN);
+		Map<String, Object> gv = p.snapshots.gameVarsBlock(1_000_000L);
 		assertNotNull(gv);
 		assertEquals(1000L, gv.get("observed_at"));
 		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(0);
-		assertNull("a login tick whose skills read 0 has not loaded the player: send nothing", p.gameVarsBlock(1_000_000L));
+		assertNull("a login tick whose skills read 0 has not loaded the player: send nothing", p.snapshots.gameVarsBlock(1_000_000L));
 	}
 
 	@Test
@@ -373,10 +373,10 @@ public class BroadCaptureBatch1Test
 		a.put("schema_v", 1);
 		Map<String, Object> b = new LinkedHashMap<>(a);
 		b.put("game_vars", GameVarsCapture.encode(new int[]{1, 2, 3}));
-		assertEquals(p.canonicalHash(a), p.canonicalHash(b));
+		assertEquals(p.snapshots.canonicalHash(a), p.snapshots.canonicalHash(b));
 		Map<String, Object> c = new LinkedHashMap<>(a);
 		c.put("schema_v", 2);
-		assertNotEquals("control: a real change still changes the hash", p.canonicalHash(a), p.canonicalHash(c));
+		assertNotEquals("control: a real change still changes the hash", p.snapshots.canonicalHash(a), p.snapshots.canonicalHash(c));
 	}
 
 	// ------------------------------------------------------------------ observed_at
@@ -385,10 +385,10 @@ public class BroadCaptureBatch1Test
 	public void observedAtIsNullUntilTheContainerChangedAndThenItsTime() throws Exception
 	{
 		setUp();
-		assertNull(p.observedAtSeconds(95));
-		p.containerObservedAtMs.put(95, 1_700_000_123_456L);
-		assertEquals(Long.valueOf(1_700_000_123L), p.observedAtSeconds(95));
-		assertNull("another container is unaffected", p.observedAtSeconds(93));
+		assertNull(p.snapshots.observedAtSeconds(95));
+		p.snapshots.containerObservedAtMs.put(95, 1_700_000_123_456L);
+		assertEquals(Long.valueOf(1_700_000_123L), p.snapshots.observedAtSeconds(95));
+		assertNull("another container is unaffected", p.snapshots.observedAtSeconds(93));
 	}
 
     // ------------------------------------------------------------------ profile fencing
@@ -400,19 +400,19 @@ public class BroadCaptureBatch1Test
 		Field f = AccountConnectPlugin.class.getDeclaredField("activeProfileType");
 		f.setAccessible(true);
 		f.set(p, "STANDARD");
-		p.emitEvent("loot", new HashMap<>());
+		p.events.emitEvent("loot", new HashMap<>());
 		// Since the observation-context contract (4d2bbc72), STANDARD is explicit too.
 		// Omitting it would make a known main-game event indistinguishable from unknown mode.
-		assertEquals("STANDARD", p.pendingEvents.get(0).get("profile_type"));
+		assertEquals("STANDARD", p.events.pendingEvents.get(0).get("profile_type"));
 		f.set(p, "SEASONAL");
-		p.emitEvent("loot", new HashMap<>());
-		assertEquals("SEASONAL", p.pendingEvents.get(1).get("profile_type"));
+		p.events.emitEvent("loot", new HashMap<>());
+		assertEquals("SEASONAL", p.events.pendingEvents.get(1).get("profile_type"));
 	}
 
 	@Test
 	public void ownStorageContainersAreGamevalIdsAndExcludeOtherPlayersContainers()
 	{
-		Map<String, Integer> m = AccountConnectPlugin.OWN_STORAGE_CONTAINERS;
+		Map<String, Integer> m = SnapshotBuilder.OWN_STORAGE_CONTAINERS;
 		assertEquals(10, m.size());
 		assertEquals(Integer.valueOf(573), m.get("seed_box"));
 		assertEquals(Integer.valueOf(636), m.get("death_storage"));
@@ -434,37 +434,37 @@ public class BroadCaptureBatch1Test
 		when(prices.getItemPrice(5291)).thenReturn(2L);inject("itemManager",prices);
 		net.runelite.api.ItemContainer c=mock(net.runelite.api.ItemContainer.class);when(c.getId()).thenReturn(573);
 		Map<String,Object> snap=new LinkedHashMap<>();
-		p.addContainerSnapshot(snap,"seed_box",null);assertFalse(snap.containsKey("seed_box"));
-		p.addContainerSnapshot(snap,"seed_box",c);assertFalse("null array is unknown",snap.containsKey("seed_box"));
+		p.snapshots.addContainerSnapshot(snap,"seed_box",null);assertFalse(snap.containsKey("seed_box"));
+		p.snapshots.addContainerSnapshot(snap,"seed_box",c);assertFalse("null array is unknown",snap.containsKey("seed_box"));
 		when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,Integer.MAX_VALUE),
 			new net.runelite.api.Item(5291,Integer.MAX_VALUE),new net.runelite.api.Item(-1,0)});
-		p.containerObservedAtMs.put(573,1700000000123L);p.addContainerSnapshot(snap,"seed_box",c);
+		p.snapshots.containerObservedAtMs.put(573,1700000000123L);p.snapshots.addContainerSnapshot(snap,"seed_box",c);
 		Map<?,?> block=(Map<?,?>)snap.get("seed_box");
 		assertEquals(List.of(Map.of("id",5291,"qty",4294967294L)),block.get("items"));
 		assertEquals(8589934588L,block.get("value_gp"));assertEquals(false,block.get("complete"));
 		assertEquals("client_cached_seed_box",block.get("basis"));assertEquals(1700000000L,block.get("observed_at"));
-		when(c.getItems()).thenReturn(new net.runelite.api.Item[0]);snap.clear();p.addContainerSnapshot(snap,"seed_box",c);
+		when(c.getItems()).thenReturn(new net.runelite.api.Item[0]);snap.clear();p.snapshots.addContainerSnapshot(snap,"seed_box",c);
 		block=(Map<?,?>)snap.get("seed_box");assertEquals(List.of(),block.get("items"));assertEquals("observed_empty_cache",block.get("status"));
 		when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,-1)});
-		snap.clear();p.addContainerSnapshot(snap,"seed_box",c);assertFalse("invalid is not empty",snap.containsKey("seed_box"));
+		snap.clear();p.snapshots.addContainerSnapshot(snap,"seed_box",c);assertFalse("invalid is not empty",snap.containsKey("seed_box"));
 	}
 
 	@Test
 	public void seedBoxRejectsWrongContainerAndUnknownValueWithoutReadingOtherPlayers() throws Exception
 	{
 		setUp();net.runelite.api.ItemContainer c=mock(net.runelite.api.ItemContainer.class);
-		when(c.getId()).thenReturn(90);Map<String,Object> snap=new LinkedHashMap<>();p.addContainerSnapshot(snap,"seed_box",c);
+		when(c.getId()).thenReturn(90);Map<String,Object> snap=new LinkedHashMap<>();p.snapshots.addContainerSnapshot(snap,"seed_box",c);
 		assertFalse(snap.containsKey("seed_box"));org.mockito.Mockito.verify(c,org.mockito.Mockito.never()).getItems();
 		when(c.getId()).thenReturn(573);when(c.getItems()).thenReturn(new net.runelite.api.Item[]{new net.runelite.api.Item(5291,2)});
-		p.addContainerSnapshot(snap,"seed_box",c);assertFalse("not read this login: no block",snap.containsKey("seed_box"));
-		p.containerObservedAtMs.put(573,1700000000123L);
+		p.snapshots.addContainerSnapshot(snap,"seed_box",c);assertFalse("not read this login: no block",snap.containsKey("seed_box"));
+		p.snapshots.containerObservedAtMs.put(573,1700000000123L);
 		net.runelite.client.game.ItemManager prices=mock(net.runelite.client.game.ItemManager.class);inject("itemManager",prices);
-		when(prices.getItemPrice(5291)).thenReturn(Long.MAX_VALUE);p.addContainerSnapshot(snap,"seed_box",c);
+		when(prices.getItemPrice(5291)).thenReturn(Long.MAX_VALUE);p.snapshots.addContainerSnapshot(snap,"seed_box",c);
 		assertNull(((Map<?,?>)snap.get("seed_box")).get("value_gp"));
 		assertEquals("client_item_price_estimate",((Map<?,?>)snap.get("seed_box")).get("valuation_basis"));
 		for(long price:new long[]{0,4503599627370496L})
 		{
-			when(prices.getItemPrice(5291)).thenReturn(price);snap.clear();p.addContainerSnapshot(snap,"seed_box",c);
+			when(prices.getItemPrice(5291)).thenReturn(price);snap.clear();p.snapshots.addContainerSnapshot(snap,"seed_box",c);
 			assertNull("unpriced or inexact JSON values stay unknown",((Map<?,?>)snap.get("seed_box")).get("value_gp"));
 		}
 	}
@@ -472,9 +472,9 @@ public class BroadCaptureBatch1Test
 	@Test
 	public void containerObservationTimeDoesNotSurviveRelog() throws Exception
 	{
-		setUp();p.containerObservedAtMs.put(573,1700000000123L);p.containerObservedAtMs.put(95,1700000000123L);
+		setUp();p.snapshots.containerObservedAtMs.put(573,1700000000123L);p.snapshots.containerObservedAtMs.put(95,1700000000123L);
 		net.runelite.api.events.GameStateChanged e=new net.runelite.api.events.GameStateChanged();e.setGameState(GameState.LOGGING_IN);
-		p.onGameStateChanged(e);assertNull(p.observedAtSeconds(573));assertNull(p.observedAtSeconds(95));
+		p.onGameStateChanged(e);assertNull(p.snapshots.observedAtSeconds(573));assertNull(p.snapshots.observedAtSeconds(95));
 	}
 
 	@Test
@@ -483,16 +483,16 @@ public class BroadCaptureBatch1Test
 		setUp();
 		okhttp3.Response on = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", "on").build();
-		p.applyServerPolicy(on, TOKEN);
-		assertTrue(p.serverGameVarsEnabled);
+		p.grants.applyServerPolicy(on, TOKEN);
+		assertTrue(p.grants.serverGameVarsEnabled);
 		okhttp3.Response none = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").build();
-		p.applyServerPolicy(none, TOKEN);
-		assertFalse("an absent header revokes the grant", p.serverGameVarsEnabled);
+		p.grants.applyServerPolicy(none, TOKEN);
+		assertFalse("an absent header revokes the grant", p.grants.serverGameVarsEnabled);
 		okhttp3.Response off = new okhttp3.Response.Builder().request(new okhttp3.Request.Builder().url("http://x/").build())
 			.protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("ok").header("X-Broad-Capture", "off").build();
-		p.applyServerPolicy(off, TOKEN);
-		assertFalse(p.serverGameVarsEnabled);
+		p.grants.applyServerPolicy(off, TOKEN);
+		assertFalse(p.grants.serverGameVarsEnabled);
 	}
 
 	private static okhttp3.Response broadResponse(String grant)
@@ -505,24 +505,24 @@ public class BroadCaptureBatch1Test
 	public void broadGrantCannotCrossTokensAndRevocationRemovesCachedData() throws Exception
 	{
 		setUp();
-		p.applyServerPolicy(broadResponse("on"), "ffffffffffffffffffffffffffffffff");
-		assertFalse("old-token response cannot grant", p.serverGameVarsEnabled);
-		p.applyServerPolicy(broadResponse("on"), TOKEN);
+		p.grants.applyServerPolicy(broadResponse("on"), "ffffffffffffffffffffffffffffffff");
+		assertFalse("old-token response cannot grant", p.grants.serverGameVarsEnabled);
+		p.grants.applyServerPolicy(broadResponse("on"), TOKEN);
 		Map<String, Object> cache = new LinkedHashMap<>();
 		cache.put("schema_v", 1);
 		cache.put("game_vars", GameVarsCapture.encode(new int[]{1}));
 		cache.put("seed_box", new HashMap<>());
-		p.lastBuiltSnapshot = cache;
+		p.uploader.lastBuiltSnapshot = cache;
 		inject("gson", new com.google.gson.Gson());
-		p.applyServerPolicy(broadResponse("off"), TOKEN);
-		assertFalse(p.lastBuiltSnapshot.containsKey("game_vars"));
-		assertFalse(p.lastBuiltSnapshot.containsKey("seed_box"));
-		assertEquals(1, p.lastBuiltSnapshot.get("schema_v"));
-		p.applyServerPolicy(broadResponse("on"), TOKEN);
+		p.grants.applyServerPolicy(broadResponse("off"), TOKEN);
+		assertFalse(p.uploader.lastBuiltSnapshot.containsKey("game_vars"));
+		assertFalse(p.uploader.lastBuiltSnapshot.containsKey("seed_box"));
+		assertEquals(1, p.uploader.lastBuiltSnapshot.get("schema_v"));
+		p.grants.applyServerPolicy(broadResponse("on"), TOKEN);
 		inject("config", new AccountConnectConfig() { public String linkToken() { return "ffffffffffffffffffffffffffffffff"; }});
 		when(client.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);
 		when(client.getVarps()).thenReturn(new int[]{1});
-		assertNull("grant is bound even before config notification", p.gameVarsBlock(1_000_000L));
+		assertNull("grant is bound even before config notification", p.snapshots.gameVarsBlock(1_000_000L));
 	}
 
 	// ------------------------------------------------------------------ batch 2a: KC + clog guard
@@ -530,21 +530,21 @@ public class BroadCaptureBatch1Test
 	@Test
 	public void killCountLinesParseToStructuredSources()
 	{
-		Map<String, Object> z = AccountConnectPlugin.parseKillCount("Your Zulrah kill count is: <col=ff0000>41</col>.");
+		Map<String, Object> z = KillActivity.parseKillCount("Your Zulrah kill count is: <col=ff0000>41</col>.");
 		assertEquals("Zulrah", z.get("source"));
 		assertEquals("kill", z.get("kind"));
 		assertEquals(41L, z.get("count"));
-		Map<String, Object> t = AccountConnectPlugin.parseKillCount("Your completed Tombs of Amascut count is: 1,204.");
+		Map<String, Object> t = KillActivity.parseKillCount("Your completed Tombs of Amascut count is: 1,204.");
 		assertEquals("Tombs of Amascut", t.get("source"));
 		assertEquals(1204L, t.get("count"));
-		Map<String, Object> b = AccountConnectPlugin.parseKillCount("Your Barrows chest count is: @mes_hl_red@73@mes_hl_red@.");
+		Map<String, Object> b = KillActivity.parseKillCount("Your Barrows chest count is: @mes_hl_red@73@mes_hl_red@.");
 		assertEquals("Barrows chest", b.get("source"));
 		assertEquals(73L, b.get("count"));
-		Map<String, Object> c = AccountConnectPlugin.parseKillCount("Your completion count for the Theatre of Blood is: 12.");
+		Map<String, Object> c = KillActivity.parseKillCount("Your completion count for the Theatre of Blood is: 12.");
 		assertEquals("Theatre of Blood", c.get("source"));
 		assertEquals("completion count for", c.get("kind"));
-		assertNull("control: an unrelated line is not a count", AccountConnectPlugin.parseKillCount("You feel something weird sneaking into your backpack."));
-		assertNull(AccountConnectPlugin.parseKillCount(null));
+		assertNull("control: an unrelated line is not a count", KillActivity.parseKillCount("You feel something weird sneaking into your backpack."));
+		assertNull(KillActivity.parseKillCount(null));
 	}
 
 	@Test

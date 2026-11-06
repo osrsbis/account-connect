@@ -135,9 +135,9 @@ public class WholeCollectionLogTest
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> log() throws Exception
 	{
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		return (Map<String, Object>) ((Map<String, Object>) build.invoke(plugin)).get("collection_log");
+		return (Map<String, Object>) ((Map<String, Object>) build.invoke(plugin.snapshots)).get("collection_log");
 	}
 
 	@Test
@@ -160,7 +160,7 @@ public class WholeCollectionLogTest
 	public void anOpenLogIsScannedEvenWithoutTheSetupScriptEvent() throws Exception
 	{
 		counts(1, 1600);
-		inject("backoffUntilMillis", Long.MAX_VALUE);		// no upload in this fixture
+		plugin.uploader.backoffUntilMillis = Long.MAX_VALUE;		// no upload in this fixture
 		net.runelite.api.events.WidgetLoaded loaded = new net.runelite.api.events.WidgetLoaded();
 		loaded.setGroupId(COLLECTION_GROUP);
 		plugin.onWidgetLoaded(loaded);
@@ -263,7 +263,7 @@ public class WholeCollectionLogTest
 	@Test
 	public void theAccountProgressGrantKeepsItsOwnScan() throws Exception
 	{
-		plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url("http://localhost/").build())
+		plugin.grants.applyServerPolicy(new Response.Builder().request(new Request.Builder().url("http://localhost/").build())
 			.protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Account-Progress", "on").build(), TOKEN);
 		plugin.progressBlock();
 		tick += 2;
@@ -281,13 +281,13 @@ public class WholeCollectionLogTest
 	{
 		counts(2, 1600);
 		openAndScan(new int[]{4151, 1});
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
 		@SuppressWarnings("unchecked")
-		String before = plugin.canonicalHash((Map<String, Object>) build.invoke(plugin));
+		String before = plugin.snapshots.canonicalHash((Map<String, Object>) build.invoke(plugin.snapshots));
 		openAndScan(new int[]{11832, 1});					// the same scan sees the second item
 		@SuppressWarnings("unchecked")
-		String after = plugin.canonicalHash((Map<String, Object>) build.invoke(plugin));
+		String after = plugin.snapshots.canonicalHash((Map<String, Object>) build.invoke(plugin.snapshots));
 		assertEquals(true, log().get("complete"));
 		assertFalse("a now complete log is uploaded", before.equals(after));
 		assertNull(plugin.progressBlock());

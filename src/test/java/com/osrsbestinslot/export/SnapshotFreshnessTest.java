@@ -128,7 +128,7 @@ public class SnapshotFreshnessTest
 	{
 		bank = b;
 		server.enqueue(new MockResponse().setResponseCode(200));
-		plugin.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		RecordedRequest req = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("the open sends a snapshot", req);
 		return (Map<String, Object>) new Gson().fromJson(req.getBody().readUtf8(), Map.class).get("snapshot");
@@ -136,16 +136,16 @@ public class SnapshotFreshnessTest
 
 	private void close()
 	{
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		bank = null;
 	}
 
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> snapshot() throws Exception
 	{
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		return (Map<String, Object>) build.invoke(plugin);
+		return (Map<String, Object>) build.invoke(plugin.snapshots);
 	}
 
 	private static Object openAtCapture(Map<String, Object> snap)
@@ -174,12 +174,12 @@ public class SnapshotFreshnessTest
 		Map<String, Object> bankBlock = new LinkedHashMap<>((Map<String, Object>) a.get("bank"));
 		bankBlock.put("open_at_capture", true);
 		b.put("bank", bankBlock);
-		assertEquals(plugin.canonicalHash(a), plugin.canonicalHash(b));
+		assertEquals(plugin.snapshots.canonicalHash(a), plugin.snapshots.canonicalHash(b));
 
 		Map<String, Object> moved = new LinkedHashMap<>(bankBlock);
 		moved.put("value_gp", 1L);
 		b.put("bank", moved);
-		assertFalse("a real bank change still counts", plugin.canonicalHash(a).equals(plugin.canonicalHash(b)));
+		assertFalse("a real bank change still counts", plugin.snapshots.canonicalHash(a).equals(plugin.snapshots.canonicalHash(b)));
 	}
 
 	@Test
@@ -276,7 +276,7 @@ public class SnapshotFreshnessTest
 	{
 		open(container(new Item(COINS, 100)));
 		bank = container();								// the close reads an empty container: the close waits
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		bank = container(new Item(COINS, 100));			// a read arriving after the close
 		assertNull(openAtCapture(snapshot()));
 	}
@@ -294,16 +294,16 @@ public class SnapshotFreshnessTest
 	{
 		plugin.syncTask();
 		server.takeRequest(5, TimeUnit.SECONDS);
-		Map<String, Object> login = plugin.pendingEvents.get(0);
+		Map<String, Object> login = plugin.events.pendingEvents.get(0);
 		assertEquals("login", login.get("type"));
 		assertFalse("no bank read yet: no wealth at all", login.containsKey("wealth"));
-		assertNull(plugin.lastKnownNetWorth());
+		assertNull(plugin.session.lastKnownNetWorth());
 
 		open(container(new Item(COINS, 100)));
 		close();
-		plugin.pendingEvents.clear();
-		plugin.trackLogout("manual");
-		Map<String, Object> logout = plugin.pendingEvents.get(0);
+		plugin.events.pendingEvents.clear();
+		plugin.session.trackLogout("manual");
+		Map<String, Object> logout = plugin.events.pendingEvents.get(0);
 		assertEquals("logout", logout.get("type"));
 		assertNotNull("the bank was read this login", logout.get("wealth"));
 	}

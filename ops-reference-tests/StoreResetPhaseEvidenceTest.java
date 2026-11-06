@@ -1,6 +1,7 @@
 package com.osrsbestinslot.export;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -71,14 +72,14 @@ public class StoreResetPhaseEvidenceTest
 		}
 		inject("soldThisVisit", sold);
 		inject("shopStock", base);
-		inject("storeProbeItem", stock[0][0]);
+		p.store.storeProbeItem = stock[0][0];
 	}
 
 	/** Our own store click through the real menu path ("Sell 1" or "Buy 1"). */
 	private void click(long atMs, String option, int item) throws Exception
 	{
 		now = atMs;
-		inject("shopOpen", true);
+		p.store.shopOpen = true;
 		net.runelite.api.events.MenuOptionClicked e = mock(net.runelite.api.events.MenuOptionClicked.class);
 		when(e.getMenuOption()).thenReturn(option);
 		when(e.getItemId()).thenReturn(item);
@@ -99,7 +100,7 @@ public class StoreResetPhaseEvidenceTest
 			long r = Math.floorMod(at - trueTickMs, P);
 			long truth = Math.min(r, P - r);
 			assertTrue("phase off the true tick: row " + e + " truth " + truth,
-				Math.abs(ms - truth) <= AccountConnectPlugin.PHASE_ALIGN_TOL_MS);
+				Math.abs(ms - truth) <= StoreTools.PHASE_ALIGN_TOL_MS);
 		}
 	}
 
@@ -113,11 +114,11 @@ public class StoreResetPhaseEvidenceTest
 			items[i] = new Item(pairs[i][0], pairs[i][1]);
 		}
 		when(c.getItems()).thenReturn(items);
-		int before = p.pendingEvents.size();
-		p.handleShopStockChanged(c);
-		for (int i = before; i < p.pendingEvents.size(); i++)
+		int before = p.events.pendingEvents.size();
+		p.store.handleShopStockChanged(c);
+		for (int i = before; i < p.events.pendingEvents.size(); i++)
 		{
-			p.pendingEvents.get(i).put("at_test_ms", atMs);	// the test clock, for assertNoFalsePhase
+			p.events.pendingEvents.get(i).put("at_test_ms", atMs);	// the test clock, for assertNoFalsePhase
 		}
 	}
 
@@ -137,7 +138,7 @@ public class StoreResetPhaseEvidenceTest
 		base.put(999, 3);
 		inject("shopStock", base);
 		inject("soldThisVisit", new java.util.LinkedHashSet<>(java.util.Arrays.asList(1511)));
-		inject("storeProbeItem", 1511);
+		p.store.storeProbeItem = 1511;
 		stock(T0, new int[][]{{999, 3}});					// probe decays on the tick
 		long[] sellOff = {1_800L, 1_800L, 2_400L, 1_800L, 1_800L};
 		long[] buyOff = {6_000L, 9_000L, 4_200L, 11_400L, -1L};
@@ -388,7 +389,7 @@ public class StoreResetPhaseEvidenceTest
 	private List<Map<String, Object>> taken()
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("store_taken".equals(e.get("type")))
 			{
@@ -406,17 +407,28 @@ public class StoreResetPhaseEvidenceTest
 
 	private void inject(String name, Object value) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField(name);
+		Object on = p;
+		Field f;
+		try
+		{
+			f = AccountConnectPlugin.class.getDeclaredField(name);
+		}
+		catch (NoSuchFieldException moved)
+		{
+			boolean grant = Arrays.stream(ServerGrants.class.getDeclaredFields()).anyMatch(g -> g.getName().equals(name));
+			f = (grant ? ServerGrants.class : StoreTools.class).getDeclaredField(name);
+			on = grant ? p.grants : p.store;
+		}
 		f.setAccessible(true);
-		f.set(p, value);
+		f.set(on, value);
 		StaffGrant.afterInject(p, name);
 	}
 
 	private long anchor() throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("storeResetAnchorMs");
+		Field f = StoreTools.class.getDeclaredField("storeResetAnchorMs");
 		f.setAccessible(true);
-		return f.getLong(p);
+		return f.getLong(p.store);
 	}
 
 	/** Three decay steps of a 3-stack probe, one period apart: confirms the phase at the third step. */
@@ -554,7 +566,7 @@ public class StoreResetPhaseEvidenceTest
 			boolean clash = false;
 			for (long o : times)
 			{
-				if (AccountConnectPlugin.phaseAligned(o, t, AccountConnectPlugin.PHASE_ALIGN_TOL_MS))
+				if (StoreTools.phaseAligned(o, t, StoreTools.PHASE_ALIGN_TOL_MS))
 				{
 					clash = true;
 					break;
@@ -644,18 +656,18 @@ public class StoreResetPhaseEvidenceTest
 	@Test
 	public void theSupportNeededGrowsWithTheHistory()
 	{
-		assertEquals("a quiet shop: three ticks are enough", 3, AccountConnectPlugin.requiredPhaseSupport(3));
-		assertEquals(3, AccountConnectPlugin.requiredPhaseSupport(5));
-		assertTrue("never below three", AccountConnectPlugin.requiredPhaseSupport(2) > 2);
+		assertEquals("a quiet shop: three ticks are enough", 3, StoreTools.requiredPhaseSupport(3));
+		assertEquals(3, StoreTools.requiredPhaseSupport(5));
+		assertTrue("never below three", StoreTools.requiredPhaseSupport(2) > 2);
 		int prev = 0;
-		for (int n = 0; n <= AccountConnectPlugin.RESET_PHASE_HISTORY; n++)
+		for (int n = 0; n <= StoreTools.RESET_PHASE_HISTORY; n++)
 		{
-			int s = AccountConnectPlugin.requiredPhaseSupport(n);
-			assertTrue("n=" + n + " needs " + s, s >= AccountConnectPlugin.RESET_PHASE_MIN_OBS);
+			int s = StoreTools.requiredPhaseSupport(n);
+			assertTrue("n=" + n + " needs " + s, s >= StoreTools.RESET_PHASE_MIN_OBS);
 			assertTrue("monotone at n=" + n, s >= prev);
 			prev = s;
 		}
-		assertTrue("a full history needs more than three", AccountConnectPlugin.requiredPhaseSupport(32) > 3);
+		assertTrue("a full history needs more than three", StoreTools.requiredPhaseSupport(32) > 3);
 	}
 
 	// ---- (e) the phase is per visit ----
@@ -712,31 +724,31 @@ public class StoreResetPhaseEvidenceTest
 	@Test
 	public void alignmentIsWholePeriodsWithinOneTick()
 	{
-		long tol = AccountConnectPlugin.PHASE_ALIGN_TOL_MS;
+		long tol = StoreTools.PHASE_ALIGN_TOL_MS;
 		assertTrue(tol >= 600L && tol < 1_000L);
-		assertTrue(AccountConnectPlugin.phaseAligned(T0, T0 + P, tol));
-		assertTrue(AccountConnectPlugin.phaseAligned(T0, T0 + 3 * P + tol, tol));
-		assertTrue("order does not matter", AccountConnectPlugin.phaseAligned(T0 + 2 * P - tol, T0, tol));
-		assertFalse(AccountConnectPlugin.phaseAligned(T0, T0 + P + tol + 1, tol));
-		assertFalse("same cycle is k = 0", AccountConnectPlugin.phaseAligned(T0, T0 + 300L, tol));
-		assertFalse(AccountConnectPlugin.phaseAligned(T0, T0, tol));
-		assertFalse("half a period", AccountConnectPlugin.phaseAligned(T0, T0 + P / 2, tol));
+		assertTrue(StoreTools.phaseAligned(T0, T0 + P, tol));
+		assertTrue(StoreTools.phaseAligned(T0, T0 + 3 * P + tol, tol));
+		assertTrue("order does not matter", StoreTools.phaseAligned(T0 + 2 * P - tol, T0, tol));
+		assertFalse(StoreTools.phaseAligned(T0, T0 + P + tol + 1, tol));
+		assertFalse("same cycle is k = 0", StoreTools.phaseAligned(T0, T0 + 300L, tol));
+		assertFalse(StoreTools.phaseAligned(T0, T0, tol));
+		assertFalse("half a period", StoreTools.phaseAligned(T0, T0 + P / 2, tol));
 	}
 
 	@Test
 	public void alignedPhaseNeedsEveryPairToAgree()
 	{
-		long tol = AccountConnectPlugin.PHASE_ALIGN_TOL_MS;
-		assertNull(AccountConnectPlugin.alignedPhase(new long[0], tol));
-		long[] two = AccountConnectPlugin.alignedPhase(new long[]{T0, T0 + P}, tol);
+		long tol = StoreTools.PHASE_ALIGN_TOL_MS;
+		assertNull(StoreTools.alignedPhase(new long[0], tol));
+		long[] two = StoreTools.alignedPhase(new long[]{T0, T0 + P}, tol);
 		assertEquals(2L, two[1]);
-		long[] three = AccountConnectPlugin.alignedPhase(new long[]{T0, T0 + 17_000L, T0 + P + 400L, T0 + 2 * P - 250L}, tol);
+		long[] three = StoreTools.alignedPhase(new long[]{T0, T0 + 17_000L, T0 + P + 400L, T0 + 2 * P - 250L}, tol);
 		assertNotNull(three);
 		assertEquals(3L, three[1]);
 		assertEquals("the phase is the latest member", T0 + 2 * P - 250L, three[0]);
 		// a and b agree, b and c agree, but a and c are 1.2 s apart: not one phase
-		long[] chain = AccountConnectPlugin.alignedPhase(new long[]{T0, T0 + P + 600L, T0 + 2 * P + 1_200L}, tol);
+		long[] chain = StoreTools.alignedPhase(new long[]{T0, T0 + P + 600L, T0 + 2 * P + 1_200L}, tol);
 		assertEquals(2L, chain[1]);
-		assertTrue(AccountConnectPlugin.RESET_PHASE_MIN_OBS >= 3);
+		assertTrue(StoreTools.RESET_PHASE_MIN_OBS >= 3);
 	}
 }

@@ -56,11 +56,11 @@ public class Wave2EventsTest
 		p.onStatChanged(stat(Skill.WOODCUTTING, 50, 1050));	// +50
 		p.onStatChanged(stat(Skill.FISHING, 40, 500));		// baseline fishing
 		p.onStatChanged(stat(Skill.FISHING, 40, 530));		// +30
-		assertTrue("nothing emitted before a flush", p.pendingEvents.isEmpty());
+		assertTrue("nothing emitted before a flush", p.events.pendingEvents.isEmpty());
 
-		p.flushXpGain();
-		assertEquals(1, p.pendingEvents.size());
-		Map<String, Object> ev = p.pendingEvents.get(0);
+		p.session.flushXpGain();
+		assertEquals(1, p.events.pendingEvents.size());
+		Map<String, Object> ev = p.events.pendingEvents.get(0);
 		assertEquals("xp_gain", ev.get("type"));
 		assertEquals(80L, ev.get("total"));
 		@SuppressWarnings("unchecked")
@@ -71,8 +71,8 @@ public class Wave2EventsTest
 		assertEquals("Fishing", gains.get(1).get("skill"));
 		assertEquals(30L, gains.get(1).get("xp"));
 
-		p.flushXpGain();	// nothing new accumulated
-		assertEquals("empty flush emits nothing", 1, p.pendingEvents.size());
+		p.session.flushXpGain();	// nothing new accumulated
+		assertEquals("empty flush emits nothing", 1, p.events.pendingEvents.size());
 	}
 
 	@Test
@@ -80,8 +80,8 @@ public class Wave2EventsTest
 	{
 		AccountConnectPlugin p = plug();
 		p.onStatChanged(stat(Skill.MINING, 60, 273742));	// first sight of Mining xp
-		p.flushXpGain();
-		assertTrue("baseline alone yields no xp_gain", p.pendingEvents.isEmpty());
+		p.session.flushXpGain();
+		assertTrue("baseline alone yields no xp_gain", p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -94,16 +94,16 @@ public class Wave2EventsTest
 		inject(p, "client", c);
 
 		when(self.getWorldLocation()).thenReturn(new WorldPoint(3200, 3200, 0));
-		p.checkRegionChange();	// baseline
-		assertTrue("first region only baselines", p.pendingEvents.isEmpty());
+		p.session.checkRegionChange();	// baseline
+		assertTrue("first region only baselines", p.events.pendingEvents.isEmpty());
 
-		p.checkRegionChange();	// same region again
-		assertTrue("no move = no event", p.pendingEvents.isEmpty());
+		p.session.checkRegionChange();	// same region again
+		assertTrue("no move = no event", p.events.pendingEvents.isEmpty());
 
 		when(self.getWorldLocation()).thenReturn(new WorldPoint(2500, 3000, 0));	// different region
-		p.checkRegionChange();
-		assertEquals(1, p.pendingEvents.size());
-		Map<String, Object> ev = p.pendingEvents.get(0);
+		p.session.checkRegionChange();
+		assertEquals(1, p.events.pendingEvents.size());
+		Map<String, Object> ev = p.events.pendingEvents.get(0);
 		assertEquals("region", ev.get("type"));
 		assertEquals(new WorldPoint(3200, 3200, 0).getRegionID(), ev.get("from"));
 		assertEquals(new WorldPoint(2500, 3000, 0).getRegionID(), ev.get("to"));

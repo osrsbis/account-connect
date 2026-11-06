@@ -37,9 +37,9 @@ public class StoreResetTimerTest
 	public void countdownIsAPhaseNotAPerItemDuration()
 	{
 		long anchor = 1_000_000L;
-		assertEquals("1s after a reset -> 59s left", 59_000L, AccountConnectPlugin.msUntilNextReset(anchor, anchor + 1_000L));
-		assertEquals("30s in -> 30s left", 30_000L, AccountConnectPlugin.msUntilNextReset(anchor, anchor + 30_000L));
-		assertEquals("58s in -> 2s left", 2_000L, AccountConnectPlugin.msUntilNextReset(anchor, anchor + 58_000L));
+		assertEquals("1s after a reset -> 59s left", 59_000L, StoreTools.msUntilNextReset(anchor, anchor + 1_000L));
+		assertEquals("30s in -> 30s left", 30_000L, StoreTools.msUntilNextReset(anchor, anchor + 30_000L));
+		assertEquals("58s in -> 2s left", 2_000L, StoreTools.msUntilNextReset(anchor, anchor + 58_000L));
 	}
 
 	/** The anchor keeps working across later cycles — one probe pins the phase for the whole visit. */
@@ -48,9 +48,9 @@ public class StoreResetTimerTest
 	{
 		long anchor = 5_000_000L;
 		assertEquals("into the 5th cycle, 40s elapsed", 20_000L,
-			AccountConnectPlugin.msUntilNextReset(anchor, anchor + (4 * P) + 40_000L));
+			StoreTools.msUntilNextReset(anchor, anchor + (4 * P) + 40_000L));
 		assertEquals("an hour later the phase still holds", 45_000L,
-			AccountConnectPlugin.msUntilNextReset(anchor, anchor + (60 * P) + 15_000L));
+			StoreTools.msUntilNextReset(anchor, anchor + (60 * P) + 15_000L));
 	}
 
 	/** Landing exactly on a tick means a FULL period remains — never 0, which means "unknown". */
@@ -58,9 +58,9 @@ public class StoreResetTimerTest
 	public void exactTickYieldsAFullPeriodNotZero()
 	{
 		long anchor = 2_000_000L;
-		assertEquals(P, AccountConnectPlugin.msUntilNextReset(anchor, anchor));
-		assertEquals(P, AccountConnectPlugin.msUntilNextReset(anchor, anchor + P));
-		assertEquals(P, AccountConnectPlugin.msUntilNextReset(anchor, anchor + (7 * P)));
+		assertEquals(P, StoreTools.msUntilNextReset(anchor, anchor));
+		assertEquals(P, StoreTools.msUntilNextReset(anchor, anchor + P));
+		assertEquals(P, StoreTools.msUntilNextReset(anchor, anchor + (7 * P)));
 	}
 
 	/**
@@ -71,11 +71,11 @@ public class StoreResetTimerTest
 	@Test
 	public void unknownPhaseShowsNothing()
 	{
-		assertEquals("no anchor yet", 0L, AccountConnectPlugin.msUntilNextReset(0L, 9_999_999L));
-		assertEquals("negative anchor is not an anchor", 0L, AccountConnectPlugin.msUntilNextReset(-1L, 9_999_999L));
-		assertEquals("clock went backwards", 0L, AccountConnectPlugin.msUntilNextReset(5_000L, 4_000L));
-		assertFalse(AccountConnectPlugin.resetPhaseKnown(0L));
-		assertTrue(AccountConnectPlugin.resetPhaseKnown(1L));
+		assertEquals("no anchor yet", 0L, StoreTools.msUntilNextReset(0L, 9_999_999L));
+		assertEquals("negative anchor is not an anchor", 0L, StoreTools.msUntilNextReset(-1L, 9_999_999L));
+		assertEquals("clock went backwards", 0L, StoreTools.msUntilNextReset(5_000L, 4_000L));
+		assertFalse(StoreTools.resetPhaseKnown(0L));
+		assertTrue(StoreTools.resetPhaseKnown(1L));
 	}
 
 	// ---- anchor detection ----
@@ -95,7 +95,7 @@ public class StoreResetTimerTest
 	public void theProbeIsFixedAtTheFirstSellAndNotReArmed() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		inject(plugin, "shopOpen", true);
+		plugin.store.shopOpen = true;
 		net.runelite.api.Client client = org.mockito.Mockito.mock(net.runelite.api.Client.class);
 		inject(plugin, "client", client);
 
@@ -122,18 +122,18 @@ public class StoreResetTimerTest
 	public void theTickReArmsTheCountdownWhenThePhaseIsKnownAndNoTimerIsUp() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		inject(plugin, "shopOpen", true);
-		inject(plugin, "storeResetAnchorMs", System.currentTimeMillis());
+		plugin.store.shopOpen = true;
+		plugin.store.storeResetAnchorMs = System.currentTimeMillis();
 		inject(plugin, "infoBoxManager", null);		// no manager: showResetTimer is a safe no-op
-		inject(plugin, "resetTimer", null);		// the state after a Timer removed itself
+		plugin.store.resetTimer = null;		// the state after a Timer removed itself
 
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 
 		// The guard ran and reached showResetTimer, which returned early with no manager. What this
 		// arm pins is that the tick path is REACHED at all — deleting the re-arm block, or negating
 		// any of its three conditions, changes the reachability asserted below.
-		assertTrue("phase must still be known after the tick", plugin.resetPhaseKnownForTest());
-		assertTrue("the tick must have attempted a re-arm", plugin.reArmAttemptsForTest() > 0);
+		assertTrue("phase must still be known after the tick", plugin.store.resetPhaseKnownForTest());
+		assertTrue("the tick must have attempted a re-arm", plugin.store.reArmAttemptsForTest() > 0);
 	}
 
 	/** No re-arm while a countdown is already showing — that would restart it every tick. */
@@ -141,14 +141,14 @@ public class StoreResetTimerTest
 	public void theTickDoesNotReArmWhileACountdownIsAlreadyUp() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		inject(plugin, "shopOpen", true);
-		inject(plugin, "storeResetAnchorMs", System.currentTimeMillis());
-		inject(plugin, "resetTimer", org.mockito.Mockito.mock(
-			net.runelite.client.ui.overlay.infobox.Timer.class));
+		plugin.store.shopOpen = true;
+		plugin.store.storeResetAnchorMs = System.currentTimeMillis();
+		plugin.store.resetTimer = org.mockito.Mockito.mock(
+			net.runelite.client.ui.overlay.infobox.Timer.class);
 
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 
-		assertEquals("must not re-arm over a live countdown", 0, plugin.reArmAttemptsForTest());
+		assertEquals("must not re-arm over a live countdown", 0, plugin.store.reArmAttemptsForTest());
 	}
 
 	/** No re-arm outside a shop, and none while the phase is unknown. */
@@ -156,16 +156,16 @@ public class StoreResetTimerTest
 	public void theTickDoesNotReArmOutsideAShopOrWithAnUnknownPhase() throws Exception
 	{
 		AccountConnectPlugin outside = plugin();
-		inject(outside, "shopOpen", false);
-		inject(outside, "storeResetAnchorMs", System.currentTimeMillis());
+		outside.store.shopOpen = false;
+		outside.store.storeResetAnchorMs = System.currentTimeMillis();
 		outside.onGameTick(new net.runelite.api.events.GameTick());
-		assertEquals("no re-arm outside a shop", 0, outside.reArmAttemptsForTest());
+		assertEquals("no re-arm outside a shop", 0, outside.store.reArmAttemptsForTest());
 
 		AccountConnectPlugin unknown = plugin();
-		inject(unknown, "shopOpen", true);
-		inject(unknown, "storeResetAnchorMs", 0L);
+		unknown.store.shopOpen = true;
+		unknown.store.storeResetAnchorMs = 0L;
 		unknown.onGameTick(new net.runelite.api.events.GameTick());
-		assertEquals("no re-arm with an unknown phase", 0, unknown.reArmAttemptsForTest());
+		assertEquals("no re-arm with an unknown phase", 0, unknown.store.reArmAttemptsForTest());
 	}
 
 	// ---- anchor 1: THE ITEM WE SOLD VANISHING (measured live 2026-09-03) ----
@@ -180,14 +180,14 @@ public class StoreResetTimerTest
 	public void theItemWeSoldReachingZeroAnchorsTheClock() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		// The probe is seeded because the REAL sell path sets it: 1191 is the first item sold this
 		// visit, so it IS the probe. The old fixture left storeProbeItem at 0, which no live visit
 		// ever does. The assertion below is unchanged.
 		seedVisitWithProbe(plugin, 1191, new int[][]{{1191, 1}});	// our junk, one left
 		long before = System.currentTimeMillis();
 
-		plugin.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 1191 gone entirely
+		plugin.store.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 1191 gone entirely
 
 		assertTrue("the sold item vanishing must anchor", anchor(plugin) >= before);
 	}
@@ -202,10 +202,10 @@ public class StoreResetTimerTest
 	public void theShopAbsorbingItsOwnDefaultStockDoesNotAnchor() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisit(plugin, new int[][]{{1931, 6}});		// a Pot sold in, above the default of 5
 
-		plugin.handleShopStockChanged(shop(new int[][]{{1931, 5}}));	// normalised, NOT gone
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1931, 5}}));	// normalised, NOT gone
 
 		assertEquals("6->5 is the shop normalising, not a tick", 0L, anchor(plugin));
 	}
@@ -227,10 +227,10 @@ public class StoreResetTimerTest
 	public void aCustomerBuyingOutTheMerchandiseDoesNotAnchor() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisitWithProbe(plugin, 111, new int[][]{{111, 1}, {999, 3}});	// probe + merchandise
 
-		plugin.handleShopStockChanged(shop(new int[][]{{111, 1}}));	// 999 bought out, probe still there
+		plugin.store.handleShopStockChanged(shop(new int[][]{{111, 1}}));	// 999 bought out, probe still there
 
 		assertEquals("a customer clearing the merchandise is not a store tick", 0L, anchor(plugin));
 	}
@@ -240,11 +240,11 @@ public class StoreResetTimerTest
 	public void theProbeReachingZeroStillAnchorsInAMultiItemVisit() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisitWithProbe(plugin, 111, new int[][]{{111, 1}, {999, 3}});
 		long before = System.currentTimeMillis();
 
-		plugin.handleShopStockChanged(shop(new int[][]{{999, 3}}));	// probe gone, merchandise untouched
+		plugin.store.handleShopStockChanged(shop(new int[][]{{999, 3}}));	// probe gone, merchandise untouched
 
 		assertTrue("the probe vanishing is still the tick", anchor(plugin) >= before);
 	}
@@ -265,10 +265,10 @@ public class StoreResetTimerTest
 	public void noProbeRecordedMeansNoAnchorFromAVanishingItem() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisitWithProbe(plugin, 0, new int[][]{{999, 3}});		// stock present, probe never set
 
-		plugin.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 999 gone
+		plugin.store.handleShopStockChanged(shop(new int[][]{{550, 5}}));	// 999 gone
 
 		assertEquals("no probe means no tick can be read from a vanishing item", 0L, anchor(plugin));
 	}
@@ -279,15 +279,15 @@ public class StoreResetTimerTest
 		// Another player's stock reaching zero is a real tick, but we cannot tell it from a customer
 		// clearing the last of a stack. Only OUR OWN sold item is unambiguous.
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisit(plugin, new int[][]{{1191, 1}});
-		Field f = AccountConnectPlugin.class.getDeclaredField("shopStock");
+		Field f = StoreTools.class.getDeclaredField("shopStock");
 		f.setAccessible(true);
 		@SuppressWarnings("unchecked")
-		Map<Integer, Integer> st = (Map<Integer, Integer>) f.get(plugin);
+		Map<Integer, Integer> st = (Map<Integer, Integer>) f.get(plugin.store);
 		st.put(9999, 1);			// present in stock, never sold by us
 
-		plugin.handleShopStockChanged(shop(new int[][]{{1191, 1}}));	// 9999 vanished, ours did not
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1191, 1}}));	// 9999 vanished, ours did not
 
 		assertEquals("only our own sold item may anchor", 0L, anchor(plugin));
 	}
@@ -298,10 +298,10 @@ public class StoreResetTimerTest
 		// had == 0 must not read as a fall to zero. Otherwise every item we ever sold anchors the
 		// clock on every single container change, forever.
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisit(plugin, new int[][]{{1191, 0}});
 
-		plugin.handleShopStockChanged(shop(new int[][]{{550, 5}}));
+		plugin.store.handleShopStockChanged(shop(new int[][]{{550, 5}}));
 
 		assertEquals("0->0 is not a disappearance", 0L, anchor(plugin));
 	}
@@ -318,18 +318,18 @@ public class StoreResetTimerTest
 	public void twoChangesOnePeriodApartAnchorTheClock()
 	{
 		long t = 1_000_000L;
-		assertTrue(AccountConnectPlugin.isPeriodAgreement(t, t + 60_000L));
+		assertTrue(StoreTools.isPeriodAgreement(t, t + 60_000L));
 	}
 
 	@Test
 	public void theToleranceCoversRealJitterAndNoMore()
 	{
 		long t = 1_000_000L;
-		long tol = AccountConnectPlugin.PERIOD_TOLERANCE_MS;
-		assertTrue("at the edge, inside", AccountConnectPlugin.isPeriodAgreement(t, t + 60_000L + tol));
-		assertTrue("at the edge, early", AccountConnectPlugin.isPeriodAgreement(t, t + 60_000L - tol));
-		assertFalse("one ms past the edge", AccountConnectPlugin.isPeriodAgreement(t, t + 60_000L + tol + 1));
-		assertFalse("one ms early past the edge", AccountConnectPlugin.isPeriodAgreement(t, t + 60_000L - tol - 1));
+		long tol = StoreTools.PERIOD_TOLERANCE_MS;
+		assertTrue("at the edge, inside", StoreTools.isPeriodAgreement(t, t + 60_000L + tol));
+		assertTrue("at the edge, early", StoreTools.isPeriodAgreement(t, t + 60_000L - tol));
+		assertFalse("one ms past the edge", StoreTools.isPeriodAgreement(t, t + 60_000L + tol + 1));
+		assertFalse("one ms early past the edge", StoreTools.isPeriodAgreement(t, t + 60_000L - tol - 1));
 	}
 
 	@Test
@@ -341,7 +341,7 @@ public class StoreResetTimerTest
 		for (long gap : new long[]{600L, 1_800L, 2_400L, 9_000L, 15_000L, 30_000L, 45_000L, 120_000L})
 		{
 			assertFalse("a " + gap + "ms gap must not anchor",
-				AccountConnectPlugin.isPeriodAgreement(t, t + gap));
+				StoreTools.isPeriodAgreement(t, t + gap));
 		}
 	}
 
@@ -354,16 +354,16 @@ public class StoreResetTimerTest
 	{
 		// With no previous change there is nothing to be periodic WITH. Opening a shop, or the very
 		// first stock reading, must leave the clock unknown rather than anchoring to that instant.
-		assertFalse(AccountConnectPlugin.isPeriodAgreement(0L, 1_000_000L));
-		assertFalse(AccountConnectPlugin.isPeriodAgreement(-1L, 1_000_000L));
+		assertFalse(StoreTools.isPeriodAgreement(0L, 1_000_000L));
+		assertFalse(StoreTools.isPeriodAgreement(-1L, 1_000_000L));
 	}
 
 	@Test
 	public void aClockGoingBackwardsNeverAnchors()
 	{
-		assertFalse(AccountConnectPlugin.isPeriodAgreement(2_000_000L, 1_000_000L));
+		assertFalse(StoreTools.isPeriodAgreement(2_000_000L, 1_000_000L));
 		assertFalse("identical timestamps are not a period",
-			AccountConnectPlugin.isPeriodAgreement(1_000_000L, 1_000_000L));
+			StoreTools.isPeriodAgreement(1_000_000L, 1_000_000L));
 	}
 
 	@Test
@@ -372,8 +372,8 @@ public class StoreResetTimerTest
 		// A tick MISSED (the shop unchanged for a whole cycle) lands 120s later. Treating that as
 		// agreement would be right by luck here and wrong whenever the gap is any other multiple.
 		long t = 1_000_000L;
-		assertFalse(AccountConnectPlugin.isPeriodAgreement(t, t + 120_000L));
-		assertFalse(AccountConnectPlugin.isPeriodAgreement(t, t + 180_000L));
+		assertFalse(StoreTools.isPeriodAgreement(t, t + 120_000L));
+		assertFalse(StoreTools.isPeriodAgreement(t, t + 180_000L));
 	}
 
 	/** The real container path: two changes one period apart anchor; nothing else does. */
@@ -381,22 +381,22 @@ public class StoreResetTimerTest
 	public void theContainerPathAnchorsOnlyOnPeriodAgreement() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
-		inject(plugin, "shopOpen", true);
+		plugin.grants.setStoreToolsForTest(true);
+		plugin.store.shopOpen = true;
 		inject(plugin, "shopStock", new java.util.LinkedHashMap<Integer, Integer>());
 		inject(plugin, "soldThisVisit", new java.util.LinkedHashSet<Integer>());
 
 		// First reading of the visit — establishes the baseline, must not anchor.
-		plugin.handleShopStockChanged(shop(new int[][]{{1115, 10}, {1191, 2}}));
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1115, 10}, {1191, 2}}));
 		assertEquals("the first reading must not anchor", 0L, anchor(plugin));
 
 		// A change — records the time, still nothing to be periodic with.
-		plugin.handleShopStockChanged(shop(new int[][]{{1115, 9}, {1191, 1}}));
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1115, 9}, {1191, 1}}));
 		assertEquals("one change is not a period", 0L, anchor(plugin));
 
 		// A change one period later. Drive the clock through the field rather than sleeping 60s.
-		inject(plugin, "lastStockChangeMs", System.currentTimeMillis() - 60_000L);
-		plugin.handleShopStockChanged(shop(new int[][]{{1115, 8}, {1191, 1}}));
+		plugin.store.lastStockChangeMs = System.currentTimeMillis() - 60_000L;
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1115, 8}, {1191, 1}}));
 		assertTrue("two changes one period apart must anchor", anchor(plugin) > 0);
 	}
 
@@ -406,18 +406,18 @@ public class StoreResetTimerTest
 		// The shop container fires on events that leave the stock identical. Counting those as
 		// changes would reset the periodicity chain constantly and stop the clock ever locking.
 		AccountConnectPlugin plugin = plugin();
-		plugin.setStoreToolsForTest(true);
-		inject(plugin, "shopOpen", true);
+		plugin.grants.setStoreToolsForTest(true);
+		plugin.store.shopOpen = true;
 		inject(plugin, "shopStock", new java.util.LinkedHashMap<Integer, Integer>());
 		inject(plugin, "soldThisVisit", new java.util.LinkedHashSet<Integer>());
-		plugin.handleShopStockChanged(shop(new int[][]{{1115, 10}}));
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1115, 10}}));
 
 		long marker = System.currentTimeMillis() - 60_000L;
-		inject(plugin, "lastStockChangeMs", marker);
-		plugin.handleShopStockChanged(shop(new int[][]{{1115, 10}}));	// identical
-		Field f = AccountConnectPlugin.class.getDeclaredField("lastStockChangeMs");
+		plugin.store.lastStockChangeMs = marker;
+		plugin.store.handleShopStockChanged(shop(new int[][]{{1115, 10}}));	// identical
+		Field f = StoreTools.class.getDeclaredField("lastStockChangeMs");
 		f.setAccessible(true);
-		assertEquals("an unchanged read must not touch the chain", marker, f.getLong(plugin));
+		assertEquals("an unchanged read must not touch the chain", marker, f.getLong(plugin.store));
 		assertEquals("and must not anchor", 0L, anchor(plugin));
 	}
 
@@ -432,9 +432,9 @@ public class StoreResetTimerTest
 
 	private static int probeItem(AccountConnectPlugin p) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("storeProbeItem");
+		Field f = StoreTools.class.getDeclaredField("storeProbeItem");
 		f.setAccessible(true);
-		return f.getInt(p);
+		return f.getInt(p.store);
 	}
 
 
@@ -453,10 +453,10 @@ public class StoreResetTimerTest
 			AccountConnectPlugin plugin = plugin();
 			java.util.List<Object> boxes = new java.util.ArrayList<>();
 			installInfoBoxManager(plugin, boxes);
-			plugin.setStoreToolsForTest(true);	// the countdown is gated
+			plugin.grants.setStoreToolsForTest(true);	// the countdown is gated
 			seedVisit(plugin, new int[][]{{111, 1}, {222, 1}});
-			inject(plugin, "lastStockChangeMs", System.currentTimeMillis() - 60_000L);
-			plugin.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));	// period -> box
+			plugin.store.lastStockChangeMs = System.currentTimeMillis() - 60_000L;
+			plugin.store.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));	// period -> box
 			assertEquals(path + ": a reset should show the countdown", 1, boxes.size());
 
 			switch (path)
@@ -484,12 +484,12 @@ public class StoreResetTimerTest
 		AccountConnectPlugin plugin = plugin();
 		java.util.List<Object> boxes = new java.util.ArrayList<>();
 		installInfoBoxManager(plugin, boxes);
-		plugin.setStoreToolsForTest(true);	// the countdown is gated
+		plugin.grants.setStoreToolsForTest(true);	// the countdown is gated
 		for (int i = 0; i < 4; i++)
 		{
 			seedVisit(plugin, new int[][]{{111, 1}, {222, 1}});
-			inject(plugin, "lastStockChangeMs", System.currentTimeMillis() - 60_000L);
-			plugin.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));
+			plugin.store.lastStockChangeMs = System.currentTimeMillis() - 60_000L;
+			plugin.store.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));
 		}
 		assertEquals("four resets must leave exactly one box", 1, boxes.size());
 	}
@@ -506,9 +506,9 @@ public class StoreResetTimerTest
 		installInfoBoxManager(plugin, boxes);
 		// store tools deliberately NOT granted
 		seedVisit(plugin, new int[][]{{111, 1}, {222, 1}});
-		inject(plugin, "lastStockChangeMs", System.currentTimeMillis() - 60_000L);
+		plugin.store.lastStockChangeMs = System.currentTimeMillis() - 60_000L;
 
-		plugin.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));	// a real tick
+		plugin.store.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));	// a real tick
 
 		assertEquals("an ungranted token must see no countdown", 0, boxes.size());
 		assertTrue("but the phase is still tracked for when it IS granted", anchor(plugin) > 0);
@@ -521,13 +521,13 @@ public class StoreResetTimerTest
 		AccountConnectPlugin plugin = plugin();
 		java.util.List<Object> boxes = new java.util.ArrayList<>();
 		installInfoBoxManager(plugin, boxes);
-		plugin.setStoreToolsForTest(true);
+		plugin.grants.setStoreToolsForTest(true);
 		seedVisit(plugin, new int[][]{{111, 1}, {222, 1}});
-		inject(plugin, "lastStockChangeMs", System.currentTimeMillis() - 60_000L);
-		plugin.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));
+		plugin.store.lastStockChangeMs = System.currentTimeMillis() - 60_000L;
+		plugin.store.handleShopStockChanged(shop(new int[][]{{111, 0}, {222, 1}}));
 		assertEquals("granted: countdown shows", 1, boxes.size());
 
-		plugin.applyServerPolicy(policyResponse("off"));
+		plugin.grants.applyServerPolicy(policyResponse("off"));
 
 		assertEquals("revoked: countdown must be cleared", 0, boxes.size());
 	}
@@ -537,11 +537,11 @@ public class StoreResetTimerTest
 	public void theServerHeaderGrantsAndRevokesTheFeature() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		assertFalse("default is OFF", plugin.storeToolsEnabled());
-		plugin.applyServerPolicy(policyResponse("on"));
-		assertTrue("header on grants the feature", plugin.storeToolsEnabled());
-		plugin.applyServerPolicy(policyResponse("off"));
-		assertFalse("header off revokes it", plugin.storeToolsEnabled());
+		assertFalse("default is OFF", plugin.grants.storeToolsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse("on"));
+		assertTrue("header on grants the feature", plugin.grants.storeToolsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse("off"));
+		assertFalse("header off revokes it", plugin.grants.storeToolsEnabled());
 	}
 
 	/** Anything that is not an explicit grant word must leave the feature OFF. */
@@ -551,8 +551,8 @@ public class StoreResetTimerTest
 		for (String v : new String[]{"", " ", "maybe", "allow", "yes", "2", "OFF"})
 		{
 			AccountConnectPlugin plugin = plugin();
-			plugin.applyServerPolicy(policyResponse(v));
-			assertFalse("'" + v + "' must not grant store tools", plugin.storeToolsEnabled());
+			plugin.grants.applyServerPolicy(policyResponse(v));
+			assertFalse("'" + v + "' must not grant store tools", plugin.grants.storeToolsEnabled());
 		}
 	}
 
@@ -561,10 +561,10 @@ public class StoreResetTimerTest
 	public void anAbsentHeaderLeavesTheCurrentGrantAlone() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.applyServerPolicy(policyResponse("on"));
-		assertTrue(plugin.storeToolsEnabled());
-		plugin.applyServerPolicy(policyResponse(null));		// header omitted entirely
-		assertTrue("an absent header must not silently revoke", plugin.storeToolsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse("on"));
+		assertTrue(plugin.grants.storeToolsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse(null));		// header omitted entirely
+		assertTrue("an absent header must not silently revoke", plugin.grants.storeToolsEnabled());
 	}
 
 	/** Build a 200 carrying (or omitting) the X-Store-Tools header. */
@@ -614,7 +614,7 @@ public class StoreResetTimerTest
 	private static void seedVisitWithProbe(AccountConnectPlugin p, int probe, int[][] stock) throws Exception
 	{
 		seedVisit(p, stock);
-		inject(p, "storeProbeItem", probe);
+		p.store.storeProbeItem = probe;
 	}
 
 	/** Put the plugin in a shop visit that has sold the given {item, qty} pairs into the shop. */
@@ -646,15 +646,25 @@ public class StoreResetTimerTest
 
 	private static long anchor(AccountConnectPlugin p) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("storeResetAnchorMs");
+		Field f = StoreTools.class.getDeclaredField("storeResetAnchorMs");
 		f.setAccessible(true);
-		return f.getLong(p);
+		return f.getLong(p.store);
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String name, Object value) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField(name);
+		Object on = plugin;
+		Field f;
+		try
+		{
+			f = AccountConnectPlugin.class.getDeclaredField(name);
+		}
+		catch (NoSuchFieldException moved)
+		{
+			f = StoreTools.class.getDeclaredField(name);
+			on = plugin.store;
+		}
 		f.setAccessible(true);
-		f.set(plugin, value);
+		f.set(on, value);
 	}
 }

@@ -34,8 +34,7 @@ public class OwnSignalEventTest
             e.put("raw_chat","PRIVATE");((Map<String,Object>)e.get("signal_value")).put("player_name","PRIVATE");
             Map<String,Object> projected=PublicTransport.event(e);assertNotNull(projected);assertFalse(gson.toJson(projected).contains("PRIVATE"));
             assertEquals(OwnSignalEvent.wire(projected),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
-            assertTrue(EventQueueProtocol.allows("own-signals-v1",projected));
-            for(String scope:List.of("own-vars-v1","own-state-v1","own-combat-v1","own-history-v1","ge-v1"))assertFalse(EventQueueProtocol.allows(scope,projected));
+            for(String scope:List.of("own-history-v1","ge-v1"))assertFalse(EventQueueProtocol.allows(scope,projected));
             assertEquals("observed_signal",projected.get("observation"));
         }
         assertNull(((Map<?,?>)event("combat.chompy_kc").get("signal_value")).get("total_kills"));

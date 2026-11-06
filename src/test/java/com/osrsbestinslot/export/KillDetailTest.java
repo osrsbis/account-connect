@@ -199,28 +199,28 @@ public class KillDetailTest
 	public void nothingIsSentWithoutTheGrant() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.emitKillDetail("Fight duration: <col=ff0000>1:36</col> (new personal best).");
-		p.emitKillDetail("Amount of Rifts you have closed: <col=ff0000>167</col>.");
-		assertTrue(p.pendingEvents.isEmpty());
-		p.applyServerPolicy(policy("X-Kill-Detail", "off"));
-		p.emitKillDetail("Fight duration: <col=ff0000>1:36</col> (new personal best).");
-		assertTrue(p.pendingEvents.isEmpty());
+		p.kills.emitKillDetail("Fight duration: <col=ff0000>1:36</col> (new personal best).");
+		p.kills.emitKillDetail("Amount of Rifts you have closed: <col=ff0000>167</col>.");
+		assertTrue(p.events.pendingEvents.isEmpty());
+		p.grants.applyServerPolicy(policy("X-Kill-Detail", "off"));
+		p.kills.emitKillDetail("Fight duration: <col=ff0000>1:36</col> (new personal best).");
+		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 
 	@Test
 	public void grantedTokenSendsTimingAndCountRows() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.applyServerPolicy(policy("X-Kill-Detail", "on"));
-		p.emitKillDetail("Fight duration: <col=ff0000>2:06.40</col>. Personal best: 1:19.20.");
-		p.emitKillDetail("You have completed Floor 5 of the Hallowed Sepulchre! Total completions: <col=ff0000>1,114</col>.");
-		assertEquals(2, p.pendingEvents.size());
-		Map<String, Object> t = p.pendingEvents.get(0);
+		p.grants.applyServerPolicy(policy("X-Kill-Detail", "on"));
+		p.kills.emitKillDetail("Fight duration: <col=ff0000>2:06.40</col>. Personal best: 1:19.20.");
+		p.kills.emitKillDetail("You have completed Floor 5 of the Hallowed Sepulchre! Total completions: <col=ff0000>1,114</col>.");
+		assertEquals(2, p.events.pendingEvents.size());
+		Map<String, Object> t = p.events.pendingEvents.get(0);
 		assertEquals("kill_timing", t.get("type"));
 		assertEquals(126.4, (Double) t.get("duration_s"), 1e-9);
 		assertEquals(0, t.get("seq"));
-		assertEquals("kill_count", p.pendingEvents.get(1).get("type"));
-		assertEquals("Hallowed Sepulchre Floor 5", p.pendingEvents.get(1).get("source"));
+		assertEquals("kill_count", p.events.pendingEvents.get(1).get("type"));
+		assertEquals("Hallowed Sepulchre Floor 5", p.events.pendingEvents.get(1).get("source"));
 		Map<String, Object> wire = PublicTransport.event(t);
 		assertEquals("the public projection keeps the timing", 79.2, (Double) wire.get("personal_best_s"), 1e-9);
 	}
@@ -229,10 +229,10 @@ public class KillDetailTest
 	public void aRefusedAnswerRevokesTheGrant() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.applyServerPolicy(policy("X-Kill-Detail", "on"));
-		assertTrue(p.killDetailGranted());
-		p.applyServerPolicy(policy());
-		assertFalse("an answer without the header turns it off", p.killDetailGranted());
+		p.grants.applyServerPolicy(policy("X-Kill-Detail", "on"));
+		assertTrue(p.grants.killDetailGranted());
+		p.grants.applyServerPolicy(policy());
+		assertFalse("an answer without the header turns it off", p.grants.killDetailGranted());
 	}
 
 	// ---- kill context, slayer tasks, progress and failure (X-Kill-Context) ----
@@ -398,7 +398,7 @@ public class KillDetailTest
 	public void countersNeverCompareTwoAccountsAcrossARelog() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.applyServerPolicy(policy("X-Kill-Context", "on"));
+		p.grants.applyServerPolicy(policy("X-Kill-Context", "on"));
 		Map<String, Integer> a = new java.util.LinkedHashMap<>();
 		a.put("tempoross_permits", 400);
 		for (int i = 0; i < 3; i++) assertTrue(p.activityCounters.tick(a).isEmpty());
@@ -411,7 +411,7 @@ public class KillDetailTest
 		b.put("tempoross_permits", 7);
 		assertTrue("B's first read is a baseline, not a change from A's", p.activityCounters.tick(b).isEmpty());
 		assertNull("B's slayer counter is a baseline, not A's next task", p.slayerTasks.tick(42, 10, 50));
-		assertTrue(p.killContextGranted());
+		assertTrue(p.grants.killContextGranted());
 	}
 
 	@Test
@@ -437,20 +437,20 @@ public class KillDetailTest
 	public void contextRowsNeedTheirOwnGrant() throws Exception
 	{
 		AccountConnectPlugin p = plug();
-		p.applyServerPolicy(policy("X-Kill-Detail", "on"));
-		p.emitProgressAndFailure("Your party failed to complete the challenge.");
-		p.emitProgressAndFailure("New item added to your collection log: Vorkath's head");
-		assertTrue("X-Kill-Detail alone does not grant context rows", p.pendingEvents.isEmpty());
-		p.applyServerPolicy(policy("X-Kill-Context", "on"));
-		p.emitProgressAndFailure("Your party failed to complete the challenge.");
-		p.emitProgressAndFailure("New item added to your collection log: Vorkath's head");
-		assertEquals(2, p.pendingEvents.size());
-		assertEquals("attempt_end", p.pendingEvents.get(0).get("type"));
-		assertEquals("failed", p.pendingEvents.get(0).get("outcome"));
-		assertEquals("progress", p.pendingEvents.get(1).get("type"));
-		assertEquals("collection_log_add", p.pendingEvents.get(1).get("kind"));
-		assertEquals("Vorkath's head", PublicTransport.event(p.pendingEvents.get(1)).get("subject"));
-		p.applyServerPolicy(policy());
-		assertFalse(p.killContextGranted());
+		p.grants.applyServerPolicy(policy("X-Kill-Detail", "on"));
+		p.kills.emitProgressAndFailure("Your party failed to complete the challenge.");
+		p.kills.emitProgressAndFailure("New item added to your collection log: Vorkath's head");
+		assertTrue("X-Kill-Detail alone does not grant context rows", p.events.pendingEvents.isEmpty());
+		p.grants.applyServerPolicy(policy("X-Kill-Context", "on"));
+		p.kills.emitProgressAndFailure("Your party failed to complete the challenge.");
+		p.kills.emitProgressAndFailure("New item added to your collection log: Vorkath's head");
+		assertEquals(2, p.events.pendingEvents.size());
+		assertEquals("attempt_end", p.events.pendingEvents.get(0).get("type"));
+		assertEquals("failed", p.events.pendingEvents.get(0).get("outcome"));
+		assertEquals("progress", p.events.pendingEvents.get(1).get("type"));
+		assertEquals("collection_log_add", p.events.pendingEvents.get(1).get("kind"));
+		assertEquals("Vorkath's head", PublicTransport.event(p.events.pendingEvents.get(1)).get("subject"));
+		p.grants.applyServerPolicy(policy());
+		assertFalse(p.grants.killContextGranted());
 	}
 }

@@ -16,8 +16,8 @@ public class CaptureHealthTest
 	public void eventQueueIsVisibleInHealth() throws Exception
 	{
 		AccountConnectPlugin plugin = plugin();
-		plugin.emitEvent("level_up", new LinkedHashMap<>());
-		Map<String, Object> h = plugin.captureHealthSnapshot();
+		plugin.events.emitEvent("level_up", new LinkedHashMap<>());
+		Map<String, Object> h = plugin.events.captureHealthSnapshot();
 		assertEquals(1L, h.get("events_queued_total"));
 		assertEquals(1, h.get("events_pending"));
 		assertEquals(0L, h.get("events_lost_total"));
@@ -37,10 +37,10 @@ public class CaptureHealthTest
 		snapshot.put("source", source);
 		snapshot.put("captured_at", 1L);
 
-		String first = plugin.canonicalHash(snapshot);
+		String first = plugin.snapshots.canonicalHash(snapshot);
 		health.put("events_queued_total", 99L);
 		snapshot.put("captured_at", 2L);
-		String second = plugin.canonicalHash(snapshot);
+		String second = plugin.snapshots.canonicalHash(snapshot);
 		assertEquals("health counters must not create snapshot traffic", first, second);
 	}
 

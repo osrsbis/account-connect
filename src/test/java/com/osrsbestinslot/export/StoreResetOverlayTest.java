@@ -45,8 +45,8 @@ public class StoreResetOverlayTest
 	public void alwaysDrawsExactlyOneRowWhateverTheState() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.setShopOpenForTest(true);
-		p.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		StoreResetOverlay o = new StoreResetOverlay(p);
 
 		// phase unknown
@@ -54,9 +54,9 @@ public class StoreResetOverlayTest
 		assertEquals("waiting state must be one row", 1, o.builtRowCountForTest());
 
 		// phase known — drive the anchor through the real field
-		java.lang.reflect.Field a = AccountConnectPlugin.class.getDeclaredField("storeResetAnchorMs");
+		java.lang.reflect.Field a = StoreTools.class.getDeclaredField("storeResetAnchorMs");
 		a.setAccessible(true);
-		a.setLong(p, System.currentTimeMillis() - 30_000L);
+		a.setLong(p.store, System.currentTimeMillis() - 30_000L);
 		o.render(graphics());
 		assertEquals("counting state must also be one row", 1, o.builtRowCountForTest());
 	}
@@ -65,8 +65,8 @@ public class StoreResetOverlayTest
 	public void repeatedRendersDoNotAccumulateRows() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.setShopOpenForTest(true);
-		p.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		StoreResetOverlay o = new StoreResetOverlay(p);
 		for (int i = 0; i < 25; i++)
 		{
@@ -79,11 +79,11 @@ public class StoreResetOverlayTest
 	public void drawsNothingOutsideAShopOrWithoutTheGrant() throws Exception
 	{
 		AccountConnectPlugin outside = plugin();
-		outside.setStoreToolsForTest(true);
+		outside.grants.setStoreToolsForTest(true);
 		assertNull("no shop, no overlay", new StoreResetOverlay(outside).render(graphics()));
 
 		AccountConnectPlugin ungranted = plugin();
-		ungranted.setShopOpenForTest(true);
+		ungranted.store.setShopOpenForTest(true);
 		assertNull("no grant, no overlay", new StoreResetOverlay(ungranted).render(graphics()));
 	}
 
@@ -91,8 +91,8 @@ public class StoreResetOverlayTest
 	public void drawsWhileAShopIsOpenAndGranted() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.setShopOpenForTest(true);
-		p.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		Dimension d = new StoreResetOverlay(p).render(graphics());
 		assertNotNull(d);
 	}
@@ -103,8 +103,8 @@ public class StoreResetOverlayTest
 		// A blank or red waiting state is the failure: blank looks broken, red is a standing
 		// "do not hand off" warning on a shop that has never reset.
 		AccountConnectPlugin p = plugin();
-		p.setShopOpenForTest(true);
-		p.setStoreToolsForTest(true);
+		p.store.setShopOpenForTest(true);
+		p.grants.setStoreToolsForTest(true);
 		StoreResetOverlay o = new StoreResetOverlay(p);
 		o.render(graphics());
 		assertEquals("sell junk", o.lastTextForTest());

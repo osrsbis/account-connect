@@ -29,7 +29,7 @@ public class OwnInferredSignalTest
    Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));
    assertEquals(OwnSignalEvent.wire(wire),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
    assertEquals(false,wire.get("direct"));assertEquals("inferred_observation",wire.get("observation"));
-   assertTrue(EventQueueProtocol.allows("own-signals-v1",wire));assertFalse(EventQueueProtocol.allows("own-vars-v1",wire));
+   assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
   }
  }
  @Test public void inferenceLabelsSourcesPairsAndTimeContradictionsFailClosed() {

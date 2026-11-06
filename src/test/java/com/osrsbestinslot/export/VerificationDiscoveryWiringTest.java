@@ -33,7 +33,7 @@ public class VerificationDiscoveryWiringTest
         {
             set(plugin,"client",client);set(plugin,"activeHash","123");set(plugin,"lastSnapshotCapturedAtMs",1000L);
             set(plugin,"config",new AccountConnectConfig(){public String linkToken(){return TOKEN;}});
-            set(plugin,"verificationGrantToken",TOKEN);set(plugin,"verificationFramesGrantToken",TOKEN);
+            plugin.grants.verificationGrantToken = TOKEN;plugin.grants.verificationFramesGrantToken = TOKEN;
             set(plugin,"gson",new Gson());set(plugin,"executor",mock(ScheduledExecutorService.class));
             set(plugin,"drawManager",new DrawManager());set(plugin,"clientThread",mock(ClientThread.class));set(plugin,"okHttpClient",http);
             when(client.getAccountHash()).thenAnswer(i->account);when(client.getTickCount()).thenAnswer(i->tick);
@@ -57,15 +57,15 @@ public class VerificationDiscoveryWiringTest
 
     @Test public void unparsedMessageGetsRealSourceIdentityAndUsesLegacyEvenWithQueueGrant()throws Exception
     {
-        Fixture f=new Fixture();set(f.plugin,"eventQueueGrantToken",TOKEN);set(f.plugin,"eventQueueScope","own-signals-v1");
+        Fixture f=new Fixture();f.plugin.grants.eventQueueGrantToken = TOKEN;f.plugin.grants.eventQueueScope = "own-history-v1";
         f.chat(ChatMessageType.GAMEMESSAGE,"An unknown game completion message.");
-        assertEquals(1,f.plugin.pendingEvents.size());Map<String,Object> source=f.plugin.pendingEvents.get(0);
+        assertEquals(1,f.plugin.events.pendingEvents.size());Map<String,Object> source=f.plugin.events.pendingEvents.get(0);
         assertEquals("verification_discovery",source.get("type"));assertEquals("unknown",source.get("activity"));
         assertTrue(String.valueOf(source.get("event_id")).matches("[a-f0-9]{32}"));
         assertEquals(100,source.get("verification_tick"));assertEquals(1000L,source.get("verification_revision"));
         assertEquals("123",source.get("account_hash"));assertFalse(source.containsKey("_discovery_at"));
-        assertFalse(EventQueueProtocol.allows("own-signals-v1",source));
-        f.plugin.flushEvents();ArgumentCaptor<Request> request=ArgumentCaptor.forClass(Request.class);
+        assertFalse(EventQueueProtocol.allows("own-history-v1",source));
+        f.plugin.events.flushEvents();ArgumentCaptor<Request> request=ArgumentCaptor.forClass(Request.class);
         verify(f.http).newCall(request.capture());assertTrue(request.getValue().url().toString().endsWith("/event-ingest"));
         Buffer body=new Buffer();request.getValue().body().writeTo(body);String json=body.readUtf8();
         assertTrue(json.contains("verification_discovery"));assertFalse(json.contains("_discovery_at"));
@@ -74,21 +74,21 @@ public class VerificationDiscoveryWiringTest
     @Test public void privatePublicChatOffGrantAndUnknownAccountProduceNoDiscovery()throws Exception
     {
         Fixture f=new Fixture();f.chat(ChatMessageType.PUBLICCHAT,"A player's message.");
-        f.chat(ChatMessageType.PRIVATECHAT,"A private message.");assertTrue(f.plugin.pendingEvents.isEmpty());
-        set(f.plugin,"verificationGrantToken",null);f.chat(ChatMessageType.GAMEMESSAGE,"Unknown game result.");
-        assertTrue(f.plugin.pendingEvents.isEmpty());set(f.plugin,"verificationGrantToken",TOKEN);
+        f.chat(ChatMessageType.PRIVATECHAT,"A private message.");assertTrue(f.plugin.events.pendingEvents.isEmpty());
+        f.plugin.grants.verificationGrantToken = null;f.chat(ChatMessageType.GAMEMESSAGE,"Unknown game result.");
+        assertTrue(f.plugin.events.pendingEvents.isEmpty());f.plugin.grants.verificationGrantToken = TOKEN;
         f.account=-1;set(f.plugin,"activeHash","-1");f.chat(ChatMessageType.GAMEMESSAGE,"Unknown game result.");
-        assertTrue(f.plugin.pendingEvents.isEmpty());
+        assertTrue(f.plugin.events.pendingEvents.isEmpty());
     }
 
     @Test public void captureGrantCannotWidenDiscoverySourceProjection()throws Exception
     {
-        Fixture f=new Fixture();f.plugin.setStaffCaptureForTest(TOKEN,"123");assertTrue(f.plugin.captureEnabled());
+        Fixture f=new Fixture();f.plugin.grants.setStaffCapture(TOKEN,"123");assertTrue(f.plugin.grants.captureEnabled());
         f.chat(ChatMessageType.GAMEMESSAGE,"An unknown result under a capture grant.");
-        assertEquals(1,f.plugin.pendingEvents.size());
-        assertEquals("verification_discovery",f.plugin.pendingEvents.get(0).get("type"));
-        assertFalse(f.plugin.pendingEvents.get(0).containsKey("_discovery_at"));
-        assertFalse(f.plugin.pendingEvents.get(0).containsKey("unapproved_field"));
+        assertEquals(1,f.plugin.events.pendingEvents.size());
+        assertEquals("verification_discovery",f.plugin.events.pendingEvents.get(0).get("type"));
+        assertFalse(f.plugin.events.pendingEvents.get(0).containsKey("_discovery_at"));
+        assertFalse(f.plugin.events.pendingEvents.get(0).containsKey("unapproved_field"));
     }
 
     @Test public void sharedQueueRefusalDoesNotConsumeNamedResultTransition()throws Exception
@@ -98,11 +98,11 @@ public class VerificationDiscoveryWiringTest
         Map<String,Object> event=VerificationProbe.inputs("event_id","aabbccddeeff00112233445566778899aa","type","death");
         for(int i=0;i<EventVerification.MAX_PENDING;i++)
             assertTrue(f.plugin.eventVerification.offer(new EventVerification.Source(event,"different","999",0,100,1000,0,null)));
-        f.plugin.onClientTick(null);assertTrue(f.plugin.pendingEvents.isEmpty());
+        f.plugin.onClientTick(null);assertTrue(f.plugin.events.pendingEvents.isEmpty());
         // The old ineligible entries were drained. Both unchanged result fields are still eligible next tick.
         f.plugin.onClientTick(null);
-        assertEquals(2,f.plugin.pendingEvents.size());
-        assertEquals(InterfaceID.ClanwarsGameover.MESSAGE,f.plugin.pendingEvents.get(0).get("widget"));
-        assertEquals(InterfaceID.ClanwarsGameover.TITLE,f.plugin.pendingEvents.get(1).get("widget"));
+        assertEquals(2,f.plugin.events.pendingEvents.size());
+        assertEquals(InterfaceID.ClanwarsGameover.MESSAGE,f.plugin.events.pendingEvents.get(0).get("widget"));
+        assertEquals(InterfaceID.ClanwarsGameover.TITLE,f.plugin.events.pendingEvents.get(1).get("widget"));
     }
 }

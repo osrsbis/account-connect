@@ -90,36 +90,36 @@ public class EventDeliveryRetryTest
 		ev.put("type", "level_up");
 		ev.put("skill", type);
 		ev.put("ts", 1_700_000_000_000L);
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			plugin.pendingEvents.add(ev);
-			while (plugin.pendingEvents.size() > 500)
+			plugin.events.pendingEvents.add(ev);
+			while (plugin.events.pendingEvents.size() > 500)
 			{
-				plugin.pendingEvents.remove(0);
+				plugin.events.pendingEvents.remove(0);
 			}
 		}
 	}
 
 	private int buffered()
 	{
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			return plugin.pendingEvents.size();
+			return plugin.events.pendingEvents.size();
 		}
 	}
 
 	/** Clear the backoff so a test can drive consecutive attempts without sleeping. */
 	private void clearBackoff()
 	{
-		plugin.eventRetryBackoffUntilMs = 0L;
+		plugin.events.eventRetryBackoffUntilMs = 0L;
 	}
 
 	@Test
 	public void internalTokenBindingNeverAppearsOnTheWire() throws Exception
 	{
 		server.enqueue(new MockResponse().setResponseCode(200));
-		plugin.emitEvent("trade", new LinkedHashMap<>());
-		plugin.flushEvents();
+		plugin.events.emitEvent("trade", new LinkedHashMap<>());
+		plugin.events.flushEvents();
 		RecordedRequest req = server.takeRequest(3, TimeUnit.SECONDS);
 		assertNotNull(req);
 		String body = req.getBody().readUtf8();
@@ -130,7 +130,7 @@ public class EventDeliveryRetryTest
 	@Test
 	public void tokenSwitchDropsOldBoundEventsInsteadOfSendingThemUnderNewToken() throws Exception
 	{
-		plugin.emitEvent("trade", new LinkedHashMap<>());
+		plugin.events.emitEvent("trade", new LinkedHashMap<>());
 		assertEquals(1, buffered());
 
 		AccountConnectConfig switched = mock(AccountConnectConfig.class);
@@ -138,28 +138,28 @@ public class EventDeliveryRetryTest
 		when(switched.apiBaseUrl()).thenReturn(server.url("/api").toString().replaceAll("/+$", ""));
 		inject("config", switched);
 
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertEquals(0, buffered());
 		assertNull("old-identity event must not POST under the new token", server.takeRequest(1, TimeUnit.SECONDS));
-		assertEquals(1L, plugin.captureHealthSnapshot().get("events_lost_total"));
+		assertEquals(1L, plugin.events.captureHealthSnapshot().get("events_lost_total"));
 	}
 
 	@Test
 	public void staleBoundEventIsRejectedAtEmitBeforeItCanEnterTheQueue() throws Exception
 	{
-		String oldFingerprint = plugin.currentEventTokenFingerprint();
+		String oldFingerprint = plugin.events.currentEventTokenFingerprint();
 		AccountConnectConfig switched = mock(AccountConnectConfig.class);
 		when(switched.linkToken()).thenReturn(OTHER_TOKEN);
 		when(switched.apiBaseUrl()).thenReturn(server.url("/api").toString().replaceAll("/+$", ""));
 		inject("config", switched);
 
-		Method emitBound = AccountConnectPlugin.class.getDeclaredMethod(
+		Method emitBound = EventQueue.class.getDeclaredMethod(
 			"emitEventBound", String.class, Map.class, String.class);
 		emitBound.setAccessible(true);
-		emitBound.invoke(plugin, "trade", new LinkedHashMap<>(), oldFingerprint);
+		emitBound.invoke(plugin.events, "trade", new LinkedHashMap<>(), oldFingerprint);
 
 		assertEquals("stale callback must never enter the new identity queue", 0, buffered());
-		assertEquals(1L, plugin.captureHealthSnapshot().get("events_lost_total"));
+		assertEquals(1L, plugin.events.captureHealthSnapshot().get("events_lost_total"));
 	}
 
 	// ---------------------------------------------------------------- 5xx
@@ -171,23 +171,23 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		seed("trade");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		RecordedRequest first = server.takeRequest(3, TimeUnit.SECONDS);
 		assertNotNull("the first POST should have been made", first);
 
 		// The batch must be BACK in the buffer, not destroyed.
 		waitFor(() -> buffered() == 1, "batch requeued after 503");
-		assertTrue("a failure must arm the backoff", plugin.eventRetryBackoffUntilMs > 0);
+		assertTrue("a failure must arm the backoff", plugin.events.eventRetryBackoffUntilMs > 0);
 
 		clearBackoff();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		RecordedRequest second = server.takeRequest(3, TimeUnit.SECONDS);
 		assertNotNull("the batch should have been retried", second);
 		assertTrue("the retry must carry the same event", second.getBody().readUtf8().contains("trade"));
 
 		// Delivered: buffer drains and stays drained — exactly one successful delivery.
 		waitFor(() -> buffered() == 0, "buffer drained after 200");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNull("no third POST — an empty buffer must not resend",
 			server.takeRequest(1, TimeUnit.SECONDS));
 		assertEquals("exactly 2 requests total: the failure and the successful retry",
@@ -209,19 +209,19 @@ public class EventDeliveryRetryTest
 		seed("bank_visit_open");
 		seed("bank_visit_manifest_chunk");
 		seed("bank_visit_close");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 		waitFor(() -> buffered() == 3, "bank visit batch requeued after 503");
-		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 503");
+		waitFor(() -> plugin.events.eventRetryBackoffUntilMs != 0L, "backoff armed after 503");
 
 		clearBackoff();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 		waitFor(() -> buffered() == 3, "bank visit batch requeued after 429");
-		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
+		waitFor(() -> plugin.events.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
 
 		clearBackoff();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		RecordedRequest ok = server.takeRequest(3, TimeUnit.SECONDS);
 		assertNotNull(ok);
 		String body = ok.getBody().readUtf8();
@@ -230,7 +230,7 @@ public class EventDeliveryRetryTest
 		int close = body.indexOf("bank_visit_close");
 		assertTrue("all three in the delivered batch, in order", open >= 0 && open < chunk && chunk < close);
 		waitFor(() -> buffered() == 0, "buffer drained after 200");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNull("delivered exactly once", server.takeRequest(1, TimeUnit.SECONDS));
 		assertEquals(3, server.getRequestCount());
 	}
@@ -243,7 +243,7 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(429).setHeader("Retry-After", "42"));
 
 		seed("store_buy");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 
 		waitFor(() -> buffered() == 1, "batch requeued after 429");
@@ -252,14 +252,14 @@ public class EventDeliveryRetryTest
 		// still 0. Reading it in that window measured -1789916708150ms and failed this arm, once, on
 		// 2026-09-20. Production is unaffected: requeueEvents clears eventPostInFlight last of all, and
 		// flushEvents refuses to send while that flag is set, so no early POST can escape.
-		waitFor(() -> plugin.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
+		waitFor(() -> plugin.events.eventRetryBackoffUntilMs != 0L, "backoff armed after 429");
 		// 42s from the server beats the 5s base rung of the ladder, and is under the 300s ceiling.
-		long waitMs = plugin.eventRetryBackoffUntilMs - plugin.nowMs();
+		long waitMs = plugin.events.eventRetryBackoffUntilMs - plugin.nowMs();
 		assertTrue("Retry-After should push the next attempt out to ~42s, got " + waitMs + "ms",
 			waitMs > 30_000L && waitMs <= 42_000L);
 
 		// While backing off, a flush must NOT fire — that is the point of the backoff.
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNull("no POST while backing off", server.takeRequest(1, TimeUnit.SECONDS));
 		assertEquals(1, buffered());
 	}
@@ -272,10 +272,10 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START));
 
 		seed("ge_buy");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 
 		waitFor(() -> buffered() == 1, "batch requeued after a network failure");
-		assertTrue("a network failure must arm the backoff", plugin.eventRetryBackoffUntilMs > 0);
+		assertTrue("a network failure must arm the backoff", plugin.events.eventRetryBackoffUntilMs > 0);
 	}
 
 	// ---------------------------------------------------------------- ordering + bound
@@ -286,16 +286,16 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(500));
 
 		seed("older");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 		waitFor(() -> buffered() >= 1, "requeued");
 
 		seed("newer");	// logged after the failed batch was taken
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
 			assertEquals("the requeued (older) event must sit in FRONT of the newer one",
-				"older", plugin.pendingEvents.get(0).get("skill"));
-			assertEquals("newer", plugin.pendingEvents.get(1).get("skill"));
+				"older", plugin.events.pendingEvents.get(0).get("skill"));
+			assertEquals("newer", plugin.events.pendingEvents.get(1).get("skill"));
 		}
 	}
 
@@ -311,14 +311,14 @@ public class EventDeliveryRetryTest
 			ev.put("skill", "e" + i);
 			big.add(ev);
 		}
-		plugin.requeueEvents(big, 0L);
+		plugin.events.requeueEvents(big, 0L);
 
 		assertEquals("requeue must respect MAX_PENDING_EVENTS (500)", 500, buffered());
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
 			assertEquals("the OLDEST should have been dropped, keeping the newest 500",
-				"e100", plugin.pendingEvents.get(0).get("skill"));
-			assertEquals("e599", plugin.pendingEvents.get(499).get("skill"));
+				"e100", plugin.events.pendingEvents.get(0).get("skill"));
+			assertEquals("e599", plugin.events.pendingEvents.get(499).get("skill"));
 		}
 	}
 
@@ -328,18 +328,18 @@ public class EventDeliveryRetryTest
 		List<Map<String, Object>> one = new ArrayList<>();
 		one.add(new LinkedHashMap<>());
 
-		plugin.requeueEvents(one, 0L);
-		assertEquals("first rung is the 5s flush period", 5_000L, plugin.eventRetryBackoffMs);
-		plugin.requeueEvents(one, 0L);
-		assertEquals(10_000L, plugin.eventRetryBackoffMs);
-		plugin.requeueEvents(one, 0L);
-		assertEquals(20_000L, plugin.eventRetryBackoffMs);
+		plugin.events.requeueEvents(one, 0L);
+		assertEquals("first rung is the 5s flush period", 5_000L, plugin.events.eventRetryBackoffMs);
+		plugin.events.requeueEvents(one, 0L);
+		assertEquals(10_000L, plugin.events.eventRetryBackoffMs);
+		plugin.events.requeueEvents(one, 0L);
+		assertEquals(20_000L, plugin.events.eventRetryBackoffMs);
 
 		for (int i = 0; i < 20; i++)
 		{
-			plugin.requeueEvents(one, 0L);
+			plugin.events.requeueEvents(one, 0L);
 		}
-		assertEquals("the ladder must cap at 5 minutes", 300_000L, plugin.eventRetryBackoffMs);
+		assertEquals("the ladder must cap at 5 minutes", 300_000L, plugin.events.eventRetryBackoffMs);
 	}
 
 	// ---------------------------------------------------------------- non-retryable
@@ -352,11 +352,11 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(400));
 
 		seed("trade");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 
 		waitFor(() -> buffered() == 0, "a 400 drops the batch");
-		assertEquals("a non-retryable failure must NOT arm the backoff", 0L, plugin.eventRetryBackoffUntilMs);
+		assertEquals("a non-retryable failure must NOT arm the backoff", 0L, plugin.events.eventRetryBackoffUntilMs);
 	}
 
 	@Test
@@ -366,14 +366,14 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		seed("trade");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
-		waitFor(() -> plugin.eventRetryBackoffMs == 5_000L, "ladder armed");
+		waitFor(() -> plugin.events.eventRetryBackoffMs == 5_000L, "ladder armed");
 
 		clearBackoff();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
-		waitFor(() -> plugin.eventRetryBackoffMs == 0L, "a delivery resets the ladder");
+		waitFor(() -> plugin.events.eventRetryBackoffMs == 0L, "a delivery resets the ladder");
 	}
 
 	// ---------------------------------------------------------------- explicit no-duplicate proof
@@ -394,12 +394,12 @@ public class EventDeliveryRetryTest
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		seed("trade_unique_marker");
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		String firstBody = server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8();
 		waitFor(() -> buffered() == 1, "requeued after 503");
 
 		clearBackoff();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		String secondBody = server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8();
 		waitFor(() -> buffered() == 0, "delivered");
 
@@ -410,8 +410,8 @@ public class EventDeliveryRetryTest
 
 		// Drive several more ticks: nothing may be sent, because the buffer is genuinely empty.
 		clearBackoff();
-		plugin.flushEvents();
-		plugin.flushEvents();
+		plugin.events.flushEvents();
+		plugin.events.flushEvents();
 		assertNull("no further delivery after success", server.takeRequest(1, TimeUnit.SECONDS));
 		assertEquals("exactly 2 HTTP requests total for one event", 2, server.getRequestCount());
 	}
@@ -434,7 +434,7 @@ public class EventDeliveryRetryTest
 		{
 			seed("old" + i);
 		}
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
 		waitFor(() -> buffered() == 480, "batch requeued whole");
 
@@ -442,13 +442,13 @@ public class EventDeliveryRetryTest
 		{
 			seed("new" + i);	// the game keeps playing during the outage
 		}
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			assertEquals("buffer must be capped, not unbounded", 500, plugin.pendingEvents.size());
+			assertEquals("buffer must be capped, not unbounded", 500, plugin.events.pendingEvents.size());
 			assertEquals("the NEWEST event must be retained",
-				"new199", plugin.pendingEvents.get(499).get("skill"));
+				"new199", plugin.events.pendingEvents.get(499).get("skill"));
 			assertTrue("the oldest events are the ones dropped",
-				String.valueOf(plugin.pendingEvents.get(0).get("skill")).startsWith("old"));
+				String.valueOf(plugin.events.pendingEvents.get(0).get("skill")).startsWith("old"));
 		}
 	}
 
@@ -466,10 +466,10 @@ public class EventDeliveryRetryTest
 		assertEquals(1, buffered());
 
 		AccountConnectPlugin restarted = new AccountConnectPlugin();
-		synchronized (restarted.pendingEvents)
+		synchronized (restarted.events.pendingEvents)
 		{
 			assertTrue("a fresh instance has no spool — restart loss is a KNOWN, accepted limit",
-				restarted.pendingEvents.isEmpty());
+				restarted.events.pendingEvents.isEmpty());
 		}
 	}
 

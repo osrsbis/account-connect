@@ -114,9 +114,9 @@ public class ProductionIngestContractTest
 		ev.put("type", type);
 		ev.put("ts", System.currentTimeMillis());
 		ev.putAll(fields);
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			plugin.pendingEvents.add(ev);
+			plugin.events.pendingEvents.add(ev);
 		}
 	}
 
@@ -153,15 +153,15 @@ public class ProductionIngestContractTest
 		fields.put("counterparty", "ZZZ_CONTRACT_TEST");	// 0.7.4: was never present
 		seed("trade", fields);
 
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		Thread.sleep(4000);
 
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
 			assertTrue("a 2xx from production must drain the buffer — if this fails the payload was "
-				+ "rejected and requeued", plugin.pendingEvents.isEmpty());
+				+ "rejected and requeued", plugin.events.pendingEvents.isEmpty());
 		}
-		assertEquals("a successful delivery resets the backoff ladder", 0L, plugin.eventRetryBackoffMs);
+		assertEquals("a successful delivery resets the backoff ladder", 0L, plugin.events.eventRetryBackoffMs);
 	}
 
 	/**
@@ -177,18 +177,18 @@ public class ProductionIngestContractTest
 		}
 		requireEnabled();
 		pointAt(PROD);
-		Map<String, Object> fields = AccountConnectPlugin.buildStoreTxFields(
+		Map<String, Object> fields = StoreTools.buildStoreTxFields(
 			"store_buy", 453, 20, 1_000_000L, 998_000L, false, true);
 		assertEquals(2_000L, fields.get("gp_total"));
 		assertTrue("merged qty must carry no unit price", !fields.containsKey("unit_price_gp"));
 		seed("store_buy", fields);
 
-		plugin.flushEvents();
+		plugin.events.flushEvents();
 		Thread.sleep(4000);
 
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			assertTrue("production must accept the merged store payload", plugin.pendingEvents.isEmpty());
+			assertTrue("production must accept the merged store payload", plugin.events.pendingEvents.isEmpty());
 		}
 	}
 
@@ -258,22 +258,22 @@ public class ProductionIngestContractTest
 		fields.put("level", 99);
 		seed("level_up", fields);
 
-		plugin.flushEvents();				// attempt 1 → 429
+		plugin.events.flushEvents();				// attempt 1 → 429
 		Thread.sleep(2000);
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
-			assertEquals("the batch must survive the 429", 1, plugin.pendingEvents.size());
+			assertEquals("the batch must survive the 429", 1, plugin.events.pendingEvents.size());
 		}
-		assertTrue("the 429 must arm the backoff", plugin.eventRetryBackoffUntilMs > 0);
+		assertTrue("the 429 must arm the backoff", plugin.events.eventRetryBackoffUntilMs > 0);
 
-		plugin.eventRetryBackoffUntilMs = 0L;	// jump the wait rather than sleeping it out
-		plugin.flushEvents();				// attempt 2 → forwarded to production
+		plugin.events.eventRetryBackoffUntilMs = 0L;	// jump the wait rather than sleeping it out
+		plugin.events.flushEvents();				// attempt 2 → forwarded to production
 		Thread.sleep(5000);
 
-		synchronized (plugin.pendingEvents)
+		synchronized (plugin.events.pendingEvents)
 		{
 			assertTrue("production accepted the retry, so the buffer must be empty",
-				plugin.pendingEvents.isEmpty());
+				plugin.events.pendingEvents.isEmpty());
 		}
 		assertEquals("exactly two attempts: the refused one and the accepted one", 2, attempts.get());
 		synchronized (bodies)

@@ -238,14 +238,14 @@ public class AccountProgressCaptureTest
     {
         AccountConnectPlugin p = plugin();
         assertNull(p.progressBlock());
-        p.applyServerPolicy(policy("X-Broad-Capture", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Broad-Capture", "on"), TOKEN);
         assertNull(p.progressBlock());
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), "old-token");
-        assertFalse(p.progressGranted());
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), "old-token");
+        assertFalse(p.grants.progressGranted());
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         assertNull(p.progressBlock()); tick += 2;
         assertNotNull(p.progressBlock());
-        p.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
         assertNull(p.progressBlock());
     }
 
@@ -253,14 +253,14 @@ public class AccountProgressCaptureTest
     public void revokeRegrantWithinTickRestartsSettleAndClearsData() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2; assertNotNull(p.progressBlock());
         ChatMessage msg = new ChatMessage(); msg.setType(ChatMessageType.GAMEMESSAGE);
         msg.setMessage("You have completed 12 hard Treasure Trails.");
         p.onChatMessage(msg);
         assertEquals(1, ((java.util.List<?>) p.progressBlock().get("recent_signals")).size());
-        p.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         assertNull(p.progressBlock()); tick += 2;
         assertTrue(((java.util.List<?>) p.progressBlock().get("recent_signals")).isEmpty());
     }
@@ -269,7 +269,7 @@ public class AccountProgressCaptureTest
     public void publicChatCannotSupplyProgress() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2; p.progressBlock();
         ChatMessage msg = new ChatMessage(); msg.setType(ChatMessageType.PUBLICCHAT);
         msg.setMessage("You have completed 12 hard Treasure Trails.");
@@ -283,20 +283,20 @@ public class AccountProgressCaptureTest
     {
         AccountConnectPlugin p = plugin();
         inject(p, "gson", new com.google.gson.Gson());
-        java.lang.reflect.Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+        java.lang.reflect.Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
         build.setAccessible(true);
-        Map<String, Object> ungranted = (Map<String, Object>) build.invoke(p);
+        Map<String, Object> ungranted = (Map<String, Object>) build.invoke(p.snapshots);
         assertEquals(1, ungranted.get("schema_v"));
         assertFalse(ungranted.containsKey("account_progress"));
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
-        build.invoke(p); tick += 2;
-        Map<String, Object> a = (Map<String, Object>) build.invoke(p);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        build.invoke(p.snapshots); tick += 2;
+        Map<String, Object> a = (Map<String, Object>) build.invoke(p.snapshots);
         assertTrue(a.containsKey("account_progress"));
-        String hash = p.canonicalHash(a);
+        String hash = p.snapshots.canonicalHash(a);
         tick++;
-        assertEquals(hash, p.canonicalHash((Map<String, Object>) build.invoke(p)));
+        assertEquals(hash, p.snapshots.canonicalHash((Map<String, Object>) build.invoke(p.snapshots)));
         vars[394] = 17;
-        assertNotEquals(hash, p.canonicalHash((Map<String, Object>) build.invoke(p)));
+        assertNotEquals(hash, p.snapshots.canonicalHash((Map<String, Object>) build.invoke(p.snapshots)));
     }
 
     @Test
@@ -307,16 +307,16 @@ public class AccountProgressCaptureTest
         OkHttpClient http = mock(OkHttpClient.class);
         when(http.newCall(any(Request.class))).thenReturn(mock(Call.class));
         inject(p, "okHttpClient", http);
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         Map<String, Object> snapshot = new java.util.LinkedHashMap<>();
         snapshot.put("schema_v", 1);
         snapshot.put("account_progress", p.progressBlock());
-        java.lang.reflect.Method send = AccountConnectPlugin.class.getDeclaredMethod("postSnapshot", String.class, Map.class, String.class);
+        java.lang.reflect.Method send = SnapshotUploader.class.getDeclaredMethod("postSnapshot", String.class, Map.class, String.class);
         send.setAccessible(true);
-        send.invoke(p, TOKEN, snapshot, "hash");
-        p.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
-        send.invoke(p, TOKEN, snapshot, "hash");
+        send.invoke(p.uploader, TOKEN, snapshot, "hash");
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
+        send.invoke(p.uploader, TOKEN, snapshot, "hash");
         org.mockito.ArgumentCaptor<Request> requests = org.mockito.ArgumentCaptor.forClass(Request.class);
         verify(http, times(2)).newCall(requests.capture());
         okio.Buffer allowed = new okio.Buffer(); requests.getAllValues().get(0).body().writeTo(allowed);
@@ -330,7 +330,7 @@ public class AccountProgressCaptureTest
     public void realScriptHandlerCapturesQuantityAndGameStateClearsIt() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         ScriptEvent script = mock(ScriptEvent.class);
         when(script.getArguments()).thenReturn(new Object[]{4100, 4151, 7});
@@ -383,7 +383,7 @@ public class AccountProgressCaptureTest
     public void shutdownDiscardsObservationsAcrossMissedSessionTransitions() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         assertNotNull(p.progressBlock());
         ChatMessage msg = new ChatMessage(); msg.setType(ChatMessageType.GAMEMESSAGE);
@@ -400,12 +400,12 @@ public class AccountProgressCaptureTest
     public void failedResponsesCannotGrantAndForbiddenRevokes() throws Exception
     {
         AccountConnectPlugin p = plugin();
-        p.applyServerPolicy(policy("X-Account-Progress", "on").newBuilder().code(500).build(), TOKEN);
-        assertFalse(p.progressGranted());
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
-        assertTrue(p.progressGranted());
-        p.applyServerPolicy(policy("X-Sync-Interval", "30").newBuilder().code(403).build(), TOKEN);
-        assertFalse(p.progressGranted());
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on").newBuilder().code(500).build(), TOKEN);
+        assertFalse(p.grants.progressGranted());
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        assertTrue(p.grants.progressGranted());
+        p.grants.applyServerPolicy(policy("X-Sync-Interval", "30").newBuilder().code(403).build(), TOKEN);
+        assertFalse(p.grants.progressGranted());
         assertNull(p.progressBlock());
     }
 
@@ -488,7 +488,7 @@ public class AccountProgressCaptureTest
         ScriptPostFired setup = new ScriptPostFired(7797);
         p.onScriptPostFired(setup);
         verify(client, never()).runScript(2240);
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         p.onScriptPostFired(setup);
         verify(client, never()).runScript(2240); // never inside the setup script
@@ -519,7 +519,7 @@ public class AccountProgressCaptureTest
         when(client.getWidget(383, 3)).thenReturn(list);
         p.onGameTick(new GameTick());
         verify(client, never()).getWidget(383, 3);
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.onGameTick(new GameTick()); tick += 2;
         p.onGameTick(new GameTick()); tick++;
         p.onGameTick(new GameTick());
@@ -534,14 +534,14 @@ public class AccountProgressCaptureTest
         when(client.getWorldType()).thenReturn(java.util.EnumSet.of(WorldType.SEASONAL));
         assertNull(p.progressBlock()); tick += 2;
         assertTrue(((java.util.List<?>) ((Map<?, ?>) p.progressBlock().get("ge_history")).get("observations")).isEmpty());
-        p.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "off"), TOKEN);
         assertNull(p.progressBlock());
     }
 
     @Test public void automaticZeroTransmissionNeverPollutesLegacyObtainedSet() throws Exception
     {
         AccountConnectPlugin p = plugin(); searchable(0);
-        p.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
         p.progressBlock(); tick += 2;
         p.onScriptPostFired(new ScriptPostFired(7797));
         p.onGameTick(new GameTick());

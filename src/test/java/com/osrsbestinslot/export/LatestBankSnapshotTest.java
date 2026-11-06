@@ -209,7 +209,7 @@ public class LatestBankSnapshotTest
 		{
 			b.header("X-Bank-Receipt", "event-id-v1");
 		}
-		plugin.applyServerPolicy(b.build(), TOKEN);
+		plugin.grants.applyServerPolicy(b.build(), TOKEN);
 	}
 
 	private void inject(String field, Object value) throws Exception
@@ -237,7 +237,7 @@ public class LatestBankSnapshotTest
 	{
 		bank = b;
 		plugin.onItemContainerChanged(new ItemContainerChanged(BANK, b));
-		plugin.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 	}
 
 	private void change(ItemContainer b)
@@ -252,25 +252,25 @@ public class LatestBankSnapshotTest
 	 */
 	private void close()
 	{
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		regularUpload();
 		tick++;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
-		tick += AccountConnectPlugin.PUBLIC_CLOSE_WAIT_TICKS;
+		tick += BankVisit.PUBLIC_CLOSE_WAIT_TICKS;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 	}
 
 	private void regularUpload()
 	{
-		plugin.lastSendMillis = 0L;
+		plugin.uploader.lastSendMillis = 0L;
 		plugin.syncTask();
 	}
 
 	private List<Map<String, Object>> of(String type)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{
@@ -315,12 +315,12 @@ public class LatestBankSnapshotTest
 	{
 		policy();
 		bank = container(new int[]{4151, 1}, new int[]{995, 1000}, new int[]{995, 5});
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		Map<?, ?> sent = sentBanks().get(0);
 		assertNull("one item in two slots does not match its items list, so no hash", sent.get("manifest_sha256"));
 
 		bank = container(new int[]{4151, 1}, new int[]{995, 1000});
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		sent = sentBanks().get(0);
 		Map<Integer, Long> counts = new LinkedHashMap<>();
 		counts.put(4151, 1L);
@@ -334,7 +334,7 @@ public class LatestBankSnapshotTest
 	public void anUnreadBankHasNoHash() throws Exception
 	{
 		policy();
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		Map<?, ?> sent = sentBanks().get(0);
 		assertTrue(((List<?>) sent.get("items")).isEmpty());
 		assertFalse(sent.containsKey("manifest_sha256"));
@@ -372,7 +372,7 @@ public class LatestBankSnapshotTest
 	public void withNoSnapshotQueuedTheListsGoAsChunks() throws Exception
 	{
 		policy();
-		plugin.backoffUntilMillis = Long.MAX_VALUE;		// a 429 backoff: no snapshot can be queued
+		plugin.uploader.backoffUntilMillis = Long.MAX_VALUE;		// a 429 backoff: no snapshot can be queued
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
 		close();
@@ -393,10 +393,10 @@ public class LatestBankSnapshotTest
 	{
 		policy();
 		bank = container(new int[]{995, 1000});
-		plugin.forceSendSnapshot();						// queued under account 42
+		plugin.uploader.forceSendSnapshot();						// queued under account 42
 		when(client.getAccountHash()).thenReturn(43L);		// a relog to another account
 		inject("activeHash", "43");
-		plugin.backoffUntilMillis = Long.MAX_VALUE;
+		plugin.uploader.backoffUntilMillis = Long.MAX_VALUE;
 		open(container(new int[]{995, 1000}));
 		close();
 		assertFalse(of("bank_visit_open").get(0).containsKey("manifest_in_snapshot"));
@@ -409,7 +409,7 @@ public class LatestBankSnapshotTest
 	{
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));	// the open snapshot is queued
-		plugin.backoffUntilMillis = Long.MAX_VALUE;
+		plugin.uploader.backoffUntilMillis = Long.MAX_VALUE;
 		change(container(new int[]{995, 1000}));
 		close();
 		assertEquals(true, of("bank_visit_open").get(0).get("manifest_in_snapshot"));
@@ -423,8 +423,8 @@ public class LatestBankSnapshotTest
 	{
 		policy();
 		bank = container(new int[]{995, 1000});
-		plugin.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);			// contents not confirmed in this tick
-		plugin.backoffUntilMillis = Long.MAX_VALUE;
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);			// contents not confirmed in this tick
+		plugin.uploader.backoffUntilMillis = Long.MAX_VALUE;
 		Map<?, ?> queued = sentBanks().get(0);
 		assertNull(queued.get("observed_at"));
 		assertNotNull(queued.get("manifest_sha256"));
@@ -443,7 +443,7 @@ public class LatestBankSnapshotTest
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
 		int before = server.getRequestCount();
-		plugin.handleBankWidgetClosed(BANK_GROUP);			// the close script's WidgetClosed
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);			// the close script's WidgetClosed
 		tick++;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		assertEquals("no extra upload for a visit", before, server.getRequestCount());
@@ -462,7 +462,7 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		executor.hold = true;
 		regularUpload();									// sent, no answer yet
 		tick++;
@@ -482,8 +482,8 @@ public class LatestBankSnapshotTest
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		assertFalse(of("bank_visit_open").get(0).containsKey("manifest_in_snapshot"));
 		assertEquals(1, chunks("open").size());
-		plugin.handleBankWidgetClosed(BANK_GROUP);
-		assertTrue("a backoff after the loss", plugin.backoffUntilMillis > System.currentTimeMillis());
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		assertTrue("a backoff after the loss", plugin.uploader.backoffUntilMillis > System.currentTimeMillis());
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));	// a reopen during the backoff
 		Map<String, Object> second = of("bank_visit_open").get(1);
 		assertFalse("no claim from the refused upload", second.containsKey("manifest_in_snapshot"));
@@ -496,10 +496,10 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		failNext = 1;
 		regularUpload();									// fails: nothing on the server holds the end bank
-		tick += AccountConnectPlugin.PUBLIC_CLOSE_WAIT_TICKS;
+		tick += BankVisit.PUBLIC_CLOSE_WAIT_TICKS;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		Map<String, Object> close = of("bank_visit_close").get(0);
 		assertFalse(close.containsKey("manifest_in_snapshot"));
@@ -510,7 +510,7 @@ public class LatestBankSnapshotTest
 	public void aShopCloseWithAPendingBuyBuildsOnTheNextTick() throws Exception
 	{
 		policy();
-		plugin.storePendings.put(560, new AccountConnectPlugin.StorePending("store_buy", 560, 10, 100L, 5L, tick, false, false));
+		plugin.store.storePendings.put(560, new StoreTools.StorePending("store_buy", 560, 10, 100L, 5L, tick, false, false));
 		int before = server.getRequestCount();
 		plugin.onWidgetClosed(new net.runelite.api.events.WidgetClosed(net.runelite.api.gameval.InterfaceID.SHOPMAIN, 0, false));
 		assertEquals(1, of("store_buy").size());
@@ -526,7 +526,7 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
 		net.runelite.api.events.GameStateChanged e = new net.runelite.api.events.GameStateChanged();
 		e.setGameState(GameState.LOGIN_SCREEN);
@@ -560,7 +560,7 @@ public class LatestBankSnapshotTest
 	{
 		policy();
 		open(container(new int[]{995, 1000}));
-		plugin.handleBankWidgetClosed(BANK_GROUP, true);	// unload: hop, logout, disconnect
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, true);	// unload: hop, logout, disconnect
 		Map<String, Object> close = of("bank_visit_close").get(0);
 		assertFalse(close.containsKey("manifest_in_snapshot"));
 		assertFalse(close.containsKey("end_manifest_sha256"));

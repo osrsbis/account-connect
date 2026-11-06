@@ -50,8 +50,8 @@ public class EventLogTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", new AccountConnectConfig() {
 }); // linkToken() == "" → activity log inactive
-		plugin.emitEvent("login", null);
-		assertTrue("no token must buffer nothing", plugin.pendingEvents.isEmpty());
+		plugin.events.emitEvent("login", null);
+		assertTrue("no token must buffer nothing", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -61,10 +61,10 @@ public class EventLogTest
 		inject(plugin, "config", onConfig());
 		inject(plugin, "activeRsn", "OSRS BOI");
 		inject(plugin, "activeHash", "12345");
-		plugin.emitEvent("login", null);
+		plugin.events.emitEvent("login", null);
 
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("login", ev.get("type"));
 		assertEquals("OSRS BOI", ev.get("rsn"));
 		assertEquals("12345", ev.get("account_hash"));
@@ -78,8 +78,8 @@ public class EventLogTest
 		inject(plugin, "config", onConfig());
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("session_ms", 4200L);
-		plugin.emitEvent("logout", fields);
-		assertEquals(4200L, plugin.pendingEvents.get(0).get("session_ms"));
+		plugin.events.emitEvent("logout", fields);
+		assertEquals(4200L, plugin.events.pendingEvents.get(0).get("session_ms"));
 	}
 
 	@Test
@@ -89,19 +89,19 @@ public class EventLogTest
 		inject(plugin, "config", onConfig());
 		inject(plugin, "activeRsn", "regardo");
 		inject(plugin, "activeHash", "999");
-		inject(plugin, "sessionActive", true);
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - 1500L);
+		plugin.session.sessionActive = true;
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 1500L;
 
-		plugin.trackLogout();
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> ev = plugin.pendingEvents.get(0);
+		plugin.session.trackLogout();
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> ev = plugin.events.pendingEvents.get(0);
 		assertEquals("logout", ev.get("type"));
 		assertEquals("regardo", ev.get("rsn"));
 		assertTrue("session_ms should be >= elapsed", ((Long) ev.get("session_ms")) >= 1500L);
 
 		// session ended → a second logout is a no-op (no duplicate)
-		plugin.trackLogout();
-		assertEquals("logout must fire once per session", 1, plugin.pendingEvents.size());
+		plugin.session.trackLogout();
+		assertEquals("logout must fire once per session", 1, plugin.events.pendingEvents.size());
 	}
 
 	@Test
@@ -111,9 +111,9 @@ public class EventLogTest
 		inject(plugin, "config", onConfig());
 		for (int i = 0; i < 600; i++)
 		{
-			plugin.emitEvent("level_up", null);
+			plugin.events.emitEvent("level_up", null);
 		}
-		assertEquals("buffer must be capped at MAX_PENDING_EVENTS", 500, plugin.pendingEvents.size());
+		assertEquals("buffer must be capped at MAX_PENDING_EVENTS", 500, plugin.events.pendingEvents.size());
 	}
 
 	// ---- The broad chat sweep is REMOVED (0.7.3). These four tests replace the four that asserted it. ----
@@ -131,7 +131,7 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
 		when(ev.getMessage()).thenReturn("Oh dear, you are dead!");
 		plugin.onChatMessage(ev);
-		assertTrue("game chat must no longer be captured at all", plugin.pendingEvents.isEmpty());
+		assertTrue("game chat must no longer be captured at all", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -145,7 +145,7 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.SPAM);
 		when(ev.getMessage()).thenReturn("You catch a harpoonfish!");
 		plugin.onChatMessage(ev);
-		assertTrue("spam chat must no longer be captured at all", plugin.pendingEvents.isEmpty());
+		assertTrue("spam chat must no longer be captured at all", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -158,7 +158,7 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.PUBLICCHAT);
 		when(ev.getMessage()).thenReturn("buying gf");
 		plugin.onChatMessage(ev);
-		assertTrue("public/other-player chat must not be captured", plugin.pendingEvents.isEmpty());
+		assertTrue("public/other-player chat must not be captured", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -183,9 +183,9 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.TRADE);
 		when(ev.getMessage()).thenReturn("Accepted trade.");
 		plugin.onChatMessage(ev);
-		assertEquals("the accepted trade must still emit exactly one event", 1, plugin.pendingEvents.size());
-		assertEquals("trade", plugin.pendingEvents.get(0).get("type"));
-		assertNull(plugin.pendingEvents.get(0).get("counterparty"));
+		assertEquals("the accepted trade must still emit exactly one event", 1, plugin.events.pendingEvents.size());
+		assertEquals("trade", plugin.events.pendingEvents.get(0).get("type"));
+		assertNull(plugin.events.pendingEvents.get(0).get("counterparty"));
 	}
 
 	@Test
@@ -199,7 +199,7 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.TRADE);
 		when(ev.getMessage()).thenReturn("Other player declined trade.");
 		plugin.onChatMessage(ev);
-		assertTrue("a declined trade emits no event", plugin.pendingEvents.isEmpty());
+		assertTrue("a declined trade emits no event", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -214,7 +214,7 @@ public class EventLogTest
 		when(ev.getType()).thenReturn(ChatMessageType.GAMEMESSAGE);
 		when(ev.getMessage()).thenReturn("SomeOtherPlayer received a drop: Abyssal lantern");
 		plugin.onChatMessage(ev);
-		assertTrue("other players' names must not be captured via broadcasts", plugin.pendingEvents.isEmpty());
+		assertTrue("other players' names must not be captured via broadcasts", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -236,8 +236,8 @@ public class EventLogTest
 		plugin.onGrandExchangeOfferChanged(ev);
 		plugin.onGrandExchangeOfferChanged(ev); // unchanged terminal state → dedup, no second event
 
-		assertEquals("GE terminal state should emit exactly once", 1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("GE terminal state should emit exactly once", 1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("ge_buy", e.get("type"));
 		assertEquals(Integer.valueOf(20997), e.get("item"));
 	}
@@ -245,9 +245,9 @@ public class EventLogTest
 	@Test
 	public void parseTrailingQtyParses()
 	{
-		assertEquals(10, AccountConnectPlugin.parseTrailingQty("Sell 10"));
-		assertEquals(50, AccountConnectPlugin.parseTrailingQty("Buy 50"));
-		assertEquals(1, AccountConnectPlugin.parseTrailingQty("Buy"));
+		assertEquals(10, OffBookPendings.parseTrailingQty("Sell 10"));
+		assertEquals(50, OffBookPendings.parseTrailingQty("Buy 50"));
+		assertEquals(1, OffBookPendings.parseTrailingQty("Buy"));
 	}
 
 	@Test
@@ -263,12 +263,12 @@ public class EventLogTest
 
 		plugin.onMenuOptionClicked(ev); // shop closed → nothing armed, nothing emitted
 		assertNull("no pending when shop closed", storePending(plugin));
-		assertTrue("no store event when shop closed", plugin.pendingEvents.isEmpty());
+		assertTrue("no store event when shop closed", plugin.events.pendingEvents.isEmpty());
 
-		inject(plugin, "shopOpen", true);
+		plugin.store.shopOpen = true;
 		plugin.onMenuOptionClicked(ev);
-		assertTrue("store click must defer emit to the inventory-change resolve", plugin.pendingEvents.isEmpty());
-		AccountConnectPlugin.StorePending p = storePending(plugin);
+		assertTrue("store click must defer emit to the inventory-change resolve", plugin.events.pendingEvents.isEmpty());
+		StoreTools.StorePending p = storePending(plugin);
 		assertNotNull("store click must arm a pending", p);
 		assertEquals("store_sell", p.type);
 		assertEquals(1391, p.item);
@@ -284,14 +284,14 @@ public class EventLogTest
 		// item, and there is nothing to recover. Mirrors the off-book path's own <= 0 guard.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "shopOpen", true);
+		plugin.store.shopOpen = true;
 		MenuOptionClicked ev = mock(MenuOptionClicked.class);
 		when(ev.getMenuOption()).thenReturn("Buy 1");
 		when(ev.getItemId()).thenReturn(-1);
 
 		plugin.onMenuOptionClicked(ev);
 		assertNull("an itemless store click must not arm a pending", storePending(plugin));
-		assertTrue("an itemless store click must emit nothing", plugin.pendingEvents.isEmpty());
+		assertTrue("an itemless store click must emit nothing", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -301,14 +301,14 @@ public class EventLogTest
 		// inventory resolve must survive a stray itemless click.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		inject(plugin, "shopOpen", true);
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		plugin.store.shopOpen = true;
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
 		MenuOptionClicked ev = mock(MenuOptionClicked.class);
 		when(ev.getMenuOption()).thenReturn("Buy 1");
 		when(ev.getItemId()).thenReturn(-1);
 
 		plugin.onMenuOptionClicked(ev);
-		AccountConnectPlugin.StorePending p = storePending(plugin);
+		StoreTools.StorePending p = storePending(plugin);
 		assertNotNull("the real armed pending must survive an itemless click", p);
 		assertEquals("the surviving pending must be the original", 4151, p.item);
 	}
@@ -321,15 +321,15 @@ public class EventLogTest
 		// 0.7.1 (the build on the Hub) emits the degraded {item, qty} form instead; that must not regress.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
 
 		// Drive the REAL event, not the helper: a mutation that reverts the call site back to
 		// `storePending = null` leaves the helper itself perfect and the feature dead, and a test
 		// that calls the helper directly would stay green through exactly that regression.
 		plugin.onWidgetClosed(new WidgetClosed(300, 0, false)); // 300 = SHOPMAIN
 
-		assertEquals("the transaction must still be reported", 1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals("the transaction must still be reported", 1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("store_buy", e.get("type"));
 		assertEquals(4151, e.get("item"));
 		assertEquals(1, e.get("qty"));
@@ -343,8 +343,8 @@ public class EventLogTest
 		// The discriminator: the flush must not invent an event when nothing was armed.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		plugin.flushStorePendingOnShopClose();
-		assertEquals("no pending -> no event", 0, plugin.pendingEvents.size());
+		plugin.store.flushStorePendingOnShopClose();
+		assertEquals("no pending -> no event", 0, plugin.events.pendingEvents.size());
 	}
 
 	@Test
@@ -353,10 +353,10 @@ public class EventLogTest
 		// (a) buy → coins fell exactly; gp_total is the coins that left, qty==1 so no unit average.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
-		plugin.resolveStorePendingOnInventoryChange(700L, 6); // coins fell 300, one tick later
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		plugin.store.resolveStorePendingOnInventoryChange(700L, 6); // coins fell 300, one tick later
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("store_buy", e.get("type"));
 		assertEquals(4151, e.get("item"));
 		assertEquals(1, e.get("qty"));
@@ -377,10 +377,10 @@ public class EventLogTest
 		// AccountConnectPlugin#buildStoreTxFields and singleClickPartialFillIsLabelledNotPriced below.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending(
+		arm(plugin, new StoreTools.StorePending(
 			"store_sell", 1391, 5, 200L, 5L, 5, false, false));	// itemBefore 5
-		plugin.resolveStorePendingOnInventoryChange(950L, 0L, 5);	// coins rose 750, all 5 items gone
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		plugin.store.resolveStorePendingOnInventoryChange(950L, 0L, 5);	// coins rose 750, all 5 items gone
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("store_sell", e.get("type"));
 		assertEquals(750L, e.get("gp_total"));
 		assertEquals(150L, e.get("unit_price_gp")); // 750/5, a labelled average over a confirmed 5
@@ -393,9 +393,9 @@ public class EventLogTest
 		// still the exact measured coin movement.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_sell", 1391, 5, 200L, 5, false));
-		plugin.resolveStorePendingOnInventoryChange(950L, 5);
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		arm(plugin, new StoreTools.StorePending("store_sell", 1391, 5, 200L, 5, false));
+		plugin.store.resolveStorePendingOnInventoryChange(950L, 5);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals(750L, e.get("gp_total"));
 		assertNull("no evidence is not confirmation", e.get("unit_price_gp"));
 	}
@@ -416,11 +416,11 @@ public class EventLogTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		// "Buy 50" with 0 in the inventory; only 5 arrive, costing 3,925 gp.
-		arm(plugin, new AccountConnectPlugin.StorePending(
+		arm(plugin, new StoreTools.StorePending(
 			"store_buy", 22660, 50, 26_207_203L, 0L, 5, false, false));
-		plugin.resolveStorePendingOnInventoryChange(26_203_278L, 5L, 5);
+		plugin.store.resolveStorePendingOnInventoryChange(26_203_278L, 5L, 5);
 
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("the measured coin movement, exact as always", 3_925L, e.get("gp_total"));
 		assertEquals("the click's own quantity, for continuity with every historical row", 50, e.get("qty"));
 		assertEquals("what the server actually moved", 5L, e.get("qty_executed"));
@@ -434,9 +434,9 @@ public class EventLogTest
 		// (c) "Buy 50" but only 10 filled → gp_total is the coins that ACTUALLY moved, never qty×unitguess.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 50, 100000L, 5, false));
-		plugin.resolveStorePendingOnInventoryChange(97000L, 6); // only 3000 coins actually left
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 50, 100000L, 5, false));
+		plugin.store.resolveStorePendingOnInventoryChange(97000L, 6); // only 3000 coins actually left
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("gp_total must be the coins that actually moved", 3000L, e.get("gp_total"));
 	}
 
@@ -447,9 +447,9 @@ public class EventLogTest
 		// window must NOT be paired with the stale coinsBefore — emit nothing, drop the pending.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 10, false));
-		plugin.resolveStorePendingOnInventoryChange(50000L, 15); // 5 ticks later (> STORE_PENDING_MAX_TICKS)
-		assertTrue("stale pending must emit nothing", plugin.pendingEvents.isEmpty());
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 10, false));
+		plugin.store.resolveStorePendingOnInventoryChange(50000L, 15); // 5 ticks later (> STORE_PENDING_MAX_TICKS)
+		assertTrue("stale pending must emit nothing", plugin.events.pendingEvents.isEmpty());
 		assertNull("stale pending must be cleared", storePending(plugin));
 	}
 
@@ -459,7 +459,7 @@ public class EventLogTest
 		// (e) closing the shop widget drops any armed-but-unresolved pending.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
 		WidgetClosed wc = new WidgetClosed(300, 0, false); // SHOPMAIN — final class, use the real event
 		plugin.onWidgetClosed(wc);
 		assertNull("closing the shop must drop any armed pending", storePending(plugin));
@@ -472,9 +472,9 @@ public class EventLogTest
 		// never emit a wrong-sign price.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, false));
-		plugin.resolveStorePendingOnInventoryChange(1200L, 6); // wrong sign for a buy
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		plugin.store.resolveStorePendingOnInventoryChange(1200L, 6); // wrong sign for a buy
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals(4151, e.get("item"));
 		assertEquals(1, e.get("qty"));
 		assertFalse("must not emit a wrong-sign price", e.containsKey("gp_total"));
@@ -487,22 +487,22 @@ public class EventLogTest
 		// sign is right, rather than attribute both to one click's qty.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new AccountConnectPlugin.StorePending("store_buy", 4151, 1, 1000L, 5, true));
-		plugin.resolveStorePendingOnInventoryChange(700L, 5); // sign ok but batch-ambiguous
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, true));
+		plugin.store.resolveStorePendingOnInventoryChange(700L, 5); // sign ok but batch-ambiguous
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertFalse("same-tick batched clicks must omit gp_total", e.containsKey("gp_total"));
 	}
 
 	/** The one armed pending, or null. These tests arm at most one item. */
-	private static AccountConnectPlugin.StorePending storePending(AccountConnectPlugin plugin)
+	private static StoreTools.StorePending storePending(AccountConnectPlugin plugin)
 	{
-		assertTrue(plugin.storePendings.size() <= 1);
-		return plugin.storePendings.isEmpty() ? null : plugin.storePendings.values().iterator().next();
+		assertTrue(plugin.store.storePendings.size() <= 1);
+		return plugin.store.storePendings.isEmpty() ? null : plugin.store.storePendings.values().iterator().next();
 	}
 
-	private static void arm(AccountConnectPlugin plugin, AccountConnectPlugin.StorePending p)
+	private static void arm(AccountConnectPlugin plugin, StoreTools.StorePending p)
 	{
-		plugin.storePendings.put(p.item, p);
+		plugin.store.storePendings.put(p.item, p);
 	}
 
 	@Test
@@ -512,8 +512,8 @@ public class EventLogTest
 		AccountConnectPlugin pub = new AccountConnectPlugin();
 		inject(pub, "config", onConfig()); // apiBaseUrl == default public
 		injectPendingTrade(pub, "Bob");
-		pub.emitTradeEvent();
-		Map<String, Object> pe = pub.pendingEvents.get(0);
+		pub.trade.emitTradeEvent();
+		Map<String, Object> pe = pub.events.pendingEvents.get(0);
 		assertEquals("trade", pe.get("type"));
 		assertTrue("given items present", pe.containsKey("given"));
 		assertNull("public artifact excludes the partner", pe.get("counterparty"));
@@ -526,8 +526,8 @@ public class EventLogTest
 			@Override public String apiBaseUrl() { return "https://staff.internal/api"; }
 		});
 		injectPendingTrade(staff, "Bob");
-		staff.emitTradeEvent();
-		assertNull("a staff grant cannot widen this artifact", staff.pendingEvents.get(0).get("counterparty"));
+		staff.trade.emitTradeEvent();
+		assertNull("a staff grant cannot widen this artifact", staff.events.pendingEvents.get(0).get("counterparty"));
 	}
 
 	private static void injectPendingTrade(AccountConnectPlugin plugin, String counterparty) throws Exception
@@ -537,8 +537,8 @@ public class EventLogTest
 		item.put("id", 20997);
 		item.put("qty", 1);
 		given.add(item);
-		inject(plugin, "pendingTradeGiven", given);
-		inject(plugin, "pendingCounterparty", counterparty);
+		plugin.trade.pendingTradeGiven = given;
+		plugin.trade.pendingCounterparty = counterparty;
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

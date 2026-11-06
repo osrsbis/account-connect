@@ -39,8 +39,8 @@ final class StaffGrant
         config.setAccessible(true);
         Object c = config.get(plugin);
         String base = c instanceof AccountConnectConfig ? ((AccountConnectConfig) c).apiBaseUrl() : null;
-        plugin.staffApiBase = base == null || base.trim().isEmpty() ? AccountConnectPlugin.OFFICIAL_API_BASE : base.trim();
-        plugin.setStaffCaptureForTest(plugin.currentLinkToken(), (String) hash.get(plugin));
+        plugin.grants.staffApiBase = base == null || base.trim().isEmpty() ? ServerGrants.OFFICIAL_API_BASE : base.trim();
+        plugin.grants.setStaffCapture(plugin.currentLinkToken(), (String) hash.get(plugin));
     }
 
     private static boolean isFixtureAccount(Object hash)

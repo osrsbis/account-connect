@@ -31,7 +31,7 @@ public class OwnClueEventTest {
    Map<String,Object> e=event(family);assertNotNull(e);e.put("event_id","a".repeat(32));e.put("ts",AT);e.put("player_name","PRIVATE");
    Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));
    if(family.equals("clues.destination")) {assertEquals(28,((Map<?,?>)((Map<?,?>)wire.get("state_value")).get("inventory_map_coordinate_clues")).size());int bytes=gson.toJson(wire).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;assertTrue(bytes<8192);System.out.println("28-clue projected payload bytes="+bytes);}
-   assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertTrue(EventQueueProtocol.allows("own-signals-v1",wire));
+   assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
   }
   Map<String,Object> unknown=new HashMap<>();unknown.put("inventory_map_coordinate_clues",null);
   assertNull(OwnStateEvent.projectValue("clue_inventory",unknown).get("inventory_map_coordinate_clues"));

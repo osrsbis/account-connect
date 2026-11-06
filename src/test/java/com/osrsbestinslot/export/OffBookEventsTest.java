@@ -51,15 +51,15 @@ public class OffBookEventsTest
 	@Test
 	public void classifiesDropTakeAndAlch()
 	{
-		assertEquals("drop", AccountConnectPlugin.offBookMenuAction(menu("Drop", "", 0)));
-		assertEquals("pickup", AccountConnectPlugin.offBookMenuAction(menu("Take", "", 0)));
+		assertEquals("drop", OffBookPendings.offBookMenuAction(menu("Drop", "", 0)));
+		assertEquals("pickup", OffBookPendings.offBookMenuAction(menu("Take", "", 0)));
 		// menu shape A: the spell name is on the option itself
-		assertEquals("alch_high", AccountConnectPlugin.offBookMenuAction(menu("Cast High Level Alchemy", "", 0)));
+		assertEquals("alch_high", OffBookPendings.offBookMenuAction(menu("Cast High Level Alchemy", "", 0)));
 		// menu shape B (the likely runtime shape): option "Cast", spell name in the target
 		assertEquals("alch_low",
-			AccountConnectPlugin.offBookMenuAction(menu("Cast", "<col=00ff00>Low Level Alchemy</col> -> Item", 0)));
-		assertNull(AccountConnectPlugin.offBookMenuAction(menu("Wield", "", 0)));
-		assertNull(AccountConnectPlugin.offBookMenuAction(menu("Drop-all", "", 0))); // not the bare "Drop"
+			OffBookPendings.offBookMenuAction(menu("Cast", "<col=00ff00>Low Level Alchemy</col> -> Item", 0)));
+		assertNull(OffBookPendings.offBookMenuAction(menu("Wield", "", 0)));
+		assertNull(OffBookPendings.offBookMenuAction(menu("Drop-all", "", 0))); // not the bare "Drop"
 	}
 
 	// ---------- drop ----------
@@ -80,23 +80,23 @@ public class OffBookEventsTest
 		inject(plugin, "client", client);
 
 		plugin.onMenuOptionClicked(menu("Drop", "", 560));
-		AccountConnectPlugin.InvDeltaPending p = invDeltaPending(plugin);
+		OffBookPendings.InvDeltaPending p = invDeltaPending(plugin);
 		assertNotNull("drop must arm a pending", p);
 		assertEquals("drop", p.base);
 		assertEquals(560, p.item);
 		assertEquals(5L, p.beforeCount);
 		assertEquals(Boolean.TRUE, p.wilderness);
-		assertTrue("drop defers emit", plugin.pendingEvents.isEmpty());
+		assertTrue("drop defers emit", plugin.events.pendingEvents.isEmpty());
 
 		// an inventory removal ALONE must never emit a drop (it could be a bank / destroy / equip)
-		plugin.resolveInvDeltaPending(0L, 0L, 11);
-		assertTrue("inventory delta alone never emits a drop", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 11);
+		assertTrue("inventory delta alone never emits a drop", plugin.events.pendingEvents.isEmpty());
 		assertNotNull("pending survives awaiting the ground spawn", invDeltaPending(plugin));
 
 		// the ground spawn at our tile + the inventory loss together confirm the drop
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 11);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 0L, 11);
 		assertNull("pending consumed", invDeltaPending(plugin));
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("drop", e.get("type"));
 		assertEquals(560, e.get("item"));
 		assertEquals(5L, e.get("qty"));
@@ -109,9 +109,9 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 526, null, 1L, 0L, null, Boolean.FALSE, 5));
-		plugin.resolveDropPendingOnGroundSpawn(526, 1, 0L, 6);
-		assertEquals(false, plugin.pendingEvents.get(0).get("wilderness"));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 526, null, 1L, 0L, null, Boolean.FALSE, 5));
+		plugin.offBook.resolveDropPendingOnGroundSpawn(526, 1, 0L, 6);
+		assertEquals(false, plugin.events.pendingEvents.get(0).get("wilderness"));
 	}
 
 	/**
@@ -124,14 +124,14 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.FALSE, 5));
 		// tbow leaves the inventory (equip / deposit / destroy) — inv-change path sees it, must not emit
-		plugin.resolveInvDeltaPending(0L, 0L, 6);
-		assertTrue("no fabricated drop", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 6);
+		assertTrue("no fabricated drop", plugin.events.pendingEvents.isEmpty());
 		// window passes with no ground spawn -> pending expires silently
-		plugin.resolveInvDeltaPending(0L, 0L, 30);
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 30);
 		assertNull("stale drop pending expired", invDeltaPending(plugin));
-		assertTrue(plugin.pendingEvents.isEmpty());
+		assertTrue(plugin.events.pendingEvents.isEmpty());
 	}
 
 	/**
@@ -143,10 +143,10 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 		// same item id spawns at our feet but our inventory still holds all 5 -> not our drop
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
-		assertTrue("no emit without a matching inventory loss", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
+		assertTrue("no emit without a matching inventory loss", plugin.events.pendingEvents.isEmpty());
 		assertNotNull("pending kept (the real drop may still land)", invDeltaPending(plugin));
 	}
 
@@ -167,14 +167,14 @@ public class OffBookEventsTest
 		when(client.getLocalPlayer()).thenReturn(player);
 		when(player.getWorldLocation()).thenReturn(new WorldPoint(3100, 3900, 0));
 		inject(plugin, "client", client);
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
 
 		plugin.onActorDeath(new net.runelite.api.events.ActorDeath((net.runelite.api.Actor) player));
 		assertNull("death disarms any pending drop/pickup/alch", invDeltaPending(plugin));
 
 		// the death's ground spawns + inventory wipe must not resolve as a drop
-		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6);
-		assertTrue("no fabricated drop from death loot", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6);
+		assertTrue("no fabricated drop from death loot", plugin.events.pendingEvents.isEmpty());
 	}
 
 	/**
@@ -187,19 +187,19 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		AccountConnectPlugin.InvDeltaPending p =
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.TRUE, 5);
+		OffBookPendings.InvDeltaPending p =
+			new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.TRUE, 5);
 		armPending(plugin, p);
 
 		// spawn arrives while the inventory still shows the full count -> no emit yet, corroboration recorded
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
-		assertTrue("no emit while the inventory loss is unconfirmed", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6);
+		assertTrue("no emit while the inventory loss is unconfirmed", plugin.events.pendingEvents.isEmpty());
 		assertNotNull("pending kept", invDeltaPending(plugin));
 
 		// the inventory decrement lands next -> the inv-change path completes the dual signal
-		plugin.resolveInvDeltaPending(0L, 0L, 6);
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 6);
 		assertNull("pending consumed", invDeltaPending(plugin));
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("drop", e.get("type"));
 		assertEquals(560, e.get("item"));
 		assertEquals(5L, e.get("qty"));
@@ -212,10 +212,10 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6); // corroborated at tick 6, no loss yet
-		plugin.resolveInvDeltaPending(0L, 0L, 14); // loss lands 8 ticks later (bank deposit) -> too stale
-		assertTrue("stale corroboration never pairs", plugin.pendingEvents.isEmpty());
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 5L, 6); // corroborated at tick 6, no loss yet
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 14); // loss lands 8 ticks later (bank deposit) -> too stale
+		assertTrue("stale corroboration never pairs", plugin.events.pendingEvents.isEmpty());
 	}
 
 	/**
@@ -227,12 +227,12 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		AccountConnectPlugin.InvDeltaPending p =
-			new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5);
+		OffBookPendings.InvDeltaPending p =
+			new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5);
 		armPending(plugin, p);
 		// direct core call with grew=false must record nothing
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 6, false);
-		assertTrue("shrinking stack is never our drop", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 0L, 6, false);
+		assertTrue("shrinking stack is never our drop", plugin.events.pendingEvents.isEmpty());
 		assertEquals("no corroboration recorded", -1, p.spawnCorroboratedTick);
 	}
 
@@ -242,11 +242,11 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
-		inject(plugin, "deathPending",
-			new AccountConnectPlugin.DeathPending(null, "wilderness", new LinkedHashMap<>(), 5));
-		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6); // the death's tbow hits the floor
-		assertTrue("death-settle spawns never become drops", plugin.pendingEvents.isEmpty());
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 20997, null, 1L, 0L, null, Boolean.TRUE, 5));
+		plugin.death.deathPending =
+			new Death.DeathPending(null, "wilderness", new LinkedHashMap<>(), 5);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 6); // the death's tbow hits the floor
+		assertTrue("death-settle spawns never become drops", plugin.events.pendingEvents.isEmpty());
 		assertNull("pending killed by the death belt", invDeltaPending(plugin));
 	}
 
@@ -264,7 +264,7 @@ public class OffBookEventsTest
 		when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inv);
 		when(client.getTickCount()).thenReturn(6);
 		inject(plugin, "client", client);
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
 
 		net.runelite.api.TileItem it = mock(net.runelite.api.TileItem.class);
 		when(it.getId()).thenReturn(560);
@@ -273,8 +273,8 @@ public class OffBookEventsTest
 		when(tile.getWorldLocation()).thenReturn(new WorldPoint(3200, 3200, 0));
 
 		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tile, it));
-		assertTrue("foreign-owned pile rejected", plugin.pendingEvents.isEmpty());
-		AccountConnectPlugin.InvDeltaPending p = invDeltaPending(plugin);
+		assertTrue("foreign-owned pile rejected", plugin.events.pendingEvents.isEmpty());
+		OffBookPendings.InvDeltaPending p = invDeltaPending(plugin);
 		assertNotNull("pending untouched", p);
 		assertEquals("no corroboration recorded either", -1, p.spawnCorroboratedTick);
 	}
@@ -287,10 +287,10 @@ public class OffBookEventsTest
 	public void dropRowCarriesThePileTileAndWorld() throws Exception
 	{
 		AccountConnectPlugin plugin = spawnRig(308, 0);
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
 		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tileAt(3201, 3199), ownItem(560)));
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("drop", e.get("type"));
 		@SuppressWarnings("unchecked")
 		Map<String, Object> tile = (Map<String, Object>) e.get("tile");
@@ -307,17 +307,17 @@ public class OffBookEventsTest
 	public void dropRowCarriesTheTileWhenTheSpawnArrivesFirst() throws Exception
 	{
 		AccountConnectPlugin plugin = spawnRig(301, 1);
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
 		plugin.onItemSpawned(new net.runelite.api.events.ItemSpawned(tileAt(3199, 3200), ownItem(560)));
-		assertTrue("spawn first only corroborates", plugin.pendingEvents.isEmpty());
-		plugin.resolveInvDeltaPending(0L, 0L, 7);
-		assertEquals(1, plugin.pendingEvents.size());
+		assertTrue("spawn first only corroborates", plugin.events.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 7);
+		assertEquals(1, plugin.events.pendingEvents.size());
 		@SuppressWarnings("unchecked")
-		Map<String, Object> tile = (Map<String, Object>) plugin.pendingEvents.get(0).get("tile");
+		Map<String, Object> tile = (Map<String, Object>) plugin.events.pendingEvents.get(0).get("tile");
 		assertNotNull(tile);
 		assertEquals(3199, tile.get("x"));
 		assertEquals(3200, tile.get("y"));
-		assertEquals(301, plugin.pendingEvents.get(0).get("world"));
+		assertEquals(301, plugin.events.pendingEvents.get(0).get("world"));
 	}
 
 	/**
@@ -330,14 +330,14 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
-		AccountConnectPlugin.InvDeltaPending fresh =
-			new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
+		OffBookPendings.InvDeltaPending fresh =
+			new OffBookPendings.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
 		appendPending(plugin, fresh);
-		plugin.resolveDropPendingOnGroundSpawn(995, 0, 0L, 41);	// the fresh drop's spawn, loss visible
-		assertEquals("the fresh drop is emitted", 1, plugin.pendingEvents.size());
-		assertEquals("drop", plugin.pendingEvents.get(0).get("type"));
-		assertEquals(100L, plugin.pendingEvents.get(0).get("qty"));
+		plugin.offBook.resolveDropPendingOnGroundSpawn(995, 0, 0L, 41);	// the fresh drop's spawn, loss visible
+		assertEquals("the fresh drop is emitted", 1, plugin.events.pendingEvents.size());
+		assertEquals("drop", plugin.events.pendingEvents.get(0).get("type"));
+		assertEquals(100L, plugin.events.pendingEvents.get(0).get("qty"));
 		assertNull("both pendings are gone: stale discarded, fresh consumed", invDeltaPending(plugin));
 	}
 
@@ -347,25 +347,25 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
-		AccountConnectPlugin.InvDeltaPending fresh =
-			new AccountConnectPlugin.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 5));
+		OffBookPendings.InvDeltaPending fresh =
+			new OffBookPendings.InvDeltaPending("drop", 995, null, 100L, 0L, null, Boolean.FALSE, 40);
 		appendPending(plugin, fresh);
-		plugin.resolveDropPendingOnGroundSpawn(995, 0, 100L, 41);	// spawn before the loss
+		plugin.offBook.resolveDropPendingOnGroundSpawn(995, 0, 100L, 41);	// spawn before the loss
 		assertEquals(41, fresh.spawnCorroboratedTick);
-		plugin.resolveInvDeltaPending(0L, 0L, 42);
-		assertEquals(1, plugin.pendingEvents.size());
-		assertEquals("drop", plugin.pendingEvents.get(0).get("type"));
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 42);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		assertEquals("drop", plugin.events.pendingEvents.get(0).get("type"));
 	}
 
-	private static void appendPending(AccountConnectPlugin plugin, AccountConnectPlugin.InvDeltaPending p)
+	private static void appendPending(AccountConnectPlugin plugin, OffBookPendings.InvDeltaPending p)
 		throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		Field f = OffBookPendings.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
 		@SuppressWarnings("unchecked")
-		java.util.Deque<AccountConnectPlugin.InvDeltaPending> d =
-			(java.util.Deque<AccountConnectPlugin.InvDeltaPending>) f.get(plugin);
+		java.util.Deque<OffBookPendings.InvDeltaPending> d =
+			(java.util.Deque<OffBookPendings.InvDeltaPending>) f.get(plugin.offBook);
 		d.addLast(p);
 	}
 
@@ -378,12 +378,12 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
-		plugin.resolveDropPendingOnGroundSpawn(560, 1, 1L, 6, true, 3201, 3201, 0);	// stray, no loss yet
-		plugin.resolveDropPendingOnGroundSpawn(560, 0, 0L, 10, true, 3200, 3200, 0);	// the real one, loss visible
-		assertEquals(1, plugin.pendingEvents.size());
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 1L, 0L, null, Boolean.FALSE, 5));
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 1, 1L, 6, true, 3201, 3201, 0);	// stray, no loss yet
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 0, 0L, 10, true, 3200, 3200, 0);	// the real one, loss visible
+		assertEquals(1, plugin.events.pendingEvents.size());
 		@SuppressWarnings("unchecked")
-		Map<String, Object> tile = (Map<String, Object>) plugin.pendingEvents.get(0).get("tile");
+		Map<String, Object> tile = (Map<String, Object>) plugin.events.pendingEvents.get(0).get("tile");
 		assertEquals(3200, tile.get("x"));
 		assertEquals(3200, tile.get("y"));
 	}
@@ -427,9 +427,9 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
-		plugin.resolveDropPendingOnGroundSpawn(560, 7, 0L, 6);
-		assertTrue("distant spawn ignored", plugin.pendingEvents.isEmpty());
+		armPending(plugin, new OffBookPendings.InvDeltaPending("drop", 560, null, 5L, 0L, null, Boolean.FALSE, 5));
+		plugin.offBook.resolveDropPendingOnGroundSpawn(560, 7, 0L, 6);
+		assertTrue("distant spawn ignored", plugin.events.pendingEvents.isEmpty());
 		assertNotNull(invDeltaPending(plugin));
 	}
 
@@ -443,9 +443,9 @@ public class OffBookEventsTest
 		Map<String, Object> loc = new LinkedHashMap<>();
 		loc.put("region_id", 12850);
 		loc.put("plane", 0);
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("pickup", 526, null, 0L, 0L, loc, null, 5));
-		plugin.resolveInvDeltaPending(1L, 0L, 6); // gained 1
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		armPending(plugin, new OffBookPendings.InvDeltaPending("pickup", 526, null, 0L, 0L, loc, null, 5));
+		plugin.offBook.resolveInvDeltaPending(1L, 0L, 6); // gained 1
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("pickup", e.get("type"));
 		assertEquals(526, e.get("item"));
 		assertEquals(1L, e.get("qty"));
@@ -460,9 +460,9 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("alch", 1305, "high", 1L, 100L, null, null, 5));
-		plugin.resolveInvDeltaPending(0L, 1300L, 6); // item consumed, coins 100 -> 1300
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		armPending(plugin, new OffBookPendings.InvDeltaPending("alch", 1305, "high", 1L, 100L, null, null, 5));
+		plugin.offBook.resolveInvDeltaPending(0L, 1300L, 6); // item consumed, coins 100 -> 1300
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("alch", e.get("type"));
 		assertEquals(1305, e.get("item"));
 		assertEquals(1L, e.get("qty"));
@@ -479,13 +479,13 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("alch", 1305, "low", 1L, 100L, null, null, 5));
-		plugin.resolveInvDeltaPending(0L, 100L, 6); // item left but no coin gain -> not an alch
-		assertTrue("no alch emit without a confirmed coin gain", plugin.pendingEvents.isEmpty());
+		armPending(plugin, new OffBookPendings.InvDeltaPending("alch", 1305, "low", 1L, 100L, null, null, 5));
+		plugin.offBook.resolveInvDeltaPending(0L, 100L, 6); // item left but no coin gain -> not an alch
+		assertTrue("no alch emit without a confirmed coin gain", plugin.events.pendingEvents.isEmpty());
 		// window passes -> stale pending expires silently
-		plugin.resolveInvDeltaPending(0L, 100L, 12);
+		plugin.offBook.resolveInvDeltaPending(0L, 100L, 12);
 		assertNull("stale alch pending expired", invDeltaPending(plugin));
-		assertTrue(plugin.pendingEvents.isEmpty());
+		assertTrue(plugin.events.pendingEvents.isEmpty());
 	}
 
 	// ---------- resolve discipline ----------
@@ -495,14 +495,14 @@ public class OffBookEventsTest
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		armPending(plugin, new AccountConnectPlugin.InvDeltaPending("pickup", 560, null, 0L, 0L, null, null, 5));
+		armPending(plugin, new OffBookPendings.InvDeltaPending("pickup", 560, null, 0L, 0L, null, null, 5));
 		// an unrelated inventory change (item unchanged) within the window must NOT emit and must keep waiting
-		plugin.resolveInvDeltaPending(0L, 0L, 6);
-		assertTrue("no emit before the expected delta lands", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 6);
+		assertTrue("no emit before the expected delta lands", plugin.events.pendingEvents.isEmpty());
 		assertNotNull("pending kept until it lands or expires", invDeltaPending(plugin));
 		// past the window with still no gain -> drop the pending, emit nothing
-		plugin.resolveInvDeltaPending(0L, 0L, 12);
-		assertTrue(plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 12);
+		assertTrue(plugin.events.pendingEvents.isEmpty());
 		assertNull("stale pending cleared", invDeltaPending(plugin));
 	}
 
@@ -519,15 +519,17 @@ public class OffBookEventsTest
 		Map<String, Object> loc = new LinkedHashMap<>();
 		loc.put("region_id", 12345);
 		loc.put("plane", 0);
-		inject(plugin, "deathPending", new AccountConnectPlugin.DeathPending(loc, "wilderness", pre, 5));
+		plugin.death.deathPending = new Death.DeathPending(loc, "wilderness", pre, 5);
 
 		Map<Integer, Long> post = new LinkedHashMap<>();
 		post.put(560, 100L); // kept the runes, lost the whip
-		plugin.resolveDeathPending(post, true); // settle-window path: live+settled containers -> compute the loss
+		plugin.death.resolveDeathPending(post, true); // settle-window path: live+settled containers -> compute the loss
 
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
 		assertEquals("wilderness", e.get("death_kind"));
+		assertEquals(5, e.get("death_tick"));
+		assertEquals(5, PublicTransport.event(new LinkedHashMap<>(e)).get("death_tick"));
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> lost = (List<Map<String, Object>>) e.get("items_lost");
 		assertEquals("only the whip left the account", 1, lost.size());
@@ -552,11 +554,11 @@ public class OffBookEventsTest
 		Map<String, Object> loc = new LinkedHashMap<>();
 		loc.put("region_id", 12345);
 		loc.put("plane", 0);
-		inject(plugin, "deathPending", new AccountConnectPlugin.DeathPending(loc, "wilderness", pre, 5));
+		plugin.death.deathPending = new Death.DeathPending(loc, "wilderness", pre, 5);
 
-		plugin.resolveDeathPending(null, false); // logout path: containers untrustworthy
+		plugin.death.resolveDeathPending(null, false); // logout path: containers untrustworthy
 
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
 		assertEquals("wilderness", e.get("death_kind"));
 		assertNotNull("still records where the death happened", e.get("location"));
@@ -576,12 +578,12 @@ public class OffBookEventsTest
 		inject(plugin, "config", onConfig());
 		Map<Integer, Long> pre = new LinkedHashMap<>();
 		pre.put(4151, 1L);
-		inject(plugin, "deathPending", new AccountConnectPlugin.DeathPending(null, "safe", pre, 5));
+		plugin.death.deathPending = new Death.DeathPending(null, "safe", pre, 5);
 
 		Map<Integer, Long> post = new LinkedHashMap<>(); // whip "gone" (e.g. eaten/left inv) but it's a safe death
-		plugin.resolveDeathPending(post, true);
+		plugin.death.resolveDeathPending(post, true);
 
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
 		assertEquals("safe", e.get("death_kind"));
 		assertFalse("safe deaths never carry items_lost", e.containsKey("items_lost"));
@@ -612,8 +614,8 @@ public class OffBookEventsTest
 		assertNotNull("pending survives the confirmation click", invDeltaPending(plugin));
 
 		// the real drop lands: ground spawn at our feet + the item left the inventory
-		plugin.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 12);
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(20997, 0, 0L, 12);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("drop", e.get("type"));
 		assertEquals(20997, e.get("item"));
 		assertEquals(1L, e.get("qty"));
@@ -634,9 +636,9 @@ public class OffBookEventsTest
 		when(client.getItemContainer(581)).thenReturn(reward); // RAIDS_REWARDS container
 		inject(plugin, "client", client);
 
-		plugin.handleChestLootWidgetLoaded(539); // RAIDS_REWARDS widget group (CoX)
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		plugin.kills.handleChestLootWidgetLoaded(539); // RAIDS_REWARDS widget group (CoX)
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("loot", e.get("type"));
 		assertEquals("Chambers of Xeric", e.get("source_name"));
 		assertEquals("event", e.get("source_type"));
@@ -645,8 +647,8 @@ public class OffBookEventsTest
 		assertEquals(2, items.size());
 
 		// the same chest re-viewed in the same instance visit must NOT double-count
-		plugin.handleChestLootWidgetLoaded(539);
-		assertEquals("re-opened chest deduped", 1, plugin.pendingEvents.size());
+		plugin.kills.handleChestLootWidgetLoaded(539);
+		assertEquals("re-opened chest deduped", 1, plugin.events.pendingEvents.size());
 	}
 
 	@Test
@@ -655,10 +657,10 @@ public class OffBookEventsTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();inject(plugin,"config",onConfig());
 		Client client=mock(Client.class);ItemContainer reward=mock(ItemContainer.class);
 		when(client.getItemContainer(581)).thenReturn(reward);inject(plugin,"client",client);
-		when(reward.getItems()).thenReturn(null);plugin.handleChestLootWidgetLoaded(539);
-		assertTrue(plugin.pendingEvents.isEmpty());
-		when(reward.getItems()).thenReturn(new Item[]{new Item(995,100)});plugin.handleChestLootWidgetLoaded(539);
-		assertEquals(1,plugin.pendingEvents.size());
+		when(reward.getItems()).thenReturn(null);plugin.kills.handleChestLootWidgetLoaded(539);
+		assertTrue(plugin.events.pendingEvents.isEmpty());
+		when(reward.getItems()).thenReturn(new Item[]{new Item(995,100)});plugin.kills.handleChestLootWidgetLoaded(539);
+		assertEquals(1,plugin.events.pendingEvents.size());
 	}
 
 	@Test
@@ -669,8 +671,8 @@ public class OffBookEventsTest
 		Client client = mock(Client.class);
 		when(client.getItemContainer(581)).thenReturn(null); // container not readable
 		inject(plugin, "client", client);
-		plugin.handleChestLootWidgetLoaded(539);
-		assertTrue("no fabricated loot from an unreadable container", plugin.pendingEvents.isEmpty());
+		plugin.kills.handleChestLootWidgetLoaded(539);
+		assertTrue("no fabricated loot from an unreadable container", plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -679,8 +681,8 @@ public class OffBookEventsTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		inject(plugin, "client", mock(Client.class));
-		plugin.handleChestLootWidgetLoaded(12); // bank group — not a loot widget
-		assertTrue(plugin.pendingEvents.isEmpty());
+		plugin.kills.handleChestLootWidgetLoaded(12); // bank group — not a loot widget
+		assertTrue(plugin.events.pendingEvents.isEmpty());
 	}
 
 	// ---------- snapshot container blocks ----------
@@ -694,16 +696,16 @@ public class OffBookEventsTest
 		inject(plugin, "itemManager", im);
 
 		Map<String, Object> snap = new LinkedHashMap<>();
-		plugin.addContainerSnapshot(snap, "looting_bag", null); // never opened -> omitted entirely
+		plugin.snapshots.addContainerSnapshot(snap, "looting_bag", null); // never opened -> omitted entirely
 		assertFalse("absent container adds no block", snap.containsKey("looting_bag"));
 
 		ItemContainer bag = container(560, 10);
 		when(bag.getId()).thenReturn(516);
-		plugin.addContainerSnapshot(snap, "looting_bag", bag);
+		plugin.snapshots.addContainerSnapshot(snap, "looting_bag", bag);
 		assertFalse("a container the client kept from before this login is not a reading", snap.containsKey("looting_bag"));
 
-		plugin.containerObservedAtMs.put(516, 1_700_000_000_123L);	// the game sent it this login
-		plugin.addContainerSnapshot(snap, "looting_bag", bag);
+		plugin.snapshots.containerObservedAtMs.put(516, 1_700_000_000_123L);	// the game sent it this login
+		plugin.snapshots.addContainerSnapshot(snap, "looting_bag", bag);
 		@SuppressWarnings("unchecked")
 		Map<String, Object> block = (Map<String, Object>) snap.get("looting_bag");
 		assertNotNull(block);
@@ -743,23 +745,23 @@ public class OffBookEventsTest
 	 * slot was proven to silently lose rapid drops (RapidDropTest): four real drops emitted one event. Every
 	 * assertion in this file is about ONE pending, so peeking the head keeps them all meaningful and unchanged.
 	 */
-	private static AccountConnectPlugin.InvDeltaPending invDeltaPending(AccountConnectPlugin plugin) throws Exception
+	private static OffBookPendings.InvDeltaPending invDeltaPending(AccountConnectPlugin plugin) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		Field f = OffBookPendings.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
-		java.util.Deque<?> d = (java.util.Deque<?>) f.get(plugin);
-		return d.isEmpty() ? null : (AccountConnectPlugin.InvDeltaPending) d.peekFirst();
+		java.util.Deque<?> d = (java.util.Deque<?>) f.get(plugin.offBook);
+		return d.isEmpty() ? null : (OffBookPendings.InvDeltaPending) d.peekFirst();
 	}
 
 	/** Arm exactly one pending, replacing anything already armed — the old inject("invDeltaPending", p). */
-	private static void armPending(AccountConnectPlugin plugin, AccountConnectPlugin.InvDeltaPending p)
+	private static void armPending(AccountConnectPlugin plugin, OffBookPendings.InvDeltaPending p)
 		throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		Field f = OffBookPendings.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
 		@SuppressWarnings("unchecked")
-		java.util.Deque<AccountConnectPlugin.InvDeltaPending> d =
-			(java.util.Deque<AccountConnectPlugin.InvDeltaPending>) f.get(plugin);
+		java.util.Deque<OffBookPendings.InvDeltaPending> d =
+			(java.util.Deque<OffBookPendings.InvDeltaPending>) f.get(plugin.offBook);
 		d.clear();
 		if (p != null)
 		{
@@ -767,11 +769,9 @@ public class OffBookEventsTest
 		}
 	}
 
-	private static AccountConnectPlugin.DeathPending deathPending(AccountConnectPlugin plugin) throws Exception
+	private static Death.DeathPending deathPending(AccountConnectPlugin plugin)
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("deathPending");
-		f.setAccessible(true);
-		return (AccountConnectPlugin.DeathPending) f.get(plugin);
+		return plugin.death.deathPending;
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

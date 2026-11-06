@@ -35,8 +35,8 @@ public class EventVerificationWiringTest
         Fixture() throws Exception
         {
             set(p,"config",new AccountConnectConfig(){public String linkToken(){return token;}});
-            set(p,"client",client);set(p,"activeHash","123");set(p,"verificationGrantToken",TOKEN);
-            set(p,"verificationFramesGrantToken",TOKEN);set(p,"gson",new Gson());
+            set(p,"client",client);set(p,"activeHash","123");p.grants.verificationGrantToken = TOKEN;
+            p.grants.verificationFramesGrantToken = TOKEN;set(p,"gson",new Gson());
             set(p,"drawManager",draws);set(p,"okHttpClient",http);p.lastSnapshotCapturedAtMs=999;
             when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
             when(client.getTickCount()).thenAnswer(i->tick);when(client.getAccountHash()).thenAnswer(i->account);
@@ -50,7 +50,7 @@ public class EventVerificationWiringTest
         {
             String text="Your Vorkath kill count is: 42.";
             set(p,"verificationMessage",text);
-            p.emitEvent("kill_count",VerificationProbe.inputs("source","Vorkath","kind","kill","count",42));
+            p.events.emitEvent("kill_count",VerificationProbe.inputs("source","Vorkath","kind","kill","count",42));
             set(p,"verificationMessage",null);
         }
         void show()
@@ -63,44 +63,44 @@ public class EventVerificationWiringTest
     @Test public void emittedEventIdentityDrivesImmediateCaptureAndSurvivesProjection() throws Exception
     {
         Fixture f=new Fixture();f.show();assertTrue(f.p.verificationProbe.takeEvent(System.currentTimeMillis()));
-        f.emit();String id=String.valueOf(f.p.pendingEvents.get(0).get("event_id"));
+        f.emit();String id=String.valueOf(f.p.events.pendingEvents.get(0).get("event_id"));
         f.p.onClientTick(null);
         f.draws.processDrawComplete(()->new BufferedImage(800,600,BufferedImage.TYPE_INT_RGB));
         assertNotNull(f.encode.get());f.encode.get().run();assertNotNull(f.finish.get());
         // Stop before network: revoke at the encoding completion boundary.
         f.token="abcdef0123456789abcdef0123456789";f.finish.get().run();
         verify(f.http,never()).newCall(any());
-        assertEquals(id,f.p.pendingEvents.get(0).get("event_id"));
-        assertEquals(100,f.p.pendingEvents.get(0).get("verification_tick"));
-        assertEquals(999L,f.p.pendingEvents.get(0).get("verification_revision"));
+        assertEquals(id,f.p.events.pendingEvents.get(0).get("event_id"));
+        assertEquals(100,f.p.events.pendingEvents.get(0).get("verification_tick"));
+        assertEquals(999L,f.p.events.pendingEvents.get(0).get("verification_revision"));
     }
     @Test public void completedFrameAndScreenRowsKeepActualProjectedEventIdentity() throws Exception
     {
         Fixture f=new Fixture();f.show();f.emit();
-        String id=String.valueOf(f.p.pendingEvents.get(0).get("event_id"));
+        String id=String.valueOf(f.p.events.pendingEvents.get(0).get("event_id"));
         when(f.http.newCall(any())).thenReturn(mock(okhttp3.Call.class));
         f.p.onClientTick(null);f.draws.processDrawComplete(()->new BufferedImage(800,600,BufferedImage.TYPE_INT_RGB));
         f.encode.get().run();f.finish.get().run();
-        assertEquals(3,f.p.pendingEvents.size());
+        assertEquals(3,f.p.events.pendingEvents.size());
         for (int i=1;i<3;i++)
         {
-            Map<String,Object> row=f.p.pendingEvents.get(i);
+            Map<String,Object> row=f.p.events.pendingEvents.get(i);
             assertEquals(id,row.get("source_event_id"));assertEquals("kill_count",row.get("source_event_type"));
             assertEquals(100,row.get("source_event_tick"));assertEquals(999L,row.get("source_event_revision"));
             assertEquals("123",row.get("account_hash"));
             assertTrue(new Gson().toJson(row).getBytes(java.nio.charset.StandardCharsets.UTF_8).length<8192);
         }
-        Map<?,?> result=(Map<?,?>)((List<?>)f.p.pendingEvents.get(2).get("results")).get(0);
+        Map<?,?> result=(Map<?,?>)((List<?>)f.p.events.pendingEvents.get(2).get("results")).get(0);
         assertEquals(42,result.get("expected"));assertNull(result.get("match"));
         verify(f.http).newCall(any());
     }
 
     @Test public void missingWidgetExpiresAsSourceBoundUnknownInsteadOfLaterOrbCapture() throws Exception
     {
-        Fixture f=new Fixture();f.emit();String id=String.valueOf(f.p.pendingEvents.get(0).get("event_id"));
-        f.p.onClientTick(null);assertEquals(1,f.p.pendingEvents.size());
+        Fixture f=new Fixture();f.emit();String id=String.valueOf(f.p.events.pendingEvents.get(0).get("event_id"));
+        f.p.onClientTick(null);assertEquals(1,f.p.events.pendingEvents.size());
         f.tick=104;f.p.onClientTick(null);
-        Map<String,Object> row=f.p.pendingEvents.get(1);
+        Map<String,Object> row=f.p.events.pendingEvents.get(1);
         assertEquals("ocr_event",row.get("check"));assertEquals(id,row.get("source_event_id"));
         assertEquals(100,row.get("source_event_tick"));assertEquals(999L,row.get("snapshot_revision"));
         Map<?,?> result=(Map<?,?>)((List<?>)row.get("results")).get(0);

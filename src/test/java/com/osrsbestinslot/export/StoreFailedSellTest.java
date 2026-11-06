@@ -58,7 +58,7 @@ public class StoreFailedSellTest
 		when(inv.getItems()).thenAnswer(i -> inventory);
 		when(client.getItemContainer(any(InventoryID.class))).thenReturn(inv);
 		inject("client", client);
-		inject("shopOpen", true);
+		plugin.store.shopOpen = true;
 		inventoryIs(735_512L, POT, LOBSTER);
 	}
 
@@ -95,7 +95,7 @@ public class StoreFailedSellTest
 
 	private List<Map<String, Object>> storeSells()
 	{
-		return plugin.pendingEvents.stream().filter(e -> "store_sell".equals(e.get("type"))).collect(Collectors.toList());
+		return plugin.events.pendingEvents.stream().filter(e -> "store_sell".equals(e.get("type"))).collect(Collectors.toList());
 	}
 
 	@Test
@@ -106,7 +106,7 @@ public class StoreFailedSellTest
 		inventoryNow(735_512L, POT, LOBSTER);			// some inventory update, the Pot is still held
 		assertEquals("a sale that moved no item is not a sale", 0, storeSells().size());
 
-		tick += AccountConnectPlugin.STORE_PENDING_MAX_TICKS + 1;
+		tick += StoreTools.STORE_PENDING_MAX_TICKS + 1;
 		sell(POT);										// the retry
 		tick++;
 		inventoryNow(735_512L, LOBSTER);				// sold, the shop paid 0 gp
@@ -114,7 +114,7 @@ public class StoreFailedSellTest
 		List<Map<String, Object>> sells = storeSells();
 		assertEquals("one real sale, one row", 1, sells.size());
 		assertEquals(POT, sells.get(0).get("item"));
-		assertEquals(0, plugin.storePendings.size());
+		assertEquals(0, plugin.store.storePendings.size());
 		assertEquals("a measured 0 gp sale says so", 0L, sells.get(0).get("gp_total"));
 		assertEquals(true, sells.get(0).get("coins_unchanged"));
 	}
@@ -135,10 +135,10 @@ public class StoreFailedSellTest
 		assertEquals(1L, zero.get("qty_executed"));
 		assertFalse("no price from a 0", zero.containsKey("unit_price_gp"));
 		assertEquals("it survives the public projection", true, PublicTransport.event(zero).get("coins_unchanged"));
-		plugin.pendingEvents.clear();
+		plugin.events.pendingEvents.clear();
 
 		sell(LOBSTER);
-		plugin.flushStorePendingOnShopClose();		// closed before any change: nothing was measured
+		plugin.store.flushStorePendingOnShopClose();		// closed before any change: nothing was measured
 		assertFalse(storeSells().get(0).containsKey("gp_total"));
 		assertFalse(storeSells().get(0).containsKey("coins_unchanged"));
 	}
@@ -156,19 +156,19 @@ public class StoreFailedSellTest
 	@Test
 	public void theBuilderMarksOnlyAMeasuredUnambiguousSell()
 	{
-		assertEquals(true, AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L, false, false, 1L)
+		assertEquals(true, StoreTools.buildStoreTxFields("store_sell", POT, 1, 100L, 100L, false, false, 1L)
 			.get("coins_unchanged"));
-		assertFalse("two sales in one change", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+		assertFalse("two sales in one change", StoreTools.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
 			true, false, 1L).containsKey("gp_total"));
-		assertFalse("merged clicks", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 2, 100L, 100L,
+		assertFalse("merged clicks", StoreTools.buildStoreTxFields("store_sell", POT, 2, 100L, 100L,
 			false, true, 1L).containsKey("gp_total"));
-		assertFalse("nothing moved", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+		assertFalse("nothing moved", StoreTools.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
 			false, false, 0L).containsKey("gp_total"));
-		assertFalse("item count unknown", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
-			false, false, AccountConnectPlugin.UNKNOWN_ITEM_COUNT).containsKey("gp_total"));
-		assertFalse("coins fell on a sell", AccountConnectPlugin.buildStoreTxFields("store_sell", POT, 1, 100L, 90L,
+		assertFalse("item count unknown", StoreTools.buildStoreTxFields("store_sell", POT, 1, 100L, 100L,
+			false, false, StoreTools.UNKNOWN_ITEM_COUNT).containsKey("gp_total"));
+		assertFalse("coins fell on a sell", StoreTools.buildStoreTxFields("store_sell", POT, 1, 100L, 90L,
 			false, false, 1L).containsKey("gp_total"));
-		assertFalse("a buy for 0 is not a shop case", AccountConnectPlugin.buildStoreTxFields("store_buy", POT, 1, 100L,
+		assertFalse("a buy for 0 is not a shop case", StoreTools.buildStoreTxFields("store_buy", POT, 1, 100L,
 			100L, false, false, 1L).containsKey("gp_total"));
 	}
 
@@ -204,10 +204,10 @@ public class StoreFailedSellTest
 		sell(POT);
 		tick++;
 		inventoryNow(735_512L, POT, LOBSTER);
-		tick += AccountConnectPlugin.STORE_PENDING_MAX_TICKS + 1;
-		plugin.flushStorePendingOnShopClose();
+		tick += StoreTools.STORE_PENDING_MAX_TICKS + 1;
+		plugin.store.flushStorePendingOnShopClose();
 		assertEquals(0, storeSells().size());
-		assertFalse(plugin.storePendings.containsKey(POT));
+		assertFalse(plugin.store.storePendings.containsKey(POT));
 	}
 
 	/**
@@ -226,7 +226,7 @@ public class StoreFailedSellTest
 		ItemContainer changed = client.getItemContainer(InventoryID.INVENTORY);
 		plugin.onItemContainerChanged(new ItemContainerChanged(net.runelite.api.gameval.InventoryID.INV, changed));
 
-		List<Map<String, Object>> buys = plugin.pendingEvents.stream().filter(e -> "store_buy".equals(e.get("type")))
+		List<Map<String, Object>> buys = plugin.events.pendingEvents.stream().filter(e -> "store_buy".equals(e.get("type")))
 			.collect(Collectors.toList());
 		assertEquals(2, buys.size());
 		for (Map<String, Object> b : buys)
@@ -250,7 +250,7 @@ public class StoreFailedSellTest
 	public void sellThenCloseInsideTheWindowStillReportsTheSale()
 	{
 		sell(LOBSTER);
-		plugin.flushStorePendingOnShopClose();		// buy- or sell-then-close: the change has not arrived yet
+		plugin.store.flushStorePendingOnShopClose();		// buy- or sell-then-close: the change has not arrived yet
 		assertEquals(1, storeSells().size());
 		assertFalse("no coins could be measured", storeSells().get(0).containsKey("gp_total"));
 	}

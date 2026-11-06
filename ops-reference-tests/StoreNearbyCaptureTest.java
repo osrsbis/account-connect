@@ -84,14 +84,14 @@ public class StoreNearbyCaptureTest
 		// tick 10: Receiver 3 tiles east
 		when(b.getWorldLocation()).thenReturn(new WorldPoint(3167, 3486, 0));
 		when(client.getTickCount()).thenReturn(10);
-		plugin.accumulateShopNearby();
+		plugin.store.accumulateShopNearby();
 		// tick 13: Receiver steps adjacent (1 tile)
 		when(b.getWorldLocation()).thenReturn(new WorldPoint(3165, 3486, 0));
 		when(client.getTickCount()).thenReturn(13);
-		plugin.accumulateShopNearby();
+		plugin.store.accumulateShopNearby();
 
 		@SuppressWarnings("unchecked")
-		Map<String, int[]> seen = (Map<String, int[]>) field(plugin, "shopVisitNearby");
+		Map<String, int[]> seen = (Map<String, int[]>) plugin.store.shopVisitNearby;
 		int[] rec = seen.get("Receiver");
 		assertEquals("closest approach kept", 1, rec[0]);
 		assertEquals("first tick", 10, rec[1]);
@@ -111,9 +111,9 @@ public class StoreNearbyCaptureTest
 		players.add(near);
 		AccountConnectPlugin plugin = plugin(self, players, 302, 20);
 
-		plugin.accumulateShopNearby();		// build the visit set
+		plugin.store.accumulateShopNearby();		// build the visit set
 		Map<String, Object> fields = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(fields);
+		plugin.store.addStoreContextFields(fields);
 
 		assertEquals(302, fields.get("world"));
 		assertEquals(java.util.Arrays.asList(3164, 3486, 0), fields.get("loc"));
@@ -138,9 +138,9 @@ public class StoreNearbyCaptureTest
 		players.add(nameless);	// unnamed (rendering) player excluded
 		AccountConnectPlugin plugin = plugin(self, players, 302, 5);
 
-		plugin.accumulateShopNearby();
+		plugin.store.accumulateShopNearby();
 		@SuppressWarnings("unchecked")
-		Map<String, int[]> seen = (Map<String, int[]>) field(plugin, "shopVisitNearby");
+		Map<String, int[]> seen = (Map<String, int[]>) plugin.store.shopVisitNearby;
 		assertTrue("no self, no nameless", seen.isEmpty());
 	}
 
@@ -156,7 +156,7 @@ public class StoreNearbyCaptureTest
 		AccountConnectPlugin plugin = plugin(self, players, 308, 1);
 
 		Map<String, Object> fields = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(fields);	// no accumulate() first
+		plugin.store.addStoreContextFields(fields);	// no accumulate() first
 
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> nearby = (List<Map<String, Object>>) fields.get("nearby");
@@ -175,7 +175,7 @@ public class StoreNearbyCaptureTest
 		AccountConnectPlugin plugin = plugin(self, players, 302, 5);
 
 		Map<String, Object> fields = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(fields);
+		plugin.store.addStoreContextFields(fields);
 
 		assertNull("no nearby field when nobody around", fields.get("nearby"));
 		assertEquals(302, fields.get("world"));
@@ -206,10 +206,10 @@ public class StoreNearbyCaptureTest
 		inject(plugin, "shopVisitNearby", visit);
 
 		// At the transaction moment only the receiver is present.
-		inject(plugin, "nearbyAtTx", plugin.nearbyPlayersSnapshot(24));
+		plugin.store.nearbyAtTx = plugin.store.nearbyPlayersSnapshot(24);
 
 		java.util.Map<String, Object> fields = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(fields);
+		plugin.store.addStoreContextFields(fields);
 
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> visitWide = (List<Map<String, Object>>) fields.get("nearby");
@@ -233,14 +233,14 @@ public class StoreNearbyCaptureTest
 		Player self = player("Seller", 3164, 3486, 90);
 		Player other = player("Other", 3164, 3486, 100);
 		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, other), 311, 100);
-		inject(plugin, "nearbyAtTx", plugin.nearbyPlayersSnapshot(24));
+		plugin.store.nearbyAtTx = plugin.store.nearbyPlayersSnapshot(24);
 
 		java.util.Map<String, Object> first = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(first);
+		plugin.store.addStoreContextFields(first);
 		assertNotNull("first event carries the snapshot", first.get("nearby_at_tx"));
 
 		java.util.Map<String, Object> second = new java.util.LinkedHashMap<>();
-		plugin.addStoreContextFields(second);
+		plugin.store.addStoreContextFields(second);
 		assertNull("a second event must NOT inherit the previous transaction's snapshot",
 			second.get("nearby_at_tx"));
 	}
@@ -268,9 +268,9 @@ public class StoreNearbyCaptureTest
 		inject(plugin, "shopStock", baseline);
 
 		// Both fall: ours to 0 (a taker), the unrelated one to 42 (nothing to do with us).
-		plugin.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
 
-		List<Map<String, Object>> events = plugin.pendingEvents;
+		List<Map<String, Object>> events = plugin.events.pendingEvents;
 		long taken = events.stream().filter(e -> "store_taken".equals(e.get("type"))).count();
 		assertEquals("exactly one store_taken, for the SOLD item only", 1, taken);
 		Map<String, Object> ev = events.stream()
@@ -289,10 +289,10 @@ public class StoreNearbyCaptureTest
 	{
 		Player self = player("Seller", 3164, 3486, 90);
 		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self), 412, 200);
-		StoreVisitClip clip = new StoreVisitClip(AccountConnectPlugin.MAX_CLIP_FRAMES,
-			AccountConnectPlugin.MAX_CLIP_BURST_BYTES, AccountConnectPlugin.MAX_CLIP_FRAME_BYTES);
-		inject(plugin, "clipVisit", clip);
-		inject(plugin, "clipCapturing", true);
+		StoreVisitClip clip = new StoreVisitClip(StoreClips.MAX_CLIP_FRAMES,
+			StoreClips.MAX_CLIP_BURST_BYTES, StoreClips.MAX_CLIP_FRAME_BYTES);
+		plugin.clips.clipVisit = clip;
+		plugin.clips.clipCapturing = true;
 
 		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>();
 		sold.add(20997);
@@ -301,7 +301,7 @@ public class StoreNearbyCaptureTest
 		baseline.put(20997, 1);
 		inject(plugin, "shopStock", baseline);
 
-		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));
 
 		assertEquals("store_taken must mark one moment on the visit clip", 1, clip.momentCount());
 	}
@@ -324,9 +324,9 @@ public class StoreNearbyCaptureTest
 		baseline.put(29415, 43);
 		inject(plugin, "shopStock", baseline);
 
-		plugin.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{29415, 42}}));
 
-		Map<String, Object> ev = plugin.pendingEvents.stream()
+		Map<String, Object> ev = plugin.events.pendingEvents.stream()
 			.filter(e -> "store_taken".equals(e.get("type"))).findFirst().orElseThrow(AssertionError::new);
 		assertNull("an empty shop must omit the candidate list, never emit an empty one",
 			ev.get("taken_by_candidates"));
@@ -359,13 +359,13 @@ public class StoreNearbyCaptureTest
 		inject(plugin, "shopStock", baseline);
 
 		// We just bought it back ourselves.
-		inject(plugin, "lastSelfBuyItem", 20997);
-		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis());
+		plugin.store.lastSelfBuyItem = 20997;
+		plugin.store.lastSelfBuyAtMs = System.currentTimeMillis();
 
-		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));
 
 		assertTrue("a self buy-back must emit NO store_taken at all",
-			plugin.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+			plugin.events.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
 	}
 
 	/** The suppression is time-boxed: an OLD self-buy must not mask a later genuine customer. */
@@ -383,13 +383,13 @@ public class StoreNearbyCaptureTest
 		baseline.put(20997, 1);
 		inject(plugin, "shopStock", baseline);
 
-		inject(plugin, "lastSelfBuyItem", 20997);
-		inject(plugin, "lastSelfBuyAtMs", System.currentTimeMillis() - 60_000L);	// a minute ago
+		plugin.store.lastSelfBuyItem = 20997;
+		plugin.store.lastSelfBuyAtMs = System.currentTimeMillis() - 60_000L;	// a minute ago
 
-		plugin.handleShopStockChanged(shopWith(new int[][]{}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));
 
 		assertTrue("a stale self-buy must not suppress a real taker",
-			plugin.pendingEvents.stream().anyMatch(e -> "store_taken".equals(e.get("type"))));
+			plugin.events.pendingEvents.stream().anyMatch(e -> "store_taken".equals(e.get("type"))));
 	}
 
 	/** A stock RISE (the shop's own restock timer) is not someone taking our item. */
@@ -406,10 +406,10 @@ public class StoreNearbyCaptureTest
 		baseline.put(20997, 1);
 		inject(plugin, "shopStock", baseline);
 
-		plugin.handleShopStockChanged(shopWith(new int[][]{{20997, 5}}));	// stock ROSE
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{20997, 5}}));	// stock ROSE
 
 		assertTrue("a stock rise must emit nothing",
-			plugin.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+			plugin.events.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
 	}
 
 	/**
@@ -422,8 +422,8 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
 		plugin.onMenuOptionClicked(sellClick(1931));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));	// our sale lands
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}}));	// the shop normalises
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));	// our sale lands
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}}));	// the shop normalises
 		assertEquals("no store_taken for default-stock normalisation", 0, storeTaken(plugin).size());
 	}
 
@@ -433,8 +433,8 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
 		plugin.onMenuOptionClicked(sellClick(1931));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 4}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 6}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 4}}));
 		assertEquals(1, storeTaken(plugin).size());
 		assertEquals(2, storeTaken(plugin).get(0).get("qty"));
 	}
@@ -445,9 +445,9 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 1}});
 		plugin.onMenuOptionClicked(sellClick(1931));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// normalisation, suppressed
-		plugin.handleShopStockChanged(shopWith(new int[][]{}));			// 1 -> 0: a buy-out
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// normalisation, suppressed
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));			// 1 -> 0: a buy-out
 		assertEquals(1, storeTaken(plugin).size());
 		assertEquals(0, storeTaken(plugin).get(0).get("stock_after"));
 	}
@@ -458,8 +458,8 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
 		plugin.onMenuOptionClicked(sellClick(20997));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
 		assertEquals(1, storeTaken(plugin).size());
 		assertEquals(20997, storeTaken(plugin).get(0).get("item"));
 	}
@@ -473,10 +473,10 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 5}});
 		plugin.onMenuOptionClicked(sellClick(20997));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));
 		plugin.onMenuOptionClicked(sellClick(20997));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));	// a customer buys one
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 2}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 5}, {20997, 1}}));	// a customer buys one
 		assertEquals(1, storeTaken(plugin).size());
 		assertEquals(1, storeTaken(plugin).get(0).get("stock_after"));
 	}
@@ -487,11 +487,11 @@ public class StoreNearbyCaptureTest
 	{
 		AccountConnectPlugin plugin = shopVisit(new int[][]{{1931, 1}});
 		plugin.onMenuOptionClicked(sellClick(1931));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
-		plugin.handleShopStockChanged(shopWith(new int[][]{}));				// bought out to 0 (reported)
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));				// bought out to 0 (reported)
 		plugin.onMenuOptionClicked(sellClick(1931));
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));	// we sell 2 in
-		plugin.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// a customer takes one
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 2}}));	// we sell 2 in
+		plugin.store.handleShopStockChanged(shopWith(new int[][]{{1931, 1}}));	// a customer takes one
 		assertEquals(2, storeTaken(plugin).size());
 	}
 
@@ -501,15 +501,15 @@ public class StoreNearbyCaptureTest
 		Player self = player("Seller", 3164, 3486, 90);
 		Player bystander = player("Bystander", 3164, 3486, 126);
 		AccountConnectPlugin plugin = plugin(self, java.util.Arrays.asList(self, bystander), 308, 200);
-		inject(plugin, "shopOpen", true);
-		plugin.handleShopStockChanged(shopWith(stock));		// baseline read at open
+		plugin.store.shopOpen = true;
+		plugin.store.handleShopStockChanged(shopWith(stock));		// baseline read at open
 		return plugin;
 	}
 
 	private static List<Map<String, Object>> storeTaken(AccountConnectPlugin plugin)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if ("store_taken".equals(e.get("type")))
 			{
@@ -554,9 +554,19 @@ public class StoreNearbyCaptureTest
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField(fieldName);
+		Object on = plugin;
+		Field f;
+		try
+		{
+			f = AccountConnectPlugin.class.getDeclaredField(fieldName);
+		}
+		catch (NoSuchFieldException moved)
+		{
+			f = StoreTools.class.getDeclaredField(fieldName);
+			on = plugin.store;
+		}
 		f.setAccessible(true);
-		f.set(plugin, value);
+		f.set(on, value);
 		StaffGrant.afterInject(plugin, fieldName);
 	}
 }

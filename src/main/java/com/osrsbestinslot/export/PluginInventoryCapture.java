@@ -18,17 +18,13 @@ final class PluginInventoryCapture
         for (Plugin plugin : plugins)
         {
             if (rows.size() == MAX_PLUGINS) break;
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", plugin.getClass().getName());
-            row.put("enabled", manager.isPluginEnabled(plugin));
-            row.put("active", manager.isPluginActive(plugin));
+            Map<String, Object> row = Fields.of(
+                "id", plugin.getClass().getName(), "enabled", manager.isPluginEnabled(plugin),
+                "active", manager.isPluginActive(plugin));
             rows.add(row);
         }
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("schema_v", 1);
-        out.put("observed_at_ms", now);
-        out.put("plugins", rows);
-        out.put("truncated", plugins.size() > MAX_PLUGINS);
+        Map<String, Object> out = Fields.of(
+            "schema_v", 1, "observed_at_ms", now, "plugins", rows, "truncated", plugins.size() > MAX_PLUGINS);
         return out;
     }
 }

@@ -29,7 +29,7 @@ public class OwnLootKeyJournalTest
             Map<String,Object> e=event(family);assertNotNull(e);e.put("event_id","a".repeat(32));e.put("ts",1792254000001L);
             Map<String,Object> value=(Map<String,Object>)e.get("state_value");value.put("value_gp",999999);value.put("victim","PRIVATE");
             Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));assertFalse(gson.toJson(wire).contains("value_gp"));
-            assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertTrue(EventQueueProtocol.allows("own-state-v1",wire));
+            assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
         }
         Map<String,Object> e=event("slot0"),value=(Map<String,Object>)e.get("state_value");value.put("container_observed_at_ms",1792254000002L);assertNull(OwnStateEvent.wire(e));
         e=event("slot0");value=(Map<String,Object>)e.get("state_value");value.put("slot",5);assertNull(OwnStateEvent.wire(e));

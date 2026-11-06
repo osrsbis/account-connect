@@ -73,7 +73,7 @@ public class GeLifecycleTest
 	private List<Map<String, Object>> ge()
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (String.valueOf(e.get("type")).startsWith("ge_"))
 			{

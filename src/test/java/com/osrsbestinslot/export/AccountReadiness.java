@@ -7,6 +7,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * progress.readiness.v1: named, versioned unlock/task state derived ONLY from the raw account_progress block.
@@ -26,11 +28,8 @@ final class AccountReadiness
     };
     private static final String[] PRAYER_RAW = {"rigour", "augury", "preserve", "deadeye", "mystic_vigour"};
     private static final String[] WATSON = {"easy", "medium", "hard", "elite"}; // TRAIL_WATSON_* 5186..5189
-    /** CA_TASK_COMPLETED_0..20. Task id = 32 * word + bit (cs2 proc script4834, pinned exporter sources). */
-    static final int[] CA_TASK_VARPS = {3116, 3117, 3118, 3119, 3120, 3121, 3122, 3123, 3124, 3125, 3126, 3127, 3128,
-        3387, 3718, 3773, 3774, 4204, 4496, 4721, 5673};
-    static final List<String> CA_TIERS = Collections.unmodifiableList(Arrays.asList(
-        "easy", "medium", "hard", "elite", "master", "grandmaster"));
+    static final int[] CA_TASK_VARPS = AccountProgressCapture.CA_TASK_VARPS;
+    static final List<String> CA_TIERS = AccountProgressCapture.CA_TIERS;
 
     private AccountReadiness()
     {
@@ -169,7 +168,7 @@ final class AccountReadiness
             return out;
         }
         Map<String, Object> byTier = new LinkedHashMap<>();
-        java.util.Set<Integer> catalogued = new java.util.HashSet<>();
+        Set<Integer> catalogued = new HashSet<>();
         for (String tier : CA_TIERS)
         {
             List<Integer> ids = new ArrayList<>();

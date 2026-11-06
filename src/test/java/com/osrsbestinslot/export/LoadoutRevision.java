@@ -6,6 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.IntFunction;
+import net.runelite.api.Item;
 
 /**
  * loadout.revision.v1: ordered worn-equipment revisions for ONE caller-supplied generation (account/profile/mode
@@ -130,7 +132,7 @@ final class LoadoutRevision
      * Adapter helper: worn container items (index = EquipmentInventorySlot index) to the observe() input.
      * Returns null for a missing container, so "unavailable" never becomes an empty loadout.
      */
-    static Map<Integer, Integer> slotsOf(net.runelite.api.Item[] worn)
+    static Map<Integer, Integer> slotsOf(Item[] worn)
     {
         if (worn == null) return null;
         Map<Integer, Integer> out = new TreeMap<>();
@@ -149,7 +151,7 @@ final class LoadoutRevision
         {
             canon.append(SLOT_NAMES[e.getKey()]).append('=').append(e.getValue()).append(';');
         }
-        return AccountConnectPlugin.sha256Hex(canon.toString());
+        return SnapshotBuilder.sha256Hex(canon.toString());
     }
 
     private static Map<String, Object> named(Map<Integer, Integer> slots)
@@ -164,7 +166,7 @@ final class LoadoutRevision
      * with "answer" yes|no_in_observed_locations|unknown and location lists). Worn at the revision is observed;
      * current holdings come only from C4. A null holdings source or a missing answer stays unknown.
      */
-    static Map<String, Object> ownership(Map<String, Object> revision, java.util.function.IntFunction<? extends Map<?, ?>> owns)
+    static Map<String, Object> ownership(Map<String, Object> revision, IntFunction<? extends Map<?, ?>> owns)
     {
         Map<String, Object> out = new LinkedHashMap<>();
         Map<?, ?> slots = (Map<?, ?>) revision.get("slots");

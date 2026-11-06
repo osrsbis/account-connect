@@ -9,6 +9,7 @@ import java.util.regex.Pattern;
 import net.runelite.api.Client;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.Text;
+import java.util.UUID;
 
 /** Bounded UI evidence, never a trade ledger or a source of execution timestamps. */
 final class GeHistoryCapture
@@ -33,11 +34,11 @@ final class GeHistoryCapture
     private int nextObservationTick;
     private long sequence;
     private long evicted;
-    private String collectorSession = java.util.UUID.randomUUID().toString();
+    private String collectorSession = UUID.randomUUID().toString();
 
     void reset()
     {
-        collectorSession = java.util.UUID.randomUUID().toString();
+        collectorSession = UUID.randomUUID().toString();
         observations.clear();
         previous = candidate = null;
         nextTick = nextObservationTick = 0;
@@ -72,11 +73,8 @@ final class GeHistoryCapture
         if (tick < nextObservationTick) return;
         nextObservationTick = tick + 5;
         previous = rows;
-        Map<String, Object> observation = new LinkedHashMap<>();
-        observation.put("sequence", ++sequence);
-        observation.put("observed_at_ms", candidateAt);
-        observation.put("confirmed_at_ms", now);
-        observation.put("rows", rows);
+        Map<String, Object> observation = Fields.of(
+            "sequence", ++sequence, "observed_at_ms", candidateAt, "confirmed_at_ms", now, "rows", rows);
         observations.add(observation);
         if (observations.size() > 8)
         {
@@ -101,13 +99,10 @@ final class GeHistoryCapture
             if (item.getItemId() <= 0 || item.getItemQuantity() <= 0) return null;
             // The 0.7.43 actual client shows "Bought:" / "Sold:".
             String side = Text.removeTags(rawState).trim().replaceFirst(":$", "");
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("row_index", offset / 6);
-            row.put("item_id", item.getItemId());
-            row.put("quantity", item.getItemQuantity());
-            row.put("side", "Bought".equals(side) ? "buy" : "Sold".equals(side) ? "sell" : "unknown");
-            row.put("state_text", rawState);
-            row.put("price_text", rawPrice);
+            Map<String, Object> row = Fields.of(
+                "row_index", offset / 6, "item_id", item.getItemId(), "quantity", item.getItemQuantity(),
+                "side", "Bought".equals(side) ? "buy" : "Sold".equals(side) ? "sell" : "unknown",
+                "state_text", rawState, "price_text", rawPrice);
             String plain = Text.removeTags(rawPrice.replace("<br>", " ")).replace('\u00a0', ' ').trim();
             row.put("displayed_total_gp", number(TOTAL, plain));
             row.put("displayed_each_gp", number(EACH, plain));
@@ -201,13 +196,10 @@ final class GeHistoryCapture
 
     Map<String, Object> snapshot()
     {
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("source", "ge_history_widget_383_3");
-        out.put("collector_session", collectorSession);
-        out.put("identity_scope", "account_profile_collector_session");
-        out.put("observations", new ArrayList<>(observations));
-        out.put("observations_evicted", evicted);
-        out.put("complete", false); // UI is a limited recent history, not all trades
+        Map<String, Object> out = Fields.of(
+            "source", "ge_history_widget_383_3", "collector_session", collectorSession,
+            "identity_scope", "account_profile_collector_session", "observations", new ArrayList<>(observations),
+            "observations_evicted", evicted, "complete", false);
         return out;
     }
 }

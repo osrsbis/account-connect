@@ -45,7 +45,7 @@ public class GroundRemovalTest
 	{
 		AccountConnectPlugin plugin = newPlugin(CHAPS, 1);
 		dropItem(plugin, CHAPS, 1, 100, 300);
-		assertEquals("the pile must be tracked", 1, plugin.groundDropCount());
+		assertEquals("the pile must be tracked", 1, plugin.piles.groundDropCount());
 
 		tick(plugin, 140);
 		plugin.onItemDespawned(despawn(CHAPS, 1, TILE_X, TILE_Y, 0));
@@ -57,7 +57,7 @@ public class GroundRemovalTest
 		assertEquals(40, ev.get("ticks_on_ground"));
 		assertTrue("a removal must never claim a recipient",
 			!String.valueOf(ev).toLowerCase().contains("customer"));
-		assertEquals("the pile is no longer tracked", 0, plugin.groundDropCount());
+		assertEquals("the pile is no longer tracked", 0, plugin.piles.groundDropCount());
 	}
 
 	/** Left to time out: removal at/after the client's own deadline is the timer, not a taker. */
@@ -165,7 +165,7 @@ public class GroundRemovalTest
 
 		assertNull("a scene-reload despawn must emit nothing about our pile",
 			firstEvent(plugin, "ground_removed"));
-		assertEquals(0, plugin.groundDropCount());
+		assertEquals(0, plugin.piles.groundDropCount());
 	}
 
 	/** Another player's pile despawning on our tile is not ours and must emit nothing. */
@@ -179,7 +179,7 @@ public class GroundRemovalTest
 		assertNull(firstEvent(plugin, "ground_removed"));
 		plugin.onItemDespawned(despawn(CHAPS, 1, TILE_X + 6, TILE_Y, 0));	// different tile
 		assertNull(firstEvent(plugin, "ground_removed"));
-		assertEquals("our pile is still tracked", 1, plugin.groundDropCount());
+		assertEquals("our pile is still tracked", 1, plugin.piles.groundDropCount());
 	}
 
 	/** No reported deadline means we cannot tell early from timer. Preserve the ambiguity. */
@@ -201,14 +201,14 @@ public class GroundRemovalTest
 		dropItem(plugin, CHAPS, 1, 100, 400, DIAMOND, 1, COINS, 10);
 		dropItem(plugin, DIAMOND, 1, 105, 405, COINS, 10);
 		dropItem(plugin, COINS, 10, 108, 408);
-		assertEquals(3, plugin.groundDropCount());
+		assertEquals(3, plugin.piles.groundDropCount());
 		assertEquals("all three drops emitted", 3, eventsOfType(plugin, "drop").size());
 
 		tick(plugin, 150);
 		plugin.onItemDespawned(despawn(DIAMOND, 1, TILE_X, TILE_Y, 0));
 		plugin.onItemDespawned(despawn(COINS, 10, TILE_X, TILE_Y, 0));
 		assertEquals("only the removed piles emit", 2, eventsOfType(plugin, "ground_removed").size());
-		assertEquals("the untouched pile stays tracked", 1, plugin.groundDropCount());
+		assertEquals("the untouched pile stays tracked", 1, plugin.piles.groundDropCount());
 	}
 
 	/** A pile we never dropped must never be adopted, even on our own tile with our ownership tag. */
@@ -217,7 +217,7 @@ public class GroundRemovalTest
 	{
 		AccountConnectPlugin plugin = newPlugin();
 		spawn(plugin, CHAPS, 1, 300);
-		assertEquals("nothing was dropped, so nothing may be tracked", 0, plugin.groundDropCount());
+		assertEquals("nothing was dropped, so nothing may be tracked", 0, plugin.piles.groundDropCount());
 	}
 
 
@@ -232,7 +232,7 @@ public class GroundRemovalTest
 		AccountConnectPlugin plugin = newPlugin(CHAPS, 1);
 		dropItem(plugin, CHAPS, 1, 100, 300);
 		assertEquals("the pile must still be tracked for this test to mean anything",
-			1, plugin.groundDropCount());
+			1, plugin.piles.groundDropCount());
 
 		setUnreliable(plugin, true);
 		tick(plugin, 140);			// well before the deadline: would be "removed_early" if trusted
@@ -256,7 +256,7 @@ public class GroundRemovalTest
 
 		spawn(plugin, DIAMOND, 1, 300);				// someone else's pile, same tile
 
-		assertEquals("only the item we actually dropped may be tracked", 0, plugin.groundDropCount());
+		assertEquals("only the item we actually dropped may be tracked", 0, plugin.piles.groundDropCount());
 	}
 
 
@@ -273,7 +273,7 @@ public class GroundRemovalTest
 	{
 		AccountConnectPlugin plugin = newPlugin(DIAMOND, 1);
 		dropItem(plugin, DIAMOND, 1, 100, 400);
-		assertEquals("the pile must be tracked", 1, plugin.groundDropCount());
+		assertEquals("the pile must be tracked", 1, plugin.piles.groundDropCount());
 
 		tick(plugin, 123);
 		plugin.onMenuOptionClicked(groundTake("Uncut diamond", DIAMOND));
@@ -393,7 +393,7 @@ public class GroundRemovalTest
 			firstEvent(plugin, "ground_removed"));
 
 		// the inventory gain never arrives; the window closes
-		for (int t = 141; t <= 140 + AccountConnectPlugin.REMOVAL_RESOLVE_MAX_TICKS + 1; t++)
+		for (int t = 141; t <= 140 + OwnPiles.REMOVAL_RESOLVE_MAX_TICKS + 1; t++)
 		{
 			tick(plugin, t);
 			plugin.onGameTick(null);
@@ -578,7 +578,7 @@ public class GroundRemovalTest
 		setInventory(plugin);
 		plugin.onItemQuantityChanged(new net.runelite.api.events.ItemQuantityChanged(
 			tileItem(COINS, 250, 405), tile(TILE_X, TILE_Y, 0), 100, 250));	// tile now holds 250
-		assertEquals("both drops tracked a pile", 2, plugin.groundDropCount());
+		assertEquals("both drops tracked a pile", 2, plugin.piles.groundDropCount());
 
 		tick(plugin, 150);
 		plugin.onMenuOptionClicked(groundTakeAt("Coins", COINS, TILE_X, TILE_Y));
@@ -1668,7 +1668,7 @@ public class GroundRemovalTest
 		AccountConnectPlugin plugin = newPlugin(POT, 2);
 		dropItemAt(plugin, POT, 1, 100, 400, TILE_X, TILE_Y, POT, 1);
 		dropItemAt(plugin, POT, 1, 105, 405, TILE_X + 1, TILE_Y);
-		assertEquals("both piles tracked", 2, plugin.groundDropCount());
+		assertEquals("both piles tracked", 2, plugin.piles.groundDropCount());
 
 		standAt(plugin, TILE_X, TILE_Y);
 		tick(plugin, 132);
@@ -1976,9 +1976,7 @@ public class GroundRemovalTest
 
 	private static void setUnreliable(AccountConnectPlugin plugin, boolean v) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("groundObservationUnreliable");
-		f.setAccessible(true);
-		f.setBoolean(plugin, v);
+		plugin.piles.groundObservationUnreliable = v;
 	}
 
 	private static void tick(AccountConnectPlugin plugin, int t) throws Exception
@@ -1989,7 +1987,7 @@ public class GroundRemovalTest
 	private static List<Map<String, Object>> eventsOfType(AccountConnectPlugin plugin, String type)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{

@@ -133,11 +133,11 @@ public class TriggerEventIdTest
 	}
 
 	@SuppressWarnings("unchecked")
-	private void arm(AccountConnectPlugin.InvDeltaPending p) throws Exception
+	private void arm(OffBookPendings.InvDeltaPending p) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		Field f = OffBookPendings.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
-		((java.util.Deque<AccountConnectPlugin.InvDeltaPending>) f.get(plugin)).addLast(p);
+		((java.util.Deque<OffBookPendings.InvDeltaPending>) f.get(plugin.offBook)).addLast(p);
 	}
 
 	private void inventoryChange(ItemContainer next)
@@ -148,13 +148,13 @@ public class TriggerEventIdTest
 
 	private Object trigger()
 	{
-		return plugin.lastBuiltSnapshot == null ? null : plugin.lastBuiltSnapshot.get("trigger_event_id");
+		return plugin.uploader.lastBuiltSnapshot == null ? null : plugin.uploader.lastBuiltSnapshot.get("trigger_event_id");
 	}
 
 	private List<Map<String, Object>> rows(String type)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{
@@ -167,7 +167,7 @@ public class TriggerEventIdTest
 	@Test
 	public void theForcedBuildAfterAnAlchNamesItOnTheWire() throws Exception
 	{
-		arm(new AccountConnectPlugin.InvDeltaPending("alch", STAFF, "high", 1L, 100L, null, null, tick));
+		arm(new OffBookPendings.InvDeltaPending("alch", STAFF, "high", 1L, 100L, null, null, tick));
 		tick++;
 		inventoryChange(container(COINS, 1300, RUNE, 5, BOW, 1));
 		Map<String, Object> alch = rows("alch").get(0);
@@ -184,32 +184,32 @@ public class TriggerEventIdTest
 	public void theHashIgnoresTheName() throws Exception
 	{
 		plugin.syncTask();
-		Map<String, Object> a = plugin.lastBuiltSnapshot;
+		Map<String, Object> a = plugin.uploader.lastBuiltSnapshot;
 		Map<String, Object> b = new LinkedHashMap<>(a);
 		b.put("trigger_event_id", "0123456789abcdef0123456789abcdef");
-		assertEquals(plugin.canonicalHash(a), plugin.canonicalHash(b));
+		assertEquals(plugin.snapshots.canonicalHash(a), plugin.snapshots.canonicalHash(b));
 	}
 
 	@Test
 	public void periodicBankOpenAndPlainForcedBuildsNameNothing() throws Exception
 	{
 		plugin.syncTask();
-		assertFalse("periodic", plugin.lastBuiltSnapshot.containsKey("trigger_event_id"));
-		plugin.handleCaptureOnOpenWidgetLoaded(12);
-		assertFalse("bank open", plugin.lastBuiltSnapshot.containsKey("trigger_event_id"));
-		plugin.forceSendSnapshot();
-		assertFalse("forced with no row", plugin.lastBuiltSnapshot.containsKey("trigger_event_id"));
+		assertFalse("periodic", plugin.uploader.lastBuiltSnapshot.containsKey("trigger_event_id"));
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(12);
+		assertFalse("bank open", plugin.uploader.lastBuiltSnapshot.containsKey("trigger_event_id"));
+		plugin.uploader.forceSendSnapshot();
+		assertFalse("forced with no row", plugin.uploader.lastBuiltSnapshot.containsKey("trigger_event_id"));
 	}
 
 	@Test
 	public void twoDropsFromOneChangeNameOnlyTheFirst() throws Exception
 	{
-		arm(new AccountConnectPlugin.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
-		arm(new AccountConnectPlugin.InvDeltaPending("drop", STAFF, null, 1L, 100L, null, Boolean.FALSE, tick));
+		arm(new OffBookPendings.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
+		arm(new OffBookPendings.InvDeltaPending("drop", STAFF, null, 1L, 100L, null, Boolean.FALSE, tick));
 		tick++;
-		plugin.resolveDropPendingOnGroundSpawn(BOW, 0, 1L, tick);	// spawns first, the loss not yet seen
-		plugin.resolveDropPendingOnGroundSpawn(STAFF, 0, 1L, tick);
-		assertNull(plugin.lastBuiltSnapshot);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 1L, tick);	// spawns first, the loss not yet seen
+		plugin.offBook.resolveDropPendingOnGroundSpawn(STAFF, 0, 1L, tick);
+		assertNull(plugin.uploader.lastBuiltSnapshot);
 		inventoryChange(container(COINS, 100, RUNE, 5));			// one change removes both
 
 		List<Map<String, Object>> drops = rows("drop");
@@ -230,14 +230,14 @@ public class TriggerEventIdTest
 	public void theFirstOfTwoDropsFromOneChangeIsTheNamedOne() throws Exception
 	{
 		List<Object> names = new ArrayList<>();
-		arm(new AccountConnectPlugin.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
-		arm(new AccountConnectPlugin.InvDeltaPending("drop", STAFF, null, 1L, 100L, null, Boolean.FALSE, tick));
+		arm(new OffBookPendings.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
+		arm(new OffBookPendings.InvDeltaPending("drop", STAFF, null, 1L, 100L, null, Boolean.FALSE, tick));
 		tick++;
 		inventoryChange(container(COINS, 100, RUNE, 5));			// the loss first: no row yet
 		assertEquals(0, rows("drop").size());
-		plugin.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
 		names.add(trigger());
-		plugin.resolveDropPendingOnGroundSpawn(STAFF, 0, 0L, tick);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(STAFF, 0, 0L, tick);
 		names.add(trigger());
 
 		List<Map<String, Object>> drops = rows("drop");
@@ -249,11 +249,11 @@ public class TriggerEventIdTest
 	@Test
 	public void aBuildBetweenTheChangeAndTheRowMeansNoName() throws Exception
 	{
-		arm(new AccountConnectPlugin.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
+		arm(new OffBookPendings.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
 		tick++;
 		inventoryChange(container(COINS, 100, RUNE, 5, STAFF, 1));	// the loss first
 		plugin.syncTask();											// a periodic build already holds it
-		plugin.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
 		assertEquals(1, rows("drop").size());
 		assertNull(trigger());
 	}
@@ -261,7 +261,7 @@ public class TriggerEventIdTest
 	@Test
 	public void aMeasuredStoreBuyNamesItsRow() throws Exception
 	{
-		plugin.storePendings.put(RUNE, new AccountConnectPlugin.StorePending("store_buy", RUNE, 10, 100L, 5L, tick, false, false));
+		plugin.store.storePendings.put(RUNE, new StoreTools.StorePending("store_buy", RUNE, 10, 100L, 5L, tick, false, false));
 		tick++;
 		inventoryChange(container(COINS, 60, RUNE, 15, BOW, 1, STAFF, 1));
 		Map<String, Object> buy = rows("store_buy").get(0);
@@ -271,11 +271,11 @@ public class TriggerEventIdTest
 	@Test
 	public void aRowWithNoItemChangeOfItsOwnNamesNothing() throws Exception
 	{
-		plugin.resolveDeathPending(new LinkedHashMap<>(), true);	// nothing pending: no row
+		plugin.death.resolveDeathPending(new LinkedHashMap<>(), true);	// nothing pending: no row
 		inventoryChange(container(COINS, 100, RUNE, 4, BOW, 1, STAFF, 1));	// a change that resolves no row
-		plugin.emitEvent("death", new LinkedHashMap<>());			// a trigger row emitted outside a change
+		plugin.events.emitEvent("death", new LinkedHashMap<>());			// a trigger row emitted outside a change
 		assertEquals(1, rows("death").size());
-		assertNotNull(plugin.lastBuiltSnapshot);
+		assertNotNull(plugin.uploader.lastBuiltSnapshot);
 		assertNull(trigger());
 	}
 }

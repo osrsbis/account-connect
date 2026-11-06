@@ -82,7 +82,7 @@ public class BankPlaceholderTest
 		inject("client", client);
 		Response.Builder b = new Response.Builder().request(new Request.Builder().url("http://localhost/").build())
 			.protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Bank-Evidence", "on");
-		p.applyServerPolicy(b.build(), TOKEN);
+		p.grants.applyServerPolicy(b.build(), TOKEN);
 	}
 
 	private void inject(String field, Object value) throws Exception
@@ -109,7 +109,7 @@ public class BankPlaceholderTest
 	{
 		when(client.getLocalPlayer()).thenReturn(null);
 		bank = b;
-		p.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 	}
 
 	private void change(ItemContainer b)
@@ -121,14 +121,14 @@ public class BankPlaceholderTest
 	private void close()
 	{
 		when(client.getLocalPlayer()).thenReturn(null);
-		p.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		bank = null;
 	}
 
 	private List<Map<String, Object>> of(String type)
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (type.equals(e.get("type")))
 			{
@@ -155,9 +155,9 @@ public class BankPlaceholderTest
 	private List<Object> snapshotBankIds() throws Exception
 	{
 		when(client.getLocalPlayer()).thenReturn(mock(Player.class));
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		Map<String, Object> snap = (Map<String, Object>) build.invoke(p);
+		Map<String, Object> snap = (Map<String, Object>) build.invoke(p.snapshots);
 		List<Map<String, Object>> items = (List<Map<String, Object>>) ((Map<String, Object>) snap.get("bank")).get("items");
 		return items.stream().map(m -> m.get("id")).collect(Collectors.toList());
 	}

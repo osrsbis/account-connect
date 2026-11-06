@@ -9,6 +9,7 @@ import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
+import java.awt.Rectangle;
 
 final class FlipperOverlay extends OverlayPanel
 {
@@ -28,7 +29,7 @@ final class FlipperOverlay extends OverlayPanel
         setMovable(true);
         panelComponent.setPreferredSize(new Dimension(WIDTH, 0));
         panelComponent.setBackgroundColor(new Color(26, 28, 27, 240));
-        panelComponent.setBorder(new java.awt.Rectangle(7, 5, 7, 5));
+        panelComponent.setBorder(new Rectangle(7, 5, 7, 5));
         panelComponent.setGap(new Point(0, 2));
     }
 

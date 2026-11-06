@@ -6,6 +6,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * What the player had and was boosted to at the moment the game counted a kill, and the progression and failure lines
@@ -46,9 +51,7 @@ final class KillContext
 	{
 		if (worn == null || inventory == null || boosted == null || real == null
 			|| boosted.length != SKILLS.length || real.length != SKILLS.length) return null;
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("worn", pairs(worn));
-		out.put("inventory", pairs(inventory));
+		Map<String, Object> out = Fields.of("worn", pairs(worn), "inventory", pairs(inventory));
 		Map<String, Object> levels = new LinkedHashMap<>();
 		for (int i = 0; i < SKILLS.length; i++)
 		{
@@ -224,7 +227,7 @@ final class KillContext
 	 *   WARGUILD_GAMES is not the token count, tokens are item 8851; BARBASSAULT_QUEENKILLS_EXTRA may not be the whole
 	 *   queen count). Its changes are sent for the rig and analysis but never counted as units (review 2026-11-04).
 	 */
-	static final java.util.Set<String> TOTALS = new java.util.HashSet<>(java.util.Arrays.asList(
+	static final Set<String> TOTALS = new HashSet<>(Arrays.asList(
 		"doom_level_1_completions", "doom_level_2_completions", "doom_level_3_completions", "doom_level_4_completions",
 		"doom_level_5_completions", "doom_level_6_completions", "doom_level_7_completions", "doom_level_8_completions",
 		"doom_level_8_plus_completions", "colosseum_waves_completed", "jad_kills", "zuk_kills", "sol_heredit_kills",
@@ -234,7 +237,7 @@ final class KillContext
 		"toa_completions", "toa_expert_completions", "nightmare_kills", "phosani_kills", "nex_kills", "zalcano_kills",
 		"moons_chests", "yama_kills", "maggot_king_kills", "mixology_orders"));
 
-	static final java.util.Set<String> BALANCES = new java.util.HashSet<>(java.util.Arrays.asList(
+	static final Set<String> BALANCES = new HashSet<>(Arrays.asList(
 		"tempoross_permits", "tithe_points", "ba_attacker_base", "ba_collector_base", "ba_healer_base",
 		"ba_defender_base", "soul_wars_zeal", "soul_wars_zeal_tokens", "giants_foundry_points", "mixology_mox_points",
 		"mixology_aga_points", "mixology_lye_points", "nmz_reward_points", "bounty_hunter_points",
@@ -265,15 +268,15 @@ final class KillContext
 		{"volcanic_mine_game_points", 40042505},	// FossilVolcanicMine.POINTS (in a game; resets each game)
 	};
 
-	static final java.util.Set<String> WIDGET_KEYS = new java.util.HashSet<>();
+	static final Set<String> WIDGET_KEYS = new HashSet<>();
 	static
 	{
 		for (Object[] c : WIDGET_COUNTERS) WIDGET_KEYS.add((String) c[0]);
 	}
 
 	/** A widget's whole text: an optional word label and colon, then one plain whole number with correct thousands commas. */
-	private static final java.util.regex.Pattern WIDGET_NUMBER =
-		java.util.regex.Pattern.compile("^(?:[A-Za-z][A-Za-z ']{0,40}:\\s*)?(\\d{1,3}(?:,\\d{3})*|\\d+)$");
+	private static final Pattern WIDGET_NUMBER =
+		Pattern.compile("^(?:[A-Za-z][A-Za-z ']{0,40}:\\s*)?(\\d{1,3}(?:,\\d{3})*|\\d+)$");
 
 	/**
 	 * The number a balance widget shows ("Points: 1,250" or "1250"), or null. Any other shape stays unknown: a sign,
@@ -283,7 +286,7 @@ final class KillContext
 	static Integer widgetNumber(String text)
 	{
 		if (text == null) return null;
-		java.util.regex.Matcher m = WIDGET_NUMBER.matcher(text.replaceAll("<[^>]*>", "").trim());
+		Matcher m = WIDGET_NUMBER.matcher(text.replaceAll("<[^>]*>", "").trim());
 		if (!m.matches()) return null;
 		try
 		{
@@ -333,20 +336,14 @@ final class KillContext
 				{
 					// A shop may be opened once only: its first sight is sent as an observation of the balance,
 					// with no "from", so it is never read as points earned or spent (review 2026-11-04).
-					Map<String, Object> row = new LinkedHashMap<>();
-					row.put("key", e.getKey());
-					row.put("to", v);
-					row.put("kind", kindOf(e.getKey()));
-					row.put("seen", "first");
+					Map<String, Object> row = Fields.of(
+						"key", e.getKey(), "to", v, "kind", kindOf(e.getKey()), "seen", "first");
 					out.add(row);
 					continue;
 				}
 				if (settling || prev == null || prev.intValue() == v.intValue()) continue;
-				Map<String, Object> row = new LinkedHashMap<>();
-				row.put("key", e.getKey());
-				row.put("from", prev);
-				row.put("to", v);
-				row.put("kind", kindOf(e.getKey()));
+				Map<String, Object> row = Fields.of(
+					"key", e.getKey(), "from", prev, "to", v, "kind", kindOf(e.getKey()));
 				out.add(row);
 			}
 			return out;

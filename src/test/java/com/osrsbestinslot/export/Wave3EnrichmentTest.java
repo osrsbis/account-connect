@@ -55,7 +55,7 @@ public class Wave3EnrichmentTest
 		inject(plugin, "config", onConfig());
 		inject(plugin, "activeRsn", "TestPlayer");
 		inject(plugin, "activeHash", "42");
-		inject(plugin, "sessionActive", true);
+		plugin.session.sessionActive = true;
 		return plugin;
 	}
 
@@ -72,59 +72,59 @@ public class Wave3EnrichmentTest
 	public void logoutReasonManualWhenNotIdle() throws Exception
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - 60_000L);
-		inject(plugin, "lastKeyboardIdleTicks", 3);
-		inject(plugin, "lastMouseIdleTicks", 1);	// just clicked -> manual
-		plugin.trackLogout();
-		assertEquals("manual", plugin.pendingEvents.get(0).get("reason"));
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
+		plugin.session.lastKeyboardIdleTicks = 3;
+		plugin.session.lastMouseIdleTicks = 1;	// just clicked -> manual
+		plugin.session.trackLogout();
+		assertEquals("manual", plugin.events.pendingEvents.get(0).get("reason"));
 	}
 
 	@Test
 	public void logoutReasonIdleWhenIdleTicksHigh() throws Exception
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - 60_000L);
-		inject(plugin, "lastKeyboardIdleTicks", 900);
-		inject(plugin, "lastMouseIdleTicks", 900);	// no input for minutes -> idle
-		plugin.trackLogout();
-		assertEquals("idle", plugin.pendingEvents.get(0).get("reason"));
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
+		plugin.session.lastKeyboardIdleTicks = 900;
+		plugin.session.lastMouseIdleTicks = 900;	// no input for minutes -> idle
+		plugin.session.trackLogout();
+		assertEquals("idle", plugin.events.pendingEvents.get(0).get("reason"));
 	}
 
 	@Test
 	public void logoutReasonSixHourCapWhenSessionNearSixHours() throws Exception
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - (6L * 60L * 60L * 1000L));
-		inject(plugin, "lastKeyboardIdleTicks", 0);
-		inject(plugin, "lastMouseIdleTicks", 0);
-		plugin.trackLogout();
-		assertEquals("six_hour_cap", plugin.pendingEvents.get(0).get("reason"));
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - (6L * 60L * 60L * 1000L);
+		plugin.session.lastKeyboardIdleTicks = 0;
+		plugin.session.lastMouseIdleTicks = 0;
+		plugin.session.trackLogout();
+		assertEquals("six_hour_cap", plugin.events.pendingEvents.get(0).get("reason"));
 	}
 
 	@Test
 	public void connectionLostEmitsLogoutWithReason() throws Exception
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - 60_000L);
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
 		GameStateChanged ev = new GameStateChanged();
 		ev.setGameState(GameState.CONNECTION_LOST);
 		plugin.onGameStateChanged(ev);
 
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("logout", e.get("type"));
 		assertEquals("connection_lost", e.get("reason"));
-		assertFalse("connection loss ends the session", getBool(plugin, "sessionActive"));
+		assertFalse("connection loss ends the session", plugin.session.sessionActive);
 	}
 
 	@Test
 	public void logoutCarriesWealthFromLastSnapshot() throws Exception
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
-		inject(plugin, "sessionStartMillis", System.currentTimeMillis() - 60_000L);
-		inject(plugin, "lastBuiltSnapshot", snapshotWithNetWorth(1_234_567L));
-		plugin.trackLogout();
-		assertEquals(1_234_567L, plugin.pendingEvents.get(0).get("wealth"));
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
+		plugin.uploader.lastBuiltSnapshot = snapshotWithNetWorth(1_234_567L);
+		plugin.session.trackLogout();
+		assertEquals(1_234_567L, plugin.events.pendingEvents.get(0).get("wealth"));
 	}
 
 	@Test
@@ -138,11 +138,11 @@ public class Wave3EnrichmentTest
 		when(player.getName()).thenReturn("TestPlayer");
 		when(client.getAccountHash()).thenReturn(42L);
 		inject(plugin, "client", client);
-		inject(plugin, "lastBuiltSnapshot", snapshotWithNetWorth(555L));
+		plugin.uploader.lastBuiltSnapshot = snapshotWithNetWorth(555L);
 
-		boolean newLogin = plugin.trackSessionStart();
+		boolean newLogin = plugin.session.trackSessionStart();
 		assertTrue(newLogin);
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("login", e.get("type"));
 		assertEquals(555L, e.get("wealth"));
 	}
@@ -157,8 +157,8 @@ public class Wave3EnrichmentTest
 		wealth.put("equipment_gp", 200L);
 		Map<String, Object> snap = new LinkedHashMap<>();
 		snap.put("wealth", wealth);
-		inject(plugin, "lastBuiltSnapshot", snap);
-		assertNull("inventory + gear alone is not net worth", plugin.lastKnownNetWorth());
+		plugin.uploader.lastBuiltSnapshot = snap;
+		assertNull("inventory + gear alone is not net worth", plugin.session.lastKnownNetWorth());
 	}
 
 	@Test
@@ -174,8 +174,8 @@ public class Wave3EnrichmentTest
 		plugin.onStatChanged(new StatChanged(Skill.ATTACK, 12_000, 24, 24));	// primes previous level, no emit
 		plugin.onStatChanged(new StatChanged(Skill.ATTACK, 13_363, 25, 25));	// real level increase -> emit
 
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("level_up", e.get("type"));
 		assertEquals(25, e.get("level"));
 		assertEquals(13_363, e.get("xp"));
@@ -199,11 +199,11 @@ public class Wave3EnrichmentTest
 
 		// ActorDeath is a final class -> construct directly with the (mockable) player as the dead actor.
 		plugin.onActorDeath(new ActorDeath((Actor) player));
-		assertTrue("death emit is deferred to the settle/logout resolve", plugin.pendingEvents.isEmpty());
+		assertTrue("death emit is deferred to the settle/logout resolve", plugin.events.pendingEvents.isEmpty());
 
-		plugin.resolveDeathPending(new LinkedHashMap<>(), true); // settle-window path
-		assertEquals(1, plugin.pendingEvents.size());
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		plugin.death.resolveDeathPending(new LinkedHashMap<>(), true); // settle-window path
+		assertEquals(1, plugin.events.pendingEvents.size());
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("death", e.get("type"));
 		assertEquals("safe", e.get("death_kind")); // no wilderness varbit / pvp world in the mock
 		assertFalse("safe death carries no items_lost (not a transfer)", e.containsKey("items_lost"));

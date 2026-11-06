@@ -51,10 +51,9 @@ final class OwnActivityCapture
 
     void poll(Client c, int[] vars, long at)
     {
-        Map<String,Object> potions = new LinkedHashMap<>();
-        potions.put("storage_values_raw", OwnPotionStorageCapture.raw(vars));
-        potions.put("unlocked_raw", AccountProgressCapture.bit(c,vars,11295));
-        potions.put("units", "unverified_not_doses_or_bottles");
+        Map<String,Object> potions = Fields.of(
+            "storage_values_raw", OwnPotionStorageCapture.raw(vars),
+            "unlocked_raw", AccountProgressCapture.bit(c,vars,11295), "units", "unverified_not_doses_or_bottles");
         out.state("storage.potion_store", "RuneLite1.13.1:113_named_varps;varbit:11295", potions,c.getTickCount(),at);
 
         // Read fixed own progress fields; task identity and reward decoding remain unverified.

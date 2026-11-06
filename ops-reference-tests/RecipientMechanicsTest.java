@@ -48,9 +48,20 @@ public class RecipientMechanicsTest
 
 	private static void inject(Object target, String field, Object value) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField(field);
+		Object on = target;
+		Field f;
+		try
+		{
+			f = AccountConnectPlugin.class.getDeclaredField(field);
+		}
+		catch (NoSuchFieldException moved)
+		{
+			boolean grant = Arrays.stream(ServerGrants.class.getDeclaredFields()).anyMatch(g -> g.getName().equals(field));
+			f = (grant ? ServerGrants.class : StoreTools.class).getDeclaredField(field);
+			on = grant ? ((AccountConnectPlugin) target).grants : ((AccountConnectPlugin) target).store;
+		}
 		f.setAccessible(true);
-		f.set(target, value);
+		f.set(on, value);
 		StaffGrant.afterInject(target, field);
 	}
 
@@ -78,16 +89,16 @@ public class RecipientMechanicsTest
 	}
 
 	/** A pile we track, removed early (tick 120 is far before its 400 deadline). */
-	private static AccountConnectPlugin.DroppedGroundItem pile()
+	private static OwnPiles.DroppedGroundItem pile()
 	{
 		java.util.Map<String, Object> loc = new java.util.LinkedHashMap<>();
 		loc.put("region_id", 12853);
-		return new AccountConnectPlugin.DroppedGroundItem(995, 5L, PX, PY, 0, loc, 100, 400);
+		return new OwnPiles.DroppedGroundItem(995, 5L, PX, PY, 0, loc, 100, 400);
 	}
 
 	private static Map<String, Object> removal(AccountConnectPlugin p)
 	{
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if ("ground_removed".equals(e.get("type")))
 			{
@@ -113,7 +124,7 @@ public class RecipientMechanicsTest
 		Player taker = player("Taker", PX, PY, 827);		// floor pickup
 		Player idle = player("Idle", PX + 1, PY, -1);
 		inject(p, "client", client(me, 120, taker, idle));
-		p.emitGroundRemoval(pile(), 120, false);
+		p.piles.emitGroundRemoval(pile(), 120, false);
 
 		List<Map<String, Object>> c = cands(removal(p));
 		assertEquals(2, c.size());
@@ -137,7 +148,7 @@ public class RecipientMechanicsTest
 			crowd[i] = player("P" + i, PX, PY + (i % 3), -1);
 		}
 		inject(p, "client", client(me, 120, crowd));
-		p.emitGroundRemoval(pile(), 120, false);
+		p.piles.emitGroundRemoval(pile(), 120, false);
 		assertEquals(8, cands(removal(p)).size());
 	}
 
@@ -150,7 +161,7 @@ public class RecipientMechanicsTest
 		Player caster = player("Caster", PX + 7, PY, DropCandidates.TELEGRAB_CAST_ANIMATION);
 		Player walker = player("Walker", PX + 7, PY + 1, -1);
 		inject(p, "client", client(me, 120, caster, walker));
-		p.emitGroundRemoval(pile(), 120, false);
+		p.piles.emitGroundRemoval(pile(), 120, false);
 		List<Map<String, Object>> c = cands(removal(p));
 		assertNotNull(c);
 		assertEquals(1, c.size());
@@ -206,12 +217,12 @@ public class RecipientMechanicsTest
 		Player caster = player("Caster", PX + 6, PY + 2, DropCandidates.TELEGRAB_CAST_ANIMATION);
 		Client c = client(me, 116, bystander, caster);
 		inject(p, "client", c);
-		p.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
 		grabProjectile(p, c, caster, PX, PY);
-		assertEquals(1, p.telegrabSightings.size());
+		assertEquals(1, p.piles.telegrabSightings.size());
 
 		when(c.getTickCount()).thenReturn(120);
-		p.emitGroundRemoval(pile(), 120, false);
+		p.piles.emitGroundRemoval(pile(), 120, false);
 		Map<String, Object> ev = removal(p);
 		@SuppressWarnings("unchecked")
 		Map<String, Object> grab = (Map<String, Object>) ev.get("telegrab");
@@ -233,13 +244,13 @@ public class RecipientMechanicsTest
 		Player caster = player("Caster", PX + 6, PY, DropCandidates.TELEGRAB_CAST_ANIMATION);
 		Client c = client(me, 100, customer, caster);
 		inject(p, "client", c);
-		p.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
-		p.trackGroundDrop(995, 5L, PX + 2, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX + 2, PY, 0, null, 100, 400, false);
 		grabProjectile(p, c, caster, PX, PY);			// at our tile, but 20 ticks before the removal
 		when(c.getTickCount()).thenReturn(118);
 		grabProjectile(p, c, caster, PX + 2, PY);		// recent, but at the other pile's tile
 
-		p.emitGroundRemoval(pile(), 120, false);
+		p.piles.emitGroundRemoval(pile(), 120, false);
 		Map<String, Object> ev = removal(p);
 		assertNull(ev.get("telegrab"));
 		assertEquals("Customer", ev.get("counterparty_inferred"));
@@ -254,19 +265,19 @@ public class RecipientMechanicsTest
 		Client c = client(me, 100, caster);
 		inject(p, "client", c);
 		grabProjectile(p, c, caster, PX, PY);
-		assertTrue("nothing of ours is there", p.telegrabSightings.isEmpty());
+		assertTrue("nothing of ours is there", p.piles.telegrabSightings.isEmpty());
 	}
 
 	@Test
 	public void telegrabSightingsAreBounded() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
 		for (int i = 0; i < 100; i++)
 		{
-			p.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 100, "impact", null, false, PX, PY));
+			p.piles.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 100, "impact", null, false, PX, PY));
 		}
-		assertEquals(AccountConnectPlugin.TELEGRAB_SIGHTING_CAP, p.telegrabSightings.size());
+		assertEquals(OwnPiles.TELEGRAB_SIGHTING_CAP, p.piles.telegrabSightings.size());
 	}
 
 	@Test
@@ -304,11 +315,11 @@ public class RecipientMechanicsTest
 	public void aSelfPickupNeverCarriesAGrab() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
-		p.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 118, "impact", null, false, PX, PY));
-		AccountConnectPlugin.DroppedGroundItem g = pile();
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 118, "impact", null, false, PX, PY));
+		OwnPiles.DroppedGroundItem g = pile();
 		g.selfPickedUp = true;
-		p.emitGroundRemoval(g, 120, false);
+		p.piles.emitGroundRemoval(g, 120, false);
 		assertNull(removal(p).get("telegrab"));
 	}
 
@@ -362,7 +373,7 @@ public class RecipientMechanicsTest
 		inject(p, "client", c);
 		inject(p, "serverClipsDisabled", true);	// no clip recorder in a unit test
 		p.handleActivityWidgetLoaded(net.runelite.api.gameval.InterfaceID.SHOPMAIN);
-		assertEquals("Shop keeper", p.shopkeeperName);
+		assertEquals("Shop keeper", p.store.shopkeeperName);
 
 		java.util.Set<Integer> sold = new java.util.LinkedHashSet<>(Arrays.asList(20997));
 		inject(p, "soldThisVisit", sold);
@@ -372,9 +383,9 @@ public class RecipientMechanicsTest
 		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
 		base.put(20997, 1);
 		inject(p, "shopStock", base);
-		p.handleShopStockChanged(shop(20997, 0).c);
+		p.store.handleShopStockChanged(shop(20997, 0).c);
 
-		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+		Map<String, Object> ev = p.events.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
 			.findFirst().orElseThrow(AssertionError::new);
 		assertEquals("Shop keeper", ev.get("shopkeeper"));
 		assertEquals(2, ev.get("ticks_since_sell"));
@@ -414,10 +425,10 @@ public class RecipientMechanicsTest
 		inject(p, "shopStock", base);
 		long now = System.currentTimeMillis();
 		// The evidence phase (confirmed by >= 3 aligned changes), not the countdown anchor.
-		inject(p, "evidencePhaseMs", now - 120_000L - 400L);	// two cycles and 0.4 s ago
-		inject(p, "evidencePhaseSupport", 3);
-		p.handleShopStockChanged(shop(1511, 0).c);
-		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+		p.store.evidencePhaseMs = now - 120_000L - 400L;	// two cycles and 0.4 s ago
+		p.store.evidencePhaseSupport = 3;
+		p.store.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.events.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
 			.findFirst().orElseThrow(AssertionError::new);
 		long ms = ((Number) ev.get("ms_from_reset_cycle")).longValue();
 		assertTrue("on the cycle: " + ms, ms >= 300 && ms < 2_000);
@@ -438,9 +449,9 @@ public class RecipientMechanicsTest
 		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
 		base.put(1511, 1);
 		inject(p, "shopStock", base);
-		inject(p, "storeResetAnchorMs", System.currentTimeMillis() - 120_000L - 400L);
-		p.handleShopStockChanged(shop(1511, 0).c);
-		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+		p.store.storeResetAnchorMs = System.currentTimeMillis() - 120_000L - 400L;
+		p.store.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.events.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
 			.findFirst().orElseThrow(AssertionError::new);
 		assertFalse(ev.containsKey("ms_from_reset_cycle"));
 		assertFalse(ev.containsKey("reset_cycle_obs"));
@@ -456,8 +467,8 @@ public class RecipientMechanicsTest
 		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
 		base.put(1511, 1);
 		inject(p, "shopStock", base);
-		p.handleShopStockChanged(shop(1511, 0).c);
-		Map<String, Object> ev = p.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
+		p.store.handleShopStockChanged(shop(1511, 0).c);
+		Map<String, Object> ev = p.events.pendingEvents.stream().filter(e -> "store_taken".equals(e.get("type")))
 			.findFirst().orElseThrow(AssertionError::new);
 		assertFalse("the probe vanishing sets the phase only AFTER this row", ev.containsKey("ms_from_reset_cycle"));
 	}
@@ -465,12 +476,12 @@ public class RecipientMechanicsTest
 	@Test
 	public void msFromResetCycleIsTheNearestTick()
 	{
-		assertEquals(Long.valueOf(0L), AccountConnectPlugin.msFromResetCycle(1_000L, 61_000L));
-		assertEquals(Long.valueOf(5_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 66_000L));
-		assertEquals(Long.valueOf(5_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 56_000L));
-		assertEquals(Long.valueOf(30_000L), AccountConnectPlugin.msFromResetCycle(1_000L, 31_000L));
-		assertNull(AccountConnectPlugin.msFromResetCycle(0L, 61_000L));
-		assertNull(AccountConnectPlugin.msFromResetCycle(61_000L, 1_000L));
+		assertEquals(Long.valueOf(0L), StoreTools.msFromResetCycle(1_000L, 61_000L));
+		assertEquals(Long.valueOf(5_000L), StoreTools.msFromResetCycle(1_000L, 66_000L));
+		assertEquals(Long.valueOf(5_000L), StoreTools.msFromResetCycle(1_000L, 56_000L));
+		assertEquals(Long.valueOf(30_000L), StoreTools.msFromResetCycle(1_000L, 31_000L));
+		assertNull(StoreTools.msFromResetCycle(0L, 61_000L));
+		assertNull(StoreTools.msFromResetCycle(61_000L, 1_000L));
 	}
 
 	@Test
@@ -482,7 +493,7 @@ public class RecipientMechanicsTest
 		Player b = player("B", 3219, 3415, -1);
 		when(a.getInteracting()).thenReturn(b);
 		inject(p, "client", client(me, 10, a, b));
-		List<Map<String, Object>> s = p.nearbyPlayersSnapshot(24, true);
+		List<Map<String, Object>> s = p.store.nearbyPlayersSnapshot(24, true);
 		for (Map<String, Object> m : s)
 		{
 			assertFalse(m.containsKey("interacting_npc"));
@@ -501,7 +512,7 @@ public class RecipientMechanicsTest
 		java.util.Map<Integer, Integer> base = new java.util.LinkedHashMap<>();
 		base.put(1931, 6);
 		inject(p, "shopStock", base);
-		p.handleShopStockChanged(shop(1931, 5).c);
-		assertTrue(p.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
+		p.store.handleShopStockChanged(shop(1931, 5).c);
+		assertTrue(p.events.pendingEvents.stream().noneMatch(e -> "store_taken".equals(e.get("type"))));
 	}
 }

@@ -65,6 +65,16 @@ import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
+import java.io.ByteArrayOutputStream;
+import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.NoSuchFileException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.function.Consumer;
 
 final class EventSpool
 {
@@ -319,7 +329,7 @@ final class EventSpool
 		}
 		Record r = new Record(eventId, type, eventJson, createdMs, false);
 		ensureOpen();
-		writeFrames(java.util.Collections.singletonList(evPayload(r)));
+		writeFrames(Collections.singletonList(evPayload(r)));
 		put(pending, r);
 		enforceBounds();
 		return true;
@@ -768,7 +778,7 @@ final class EventSpool
 			Files.deleteIfExists(dir);
 			return true;
 		}
-		catch (java.nio.file.DirectoryNotEmptyException e)
+		catch (DirectoryNotEmptyException e)
 		{
 			return false;
 		}
@@ -837,7 +847,7 @@ final class EventSpool
 			Files.deleteIfExists(dir);
 			return true;
 		}
-		catch (java.nio.file.DirectoryNotEmptyException e)
+		catch (DirectoryNotEmptyException e)
 		{
 			return false;
 		}
@@ -962,7 +972,7 @@ final class EventSpool
 				{
 					Files.deleteIfExists(d);
 				}
-				catch (java.nio.file.DirectoryNotEmptyException ignored)
+				catch (DirectoryNotEmptyException ignored)
 				{
 					// another process created something meanwhile
 				}
@@ -1052,7 +1062,7 @@ final class EventSpool
 		return out;
 	}
 
-	private static void updateIndex(Path root, java.util.function.Consumer<LinkedHashMap<String, Long>> change) throws IOException
+	private static void updateIndex(Path root, Consumer<LinkedHashMap<String, Long>> change) throws IOException
 	{
 		// Never sleep or interrupt a RuneLite/plugin thread while waiting for another process. The
 		// spool is best-effort and the memory delivery path remains authoritative, so transient
@@ -1525,14 +1535,14 @@ final class EventSpool
 
 	private static boolean isJsonObject(String json)
 	{
-		try (com.google.gson.stream.JsonReader r = new com.google.gson.stream.JsonReader(new StringReader(json)))
+		try (JsonReader r = new JsonReader(new StringReader(json)))
 		{
-			if (r.peek() != com.google.gson.stream.JsonToken.BEGIN_OBJECT)
+			if (r.peek() != JsonToken.BEGIN_OBJECT)
 			{
 				return false;
 			}
 			r.skipValue();
-			return r.peek() == com.google.gson.stream.JsonToken.END_DOCUMENT;
+			return r.peek() == JsonToken.END_DOCUMENT;
 		}
 		catch (IOException | RuntimeException e)
 		{
@@ -1594,7 +1604,7 @@ final class EventSpool
 			c = create ? open(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
 				: FileChannel.open(file, StandardOpenOption.WRITE);
 		}
-		catch (java.nio.file.NoSuchFileException e)
+		catch (NoSuchFileException e)
 		{
 			return null;
 		}
@@ -1676,7 +1686,7 @@ final class EventSpool
 
 	private static FileChannel open(Path p, OpenOption... options) throws IOException
 	{
-		Set<OpenOption> set = new HashSet<>(java.util.Arrays.asList(options));
+		Set<OpenOption> set = new HashSet<>(Arrays.asList(options));
 		return FileChannel.open(p, set, fileAttrs());
 	}
 
@@ -1736,7 +1746,7 @@ final class EventSpool
 
 	private static final class ByteArrayBuilder
 	{
-		private final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+		private final ByteArrayOutputStream out = new ByteArrayOutputStream();
 
 		void add(byte[] b)
 		{
@@ -1753,9 +1763,9 @@ final class EventSpool
 	{
 		try
 		{
-			return hex(java.security.MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8)));
+			return hex(MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8)));
 		}
-		catch (java.security.NoSuchAlgorithmException e)
+		catch (NoSuchAlgorithmException e)
 		{
 			throw new IllegalStateException("SHA-256 unavailable", e);
 		}

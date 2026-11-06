@@ -23,6 +23,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 public final class DropCandidates
 {
@@ -150,7 +152,7 @@ public final class DropCandidates
 		}
 		TelegrabSighting latest = null;
 		TelegrabSighting named = null;
-		java.util.Set<String> via = new java.util.TreeSet<>();
+		Set<String> via = new TreeSet<>();
 		for (TelegrabSighting s : sightings)
 		{
 			if (s == null || s.x != pileX || s.y != pileY || s.plane != pilePlane)
@@ -176,9 +178,7 @@ public final class DropCandidates
 		{
 			return null;
 		}
-		Map<String, Object> m = new LinkedHashMap<>();
-		m.put("via", new ArrayList<>(via));
-		m.put("ticks_before", removalTick - latest.tick);
+		Map<String, Object> m = Fields.of("via", new ArrayList<>(via), "ticks_before", removalTick - latest.tick);
 		if (named != null)
 		{
 			if (named.casterSelf)

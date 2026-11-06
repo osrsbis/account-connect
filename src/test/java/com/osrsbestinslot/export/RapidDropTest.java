@@ -65,7 +65,7 @@ public class RapidDropTest
 		}
 		for (int i = 0; i < items.length; i++)
 		{
-			plugin.resolveDropPendingOnGroundSpawn(items[i], 0, 0L, 101);
+			plugin.offBook.resolveDropPendingOnGroundSpawn(items[i], 0, 0L, 101);
 		}
 
 		List<Integer> emitted = droppedItemIds(plugin);
@@ -85,8 +85,8 @@ public class RapidDropTest
 		tick(plugin, 200);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 200);
-		plugin.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 200);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 200);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 200);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals("both same-tick drops must emit", 2, emitted.size());
@@ -104,9 +104,9 @@ public class RapidDropTest
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
 		plugin.onMenuOptionClicked(menu("Drop", "", FANG));
 		// spawns land reversed
-		plugin.resolveDropPendingOnGroundSpawn(FANG, 0, 0L, 300);
-		plugin.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 300);
-		plugin.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 300);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(FANG, 0, 0L, 300);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 300);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 300);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals(3, emitted.size());
@@ -125,12 +125,12 @@ public class RapidDropTest
 		tick(plugin, 400);
 		plugin.onMenuOptionClicked(menu("Drop", "", DEATH_RUNE));
 		assertNotNull("a single drop still arms", firstPending(plugin));
-		plugin.resolveDropPendingOnGroundSpawn(DEATH_RUNE, 0, 0L, 400);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(DEATH_RUNE, 0, 0L, 400);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals(1, emitted.size());
 		assertEquals(Integer.valueOf(DEATH_RUNE), emitted.get(0));
-		Map<String, Object> e = plugin.pendingEvents.get(0);
+		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals(5L, e.get("qty"));
 		assertEquals(true, e.get("wilderness"));
 		assertEquals(380, e.get("world"));
@@ -145,8 +145,8 @@ public class RapidDropTest
 		AccountConnectPlugin plugin = newPlugin();
 		tick(plugin, 500);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
-		plugin.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);
-		plugin.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);   // another player's tbow appearing
+		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);   // another player's tbow appearing
 		assertEquals("a drop must never emit twice", 1, droppedItemIds(plugin).size());
 	}
 
@@ -161,8 +161,8 @@ public class RapidDropTest
 		tick(plugin, 600);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.resolveInvDeltaPending(0L, 0L, 601);       // items left the inventory: bank / equip / destroy
-		assertTrue("no ground spawn = no drop, ever", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveInvDeltaPending(0L, 0L, 601);       // items left the inventory: bank / equip / destroy
+		assertTrue("no ground spawn = no drop, ever", plugin.events.pendingEvents.isEmpty());
 	}
 
 	/** A direct trade must never become a drop event. */
@@ -173,8 +173,8 @@ public class RapidDropTest
 		tick(plugin, 700);
 		plugin.onMenuOptionClicked(menu("Trade with", "Leegsonly", TBOW));
 		assertNull("a trade click must not arm a drop pending", firstPending(plugin));
-		plugin.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 700);
-		assertTrue("a trade must never emit a drop", plugin.pendingEvents.isEmpty());
+		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 700);
+		assertTrue("a trade must never emit a drop", plugin.events.pendingEvents.isEmpty());
 	}
 
 	/** Stale pendings expire without emitting and must not block later drops. */
@@ -186,7 +186,7 @@ public class RapidDropTest
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));     // never lands
 		tick(plugin, 900);
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 900);
+		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 900);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals("the later real drop must still emit", 1, emitted.size());
@@ -224,7 +224,7 @@ public class RapidDropTest
 	private static List<Integer> droppedItemIds(AccountConnectPlugin plugin)
 	{
 		List<Integer> out = new ArrayList<>();
-		for (Map<String, Object> e : plugin.pendingEvents)
+		for (Map<String, Object> e : plugin.events.pendingEvents)
 		{
 			if ("drop".equals(e.get("type")))
 			{
@@ -234,12 +234,12 @@ public class RapidDropTest
 		return out;
 	}
 
-	private static AccountConnectPlugin.InvDeltaPending firstPending(AccountConnectPlugin plugin) throws Exception
+	private static OffBookPendings.InvDeltaPending firstPending(AccountConnectPlugin plugin) throws Exception
 	{
-		Field f = AccountConnectPlugin.class.getDeclaredField("invDeltaPendings");
+		Field f = OffBookPendings.class.getDeclaredField("invDeltaPendings");
 		f.setAccessible(true);
-		java.util.Deque<?> d = (java.util.Deque<?>) f.get(plugin);
-		return d.isEmpty() ? null : (AccountConnectPlugin.InvDeltaPending) d.peekFirst();
+		java.util.Deque<?> d = (java.util.Deque<?>) f.get(plugin.offBook);
+		return d.isEmpty() ? null : (OffBookPendings.InvDeltaPending) d.peekFirst();
 	}
 
 	private static MenuOptionClicked menu(String option, String target, int itemId)

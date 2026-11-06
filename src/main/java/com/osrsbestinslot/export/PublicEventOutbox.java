@@ -6,11 +6,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.LongSupplier;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.LinkOption;
 
 /**
- * Bounded public queue-v1 journal. All methods run on the plugin's disk executor.
- * Uses the existing forced journal and tombstones, in a root separate from staff.
- * It owns projected event rows only, never snapshots, credentials or gameplay actions.
+ * The journal adapter for every durable event scope: the staff spool, the public Queue journal and the public bank
+ * journal, each in its own root with its own identity, purge and receipt rules. All methods run on the plugin's disk
+ * executor. Uses the existing forced journal and tombstones. It owns projected event rows only, never snapshots,
+ * credentials or gameplay actions. Staff identities are opened by key (token and account); public ones by Context.
  */
 final class PublicEventOutbox
 {
@@ -44,9 +48,10 @@ final class PublicEventOutbox
     private final LongSupplier clock;
     private final EventSpool.Limits limits;
     private final boolean bankOnly;
-    final EventSpool.Counters counters = new EventSpool.Counters();
-    private EventSpool journal;
-    private Context context;
+    final EventSpool.Counters counters;
+    /** The open journal and its identity key, or null. */
+    EventSpool journal;
+    String openId;
 
     PublicEventOutbox(Path data, Gson gson, LongSupplier clock)
     {
@@ -60,19 +65,79 @@ final class PublicEventOutbox
 
     PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits, boolean bankOnly)
     {
+        this(data, bankOnly ? "public-bank-events-v1" : "public-events-v1", gson, clock, limits, bankOnly, new EventSpool.Counters());
+    }
+
+    /** The staff spool: root "spool", the plugin's spool counters. Rows are appended by the plugin, never by Context. */
+    PublicEventOutbox(Path data, LongSupplier clock, EventSpool.Counters counters)
+    {
+        this(data, "spool", null, clock, EventSpool.Limits.DEFAULT, false, counters);
+    }
+
+    private PublicEventOutbox(Path data, String root, Gson gson, LongSupplier clock, EventSpool.Limits limits,
+        boolean bankOnly, EventSpool.Counters counters)
+    {
         this.data = data;
-        this.root = data.resolve("osrsbis").resolve(bankOnly ? "public-bank-events-v1" : "public-events-v1");
+        this.root = data.resolve("osrsbis").resolve(root);
         this.bankOnly = bankOnly;
         this.gson = gson;
         this.clock = clock;
         this.limits = limits;
+        this.counters = counters;
+    }
+
+    Path root() { return root; }
+
+    /** The journal of `id` is open and usable. */
+    boolean isOpen(String id) { return journal != null && id.equals(openId) && !journal.isFailed(); }
+
+    /**
+     * Staff: open `id` after the caller purged the other identities. Ages out foreign shards, waits for a marked
+     * directory's live writer, recovers this identity's abandoned shards and indexes it once the root exists.
+     */
+    boolean openStaff(String id) throws IOException
+    {
+        if (!open(id, true)) return false;
+        if (Files.isDirectory(root)) EventSpool.writePointer(data, root, id, clock.getAsLong());
+        return true;
+    }
+
+    /**
+     * Age out foreign shards, refuse a marked directory (staff first finishes an idle one), open `id` and recover
+     * its abandoned shards. The staff adapter keeps the shard open even when its recovery fails.
+     */
+    private boolean open(String id, boolean staff) throws IOException
+    {
+        EventSpool.sweepAged(root, clock, limits.maxAgeMs, counters);
+        Path dir = root.resolve(id);
+        if (Files.exists(dir.resolve(EventSpool.MARKER)) && !(staff && EventSpool.purgeIfIdle(dir))) return false;
+        EventSpool opened = new EventSpool(data, dir, clock, EventSpool.ATOMIC, limits, counters);
+        if (staff) { journal = opened; openId = id; }
+        if (Files.isDirectory(dir)) opened.recover();
+        journal = opened;
+        openId = id;
+        return true;
+    }
+
+    /**
+     * Close this writer's own shard of `id` (deleting it) if open, then purge the directory. withdrawn marks live
+     * siblings so they stop too; otherwise only an idle directory goes. True when an existing directory went.
+     */
+    boolean drop(String id, boolean withdrawn) throws IOException
+    {
+        if (id.equals(openId)) closeOwn();
+        Path dir = root.resolve(id);
+        boolean existed = Files.isDirectory(dir);
+        boolean gone = withdrawn ? EventSpool.purgeIdentityDir(dir, clock) : EventSpool.purgeIfIdle(dir);
+        if (gone || withdrawn) EventSpool.deletePointerIf(root, id);
+        return existed && (gone || withdrawn);
     }
 
     /** No grant or no settled account means no open, recovery or replay. */
     boolean activate(Context next) throws IOException
     {
         if (next == null) return false;
-        if (context != null && context.identity.equals(next.identity) && journal != null)
+        if (next.identity.equals(openId) && journal != null)
         {
             if (journal.purgeRequested())
             {
@@ -88,14 +153,7 @@ final class PublicEventOutbox
         close();
         // A normal account/profile change is not an erasure or ACK. Retain recent
         // identities for a later matching grant; age and append-time index bounds still apply.
-        EventSpool.sweepAged(root, clock, limits.maxAgeMs, counters);
-        Path dir = root.resolve(next.identity);
-        if (Files.exists(dir.resolve(EventSpool.MARKER))) return false;
-        EventSpool opened = new EventSpool(data, dir, clock, EventSpool.ATOMIC, limits, counters);
-        if (Files.isDirectory(dir)) opened.recover();
-        journal = opened;
-        context = next;
-        return true;
+        return open(next.identity, false);
     }
 
     /** Returns true only for a row still present after a forced append and bound enforcement. */
@@ -108,7 +166,7 @@ final class PublicEventOutbox
         Object timestamp = event.get("ts");
         if (!(timestamp instanceof Number) || ((Number) timestamp).longValue() <= 0) return false;
         String json = gson.toJson(event);
-        if (json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= AccountConnectPlugin.EVENT_BATCH_MAX_BYTES)
+        if (json.getBytes(StandardCharsets.UTF_8).length >= EventQueue.EVENT_BATCH_MAX_BYTES)
         {
             counters.dropped.incrementAndGet();
             return false;
@@ -139,7 +197,7 @@ final class PublicEventOutbox
             if (retained.size() != EventSpool.MAX_INDEX || !retained.contains(active)) return;
             for (String old : knownIdentities())
                 if (!retained.contains(old)
-                    && Files.isDirectory(root.resolve(old), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    && Files.isDirectory(root.resolve(old), LinkOption.NOFOLLOW_LINKS)
                     && EventSpool.purgeIfIdle(root.resolve(old)))
                     counters.purged.incrementAndGet();
         }
@@ -179,14 +237,14 @@ final class PublicEventOutbox
 
     private boolean knownType(Map<String,Object> event)
     {
-        return bankOnly ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows("own-signals-v1",event);
+        return bankOnly ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows("own-history-v1",event);
     }
 
     /** Only validated per-ID queue outcomes settle rows, including partial non-2xx receipts. */
     void settle(Context sentOwner, List<Map<String, Object>> sent, List<EventQueueProtocol.Outcome> outcomes)
         throws IOException
     {
-        if (context == null || sentOwner == null || !context.identity.equals(sentOwner.identity)
+        if (openId == null || sentOwner == null || !openId.equals(sentOwner.identity)
             || journal == null || outcomes.size() != sent.size()) return;
         List<String> accepted = new ArrayList<>(), rejected = new ArrayList<>();
         for (int i = 0; i < sent.size(); i++)
@@ -211,15 +269,7 @@ final class PublicEventOutbox
     /** Explicit withdrawal: mark known live siblings and retire idle retry payloads. */
     void purge() throws IOException
     {
-        String active = context == null ? null : context.identity;
-        if (journal != null) journal.closeAndDeleteOwn();
-        journal = null;
-        context = null;
-        if (active != null)
-        {
-            EventSpool.purgeIdentityDir(root.resolve(active), clock);
-            EventSpool.deletePointerIf(root, active);
-        }
+        if (openId != null) drop(openId, true);
         // A cold client can receive revocation or clear its token before any grant/recovery.
         // Use only hashed pointers; never open payloads or mark an unrelated live writer.
         for (String old : knownIdentities())
@@ -232,12 +282,12 @@ final class PublicEventOutbox
     private Set<String> knownIdentities() throws IOException
     {
         Set<String> identities = new LinkedHashSet<>(EventSpool.readIndex(root));
-        if (Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS))
-            try (java.nio.file.DirectoryStream<Path> dirs = Files.newDirectoryStream(root))
+        if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS))
+            try (DirectoryStream<Path> dirs = Files.newDirectoryStream(root))
             {
                 for (Path dir : dirs)
                     if (dir.getFileName().toString().matches("[a-f0-9]{32}")
-                        && Files.isDirectory(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                        && Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS))
                         identities.add(dir.getFileName().toString());
             }
         return identities;
@@ -247,15 +297,16 @@ final class PublicEventOutbox
     void erase(Context erased) throws IOException
     {
         if (erased == null) return;
-        if (context != null && context.identity.equals(erased.identity))
-        {
-            if (journal != null) journal.closeAndDeleteOwn();
-            journal = null;
-            context = null;
-        }
-        EventSpool.purgeIdentityDir(root.resolve(erased.identity), clock);
-        EventSpool.deletePointerIf(root, erased.identity);
+        drop(erased.identity, true);
         counters.purged.incrementAndGet();
+    }
+
+    /** Close this writer and delete its own shard; other shards of the identity stay. */
+    void closeOwn()
+    {
+        if (journal != null) journal.closeAndDeleteOwn();
+        journal = null;
+        openId = null;
     }
 
     /** Logout/normal close retains retry rows; a future matching grant is required to recover. */
@@ -263,10 +314,10 @@ final class PublicEventOutbox
     {
         if (journal != null) journal.close();
         journal = null;
-        context = null;
+        openId = null;
     }
 
     int size() { return journal == null ? 0 : journal.pendingCount(); }
     long bytes() { return journal == null ? 0 : journal.pendingPayloadBytes(); }
-    void crashForTest() { if (journal != null) journal.crashForTest(); journal = null; context = null; }
+    void crashForTest() { if (journal != null) journal.crashForTest(); journal = null; openId = null; }
 }

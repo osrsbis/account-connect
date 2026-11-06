@@ -7,6 +7,8 @@ import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
+import java.awt.Point;
+import java.awt.Rectangle;
 
 /**
  * The store reset countdown, ON ITS OWN so it never moves.
@@ -62,20 +64,20 @@ class StoreResetOverlay extends OverlayPanel
 		// against a bright shop. Tighter border and row gap than the default so the plate reads as
 		// one deliberate object instead of a loose stack.
 		panelComponent.setBackgroundColor(PLATE);
-		panelComponent.setBorder(new java.awt.Rectangle(6, 4, 6, 4));
-		panelComponent.setGap(new java.awt.Point(0, 2));
+		panelComponent.setBorder(new Rectangle(6, 4, 6, 4));
+		panelComponent.setGap(new Point(0, 2));
 	}
 
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
 		anchorUnderItems();
-		if (!plugin.isShopOpen() || !plugin.storeToolsEnabled())
+		if (!plugin.store.isShopOpen() || !plugin.grants.storeToolsEnabled())
 		{
 			return null;
 		}
 
-		long remainMs = plugin.msUntilNextResetForDisplay();
+		long remainMs = plugin.store.msUntilNextResetForDisplay();
 		lastText = resetText(remainMs);
 		lastColor = remainMs <= 0 ? DIM : countdownColor((int) ((remainMs + 999) / 1000));
 
@@ -104,7 +106,7 @@ class StoreResetOverlay extends OverlayPanel
 		{
 			return;
 		}
-		java.awt.Point p = plugin.shopItemsBottomLeft();
+		Point p = plugin.store.shopItemsBottomLeft();
 		if (p == null)
 		{
 			return;		// widget not laid out yet — try again next frame
@@ -113,7 +115,7 @@ class StoreResetOverlay extends OverlayPanel
 		{
 			// p.x is the grid's RIGHT edge, so subtract our own width to end flush with it. Both
 			// overlays do this, so their right edges line up whatever each one's width is.
-			setPreferredLocation(new java.awt.Point(p.x - PANEL_WIDTH, p.y));
+			setPreferredLocation(new Point(p.x - PANEL_WIDTH, p.y));
 		}
 		anchored = true;
 	}

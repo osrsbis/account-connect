@@ -119,9 +119,9 @@ public class UploadGatingTest
 		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Broad-Capture", "on"));
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
-		plugin.minUploadIntervalMillis = 600_000;
-		plugin.lastSendMillis = 0;
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
+		plugin.uploader.minUploadIntervalMillis = 600_000;
+		plugin.uploader.lastSendMillis = 0;
 		server.enqueue(new MockResponse().setResponseCode(500).setHeader("X-Broad-Capture", "on"));
 		plugin.syncTask();
 		RecordedRequest failed = server.takeRequest(5, TimeUnit.SECONDS);
@@ -129,11 +129,11 @@ public class UploadGatingTest
 		assertTrue(failed.getBody().readUtf8().contains("game_vars"));
 		awaitBackoffArmed(2000);
 		for (int i=0; i<4; i++) plugin.syncTask();
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		assertNull("failed uploads retain backoff, including force", server.takeRequest(150, TimeUnit.MILLISECONDS));
 		assertEquals(2, server.getRequestCount());
-		plugin.backoffUntilMillis = 0;
-		plugin.lastSendMillis = 0;
+		plugin.uploader.backoffUntilMillis = 0;
+		plugin.uploader.lastSendMillis = 0;
 		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Broad-Capture", "on"));
 		plugin.syncTask();
 		RecordedRequest retry = server.takeRequest(5, TimeUnit.SECONDS);
@@ -148,15 +148,15 @@ public class UploadGatingTest
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash,5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash,5000);
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.onClientShutdown(new net.runelite.client.events.ClientShutdown());
-		plugin.finalFlushDone.get(5, TimeUnit.SECONDS);
-		plugin.pendingEvents.clear();
+		plugin.events.finalFlushDone.get(5, TimeUnit.SECONDS);
+		plugin.events.pendingEvents.clear();
 		int requests = server.getRequestCount();
 		plugin.syncTask();
-		plugin.forceSendSnapshot();
-		assertFalse(plugin.pendingEvents.stream().anyMatch(e -> "login".equals(e.get("type"))));
+		plugin.uploader.forceSendSnapshot();
+		assertFalse(plugin.events.pendingEvents.stream().anyMatch(e -> "login".equals(e.get("type"))));
 		Thread.sleep(50);
 		assertEquals(requests, server.getRequestCount());
 	}
@@ -189,8 +189,8 @@ public class UploadGatingTest
 		long until = System.currentTimeMillis() + 5000;
 		while (http.dispatcher().runningCallsCount() > 0 && System.currentTimeMillis() < until) Thread.sleep(10);
 		assertEquals(0, http.dispatcher().runningCallsCount());
-		assertFalse(plugin.serverGameVarsEnabled);
-		assertNull("old accept cannot mark the new identity's state uploaded", plugin.lastUploadedHash);
+		assertFalse(plugin.grants.serverGameVarsEnabled);
+		assertNull("old accept cannot mark the new identity's state uploaded", plugin.uploader.lastUploadedHash);
 	}
 
 	/** Waits for the async OkHttp callback to record an accepted upload with the given hash. */
@@ -199,13 +199,13 @@ public class UploadGatingTest
 		long deadline = System.currentTimeMillis() + timeoutMillis;
 		while (System.currentTimeMillis() < deadline)
 		{
-			if (expectedHash.equals(plugin.lastUploadedHash))
+			if (expectedHash.equals(plugin.uploader.lastUploadedHash))
 			{
 				return;
 			}
 			Thread.sleep(10);
 		}
-		fail("lastUploadedHash never became " + expectedHash + " (was " + plugin.lastUploadedHash + ")");
+		fail("lastUploadedHash never became " + expectedHash + " (was " + plugin.uploader.lastUploadedHash + ")");
 	}
 
 	/** Waits for the async OkHttp callback to arm a 429 backoff window. */
@@ -214,7 +214,7 @@ public class UploadGatingTest
 		long deadline = System.currentTimeMillis() + timeoutMillis;
 		while (System.currentTimeMillis() < deadline)
 		{
-			if (plugin.backoffUntilMillis > System.currentTimeMillis())
+			if (plugin.uploader.backoffUntilMillis > System.currentTimeMillis())
 			{
 				return;
 			}
@@ -306,14 +306,14 @@ public class UploadGatingTest
 	public void identicalStateAcrossTicksProducesExactlyOnePost() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
+		plugin.uploader.minUploadIntervalMillis = 1;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 
 		plugin.syncTask();
 		RecordedRequest first = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("first tick must upload", first);
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
 		plugin.syncTask();
 		assertNull("second tick with identical state must not upload",
@@ -337,16 +337,16 @@ public class UploadGatingTest
 	public void publicClientCannotArmMediaPolicyHeartbeat() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
-		plugin.setStoreToolsForTest(true);
-		plugin.setDropProofRolloutForTest(true);
-		assertFalse("the public artifact cannot arm media", plugin.dropProofEnabled());
+		plugin.uploader.minUploadIntervalMillis = 1;
+		plugin.grants.setStoreToolsForTest(true);
+		plugin.grants.setDropProofRolloutForTest(true);
+		assertFalse("the public artifact cannot arm media", plugin.grants.dropProofEnabled());
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull("the first tick uploads", server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
 		// Idle: the state has not changed, so the hash gate holds the send.
 		plugin.syncTask();
@@ -355,8 +355,8 @@ public class UploadGatingTest
 		assertEquals(1, server.getRequestCount());
 
 		// The heartbeat window elapses. Nothing about the player has changed.
-		plugin.lastSendMillis =
-			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.uploader.lastSendMillis =
+			System.currentTimeMillis() - SnapshotUploader.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
 
 		server.enqueue(new MockResponse().setResponseCode(200).setHeader("X-Drop-Proof", "off"));
 		plugin.syncTask();
@@ -366,12 +366,12 @@ public class UploadGatingTest
 
 		// And the revocation the poll carried must actually land.
 		long deadline = System.currentTimeMillis() + 5000L;
-		while (System.currentTimeMillis() < deadline && plugin.dropProofEnabled())
+		while (System.currentTimeMillis() < deadline && plugin.grants.dropProofEnabled())
 		{
 			Thread.sleep(10);
 		}
 		assertFalse("and the revocation it carried must revoke the grant",
-			plugin.dropProofEnabled());
+			plugin.grants.dropProofEnabled());
 	}
 
 	/**
@@ -383,17 +383,17 @@ public class UploadGatingTest
 	public void anIdleClientWithoutTheGrantNeverHeartbeats() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
-		assertFalse("the rig holds no grant", plugin.dropProofEnabled());
+		plugin.uploader.minUploadIntervalMillis = 1;
+		assertFalse("the rig holds no grant", plugin.grants.dropProofEnabled());
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
-		plugin.lastSendMillis =
-			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS * 10L;
+		plugin.uploader.lastSendMillis =
+			System.currentTimeMillis() - SnapshotUploader.DROP_PROOF_POLICY_HEARTBEAT_MILLIS * 10L;
 		plugin.syncTask();
 		plugin.syncTask();
 		plugin.syncTask();
@@ -411,8 +411,8 @@ public class UploadGatingTest
 	public void anIdleStaffClientHeartbeatsAndTheAnswerRevokesTheGrant() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
-		plugin.staffApiBase = server.url("/").toString();	// this rig's stand-in for osrsbestinslot.com
+		plugin.uploader.minUploadIntervalMillis = 1;
+		plugin.grants.staffApiBase = server.url("/").toString();	// this rig's stand-in for osrsbestinslot.com
 		String account = Long.toString(client.getAccountHash());
 
 		server.enqueue(new MockResponse().setResponseCode(200)
@@ -420,8 +420,8 @@ public class UploadGatingTest
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull("the first tick uploads", server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
-		assertTrue("the server granted staff capture to this account", plugin.staffCaptureEnabled());
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
+		assertTrue("the server granted staff capture to this account", plugin.grants.staffCaptureEnabled());
 
 		// Idle inside the window: the hash gate holds the send, even for a granted client.
 		plugin.syncTask();
@@ -429,22 +429,22 @@ public class UploadGatingTest
 			server.takeRequest(300, TimeUnit.MILLISECONDS));
 
 		// The window elapses with nothing changed. The server has since taken the account off its staff list.
-		plugin.lastSendMillis =
-			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.uploader.lastSendMillis =
+			System.currentTimeMillis() - SnapshotUploader.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		plugin.syncTask();
 		assertNotNull("a granted idle client must heartbeat once the window elapses",
 			server.takeRequest(5, TimeUnit.SECONDS));
 		long deadline = System.currentTimeMillis() + 5000L;
-		while (System.currentTimeMillis() < deadline && plugin.staffCaptureEnabled())
+		while (System.currentTimeMillis() < deadline && plugin.grants.staffCaptureEnabled())
 		{
 			Thread.sleep(10);
 		}
-		assertFalse("the heartbeat's answer without the grant must revoke it", plugin.staffCaptureEnabled());
+		assertFalse("the heartbeat's answer without the grant must revoke it", plugin.grants.staffCaptureEnabled());
 
 		// Revoked, it has nothing left to lose: no further heartbeat traffic.
-		plugin.lastSendMillis =
-			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.uploader.lastSendMillis =
+			System.currentTimeMillis() - SnapshotUploader.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
 		plugin.syncTask();
 		assertNull("a revoked client stops heartbeating", server.takeRequest(500, TimeUnit.MILLISECONDS));
 		assertEquals(2, server.getRequestCount());
@@ -455,19 +455,19 @@ public class UploadGatingTest
 	public void theHeartbeatStillHonoursA429Backoff() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
-		plugin.setStoreToolsForTest(true);
-		plugin.setDropProofRolloutForTest(true);
+		plugin.uploader.minUploadIntervalMillis = 1;
+		plugin.grants.setStoreToolsForTest(true);
+		plugin.grants.setDropProofRolloutForTest(true);
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
-		plugin.backoffUntilMillis = System.currentTimeMillis() + 60_000L;
-		plugin.lastSendMillis =
-			System.currentTimeMillis() - AccountConnectPlugin.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
+		plugin.uploader.backoffUntilMillis = System.currentTimeMillis() + 60_000L;
+		plugin.uploader.lastSendMillis =
+			System.currentTimeMillis() - SnapshotUploader.DROP_PROOF_POLICY_HEARTBEAT_MILLIS - 1L;
 		plugin.syncTask();
 		assertNull("a heartbeat must never override an active backoff",
 			server.takeRequest(500, TimeUnit.MILLISECONDS));
@@ -479,14 +479,14 @@ public class UploadGatingTest
 	{
 		buildPlugin();
 		long interval = 300L;
-		plugin.minUploadIntervalMillis = interval;
+		plugin.uploader.minUploadIntervalMillis = interval;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
 		setSkillXp(2000);
 		plugin.syncTask();
@@ -505,7 +505,7 @@ public class UploadGatingTest
 	public void volatileFieldsExcludedFromHashProduceNoSecondPost() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
+		plugin.uploader.minUploadIntervalMillis = 1;
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		ItemContainer inv = mock(ItemContainer.class);
@@ -516,7 +516,7 @@ public class UploadGatingTest
 
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
 		// force captured_at to cross a second boundary and jitter the GE price (wealth) —
 		// both are excluded from the canonical hash, so no re-upload should occur.
@@ -533,7 +533,7 @@ public class UploadGatingTest
 	public void rateLimitBackoffHonorsRetryAfterThenResumes() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
+		plugin.uploader.minUploadIntervalMillis = 1;
 		server.enqueue(new MockResponse().setResponseCode(429).setHeader("Retry-After", "2"));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
@@ -559,14 +559,14 @@ public class UploadGatingTest
 	public void logoutFlushSendsCachedSnapshotBypassingDebounce() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 120_000L;
+		plugin.uploader.minUploadIntervalMillis = 120_000L;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 
 		setSkillXp(1000);
 		plugin.syncTask();
 		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 
 		setSkillXp(2000);
 		plugin.syncTask();
@@ -602,21 +602,21 @@ public class UploadGatingTest
 	public void serverSyncIntervalHeaderSetsAndClampsCadence() throws Exception
 	{
 		buildPlugin();
-		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
-		assertEquals("server cadence directive applies", 5_000L, plugin.minUploadIntervalMillis);
+		plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "5"));
+		assertEquals("server cadence directive applies", 5_000L, plugin.uploader.minUploadIntervalMillis);
 
-		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "1"));	// below floor
-		assertEquals("clamps up to the 5s floor", 5_000L, plugin.minUploadIntervalMillis);
+		plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "1"));	// below floor
+		assertEquals("clamps up to the 5s floor", 5_000L, plugin.uploader.minUploadIntervalMillis);
 
-		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "99999"));	// above ceiling
-		assertEquals("clamps down to the 600s ceiling", 600_000L, plugin.minUploadIntervalMillis);
+		plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "99999"));	// above ceiling
+		assertEquals("clamps down to the 600s ceiling", 600_000L, plugin.uploader.minUploadIntervalMillis);
 
-		long before = plugin.minUploadIntervalMillis;
-		plugin.applyServerPolicy(policyResponse());	// no header
-		assertEquals("absent directive leaves cadence unchanged", before, plugin.minUploadIntervalMillis);
+		long before = plugin.uploader.minUploadIntervalMillis;
+		plugin.grants.applyServerPolicy(policyResponse());	// no header
+		assertEquals("absent directive leaves cadence unchanged", before, plugin.uploader.minUploadIntervalMillis);
 
-		plugin.applyServerPolicy(policyResponse("X-Sync-Interval", "notanumber"));
-		assertEquals("malformed directive leaves cadence unchanged", before, plugin.minUploadIntervalMillis);
+		plugin.grants.applyServerPolicy(policyResponse("X-Sync-Interval", "notanumber"));
+		assertEquals("malformed directive leaves cadence unchanged", before, plugin.uploader.minUploadIntervalMillis);
 	}
 
 	@Test
@@ -632,13 +632,13 @@ public class UploadGatingTest
 				return TOKEN;	// the token IS the gate now (the opt-in toggle was removed 2026-09-02)
 			}
 		});
-		assertFalse("public media is off before the first policy response", plugin.screenshotsEnabled());
+		assertFalse("public media is off before the first policy response", plugin.grants.screenshotsEnabled());
 
-		plugin.applyServerPolicy(policyResponse("X-Screenshots", "off"));
-		assertFalse("server force-disable overrides the local link", plugin.screenshotsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse("X-Screenshots", "off"));
+		assertFalse("server force-disable overrides the local link", plugin.grants.screenshotsEnabled());
 
-		plugin.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
-		assertFalse("a server directive cannot widen the public artifact", plugin.screenshotsEnabled());
+		plugin.grants.applyServerPolicy(policyResponse("X-Screenshots", "allow"));
+		assertFalse("a server directive cannot widen the public artifact", plugin.grants.screenshotsEnabled());
 	}
 
 	@Test
@@ -646,8 +646,8 @@ public class UploadGatingTest
 	{
 		buildPlugin();
 		// even with a fast interval in the same response, a pause wins and caps to the 600s max
-		plugin.applyServerPolicy(policyResponse("X-Uploads-Enabled", "false", "X-Sync-Interval", "5"));
-		assertEquals("pause soft-throttles to the 600s max", 600_000L, plugin.minUploadIntervalMillis);
+		plugin.grants.applyServerPolicy(policyResponse("X-Uploads-Enabled", "false", "X-Sync-Interval", "5"));
+		assertEquals("pause soft-throttles to the 600s max", 600_000L, plugin.uploader.minUploadIntervalMillis);
 	}
 
 	// ---- FIX 1: the wire actually carries the current plugin version (not a drifted constant) ----
@@ -656,7 +656,7 @@ public class UploadGatingTest
 	public void snapshotReportsCurrentPluginVersionOnTheWire() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
+		plugin.uploader.minUploadIntervalMillis = 1;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 
@@ -681,7 +681,7 @@ public class UploadGatingTest
 	public void forceSendBypassesHashGateAndDebounce() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 120_000L;	// debounce WOULD hold a scheduled send back
+		plugin.uploader.minUploadIntervalMillis = 120_000L;	// debounce WOULD hold a scheduled send back
 		server.enqueue(new MockResponse().setResponseCode(200));
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
@@ -689,7 +689,7 @@ public class UploadGatingTest
 		// Normal tick: uploads once, records lastUploadedHash AND trips the debounce (lastSendMillis=now).
 		plugin.syncTask();
 		assertNotNull("first tick must upload", server.takeRequest(5, TimeUnit.SECONDS));
-		awaitUploadedHash(plugin.lastBuiltHash, 5000);
+		awaitUploadedHash(plugin.uploader.lastBuiltHash, 5000);
 		assertEquals(1, server.getRequestCount());
 
 		// Prove BOTH gates are now blocking: an ordinary tick with identical state sends nothing
@@ -700,7 +700,7 @@ public class UploadGatingTest
 		assertEquals(1, server.getRequestCount());
 
 		// Force-send with the SAME unchanged state must override both gates and send immediately.
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		assertNotNull("force must send despite the unchanged-hash gate and the debounce",
 			server.takeRequest(5, TimeUnit.SECONDS));
 		assertEquals(2, server.getRequestCount());
@@ -710,11 +710,11 @@ public class UploadGatingTest
 	public void forceSendStillHonorsActiveServerBackoff() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 1;
-		plugin.backoffUntilMillis = System.currentTimeMillis() + 60_000L;	// server 429 said stop
+		plugin.uploader.minUploadIntervalMillis = 1;
+		plugin.uploader.backoffUntilMillis = System.currentTimeMillis() + 60_000L;	// server 429 said stop
 		setSkillXp(1000);
 
-		plugin.forceSendSnapshot();
+		plugin.uploader.forceSendSnapshot();
 		assertNull("force must NOT override an active server-imposed 429 backoff",
 			server.takeRequest(300, TimeUnit.MILLISECONDS));
 		assertEquals(0, server.getRequestCount());
@@ -726,11 +726,11 @@ public class UploadGatingTest
 	public void bankOpenForcesImmediateSend() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 120_000L;	// without capture-on-open, the bank would wait this long
+		plugin.uploader.minUploadIntervalMillis = 120_000L;	// without capture-on-open, the bank would wait this long
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 
-		plugin.handleCaptureOnOpenWidgetLoaded(12);	// BANKMAIN (verified via javap)
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(12);	// BANKMAIN (verified via javap)
 
 		assertNotNull("opening the bank must sync immediately", server.takeRequest(5, TimeUnit.SECONDS));
 		assertEquals(1, server.getRequestCount());
@@ -740,11 +740,11 @@ public class UploadGatingTest
 	public void collectionLogOpenForcesImmediateSend() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 120_000L;
+		plugin.uploader.minUploadIntervalMillis = 120_000L;
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);
 
-		plugin.handleCaptureOnOpenWidgetLoaded(621);	// COLLECTION (verified via javap)
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(621);	// COLLECTION (verified via javap)
 
 		assertNotNull("opening the collection log must sync immediately",
 			server.takeRequest(5, TimeUnit.SECONDS));
@@ -755,10 +755,10 @@ public class UploadGatingTest
 	public void unrelatedWidgetOpenDoesNotForceSend() throws Exception
 	{
 		buildPlugin();
-		plugin.minUploadIntervalMillis = 120_000L;
+		plugin.uploader.minUploadIntervalMillis = 120_000L;
 		setSkillXp(1000);
 
-		plugin.handleCaptureOnOpenWidgetLoaded(161);	// an unrelated interface group
+		plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(161);	// an unrelated interface group
 
 		assertNull("an unrelated widget open must not trigger a send",
 			server.takeRequest(300, TimeUnit.MILLISECONDS));

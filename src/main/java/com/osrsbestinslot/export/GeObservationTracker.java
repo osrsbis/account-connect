@@ -4,6 +4,12 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import net.runelite.api.GrandExchangeOfferState;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /** Own-account, session-local observations. No game order ID or execution timestamp is exposed. */
 final class GeObservationTracker
@@ -49,24 +55,17 @@ final class GeObservationTracker
     }
 
     /** The slots as plain values, for the restart file. Empty-slot times are not kept: they only date a new offer. */
-    java.util.List<Map<String, Object>> export()
+    List<Map<String, Object>> export()
     {
-        java.util.List<Map<String, Object>> out = new java.util.ArrayList<>();
-        for (Map.Entry<Integer, Slot> e : new java.util.TreeMap<>(slots).entrySet())
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<Integer, Slot> e : new TreeMap<>(slots).entrySet())
         {
             Slot s = e.getValue();
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("slot", e.getKey());
-            m.put("key", s.key);
-            m.put("seen", s.seen);
-            m.put("state", s.state.name());
-            m.put("value", java.util.Arrays.stream(s.value).boxed().collect(java.util.stream.Collectors.toList()));
-            m.put("emitted_qty", s.emittedQty);
-            m.put("emitted_gp", s.emittedGp);
-            m.put("emitted_at", s.emittedAt);
-            m.put("observed_at", s.observedAt);
-            m.put("uncertain", s.uncertain);
-            m.put("sequence", s.sequence);
+            Map<String, Object> m = Fields.of(
+                "slot", e.getKey(), "key", s.key, "seen", s.seen, "state", s.state.name(),
+                "value", Arrays.stream(s.value).boxed().collect(Collectors.toList()), "emitted_qty", s.emittedQty,
+                "emitted_gp", s.emittedGp, "emitted_at", s.emittedAt, "observed_at", s.observedAt,
+                "uncertain", s.uncertain, "sequence", s.sequence);
             out.add(m);
         }
         return out;
@@ -77,7 +76,7 @@ final class GeObservationTracker
      * as crossing a gap: the next observation reports the counter difference since the last row sent, with the
      * interval from that row to now and no fill time. A malformed entry is skipped, never guessed.
      */
-    void restore(java.util.List<?> saved)
+    void restore(List<?> saved)
     {
         slots.clear();
         emptySlots.clear();
@@ -90,14 +89,14 @@ final class GeObservationTracker
             try
             {
                 Map<?, ?> m = (Map<?, ?>) o;
-                java.util.List<?> v = (java.util.List<?>) m.get("value");
+                List<?> v = (List<?>) m.get("value");
                 String key = (String) m.get("key");
                 if (v == null || v.size() != 5 || key == null || !key.matches("^[0-9a-f]{32}$"))
                 {
                     continue;
                 }
                 int slot = ((Number) m.get("slot")).intValue();
-                if (slot < 0 || slot >= AccountConnectPlugin.GE_SLOT_COUNT)
+                if (slot < 0 || slot >= GeSlots.SLOT_COUNT)
                 {
                     continue;
                 }
@@ -140,7 +139,7 @@ final class GeObservationTracker
     private static boolean same(Slot s, GrandExchangeOfferState state, long[] v)
     {
         return s.value[0] == v[0] && s.value[2] == v[2] && s.value[3] == v[3]
-            && java.util.Objects.equals(AccountConnectPlugin.geSide(s.state), AccountConnectPlugin.geSide(state));
+            && Objects.equals(GeSlots.side(s.state), GeSlots.side(state));
     }
 
     /** v = item, cumulative quantity, total quantity, listing price, cumulative RuneLite spent. */
@@ -185,7 +184,7 @@ final class GeObservationTracker
             s.emittedGp = fromEmpty ? 0 : v[4];
             s.emittedAt = fromEmpty ? emptyAt : observedAt;
             s.observedAt = observedAt;
-            s.lastProgressTick = replay ? tick - AccountConnectPlugin.GE_PROGRESS_MIN_TICKS : tick;
+            s.lastProgressTick = replay ? tick - GeSlots.PROGRESS_MIN_TICKS : tick;
             slots.put(slot, s);
             if (replay)
             {
@@ -217,7 +216,7 @@ final class GeObservationTracker
             type = terminalType(state);
         }
         else if (active(state) && (s.value[1] != s.emittedQty || s.value[4] != s.emittedGp)
-            && (replay || tick < s.lastProgressTick || tick - s.lastProgressTick >= AccountConnectPlugin.GE_PROGRESS_MIN_TICKS))
+            && (replay || tick < s.lastProgressTick || tick - s.lastProgressTick >= GeSlots.PROGRESS_MIN_TICKS))
         {
             type = "ge_progress";
         }
@@ -244,34 +243,17 @@ final class GeObservationTracker
 
     private static Map<String, Object> row(int slot, Slot s, String type, long at, boolean baseline)
     {
-        Map<String, Object> f = new LinkedHashMap<>();
-        f.put("type", type);
-        f.put("item", (int) s.value[0]);
-        f.put("qty", (int) s.value[1]);
-        f.put("qty_total", (int) s.value[2]);
-        f.put("price", s.value[3]);
-        f.put("gp", s.value[4]);
-        f.put("slot", slot);
-        f.put("state", s.state.name());
-        f.put("side", AccountConnectPlugin.geSide(s.state));
-        f.put("offer_key", s.key);
-        f.put("offer_seen", s.seen);
-        Map<String, Object> o = new LinkedHashMap<>();
-        o.put("schema_v", 1);
-        o.put("sequence", ++s.sequence);
-        o.put("cumulative_qty", s.value[1]);
-        o.put("cumulative_gp", s.value[4]);
-        o.put("delta_from_qty", s.emittedQty);
-        o.put("delta_from_gp", s.emittedGp);
-        o.put("source", "runelite_grand_exchange_offer");
-        o.put("observed_at_ms", at);
-        o.put("counter_observed_at_ms", s.observedAt);
-        o.put("listing_price", s.value[3]);
-        o.put("gp_semantics", "runelite_spent_tax_unknown");
-        o.put("execution_price", null);
-        o.put("tax_gp", null);
-        o.put("identity", s.uncertain ? "ambiguous_counter_regression" : s.gap ? "inferred_across_gap" : "inferred_session_slot");
-        o.put("offer_key_scope", s.restored ? "account_profile" : "collector_session");
+        Map<String, Object> f = Fields.of(
+            "type", type, "item", (int) s.value[0], "qty", (int) s.value[1], "qty_total", (int) s.value[2],
+            "price", s.value[3], "gp", s.value[4], "slot", slot, "state", s.state.name(),
+            "side", GeSlots.side(s.state), "offer_key", s.key, "offer_seen", s.seen);
+        Map<String, Object> o = Fields.of(
+            "schema_v", 1, "sequence", ++s.sequence, "cumulative_qty", s.value[1], "cumulative_gp", s.value[4],
+            "delta_from_qty", s.emittedQty, "delta_from_gp", s.emittedGp, "source", "runelite_grand_exchange_offer",
+            "observed_at_ms", at, "counter_observed_at_ms", s.observedAt, "listing_price", s.value[3],
+            "gp_semantics", "runelite_spent_tax_unknown", "execution_price", null, "tax_gp", null,
+            "identity", s.uncertain ? "ambiguous_counter_regression" : s.gap ? "inferred_across_gap" : "inferred_session_slot",
+            "offer_key_scope", s.restored ? "account_profile" : "collector_session");
         boolean clockOk = at >= s.emittedAt;
         o.put("delta_status", s.uncertain ? "unknown" : baseline ? "baseline_only" : "observed_counter_difference");
         o.put("delta_qty", s.uncertain ? null : s.value[1] - s.emittedQty);

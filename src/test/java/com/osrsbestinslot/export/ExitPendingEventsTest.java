@@ -74,7 +74,7 @@ public class ExitPendingEventsTest
 				return base;
 			}
 		});
-		p.setSpoolDataRootForTest(data);
+		p.spooler.setSpoolDataRootForTest(data);
 		return p;
 	}
 
@@ -90,7 +90,7 @@ public class ExitPendingEventsTest
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("skill", skill);
 		fields.put("level", 50);
-		p.emitEvent("level_up", fields);
+		p.events.emitEvent("level_up", fields);
 	}
 
 	private static List<Object> skills(RecordedRequest r)
@@ -108,7 +108,7 @@ public class ExitPendingEventsTest
 
 	private Path file()
 	{
-		return data.resolve("osrsbis").resolve(AccountConnectPlugin.EXIT_PENDING_FILE);
+		return data.resolve("osrsbis").resolve(EventQueue.EXIT_PENDING_FILE);
 	}
 
 	@Test
@@ -128,7 +128,7 @@ public class ExitPendingEventsTest
 		assertFalse("the file is consumed at start", Files.exists(file()));
 		emit(next, "Fishing");
 		server.enqueue(new MockResponse().setResponseCode(200).setBody("{\"ok\":true,\"stored\":3}"));
-		next.flushEvents();
+		next.events.flushEvents();
 		RecordedRequest replay = server.takeRequest(5, TimeUnit.SECONDS);
 		assertEquals("the old rows go first, in order, then the new one",
 			List.of("Attack", "Mining", "Fishing"), skills(replay));
@@ -139,13 +139,13 @@ public class ExitPendingEventsTest
 	{
 		AccountConnectPlugin first = plugin(TOKEN);
 		emit(first, "Attack");
-		Object id = first.pendingEvents.get(0).get("event_id");
-		Object ts = first.pendingEvents.get(0).get("ts");
-		first.persistPendingEvents();
+		Object id = first.events.pendingEvents.get(0).get("event_id");
+		Object ts = first.events.pendingEvents.get(0).get("ts");
+		first.events.persistPendingEvents();
 
 		AccountConnectPlugin next = plugin(TOKEN);
-		next.restorePendingEvents();
-		Map<String, Object> back = next.pendingEvents.get(0);
+		next.events.restorePendingEvents();
+		Map<String, Object> back = next.events.pendingEvents.get(0);
 		assertEquals("a retry carries the same id, so the server can drop a duplicate", id, back.get("event_id"));
 		assertEquals(ts, back.get("ts"));
 		assertEquals(50L, back.get("level"));
@@ -156,12 +156,12 @@ public class ExitPendingEventsTest
 	{
 		AccountConnectPlugin first = plugin(TOKEN);
 		emit(first, "Attack");
-		first.persistPendingEvents();
+		first.events.persistPendingEvents();
 		assertTrue(Files.exists(file()));
 
 		AccountConnectPlugin other = plugin(OTHER);
-		other.restorePendingEvents();
-		assertTrue(other.pendingEvents.isEmpty());
+		other.events.restorePendingEvents();
+		assertTrue(other.events.pendingEvents.isEmpty());
 		assertFalse("rows of a token no longer configured are deleted", Files.exists(file()));
 	}
 
@@ -171,12 +171,12 @@ public class ExitPendingEventsTest
 		AccountConnectPlugin first = plugin(TOKEN);
 		emit(first, "Attack");
 		first.shutDown();
-		assertTrue(first.pendingEvents.isEmpty());
+		assertTrue(first.events.pendingEvents.isEmpty());
 
 		AccountConnectPlugin next = plugin(TOKEN);
 		next.startUp();
-		assertEquals(1, next.pendingEvents.size());
-		assertEquals("Attack", next.pendingEvents.get(0).get("skill"));
+		assertEquals(1, next.events.pendingEvents.size());
+		assertEquals("Attack", next.events.pendingEvents.get(0).get("skill"));
 	}
 
 	@Test

@@ -35,16 +35,16 @@ public class ShopTraceTest
 		{
 			System.setProperty("osrsbis.shoptrace", out.toString());
 			AccountConnectPlugin on = configured();
-			on.handleShopStockChanged(container(new int[][]{{561, 1}}));
-			on.handleShopStockChanged(container(new int[][]{{561, 0}}));
+			on.store.handleShopStockChanged(container(new int[][]{{561, 1}}));
+			on.store.handleShopStockChanged(container(new int[][]{{561, 0}}));
 			assertTrue("the control arm must prove the trace CAN write", Files.exists(out));
 			long enabledSize = Files.size(out);
 			assertTrue("the enabled trace must have content", enabledSize > 0);
 
 			System.clearProperty("osrsbis.shoptrace");
 			AccountConnectPlugin off = configured();
-			off.handleShopStockChanged(container(new int[][]{{561, 1}}));
-			off.handleShopStockChanged(container(new int[][]{{561, 0}}));
+			off.store.handleShopStockChanged(container(new int[][]{{561, 1}}));
+			off.store.handleShopStockChanged(container(new int[][]{{561, 0}}));
 
 			assertEquals("a normal build must write no trace at all",
 				enabledSize, Files.size(out));
@@ -65,8 +65,8 @@ public class ShopTraceTest
 		try
 		{
 			AccountConnectPlugin p = configured();
-			p.handleShopStockChanged(container(new int[][]{{561, 1}, {995, 10}}));	// baseline
-			p.handleShopStockChanged(container(new int[][]{{561, 0}, {995, 11}}));	// a reset shape
+			p.store.handleShopStockChanged(container(new int[][]{{561, 1}, {995, 10}}));	// baseline
+			p.store.handleShopStockChanged(container(new int[][]{{561, 0}, {995, 11}}));	// a reset shape
 
 			String text = new String(Files.readAllBytes(out), "UTF-8");
 			String[] lines = text.split("\n");
@@ -84,7 +84,7 @@ public class ShopTraceTest
 			assertTrue("the fall must be recorded", delta != null);
 			assertTrue("the restock must be recorded too", delta.contains("995:10->11"));
 			// KNOWN-BAD CONTROL: an unchanged container must NOT look like a change.
-			p.handleShopStockChanged(container(new int[][]{{561, 0}, {995, 11}}));
+			p.store.handleShopStockChanged(container(new int[][]{{561, 0}, {995, 11}}));
 			String all = new String(Files.readAllBytes(out), "UTF-8");
 			assertTrue("an unchanged read must say so", all.contains("(none)"));
 		}

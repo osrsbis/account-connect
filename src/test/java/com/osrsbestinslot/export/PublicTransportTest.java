@@ -33,11 +33,11 @@ public class PublicTransportTest
         when(config.apiBaseUrl()).thenReturn(server.url("/api").toString());
         put("config", config); put("gson", gson); put("okHttpClient", new OkHttpClient());
         put("activeHash", "12345"); put("activeRsn", "OwnPlayer");
-        plugin.setSpoolDataRootForTest(data);
+        plugin.spooler.setSpoolDataRootForTest(data);
     }
     @After public void teardown() throws Exception
     {
-        plugin.crashSpoolForTest(); server.shutdown(); EventSpoolCodecTest.deleteTree(data);
+        plugin.spooler.crashSpoolForTest(); server.shutdown(); EventSpoolCodecTest.deleteTree(data);
     }
     private void put(String key, Object value) throws Exception
     {
@@ -77,82 +77,81 @@ public class PublicTransportTest
     }
     @Test public void verificationNeedsItsOwnGrantAndTokenChangeEndsIt() throws Exception
     {
-        assertFalse(plugin.verificationGranted());
-        plugin.emitEvent("verification", Map.of("area", "skills"));
-        assertTrue(plugin.pendingEvents.isEmpty());
+        assertFalse(plugin.grants.verificationGranted());
+        plugin.events.emitEvent("verification", Map.of("area", "skills"));
+        assertTrue(plugin.events.pendingEvents.isEmpty());
         Response on = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Verification", "on").build();
-        plugin.applyServerPolicy(on);
-        assertTrue(plugin.verificationGranted());
+        plugin.grants.applyServerPolicy(on);
+        assertTrue(plugin.grants.verificationGranted());
         assertEquals("new grants sample promptly without pretending a new game login occurred",
             "verification_ready", plugin.verificationProbe.due(System.currentTimeMillis()).trigger);
-        assertFalse("row permission alone grants no images", plugin.verificationFramesEnabled());
-        plugin.applyServerPolicy(on.newBuilder().header("X-Screenshots", "off")
+        assertFalse("row permission alone grants no images", plugin.grants.verificationFramesEnabled());
+        plugin.grants.applyServerPolicy(on.newBuilder().header("X-Screenshots", "off")
             .header("X-Verification-Frames", "on").build());
-        assertTrue("separate test permission survives the non-staff delivery-media ban", plugin.verificationFramesEnabled());
-        assertFalse("verification permission grants no trade capture", plugin.screenshotsEnabled());
-        plugin.applyServerPolicy(on.newBuilder().header("X-Verification-Frames", "off").build());
-        assertTrue(plugin.verificationGranted());
-        assertFalse(plugin.verificationFramesEnabled());
-        plugin.emitEvent("verification", Map.of("area", "skills", "snapshot_revision", 123L));
-        assertEquals(1, plugin.pendingEvents.size());
-        plugin.applyServerPolicy(on.newBuilder().removeHeader("X-Verification").build());
-        assertFalse(plugin.verificationGranted());
-        plugin.applyServerPolicy(on.newBuilder().code(503).build());
-        assertFalse(plugin.verificationGranted());
-        plugin.applyServerPolicy(on);
+        assertTrue("separate test permission survives the non-staff delivery-media ban", plugin.grants.verificationFramesEnabled());
+        assertFalse("verification permission grants no trade capture", plugin.grants.screenshotsEnabled());
+        plugin.grants.applyServerPolicy(on.newBuilder().header("X-Verification-Frames", "off").build());
+        assertTrue(plugin.grants.verificationGranted());
+        assertFalse(plugin.grants.verificationFramesEnabled());
+        plugin.events.emitEvent("verification", Map.of("area", "skills", "snapshot_revision", 123L));
+        assertEquals(1, plugin.events.pendingEvents.size());
+        plugin.grants.applyServerPolicy(on.newBuilder().removeHeader("X-Verification").build());
+        assertFalse(plugin.grants.verificationGranted());
+        plugin.grants.applyServerPolicy(on.newBuilder().code(503).build());
+        assertFalse(plugin.grants.verificationGranted());
+        plugin.grants.applyServerPolicy(on);
         net.runelite.client.events.ConfigChanged change = new net.runelite.client.events.ConfigChanged();
         change.setGroup(AccountConnectPlugin.CONFIG_GROUP); change.setKey("linkToken");
         change.setOldValue(TOKEN); change.setNewValue("ffffffffffffffffffffffffffffffff");
         plugin.onConfigChanged(change);
-        assertFalse("A -> B -> A cannot restore the earlier grant", plugin.verificationGranted());
-        assertFalse(plugin.verificationFramesEnabled());
+        assertFalse("A -> B -> A cannot restore the earlier grant", plugin.grants.verificationGranted());
+        assertFalse(plugin.grants.verificationFramesEnabled());
     }
     @Test public void verificationFrameUploadWorksWithoutStaffDeliveryPermission() throws Exception
     {
-        Class<?>[] signature = { String.class, byte[].class, String.class, long.class };
-        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
         Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Screenshots", "off")
             .header("X-Verification", "on").header("X-Verification-Frames", "on").build();
-        plugin.applyServerPolicy(policy);
+        plugin.grants.applyServerPolicy(policy);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
-        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
         RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
         assertNotNull(request);
         assertEquals("/api/screenshot-ingest", request.getPath());
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("verify")); assertTrue(body.contains("0123456789abcdef")); assertTrue(body.contains("1234"));
-        plugin.applyServerPolicy(policy.newBuilder().header("X-Verification-Frames", "off").build());
-        call("uploadVerificationFrame", signature, TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        plugin.grants.applyServerPolicy(policy.newBuilder().header("X-Verification-Frames", "off").build());
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
     }
     @Test public void deliveryGrantAllowsCaptureWithoutStaffIdentityOrOverlays() throws Exception
     {
-        put("staffApiBase", server.url("/api").toString());
+        plugin.grants.staffApiBase = server.url("/api").toString();
         Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK")
             .header("X-Staff-Capture", "off").header("X-Store-Tools", "off").header("X-Screenshots", "off").header("X-Clips", "off")
             .header("X-Delivery-Capture", "on").header("X-Delivery-Account", "12345")
             .header("X-Delivery-Screenshots", "allow").header("X-Delivery-Clips", "allow")
             .header("X-Delivery-Drop-Proof", "on").build();
-        plugin.applyServerPolicy(policy);
-        assertFalse(plugin.staffCaptureEnabled()); assertFalse(plugin.storeToolsEnabled());
-        assertTrue(plugin.deliveryCaptureEnabled()); assertTrue(plugin.screenshotsEnabled());
-        assertTrue(plugin.storeClipsEnabled()); assertTrue(plugin.dropProofEnabled());
-        plugin.emitEvent("trade", Map.of("given", List.of(), "received", List.of(), "counterparty", "OtherPlayer"));
-        assertEquals("OtherPlayer", plugin.pendingEvents.get(0).get("counterparty"));
+        plugin.grants.applyServerPolicy(policy);
+        assertFalse(plugin.grants.staffCaptureEnabled()); assertFalse(plugin.grants.storeToolsEnabled());
+        assertTrue(plugin.grants.deliveryCaptureEnabled()); assertTrue(plugin.grants.screenshotsEnabled());
+        assertTrue(plugin.grants.storeClipsEnabled()); assertTrue(plugin.grants.dropProofEnabled());
+        plugin.events.emitEvent("trade", Map.of("given", List.of(), "received", List.of(), "counterparty", "OtherPlayer"));
+        assertEquals("OtherPlayer", plugin.events.pendingEvents.get(0).get("counterparty"));
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
-        call("uploadTradeScreenshot", new Class<?>[]{String.class, byte[].class, String.class}, TOKEN, new byte[]{1, 2}, "confirm");
+        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1, 2}, "confirm");
         RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
         assertNotNull(request); String body = request.getBody().readUtf8();
         assertTrue(body.contains("account_hash")); assertTrue(body.contains("12345"));
-        put("activeHash", "999"); assertFalse(plugin.deliveryCaptureEnabled());
+        put("activeHash", "999"); assertFalse(plugin.grants.deliveryCaptureEnabled());
         put("activeHash", "12345");
-        plugin.applyServerPolicy(policy.newBuilder().removeHeader("X-Delivery-Capture").build());
-        assertFalse(plugin.deliveryCaptureEnabled()); assertFalse(plugin.screenshotsEnabled());
-        assertFalse(plugin.storeClipsEnabled()); assertFalse(plugin.dropProofEnabled());
+        plugin.grants.applyServerPolicy(policy.newBuilder().removeHeader("X-Delivery-Capture").build());
+        assertFalse(plugin.grants.deliveryCaptureEnabled()); assertFalse(plugin.grants.screenshotsEnabled());
+        assertFalse(plugin.grants.storeClipsEnabled()); assertFalse(plugin.grants.dropProofEnabled());
     }
     @Test public void optionalCollectionGrantsStayWithTheResponseAccount() throws Exception
     {
@@ -160,15 +159,15 @@ public class PublicTransportTest
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Collection-Account", "12345")
             .header("X-Own-Gameplay", "on").header("X-Account-Progress", "on")
             .header("X-Kill-Detail", "on").header("X-Kill-Context", "on").build();
-        plugin.applyServerPolicy(policy);
-        assertTrue(plugin.gameplayGranted()); assertTrue(plugin.progressGranted());
-        assertTrue(plugin.killDetailGranted()); assertTrue(plugin.killContextGranted());
+        plugin.grants.applyServerPolicy(policy);
+        assertTrue(plugin.grants.gameplayGranted()); assertTrue(plugin.grants.progressGranted());
+        assertTrue(plugin.grants.killDetailGranted()); assertTrue(plugin.grants.killContextGranted());
         put("activeHash", "999");
-        assertFalse(plugin.gameplayGranted()); assertFalse(plugin.progressGranted());
-        assertFalse(plugin.killDetailGranted()); assertFalse(plugin.killContextGranted());
+        assertFalse(plugin.grants.gameplayGranted()); assertFalse(plugin.grants.progressGranted());
+        assertFalse(plugin.grants.killDetailGranted()); assertFalse(plugin.grants.killContextGranted());
         put("activeHash", "12345");
-        plugin.applyServerPolicy(policy.newBuilder().removeHeader("X-Collection-Account").build());
-        assertFalse("a missing binding cannot restore an earlier account grant", plugin.gameplayGranted());
+        plugin.grants.applyServerPolicy(policy.newBuilder().removeHeader("X-Collection-Account").build());
+        assertFalse("a missing binding cannot restore an earlier account grant", plugin.grants.gameplayGranted());
     }
     @Test public void qualifiedGeCountersSurviveProjectionWithoutUnknownNestedFields()
     {
@@ -188,7 +187,7 @@ public class PublicTransportTest
     @Test public void staleMemoryTradeIsProjectedAtDispatch() throws Exception
     {
         server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
-        plugin.pendingEvents.add(legacyTrade()); plugin.flushEvents();
+        plugin.events.pendingEvents.add(legacyTrade()); plugin.events.flushEvents();
         assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
     }
     @Test public void oldSpoolTradeIsProjectedAndOnlyExactAckSettlesIt() throws Exception
@@ -198,27 +197,26 @@ public class PublicTransportTest
             EventSpool.ATOMIC, EventSpool.Limits.DEFAULT, new EventSpool.Counters());
         assertTrue(old.append(ID, "trade", System.currentTimeMillis(), gson.toJson(legacyTrade())));
         old.crashForTest();
-        plugin.applyServerPolicy(grant()); plugin.awaitSpoolIdleForTest();
+        plugin.grants.applyServerPolicy(grant()); plugin.spooler.awaitSpoolIdleForTest();
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
-        plugin.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i=0; i<100 && plugin.spoolReplayInFlight; i++) Thread.sleep(10);
-        plugin.awaitSpoolIdleForTest();
-        assertEquals(1, plugin.spoolPendingIdsForTest().size());
-        plugin.spoolReplayNotBeforeMs=0; plugin.spoolReplayBackoffUntilMs=0;
+        plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
+        for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
+        plugin.spooler.awaitSpoolIdleForTest();
+        assertEquals(1, plugin.spooler.spoolPendingIdsForTest().size());
+        plugin.spooler.spoolReplayNotBeforeMs=0; plugin.spooler.spoolReplayBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody("{\"results\":[{\"event_id\":\""+ID+"\",\"status\":\"stored\"}]}"));
-        plugin.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i=0; i<100 && plugin.spoolReplayInFlight; i++) Thread.sleep(10);
-        plugin.awaitSpoolIdleForTest(); assertEquals(0, plugin.spoolPendingIdsForTest().size());
+        plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
+        for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
+        plugin.spooler.awaitSpoolIdleForTest(); assertEquals(0, plugin.spooler.spoolPendingIdsForTest().size());
     }
     @Test public void remoteGrantsCannotEnablePublicMediaOrFirehose() throws Exception
     {
-        assertFalse(plugin.screenshotsEnabled()); assertFalse(plugin.storeClipsEnabled());
-        plugin.applyServerPolicy(grant());
-        assertFalse(plugin.screenshotsEnabled()); assertFalse(plugin.storeClipsEnabled());
-        assertFalse(plugin.dropProofEnabled()); assertFalse(plugin.maxCapture());
-        call("uploadTradeScreenshot", new Class<?>[]{String.class, byte[].class, String.class}, TOKEN, new byte[]{1,2}, "confirm");
-        call("postStoreClipChunk", new Class<?>[]{String.class,String.class,List.class,long.class},
-            server.url("/api").toString(),TOKEN,Arrays.asList(new byte[]{1,2}),1L);
+        assertFalse(plugin.grants.screenshotsEnabled()); assertFalse(plugin.grants.storeClipsEnabled());
+        plugin.grants.applyServerPolicy(grant());
+        assertFalse(plugin.grants.screenshotsEnabled()); assertFalse(plugin.grants.storeClipsEnabled());
+        assertFalse(plugin.grants.dropProofEnabled());
+        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1,2}, "confirm");
+        plugin.clips.postStoreClipChunk(server.url("/api").toString(),TOKEN,Arrays.asList(new byte[]{1,2}),1L);
         assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS));
     }
     @Test public void cachedSnapshotDoesNotUploadSharedStorage() throws Exception
@@ -227,7 +225,7 @@ public class PublicTransportTest
         snap.put("account", Map.of("rsn", "OwnPlayer"));
         snap.put("group_storage", Map.of("items", "OTHER_CANARY"));
         server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
-        call("postSnapshot", new Class<?>[]{String.class,Map.class,String.class}, TOKEN,snap,"old-hash");
+        plugin.uploader.postSnapshot(TOKEN,snap,"old-hash");
         RecordedRequest r=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(r);
         String body=r.getBody().readUtf8(); assertFalse(body,body.contains("OTHER_CANARY"));
         assertTrue(body,body.contains("OwnPlayer"));
@@ -243,12 +241,12 @@ public class PublicTransportTest
                 "surrounding_at_drop", "surrounding_at_trade", "taken_by_candidates", "telegrab", "received_text"))
                 e.put(key, Map.of("rsn", "OTHER_CANARY"));
             e.put("source_type", "player"); e.put("source_name", "OTHER_CANARY");
-            plugin.pendingEvents.add(e);
+            plugin.events.pendingEvents.add(e);
         }
-        plugin.pendingEvents.add(own);
-        plugin.pendingEvents.add(Map.of("type", "fh_batch", "events", "OTHER_CANARY"));
-        plugin.pendingEvents.add(Map.of("type", "store_taken", "taken_by_candidates", "OTHER_CANARY"));
-        server.enqueue(new MockResponse().setBody("{\"ok\":true}")); plugin.flushEvents();
+        plugin.events.pendingEvents.add(own);
+        plugin.events.pendingEvents.add(Map.of("type", "fh_batch", "events", "OTHER_CANARY"));
+        plugin.events.pendingEvents.add(Map.of("type", "store_taken", "taken_by_candidates", "OTHER_CANARY"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}")); plugin.events.flushEvents();
         RecordedRequest r=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(r);
         String wire=r.getBody().readUtf8(); assertFalse(wire, wire.contains("OTHER_CANARY"));
         Map<?,?> body=gson.fromJson(wire,Map.class); List<?> events=(List<?>)body.get("events");
@@ -264,10 +262,10 @@ public class PublicTransportTest
             EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
         Map<String,Object> e=legacyTrade(); e.put("type","store_taken");
         assertTrue(old.append(ID,"store_taken",System.currentTimeMillis(),gson.toJson(e))); old.crashForTest();
-        plugin.applyServerPolicy(grant()); plugin.awaitSpoolIdleForTest();
-        plugin.replaySpoolTick(); plugin.awaitSpoolIdleForTest();
+        plugin.grants.applyServerPolicy(grant()); plugin.spooler.awaitSpoolIdleForTest();
+        plugin.spooler.replaySpoolTick(); plugin.spooler.awaitSpoolIdleForTest();
         assertNull(server.takeRequest(200,TimeUnit.MILLISECONDS));
-        assertEquals(0,plugin.spoolPendingIdsForTest().size());
+        assertEquals(0,plugin.spooler.spoolPendingIdsForTest().size());
         try (java.util.stream.Stream<Path> files=Files.walk(dir))
         {
             String q=files.filter(f -> f.getFileName().toString().contains("quarantine"))
@@ -286,7 +284,7 @@ public class PublicTransportTest
         Map<String,Object> bank=new LinkedHashMap<>(Map.of("type","bank_visit_manifest_chunk",
             "event_id",ID,"account_hash","12345","items",pairs,"manifest_sha256",hash));
         server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
-        plugin.pendingEvents.add(bank); plugin.flushEvents();
+        plugin.events.pendingEvents.add(bank); plugin.events.flushEvents();
         RecordedRequest memory=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(memory);
         com.google.gson.JsonObject sent=new com.google.gson.JsonParser().parse(memory.getBody().readUtf8())
             .getAsJsonObject().getAsJsonArray("events").get(0).getAsJsonObject();
@@ -295,8 +293,8 @@ public class PublicTransportTest
         EventSpool old=new EventSpool(data,dir,System::currentTimeMillis,
             EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
         assertTrue(old.append(ID,"bank_visit_manifest_chunk",System.currentTimeMillis(),gson.toJson(bank)));old.crashForTest();
-        plugin.applyServerPolicy(grant());plugin.awaitSpoolIdleForTest();
-        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.replaySpoolTick();
+        plugin.grants.applyServerPolicy(grant());plugin.spooler.awaitSpoolIdleForTest();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.spooler.replaySpoolTick();
         RecordedRequest replay=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(replay);
         sent=new com.google.gson.JsonParser().parse(replay.getBody().readUtf8())
             .getAsJsonObject().getAsJsonArray("events").get(0).getAsJsonObject();
@@ -306,7 +304,7 @@ public class PublicTransportTest
     /** The X-Staff-Capture answer through the same policy path; staffAccount null omits the account header. */
     private Response staffAnswer(String staffCapture, String staffAccount)
     {
-        plugin.staffApiBase = server.url("/api").toString();	// this rig's stand-in for osrsbestinslot.com
+        plugin.grants.staffApiBase = server.url("/api").toString();	// this rig's stand-in for osrsbestinslot.com
         Response.Builder b = grant().newBuilder().request(new Request.Builder().url(server.url("/api/account-ingest")).build());
         if (staffCapture != null) b.header("X-Staff-Capture", staffCapture);
         if (staffAccount != null) b.header("X-Staff-Account", staffAccount);
@@ -314,9 +312,9 @@ public class PublicTransportTest
     }
     private void assertNoStaffTool(String why)
     {
-        assertFalse(why, plugin.staffCaptureEnabled());
-        assertFalse(why, plugin.screenshotsEnabled()); assertFalse(why, plugin.storeClipsEnabled());
-        assertFalse(why, plugin.dropProofEnabled()); assertFalse(why, plugin.maxCapture());
+        assertFalse(why, plugin.grants.staffCaptureEnabled());
+        assertFalse(why, plugin.grants.screenshotsEnabled()); assertFalse(why, plugin.grants.storeClipsEnabled());
+        assertFalse(why, plugin.grants.dropProofEnabled());
     }
 
     /**
@@ -334,35 +332,34 @@ public class PublicTransportTest
     @Test public void onlyTheServerStaffGrantForThisAccountOpensStaffTools() throws Exception
     {
         put("client", loggedIn());
-        plugin.applyServerPolicy(staffAnswer("on", null), TOKEN);
+        plugin.grants.applyServerPolicy(staffAnswer("on", null), TOKEN);
         assertNoStaffTool("a grant that names no account");
-        plugin.applyServerPolicy(staffAnswer("on", "99999"), TOKEN);
+        plugin.grants.applyServerPolicy(staffAnswer("on", "99999"), TOKEN);
         assertNoStaffTool("a grant for another account");
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), "fedcba9876543210fedcba9876543210");
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), "fedcba9876543210fedcba9876543210");
         assertNoStaffTool("a late answer for a token this client no longer holds");
-        plugin.applyServerPolicy(staffAnswer("yes", "12345"), TOKEN);
+        plugin.grants.applyServerPolicy(staffAnswer("yes", "12345"), TOKEN);
         assertNoStaffTool("any value but on");
 
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        assertTrue(plugin.staffCaptureEnabled());
-        assertTrue(plugin.screenshotsEnabled()); assertTrue(plugin.storeClipsEnabled()); assertTrue(plugin.dropProofEnabled());
-        assertFalse("the firehose stays off for staff too", plugin.maxCapture());
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.grants.staffCaptureEnabled());
+        assertTrue(plugin.grants.screenshotsEnabled()); assertTrue(plugin.grants.storeClipsEnabled()); assertTrue(plugin.grants.dropProofEnabled());
 
         put("activeHash", "99999");
         assertNoStaffTool("another account logged in on the same client");
         put("activeHash", "12345");
-        assertTrue(plugin.staffCaptureEnabled());
-        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+        assertTrue(plugin.grants.staffCaptureEnabled());
+        plugin.grants.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(503).message("busy").build(), TOKEN);
-        assertTrue("a server error says nothing about staff", plugin.staffCaptureEnabled());
-        plugin.applyServerPolicy(grant(), TOKEN);
+        assertTrue("a server error says nothing about staff", plugin.grants.staffCaptureEnabled());
+        plugin.grants.applyServerPolicy(grant(), TOKEN);
         assertNoStaffTool("the next accepted upload without the grant ends it");
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.grants.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(403).message("revoked").build(), TOKEN);
         assertNoStaffTool("a revoked token");
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        plugin.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.grants.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(413).message("too large").build(), TOKEN);
         assertNoStaffTool("any other refusal");
     }
@@ -373,22 +370,22 @@ public class PublicTransportTest
      */
     @Test public void onlyTheOfficialServerCanGrantStaffCapture() throws Exception
     {
-        assertEquals("https://www.osrsbestinslot.com/wp-json/osrsbis/v1", AccountConnectPlugin.OFFICIAL_API_BASE);
-        assertEquals("the default endpoint is the official one", AccountConnectPlugin.OFFICIAL_API_BASE, plugin.staffApiBase);
+        assertEquals("https://www.osrsbestinslot.com/wp-json/osrsbis/v1", ServerGrants.OFFICIAL_API_BASE);
+        assertEquals("the default endpoint is the official one", ServerGrants.OFFICIAL_API_BASE, plugin.grants.staffApiBase);
         put("client", loggedIn());
         server.enqueue(new MockResponse().setBody("{\"ok\":true}")
             .setHeader("X-Staff-Capture", "on").setHeader("X-Staff-Account", "12345")
             .setHeader("X-Store-Tools", "on").setHeader("X-Drop-Proof", "on"));
         Map<String,Object> snap = new LinkedHashMap<>(); snap.put("account", Map.of("rsn", "OwnPlayer"));
-        call("postSnapshot", new Class<?>[]{String.class,Map.class,String.class}, TOKEN, snap, "h");
+        plugin.uploader.postSnapshot(TOKEN, snap, "h");
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i = 0; i < 100 && !plugin.storeToolsEnabled(); i++) Thread.sleep(10);
-        assertTrue("the answer was applied", plugin.storeToolsEnabled());
+        for (int i = 0; i < 100 && !plugin.grants.storeToolsEnabled(); i++) Thread.sleep(10);
+        assertTrue("the answer was applied", plugin.grants.storeToolsEnabled());
         assertNoStaffTool("a player's own server granted staff capture");
 
         // Granted by the official endpoint, the grant ends the moment the setting names another server.
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        assertTrue(plugin.staffCaptureEnabled());
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.grants.staffCaptureEnabled());
         AccountConnectConfig moved = mock(AccountConnectConfig.class);
         when(moved.linkToken()).thenReturn(TOKEN); when(moved.apiBaseUrl()).thenReturn("https://example.invalid/api");
         put("config", moved);
@@ -400,8 +397,8 @@ public class PublicTransportTest
     {
         net.runelite.api.Client client = mock(net.runelite.api.Client.class); put("client", client);
         when(client.getAccountHash()).thenReturn(12345L);
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        assertTrue(plugin.staffCaptureEnabled());
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        assertTrue(plugin.grants.staffCaptureEnabled());
         when(client.getAccountHash()).thenReturn(67890L);
         assertNoStaffTool("another account is logged in, activeHash not yet updated");
     }
@@ -432,30 +429,30 @@ public class PublicTransportTest
         Map<String,Object> taken = new LinkedHashMap<>();
         taken.put("item", 1); taken.put("taken_by_candidates", Arrays.asList(Map.of("rsn", "OTHER_CANARY")));
 
-        plugin.emitEvent("trade", new LinkedHashMap<>(fields));
-        plugin.emitEvent("store_taken", new LinkedHashMap<>(taken));
-        assertEquals("a player's store_taken is never queued", 1, plugin.pendingEvents.size());
-        assertFalse(plugin.pendingEvents.toString(), plugin.pendingEvents.toString().contains("OTHER_CANARY"));
+        plugin.events.emitEvent("trade", new LinkedHashMap<>(fields));
+        plugin.events.emitEvent("store_taken", new LinkedHashMap<>(taken));
+        assertEquals("a player's store_taken is never queued", 1, plugin.events.pendingEvents.size());
+        assertFalse(plugin.events.pendingEvents.toString(), plugin.events.pendingEvents.toString().contains("OTHER_CANARY"));
 
-        plugin.pendingEvents.clear();
-        plugin.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
-        plugin.emitEvent("trade", new LinkedHashMap<>(fields));
-        plugin.emitEvent("store_taken", new LinkedHashMap<>(taken));
-        assertEquals(2, plugin.pendingEvents.size());
-        assertEquals("OTHER_CANARY", plugin.pendingEvents.get(0).get("counterparty"));
-        assertEquals("store_taken", plugin.pendingEvents.get(1).get("type"));
+        plugin.events.pendingEvents.clear();
+        plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
+        plugin.events.emitEvent("trade", new LinkedHashMap<>(fields));
+        plugin.events.emitEvent("store_taken", new LinkedHashMap<>(taken));
+        assertEquals(2, plugin.events.pendingEvents.size());
+        assertEquals("OTHER_CANARY", plugin.events.pendingEvents.get(0).get("counterparty"));
+        assertEquals("store_taken", plugin.events.pendingEvents.get(1).get("type"));
     }
 
     @Test public void publicCollectorsNeverReadOtherPlayerIdentitiesEvenWithGrants() throws Exception
     {
         net.runelite.api.Client client=mock(net.runelite.api.Client.class); put("client",client);
-        plugin.applyServerPolicy(grant());
-        assertTrue(plugin.observedPlayers().isEmpty());
-        assertTrue(plugin.nearbyPlayersSnapshot(64,true).isEmpty());
-        assertTrue(plugin.surroundingPlayersNow().isEmpty());
-        plugin.accumulateShopNearby();
-        assertNull(plugin.visibleCounterpartyCombatLevel("OTHER_CANARY"));
-        plugin.captureOtherOfferWhileMainOpen();
+        plugin.grants.applyServerPolicy(grant());
+        assertTrue(plugin.dropProof.observedPlayers().isEmpty());
+        assertTrue(plugin.store.nearbyPlayersSnapshot(64,true).isEmpty());
+        assertTrue(plugin.wilderness.surroundingPlayersNow().isEmpty());
+        plugin.store.accumulateShopNearby();
+        assertNull(plugin.trade.visibleCounterpartyCombatLevel("OTHER_CANARY"));
+        plugin.trade.captureOtherOfferWhileMainOpen();
         verify(client,never()).getPlayers();
         verify(client,never()).getWidget((335 << 16) | 31); // legacy partner title
         net.runelite.api.events.ProjectileMoved projectile=mock(net.runelite.api.events.ProjectileMoved.class);

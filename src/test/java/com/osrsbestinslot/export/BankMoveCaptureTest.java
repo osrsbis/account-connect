@@ -74,19 +74,19 @@ public class BankMoveCaptureTest
 		void open(ItemContainer bank)
 		{
 			when(client.getItemContainer(InventoryID.BANK)).thenReturn(bank);
-			plugin.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
+			plugin.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		}
 
 		/** A bank container change (a deposit or a withdraw lands). */
 		void change(ItemContainer bank)
 		{
 			when(client.getItemContainer(InventoryID.BANK)).thenReturn(bank);
-			plugin.handleBankContainerChanged(bank);
+			plugin.bankVisit.handleBankContainerChanged(bank);
 		}
 
 		void close()
 		{
-			plugin.handleBankWidgetClosed(BANK_GROUP);
+			plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
 		}
 
 		void state(GameState s)
@@ -99,7 +99,7 @@ public class BankMoveCaptureTest
 		List<Map<String, Object>> sessions()
 		{
 			List<Map<String, Object>> out = new ArrayList<>();
-			for (Map<String, Object> e : plugin.pendingEvents)
+			for (Map<String, Object> e : plugin.events.pendingEvents)
 			{
 				if ("bank_session".equals(e.get("type")))
 				{
@@ -204,7 +204,7 @@ public class BankMoveCaptureTest
 			assertEquals(s + ": the seen withdraw", Long.valueOf(1), list(sess.get(0), "withdrawn").get(303));
 			assertNull(s + ": no coins move invented from the unseen state", list(sess.get(0), "withdrawn").get(995));
 			assertTrue(s + ": nothing deposited", list(sess.get(0), "deposited").isEmpty());
-			assertNull(s + ": session cleared", field(r.plugin, "bankAtOpen"));
+			assertNull(s + ": session cleared", r.plugin.bankVisit.bankAtOpen);
 			r.close();	// a late close after the break must not emit a second row
 			assertEquals(s + ": no second row", 1, r.sessions().size());
 		}
@@ -302,7 +302,7 @@ public class BankMoveCaptureTest
 			r.change(containerOf(new int[]{995, 1000}));
 		}
 		r.close();
-		assertEquals("one event for 40 container changes", 1, r.plugin.pendingEvents.size());
+		assertEquals("one event for 40 container changes", 1, r.plugin.events.pendingEvents.size());
 		Map<String, Object> s = r.sessions().get(0);
 		assertEquals(Long.valueOf(2000), list(s, "withdrawn").get(995));
 		assertEquals(Long.valueOf(2000), list(s, "deposited").get(995));
@@ -313,7 +313,7 @@ public class BankMoveCaptureTest
 	{
 		Rig r = rig();
 		r.open(containerOf(new int[]{995, 1}));
-		int n = AccountConnectPlugin.BANK_SESSION_ITEM_CAP + 5;
+		int n = BankVisit.BANK_SESSION_ITEM_CAP + 5;
 		int[][] items = new int[n + 1][];
 		items[0] = new int[]{995, 1};
 		for (int i = 1; i <= n; i++)
@@ -323,7 +323,7 @@ public class BankMoveCaptureTest
 		r.change(containerOf(items));
 		r.close();
 		Map<String, Object> s = r.sessions().get(0);
-		assertEquals(AccountConnectPlugin.BANK_SESSION_ITEM_CAP, list(s, "deposited").size());
+		assertEquals(BankVisit.BANK_SESSION_ITEM_CAP, list(s, "deposited").size());
 		assertEquals(true, s.get("truncated"));
 	}
 
@@ -339,7 +339,7 @@ public class BankMoveCaptureTest
 		Map<String, Object> s = r.sessions().get(0);
 		assertEquals(Long.valueOf(2), list(s, "withdrawn").get(20997));
 		assertTrue(list(s, "deposited").isEmpty());
-		assertNull("bankAtOpen cleared after close", field(r.plugin, "bankAtOpen"));
+		assertNull("bankAtOpen cleared after close", r.plugin.bankVisit.bankAtOpen);
 	}
 
 	/** A transient empty read mid-session is not a whole-bank withdraw followed by a whole-bank deposit. */
@@ -361,7 +361,7 @@ public class BankMoveCaptureTest
 		r.open(containerOf(new int[]{1, 10}));
 		r.change(containerOf(new int[]{1, 10}));
 		r.close();
-		assertTrue(r.plugin.pendingEvents.isEmpty());
+		assertTrue(r.plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -372,7 +372,7 @@ public class BankMoveCaptureTest
 		when(r.client.getItemContainer(InventoryID.BANK)).thenReturn(b);
 		r.change(containerOf(new int[]{1, 5}));
 		r.close();
-		assertTrue(r.plugin.pendingEvents.isEmpty());
+		assertTrue(r.plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -390,7 +390,7 @@ public class BankMoveCaptureTest
 		r.open(containerOf(new int[]{1, 10}));
 		r.change(containerOf(new int[]{1, 5}));
 		r.close();
-		assertTrue(r.plugin.pendingEvents.isEmpty());
+		assertTrue(r.plugin.events.pendingEvents.isEmpty());
 	}
 
 	@Test
@@ -398,9 +398,9 @@ public class BankMoveCaptureTest
 	{
 		Rig r = rig();
 		r.open(containerOf(new int[]{1, 10}));
-		r.plugin.handleBankWidgetClosed(335);	// trade group, not the bank
-		assertTrue(r.plugin.pendingEvents.isEmpty());
-		assertNotNull("bankAtOpen untouched for a non-bank widget", field(r.plugin, "bankAtOpen"));
+		r.plugin.bankVisit.handleBankWidgetClosed(335);	// trade group, not the bank
+		assertTrue(r.plugin.events.pendingEvents.isEmpty());
+		assertNotNull("bankAtOpen untouched for a non-bank widget", r.plugin.bankVisit.bankAtOpen);
 	}
 
 	@Test
@@ -409,7 +409,7 @@ public class BankMoveCaptureTest
 		Rig r = rig();
 		r.open(containerOf(new int[]{20997, 3}, new int[]{995, 1000}));
 		@SuppressWarnings("unchecked")
-		Map<Integer, Long> open = (Map<Integer, Long>) field(r.plugin, "bankAtOpen");
+		Map<Integer, Long> open = (Map<Integer, Long>) r.plugin.bankVisit.bankAtOpen;
 		assertNotNull(open);
 		assertEquals(Long.valueOf(3L), open.get(20997));
 		assertEquals(Long.valueOf(1000L), open.get(995));

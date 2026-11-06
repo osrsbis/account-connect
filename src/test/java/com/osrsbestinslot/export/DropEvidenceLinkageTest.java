@@ -42,12 +42,12 @@ public class DropEvidenceLinkageTest
         when(c.getItemContainer(InventoryID.INVENTORY)).thenReturn(inventory);
         inject(p, "client", c);
         inject(p, "activeHash", "12345");
-        p.staffApiBase = AccountConnectPlugin.OFFICIAL_API_BASE;
-        p.setStaffCaptureForTest(TOKEN, "12345");
-        p.setStoreToolsForTest(true);
-        p.setDropProofRolloutForTest(true);
-        assertTrue("fixture has a staff grant", p.staffCaptureEnabled());
-        assertTrue("fixture has the media grant", p.dropProofEnabled());
+        p.grants.staffApiBase = ServerGrants.OFFICIAL_API_BASE;
+        p.grants.setStaffCapture(TOKEN, "12345");
+        p.grants.setStoreToolsForTest(true);
+        p.grants.setDropProofRolloutForTest(true);
+        assertTrue("fixture has a staff grant", p.grants.staffCaptureEnabled());
+        assertTrue("fixture has the media grant", p.grants.dropProofEnabled());
         return p;
     }
 
@@ -81,7 +81,7 @@ public class DropEvidenceLinkageTest
         when(event.getMenuTarget()).thenReturn("");
         when(event.getItemId()).thenReturn(item);
         p.onMenuOptionClicked(event);
-        assertTrue("fixture has a granted active drop session", p.dropSession.active());
+        assertTrue("fixture has a granted active drop session", p.dropProof.dropSession.active());
     }
 
     private static void spawn(AccountConnectPlugin p, int item)
@@ -99,25 +99,25 @@ public class DropEvidenceLinkageTest
     private static List<Map<String, Object>> drops(AccountConnectPlugin p)
     {
         List<Map<String, Object>> rows = new ArrayList<>();
-        for (Map<String, Object> row : p.pendingEvents)
+        for (Map<String, Object> row : p.events.pendingEvents)
             if ("drop".equals(row.get("type"))) rows.add(row);
         return rows;
     }
 
     @SuppressWarnings("unchecked")
-    private static List<AccountConnectPlugin.DroppedGroundItem> piles(AccountConnectPlugin p) throws Exception
+    private static List<OwnPiles.DroppedGroundItem> piles(AccountConnectPlugin p) throws Exception
     {
-        return new ArrayList<>((Deque<AccountConnectPlugin.DroppedGroundItem>) field(p, "groundDrops"));
+        return new ArrayList<>((Deque<OwnPiles.DroppedGroundItem>) p.piles.groundDrops);
     }
 
     private static void assertCompletedWithoutExpiredClicks(AccountConnectPlugin p) throws Exception
     {
-        assertEquals("every observed drop resolves its own pending click", 0, p.dropSession.pendingDropCount());
-        p.dropSession.settle(System.currentTimeMillis() + DropSessionRecorder.PENDING_DROP_EXPIRY_MILLIS + 1);
-        assertFalse("observed drops must not expire under a later click's identity", p.dropSession.unprovable());
-        for (AccountConnectPlugin.DroppedGroundItem g : piles(p)) p.emitGroundRemoval(g, 400, false);
-        assertEquals(0, p.dropSession.activePileCount());
-        assertEquals(DropSessionRecorder.Outcome.COMPLETE, p.dropSession.finish());
+        assertEquals("every observed drop resolves its own pending click", 0, p.dropProof.dropSession.pendingDropCount());
+        p.dropProof.dropSession.settle(System.currentTimeMillis() + DropSessionRecorder.PENDING_DROP_EXPIRY_MILLIS + 1);
+        assertFalse("observed drops must not expire under a later click's identity", p.dropProof.dropSession.unprovable());
+        for (OwnPiles.DroppedGroundItem g : piles(p)) p.piles.emitGroundRemoval(g, 400, false);
+        assertEquals(0, p.dropProof.dropSession.activePileCount());
+        assertEquals(DropSessionRecorder.Outcome.COMPLETE, p.dropProof.dropSession.finish());
     }
 
     @Test
@@ -125,7 +125,7 @@ public class DropEvidenceLinkageTest
     {
         AccountConnectPlugin p = plugin(inventory(1511, 1513, 1521));
         click(p, 1511); click(p, 1513); click(p, 1521);
-        String session = p.dropSession.sessionId();
+        String session = p.dropProof.dropSession.sessionId();
         ItemContainer empty = inventory();
         when(((Client) field(p, "client")).getItemContainer(InventoryID.INVENTORY)).thenReturn(empty);
         spawn(p, 1521); spawn(p, 1513); spawn(p, 1511);
@@ -135,7 +135,7 @@ public class DropEvidenceLinkageTest
         {
             assertEquals(session, rows.get(i).get("drop_session_id"));
             assertEquals(3 - i, rows.get(i).get("drop_seq"));
-            assertEquals(3 - i, p.dropSeqForPile(piles(p).get(i)));
+            assertEquals(3 - i, p.dropProof.dropSeqForPile(piles(p).get(i)));
         }
         assertCompletedWithoutExpiredClicks(p);
     }
@@ -147,14 +147,14 @@ public class DropEvidenceLinkageTest
         click(p, 229); click(p, 229); click(p, 229);
         spawn(p, 229); spawn(p, 229); spawn(p, 229);
         assertTrue(drops(p).isEmpty());
-        p.resolveInvDeltaPendings(inventory(), 0, 100);
+        p.offBook.resolveInvDeltaPendings(inventory(), 0, 100);
         List<Map<String, Object>> rows = drops(p);
         assertEquals("one event per actual pile", 3, rows.size());
         for (int i = 0; i < rows.size(); i++)
         {
             assertEquals(i + 1, rows.get(i).get("drop_seq"));
             assertEquals("the same inventory loss cannot be counted repeatedly", 1L, rows.get(i).get("qty"));
-            assertEquals(i + 1, p.dropSeqForPile(piles(p).get(i)));
+            assertEquals(i + 1, p.dropProof.dropSeqForPile(piles(p).get(i)));
         }
         assertCompletedWithoutExpiredClicks(p);
     }
@@ -166,7 +166,7 @@ public class DropEvidenceLinkageTest
         click(p, 229); click(p, 229); click(p, 229);
         ItemContainer empty = inventory();
         when(((Client) field(p, "client")).getItemContainer(InventoryID.INVENTORY)).thenReturn(empty);
-        p.resolveInvDeltaPendings(inventory(), 0, 100);
+        p.offBook.resolveInvDeltaPendings(inventory(), 0, 100);
         spawn(p, 229); spawn(p, 229); spawn(p, 229);
         List<Map<String, Object>> rows = drops(p);
         assertEquals(3, rows.size());
@@ -185,11 +185,11 @@ public class DropEvidenceLinkageTest
         spawn(p, 229);
         when(((Client) field(p, "client")).getTickCount()).thenReturn(104);
         spawn(p, 229);
-        List<AccountConnectPlugin.DroppedGroundItem> ground = piles(p);
+        List<OwnPiles.DroppedGroundItem> ground = piles(p);
         assertEquals(2, ground.size());
-        assertEquals(1, p.dropSeqForPile(ground.get(0)));
-        assertEquals(2, p.dropSeqForPile(ground.get(1)));
-        assertEquals(0, p.dropSession.pendingDropCount());
+        assertEquals(1, p.dropProof.dropSeqForPile(ground.get(0)));
+        assertEquals(2, p.dropProof.dropSeqForPile(ground.get(1)));
+        assertEquals(0, p.dropProof.dropSession.pendingDropCount());
     }
 
 }

@@ -95,9 +95,9 @@ public class BankAfterCloseTest
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> snapshot() throws Exception
 	{
-		Method build = AccountConnectPlugin.class.getDeclaredMethod("buildSnapshot");
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
 		build.setAccessible(true);
-		return (Map<String, Object>) build.invoke(plugin);
+		return (Map<String, Object>) build.invoke(plugin.snapshots);
 	}
 
 	@SuppressWarnings("unchecked")

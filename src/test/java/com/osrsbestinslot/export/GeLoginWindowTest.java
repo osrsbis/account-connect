@@ -96,7 +96,7 @@ public class GeLoginWindowTest
 	private List<Map<String, Object>> ge()
 	{
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (Map<String, Object> e : p.pendingEvents)
+		for (Map<String, Object> e : p.events.pendingEvents)
 		{
 			if (String.valueOf(e.get("type")).startsWith("ge_"))
 			{
@@ -443,17 +443,15 @@ public class GeLoginWindowTest
 		state(GameState.HOPPING);
 		hash = -1L;
 		offer(1, GrandExchangeOfferState.BOUGHT, 560, 10, 10, 250, 2400);
-		Field f = AccountConnectPlugin.class.getDeclaredField("geUnkeyed");
-		f.setAccessible(true);
-		Map<Integer, Object[]> held = (Map<Integer, Object[]>) f.get(p);
+		Map<Integer, Object[]> held = p.ge.unkeyed;
 		long captured = (Long) held.get(1)[2];
 		hash = A;
-		p.resolveUnkeyedGe(A);
+		p.ge.resolveUnkeyed(A);
 		Map<?, ?> observation = (Map<?, ?>) ge().get(1).get("ge_observation");
 		assertEquals(captured, observation.get("observed_at_ms"));
 		assertEquals(captured, observation.get("counter_observed_at_ms"));
 		assertEquals(10L, observation.get("delta_qty"));
-		p.resolveUnkeyedGe(A);
+		p.ge.resolveUnkeyed(A);
 		assertEquals(2, ge().size());
 	}
 

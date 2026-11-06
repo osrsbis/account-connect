@@ -37,6 +37,12 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.ui.overlay.tooltip.TooltipManager;
 import net.runelite.client.util.Text;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import net.runelite.api.ItemComposition;
 
 /** Local-only, read-only GE calculator. All game and purchase state belongs to the client thread. */
 final class FlipperController
@@ -56,7 +62,7 @@ final class FlipperController
     private volatile FlipperView view = FlipperView.empty(false, 0, "Enable Flipper to calculate a sell offer.");
     private volatile boolean running;
     private volatile boolean enabled;
-    private final java.util.concurrent.atomic.AtomicLong lifecycle = new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong lifecycle = new AtomicLong();
     private FlipperPanel panel;
     private NavigationButton navigation;
     private FlipperOverlay overlay;
@@ -309,7 +315,7 @@ final class FlipperController
         history.clear();
         offerActivity.clear();
         overview = null;
-        java.util.Arrays.fill(offerCosts, null);
+        Arrays.fill(offerCosts, null);
         account = null;
         clearSelection();
     }
@@ -473,7 +479,7 @@ final class FlipperController
         String status = typing ? "Finish entering the Grand Exchange value."
             : quantity == 0 ? "Sale completed. Completed profit is not calculated."
             : draft ? "Offer not placed." : "Estimate for the remaining items only.";
-        net.runelite.api.ItemComposition definition = client.getItemDefinition(item);
+        ItemComposition definition = client.getItemDefinition(item);
         String name = definition == null || definition.getName() == null ? "Item " + item : definition.getName();
         publish(new FlipperView(enabled, selectionKey, item, name, status, quantity, sold, price,
             typing ? -1 : rate, source, manualInput, cost, anchor));
@@ -481,7 +487,7 @@ final class FlipperController
 
     private static long activityNow()
     {
-        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
     }
 
     private void refreshOverview()
@@ -495,7 +501,7 @@ final class FlipperController
         if (!visible(index) || !visible(frame) || frame.getBounds() == null
             || visible(client.getWidget(InterfaceID.GeOffers.SETUP)) || visible(client.getWidget(InterfaceID.GeOffers.DETAILS)))
         { overview = null; return; }
-        java.util.Map<Integer, Rectangle> slots = new java.util.LinkedHashMap<>();
+        Map<Integer, Rectangle> slots = new LinkedHashMap<>();
         for (int i = 0; i < FlipperOverviewOverlay.SLOT_WIDGETS.length; i++)
         {
             Widget slot = client.getWidget(FlipperOverviewOverlay.SLOT_WIDGETS[i]);

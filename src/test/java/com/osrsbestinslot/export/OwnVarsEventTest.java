@@ -23,8 +23,7 @@ public class OwnVarsEventTest
         com.google.gson.Gson gson=new GsonBuilder().create();
         assertFalse(gson.toJson(projected).contains("PRIVATE"));
         assertEquals(projected.get("values"),PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class)).get("values"));
-        assertTrue(EventQueueProtocol.allows("own-vars-v1",projected));
-        for(String scope:List.of("own-state-v1","own-combat-v1","own-history-v1","ge-v1"))assertFalse(EventQueueProtocol.allows(scope,projected));
+        for(String scope:List.of("own-history-v1","ge-v1"))assertFalse(EventQueueProtocol.allows(scope,projected));
         ((Map<String,Object>)event.get("values")).put("timer_raw",0);assertEquals(0L,((Map<?,?>)OwnVarsEvent.wire(event).get("values")).get("timer_raw"));
         ((Map<String,Object>)event.get("values")).put("timer_raw",-1);assertEquals(-1L,((Map<?,?>)OwnVarsEvent.wire(event).get("values")).get("timer_raw"));
         ((Map<String,Object>)event.get("values")).remove("timer_raw");assertNull(((Map<?,?>)OwnVarsEvent.wire(event).get("values")).get("timer_raw"));
