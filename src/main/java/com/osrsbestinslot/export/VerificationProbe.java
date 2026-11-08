@@ -19,7 +19,8 @@ import java.util.function.IntUnaryOperator;
  * WHAT A MATCH PROVES. Two of the plugin's own paths agreeing (a container against the widget showing it, the
  * client's var against the server's) proves agreement only, not meaning. Meaning is checked by a person against the
  * screen: a sample may carry numeric screenshot regions from the next drawn frame on the same tick, with their
- * own frame time, stored under the same 16-hex frame ref as the rows. All other pixels are black before encoding.
+ * own frame time, stored under the same 16-hex frame ref as the rows. In that region frame all other pixels are black
+ * before encoding; a full-window frame, when one is taken, is the whole canvas as drawn.
  * A "match": null result means one side was not readable, never a pass.
  */
 final class VerificationProbe
@@ -41,6 +42,8 @@ final class VerificationProbe
 	private final IntUnaryOperator random;
 	private final ArrayDeque<Long> samples = new ArrayDeque<>();
 	private final ArrayDeque<Long> frames = new ArrayDeque<>();
+	private final ArrayDeque<Long> fullWindows = new ArrayDeque<>();
+	private boolean eventBudgetReported;
 	private long lastSampleMs = Long.MIN_VALUE / 2;
 	private String pendingTrigger;
 	private String pendingKey;
@@ -59,6 +62,8 @@ final class VerificationProbe
 	/** Forget the queued occasion. The hourly budgets are kept: a relog does not refill them. */
 	synchronized void reset()
 	{
+		// Logged out, grant cleared or account changed: the next refused event starts a new gap on record.
+		eventBudgetReported = false;
 		pendingTrigger = null;
 		pendingKey = null;
 		pendingValue = null;
@@ -96,7 +101,26 @@ final class VerificationProbe
 		if (samples.size() >= MAX_SAMPLES_PER_HOUR) return false;
 		samples.addLast(nowMs);
 		lastSampleMs = nowMs;
+		eventBudgetReported = false;
 		return true;
+	}
+
+	/**
+	 * True once per run of refused event admissions: the first source refused after an admitted one is reported as
+	 * UNKNOWN `event_budget`, so the start of a gap is on record without one row per refused event.
+	 */
+	synchronized boolean reportEventBudget()
+	{
+		if (eventBudgetReported) return false;
+		eventBudgetReported = true;
+		return true;
+	}
+
+	/** Room for a region frame now, without counting it: the slot is taken only when the frame is uploaded. */
+	synchronized boolean frameRoom(long nowMs)
+	{
+		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
+		return frames.size() < MAX_FRAMES_PER_HOUR;
 	}
 
 	synchronized boolean eventRoom(long nowMs)
@@ -112,6 +136,25 @@ final class VerificationProbe
 		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
 		if (frames.size() >= MAX_FRAMES_PER_HOUR) return false;
 		frames.addLast(nowMs);
+		return true;
+	}
+
+	/** Room for a full-window frame now, without counting it. */
+	synchronized boolean fullWindowRoom(long nowMs)
+	{
+		while (!fullWindows.isEmpty() && nowMs - fullWindows.peekFirst() >= HOUR_MS) fullWindows.pollFirst();
+		return fullWindows.size() < FullWindowFrame.MAX_PER_HOUR;
+	}
+
+	/**
+	 * A full-window frame: its own hourly budget only. It never takes one of the 30 region-frame slots, so the
+	 * optional full window can never crowd out the small evidence frames. Counts it when allowed.
+	 */
+	synchronized boolean takeFullWindow(long nowMs)
+	{
+		while (!fullWindows.isEmpty() && nowMs - fullWindows.peekFirst() >= HOUR_MS) fullWindows.pollFirst();
+		if (fullWindows.size() >= FullWindowFrame.MAX_PER_HOUR) return false;
+		fullWindows.addLast(nowMs);
 		return true;
 	}
 
@@ -297,6 +340,12 @@ final class VerificationProbe
 		return out;
 	}
 
+	/**
+	 * The game's blank object (ItemID.BLANKOBJECT). The inventory widget draws it in an empty slot in some interface
+	 * states; it is never a held item, so it reads as empty.
+	 */
+	static final int BLANK_OBJECT = 6512;
+
 	/** One container against the widget that shows it, slot by slot: {slot -> [id, qty]}. Empty on both sides is skipped. */
 	static List<Map<String, Object>> slots(Map<Integer, int[]> container, Map<Integer, int[]> widget, int slotCount)
 	{
@@ -305,12 +354,27 @@ final class VerificationProbe
 		{
 			int[] c = container.get(i);
 			int[] w = widget == null ? null : widget.get(i);
+			if (w != null && w[0] == BLANK_OBJECT) w = null;
 			String expected = c == null ? "empty" : item(c[0], c[1]);
 			String observed = widget == null ? null : w == null ? "empty" : item(w[0], w[1]);
 			if ("empty".equals(expected) && (observed == null || "empty".equals(observed))) continue;
 			out.add(result("slot_" + i, inputs("slot", i), expected, observed));
 		}
 		return out;
+	}
+
+	/** Ticks after a login or hop during which orb texts may not have been drawn yet. */
+	static final int ORB_DRAW_TICKS = 25;
+
+	/**
+	 * Right after a login an orb text can still read 0 before it is drawn; the orbs are not drawn together (the special
+	 * attack orb can show its value while the others still read 0). One orb reading is then unknown, not a mismatch, only
+	 * when it reads 0, the value it should show is not 0, and the sample is within {@link #ORB_DRAW_TICKS} of the login.
+	 * A zero later in a session, or any non-zero reading, stays a mismatch lead.
+	 */
+	static boolean orbUndrawn(int ticksSinceLogin, int expected, Integer orbText)
+	{
+		return ticksSinceLogin >= 0 && ticksSinceLogin <= ORB_DRAW_TICKS && orbText != null && orbText == 0 && expected != 0;
 	}
 
 	/** A number shown on screen against the value the plugin holds. A widget not on screen is unknown. */

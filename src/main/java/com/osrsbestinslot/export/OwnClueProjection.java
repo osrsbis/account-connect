@@ -1,6 +1,8 @@
 package com.osrsbestinslot.export;
 
 import java.util.*;
+
+import static com.osrsbestinslot.export.EventValues.*;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.ItemID;
 import net.runelite.client.plugins.cluescrolls.clues.MapClue;
@@ -37,7 +39,7 @@ final class OwnClueProjection
                 if(mc==null&&cc==null)throw new IllegalArgumentException();WorldPoint point=mc!=null?mc.getLocation(null):cc.getLocation(null);
                 Map<?,?> v=map(entry.getValue());String kind=mc!=null?"map":"coordinate";
                 if(!kind.equals(v.get("kind"))||!"library_base_location_not_resolved_quest_alternative".equals(v.get("qualification"))
-                    ||num(v.get("x"),0,16383)!=point.getX()||num(v.get("y"),0,16383)!=point.getY()||num(v.get("plane"),0,3)!=point.getPlane())throw new IllegalArgumentException();
+                    ||number(v.get("x"),0,16383)!=point.getX()||number(v.get("y"),0,16383)!=point.getY()||number(v.get("plane"),0,3)!=point.getPlane())throw new IllegalArgumentException();
                 clues.put((String)entry.getKey(),Map.of("kind",kind,"x",(long)point.getX(),"y",(long)point.getY(),"plane",(long)point.getPlane(),
                     "qualification","library_base_location_not_resolved_quest_alternative"));
             }
@@ -54,21 +56,15 @@ final class OwnClueProjection
         }
         Object id=p.get("observation_id");if(!(id instanceof String))throw new IllegalArgumentException();String observationId=((String)id).replace("-","");
         if(!((String)id).matches("[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"))throw new IllegalArgumentException();
-        int item=(int)num(p.get("item_id"),1,Integer.MAX_VALUE);
+        int item=(int)number(p.get("item_id"),1,Integer.MAX_VALUE);
         if(item!=ItemID.TRAIL_CLUE_BEGINNER&&item!=ItemID.TRAIL_CLUE_MASTER&&MapClue.forItemId(item)==null&&CoordinateClue.forItemId(item)==null)throw new IllegalArgumentException();
         if(!"self_at_observation".equals(p.get("ownership"))||!"unverified".equals(p.get("drop_origin"))
             ||!"current_client_session_only".equals(p.get("clock_scope")))throw new IllegalArgumentException();
         Object observation=p.get("observation");if(!"appeared".equals(observation)&&!"left_scene".equals(observation))throw new IllegalArgumentException();
         if("appeared".equals(observation)?p.get("outcome")!=null:!"taken_expired_or_scene_change_unknown".equals(p.get("outcome")))throw new IllegalArgumentException();
         Map<String,Object> out=new LinkedHashMap<>();out.put("observation_id",observationId);out.put("item_id",(long)item);
-        out.put("quantity",num(p.get("quantity"),1,Integer.MAX_VALUE));out.put("ownership","self_at_observation");out.put("drop_origin","unverified");
-        Object tick=p.get("despawn_server_tick");out.put("despawn_server_tick",tick==null?null:num(tick,1,Integer.MAX_VALUE));
+        out.put("quantity",number(p.get("quantity"),1,Integer.MAX_VALUE));out.put("ownership","self_at_observation");out.put("drop_origin","unverified");
+        Object tick=p.get("despawn_server_tick");out.put("despawn_server_tick",tick==null?null:number(tick,1,Integer.MAX_VALUE));
         out.put("clock_scope","current_client_session_only");out.put("observation",observation);out.put("outcome",p.get("outcome"));return out;
-    }
-    private static Map<?,?> map(Object x) {if(!(x instanceof Map))throw new IllegalArgumentException();return (Map<?,?>)x;}
-    private static long num(Object x,long min,long max)
-    {
-        if(!(x instanceof Number))throw new IllegalArgumentException();Number n=(Number)x;long value=n.longValue();
-        if(!Double.isFinite(n.doubleValue())||n.doubleValue()!=value||value<min||value>max)throw new IllegalArgumentException();return value;
     }
 }

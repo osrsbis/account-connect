@@ -58,6 +58,7 @@ public class LatestBankSnapshotTest
 	private int failNext;		// refuse this many uploads with a 503
 	private int dropNext;		// fail this many uploads on the network
 	private final DirectExecutor executor = new DirectExecutor();
+	private volatile String nextAnswer = "{\"ok\":true,\"schema_v\":4,\"captured_at\":1}";
 
 	@Before
 	public void setUp() throws Exception
@@ -73,7 +74,8 @@ public class LatestBankSnapshotTest
 					failNext--;	// a refused upload that still carries the token's grants
 					return grant(new MockResponse().setResponseCode(503));
 				}
-				return grant(new MockResponse().setResponseCode(200));
+				// The server's stored answer (account-ingest +server.js), or a 2xx that stored nothing new.
+				return grant(new MockResponse().setResponseCode(200).setBody(nextAnswer));
 			}
 		});
 		server.start();
@@ -331,6 +333,29 @@ public class LatestBankSnapshotTest
 	}
 
 	@Test
+	public void onlyAStoredAnswerMakesTheBankTheAcceptedOne() throws Exception
+	{
+		// Recheck 11-08, cause C2: a 2xx that says stale or paused stored nothing new.
+		assertTrue(SnapshotUploader.storedAnswer("{\"ok\":true,\"schema_v\":4,\"captured_at\":1}"));
+		assertFalse(SnapshotUploader.storedAnswer("{\"ok\":true,\"captured_at\":1,\"stale\":true}"));
+		assertFalse(SnapshotUploader.storedAnswer("{\"ok\":true,\"paused\":true}"));
+		assertFalse(SnapshotUploader.storedAnswer("{\"ok\":false}"));
+		assertFalse(SnapshotUploader.storedAnswer("not json"));
+		assertFalse(SnapshotUploader.storedAnswer(null));
+		policy();
+		bank = container(new int[]{4151, 1}, new int[]{995, 1000});
+		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
+		plugin.uploader.forceSendSnapshot();
+		sentBanks();
+		assertNull("a stale answer never becomes the accepted bank", plugin.uploader.acceptedBankSha);
+		assertNull("nor stays the queued bank a later open would point at", plugin.uploader.queuedBankSha);
+		nextAnswer = "{\"ok\":true,\"schema_v\":4,\"captured_at\":2}";
+		plugin.uploader.forceSendSnapshot();
+		sentBanks();
+		assertNotNull("a stored answer does", plugin.uploader.acceptedBankSha);
+	}
+
+	@Test
 	public void anUnreadBankHasNoHash() throws Exception
 	{
 		policy();
@@ -472,6 +497,99 @@ public class LatestBankSnapshotTest
 		tick++;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		assertEquals(true, of("bank_visit_close").get(0).get("manifest_in_snapshot"));
+	}
+
+	@Test
+	public void anOpenSentBeforeItsSnapshotWasRefusedSendsItsListAfterAll() throws Exception
+	{
+		// Review 0396065 residual: the open points at the queued bank-open snapshot before its answer arrives.
+		policy();
+		executor.hold = true;
+		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
+		Map<String, Object> open = of("bank_visit_open").get(0);
+		assertEquals("sent while the upload is in flight", true, open.get("manifest_in_snapshot"));
+		assertTrue(chunks("open").isEmpty());
+		executor.release();								// the server stored nothing new
+		List<Map<String, Object>> sent = chunks("open");
+		assertEquals("the open list follows in the same visit", 1, sent.size());
+		assertEquals(open.get("visit_id"), sent.get(0).get("visit_id"));
+		assertEquals(open.get("manifest_sha256"), sent.get(0).get("manifest_sha256"));
+	}
+
+	@Test
+	public void anOpenWhoseUploadAlreadyAnsweredDoesNotWait() throws Exception
+	{
+		// Review 1dca800 P3-1: the queued upload answered before the open was built; nothing may wait on it.
+		policy();
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));	// the bank-open upload answers at once (stored)
+		assertEquals(true, of("bank_visit_open").get(0).get("manifest_in_snapshot"));
+		java.lang.reflect.Field f = BankVisit.class.getDeclaredField("waitingOpens");
+		f.setAccessible(true);
+		assertEquals("an answered upload leaves nothing waiting", 0, ((List<?>) f.get(plugin.bankVisit)).size());
+		assertTrue(chunks("open").isEmpty());
+		// A refused upload that already answered: its marker is cleared, so the open sends its list at once.
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		tick += 2;
+		plugin.onGameTick(new net.runelite.api.events.GameTick());
+		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
+		open(container(new int[]{995, 1000}, new int[]{4151, 2}));
+		List<Map<String, Object>> opens = of("bank_visit_open");
+		assertFalse(opens.get(opens.size() - 1).containsKey("manifest_in_snapshot"));
+		assertEquals(0, ((List<?>) f.get(plugin.bankVisit)).size());
+	}
+
+	@Test
+	public void aReopenWhileTheFirstUploadIsInFlightKeepsBothOpensWaiting() throws Exception
+	{
+		// Review 843fcc4 P3-1: close and reopen before the first open's upload answers; that upload stores nothing.
+		policy();
+		executor.hold = true;
+		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		tick++;
+		plugin.onGameTick(new net.runelite.api.events.GameTick());
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
+		List<Map<String, Object>> opens = of("bank_visit_open");
+		assertEquals(2, opens.size());
+		executor.release();
+		List<String> visits = new ArrayList<>();
+		for (Map<String, Object> o : opens)
+		{
+			if (Boolean.TRUE.equals(o.get("manifest_in_snapshot"))) visits.add((String) o.get("visit_id"));
+		}
+		for (String v : visits)
+		{
+			boolean sent = false;
+			for (Map<String, Object> c : chunks("open")) sent |= v.equals(c.get("visit_id"));
+			assertTrue("every open that counted on a refused upload sends its list: " + v, sent);
+		}
+		assertTrue("the first open counted on the upload", !visits.isEmpty() && visits.contains(opens.get(0).get("visit_id")));
+	}
+
+	@Test
+	public void anOpenWhoseSnapshotWasStoredSendsNoList() throws Exception
+	{
+		policy();
+		executor.hold = true;
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
+		assertEquals(true, of("bank_visit_open").get(0).get("manifest_in_snapshot"));
+		executor.release();
+		assertTrue("a stored snapshot holds the open bank", chunks("open").isEmpty());
+	}
+
+	@Test
+	public void aRefusedSnapshotAfterAnAccountChangeSendsNothingUnderTheNewAccount() throws Exception
+	{
+		policy();
+		executor.hold = true;
+		failNext = 1;
+		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
+		assertEquals(true, of("bank_visit_open").get(0).get("manifest_in_snapshot"));
+		inject("activeHash", "43");
+		executor.release();
+		assertTrue(chunks("open").isEmpty());
 	}
 
 	@Test

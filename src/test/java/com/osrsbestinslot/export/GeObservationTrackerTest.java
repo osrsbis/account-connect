@@ -152,4 +152,134 @@ public class GeObservationTrackerTest
         assertEquals(0L, meta(at(EMPTY, 0, 0, 3)).get("delta_qty"));
     }
 
+    @Test
+    public void aQuietPartialFillIsSentOnceItsWindowPassesWithNoFurtherCallback()
+    {
+        // Released 0.7.67: BUYING 0 at tick 1, a partial 10 at tick 2 (throttled), then no more callbacks.
+        at(BUYING, 0, 0, 1);
+        assertNull(at(BUYING, 10, 2400, 2));
+        assertTrue("still inside the minute", tracker.due(50).isEmpty());
+        java.util.List<Map.Entry<Integer, Map<String, Object>>> due = tracker.due(101);
+        assertEquals(1, due.size());
+        Map<String, Object> row = due.get(0).getValue();
+        assertEquals("ge_progress", row.get("type"));
+        assertEquals(10L, meta(row).get("delta_qty"));
+        assertEquals(2400L, meta(row).get("delta_gp"));
+        assertEquals("dated by the counter observation, not by now", 100002L, meta(row).get("observed_at_ms"));
+        assertTrue("sent once", tracker.due(500).isEmpty());
+        // The collect afterwards credits nothing twice.
+        assertEquals(0L, meta(at(EMPTY, 0, 0, 600)).get("delta_qty"));
+    }
+
+    @Test
+    public void aPendingPartialFillCarriedAcrossARestartIsSentWithoutAnotherCallback()
+    {
+        at(BUYING, 0, 0, 1);
+        assertNull(at(BUYING, 10, 2400, 2));
+        java.util.List<Map<String, Object>> saved = tracker.export();
+        GeObservationTracker restarted = new GeObservationTracker();
+        restarted.restore(saved);
+        // The unchanged login replay of the same offer emits nothing by itself.
+        assertNull(restarted.observe(0, BUYING, new long[]{560, 10, 100, 300, 2400}, true, 5, 200000L));
+        java.util.List<Map.Entry<Integer, Map<String, Object>>> due = restarted.due(6);
+        assertEquals(1, due.size());
+        Map<?, ?> o = meta(due.get(0).getValue());
+        assertEquals(10L, o.get("delta_qty"));
+        assertEquals("inferred_across_gap", o.get("identity"));
+        assertTrue(restarted.due(500).isEmpty());
+    }
+
+    @Test
+    public void twoSeparateFillsInOneThrottleWindowKeepTheirOwnPricesAndTimes()
+    {
+        // Reported 11-08 on released code: 200 GP and 300 GP one-item fills merged into one 250 average, and a later
+        // identical callback replaced their original observation time.
+        GeObservationTracker t = new GeObservationTracker();
+        t.observe(0, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 0, 100000L);
+        t.observe(0, BUYING, new long[]{560, 0, 10, 300, 0}, false, 1, 100600L);
+        assertNull(t.observe(0, BUYING, new long[]{560, 1, 10, 300, 200}, false, 2, 101200L));
+        assertNull(t.observe(0, BUYING, new long[]{560, 2, 10, 300, 500}, false, 3, 101800L));
+        Map<String, Object> row = t.observe(0, BUYING, new long[]{560, 2, 10, 300, 500}, false, 101, 160600L);
+        Map<?, ?> o = meta(row);
+        assertEquals(2L, o.get("delta_qty"));
+        assertEquals(500L, o.get("delta_gp"));
+        assertEquals("the identical repeat keeps the time the counters changed", 101800L, o.get("counter_observed_at_ms"));
+        assertEquals(101800L, o.get("interval_end_ms"));
+        java.util.List<?> steps = (java.util.List<?>) o.get("steps");
+        assertEquals(2, steps.size());
+        Map<?, ?> a = (Map<?, ?>) steps.get(0), b = (Map<?, ?>) steps.get(1);
+        assertEquals(101200L, a.get("at_ms")); assertEquals(1L, a.get("cumulative_qty")); assertEquals(200L, a.get("cumulative_gp"));
+        assertEquals(101800L, b.get("at_ms")); assertEquals(2L, b.get("cumulative_qty")); assertEquals(500L, b.get("cumulative_gp"));
+        assertEquals("client_callback_receipt", o.get("step_time"));
+        assertEquals(0, o.get("steps_dropped"));
+    }
+
+    @Test
+    public void aTaxChangeIsAStepWithClientAndServerValuesAndASingleFillCarriesNoSteps()
+    {
+        GeObservationTracker t = new GeObservationTracker();
+        t.observe(1, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 0, 1L);
+        t.observe(1, SELLING, new long[]{4151, 0, 1, 1_500_000, 0}, false, 1, 2L);
+        t.taxChanged(1, 30_000L, 30_000L, 5, 5L);
+        Map<?, ?> o = meta(t.observe(1, SOLD, new long[]{4151, 1, 1, 1_500_000, 1_500_000}, false, 6, 6L));
+        java.util.List<?> steps = (java.util.List<?>) o.get("steps");
+        assertEquals("the tax update came before the offer update", "tax", ((Map<?, ?>) steps.get(0)).get("kind"));
+        assertEquals(30_000L, ((Map<?, ?>) steps.get(0)).get("native_tax_gp"));
+        assertEquals(30_000L, ((Map<?, ?>) steps.get(0)).get("native_tax_server_gp"));
+        assertEquals("counter", ((Map<?, ?>) steps.get(1)).get("kind"));
+        // One counter change and no tax step: no steps list (the row's own fields say it all).
+        GeObservationTracker u = new GeObservationTracker();
+        u.observe(2, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 0, 1L);
+        u.observe(2, BUYING, new long[]{560, 0, 10, 300, 0}, false, 1, 2L);
+        assertNull(meta(u.observe(2, BOUGHT, new long[]{560, 10, 10, 300, 3000}, false, 2, 3L)).get("steps"));
+    }
+
+    @Test
+    public void stepsAreBoundedAndTheOverflowIsCounted()
+    {
+        GeObservationTracker t = new GeObservationTracker();
+        t.observe(3, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 0, 1L);
+        t.observe(3, BUYING, new long[]{560, 0, 100, 300, 0}, false, 1, 2L);
+        for (int i = 1; i <= GeObservationTracker.MAX_STEPS + 4; i++)
+            t.observe(3, BUYING, new long[]{560, i, 100, 300, 300L * i}, false, 1 + i, 2L + i);
+        Map<?, ?> o = meta(t.due(500).get(0).getValue());
+        assertEquals(GeObservationTracker.MAX_STEPS, ((java.util.List<?>) o.get("steps")).size());
+        assertEquals(4, o.get("steps_dropped"));
+        assertEquals("the totals still cover every fill", (long) (GeObservationTracker.MAX_STEPS + 4), o.get("delta_qty"));
+    }
+
+    @Test
+    public void aClockRollbackNeverGivesReversedIntervalBounds()
+    {
+        // Independent audit 11-08: placement at 1000 ms, throttled partial at 900 ms (clock stepped back), collect at 1100.
+        GeObservationTracker t = new GeObservationTracker();
+        t.observe(2, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 1, 990L);
+        t.observe(2, BUYING, new long[]{560, 0, 100, 300, 0}, false, 2, 1000L);
+        assertNull(t.observe(2, BUYING, new long[]{560, 20, 100, 300, 4000}, false, 3, 900L));
+        Map<?, ?> o = meta(t.observe(2, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 4, 1100L));
+        assertEquals("the counter difference is kept", 20L, o.get("delta_qty"));
+        assertEquals(4000L, o.get("delta_gp"));
+        assertNull(o.get("interval_start_ms"));
+        assertNull(o.get("interval_end_ms"));
+        // Normal clock control: [1000, 1050].
+        GeObservationTracker c = new GeObservationTracker();
+        c.observe(2, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 1, 990L);
+        c.observe(2, BUYING, new long[]{560, 0, 100, 300, 0}, false, 2, 1000L);
+        c.observe(2, BUYING, new long[]{560, 20, 100, 300, 4000}, false, 3, 1050L);
+        Map<?, ?> n = meta(c.observe(2, EMPTY, new long[]{0, 0, 0, 0, 0}, false, 4, 1100L));
+        assertEquals(1000L, n.get("interval_start_ms"));
+        assertEquals(1050L, n.get("interval_end_ms"));
+    }
+
+    @Test
+    public void uncertainCountersAndTerminalSlotsAreNeverFlushed()
+    {
+        at(BUYING, 10, 2400, 1);
+        assertNull(at(BUYING, 5, 1200, 2));	// regression: quarantined
+        assertTrue(tracker.due(500).isEmpty());
+        GeObservationTracker t = new GeObservationTracker();
+        t.observe(1, BUYING, new long[]{560, 0, 100, 300, 0}, false, 1, 1L);
+        t.observe(1, BOUGHT, new long[]{560, 100, 100, 300, 30000}, false, 2, 2L);	// terminal row sent at once
+        assertTrue(t.due(500).isEmpty());
+    }
 }

@@ -75,6 +75,25 @@ public class EventVerificationTest
         when(w.getText()).thenReturn(message);when(bystander.getText()).thenReturn(message);
         assertTrue(EventVerificationScreen.regions(c,source(event("kill_count"),message)).isEmpty());
     }
+    @Test public void chatMessageTextIsFoundInTheScrollAreaChildrenNotOnlyTheSenderLines()
+    {
+        Client c = client(); String message = "Your Vorkath kill count is: 42.";
+        Widget sender = text("", InterfaceID.Chatbox.SCROLLAREA);
+        Widget body = text("<col=ef1020>" + message + "</col>", InterfaceID.Chatbox.SCROLLAREA);
+        Widget other = text("You have a funny feeling like you're being followed.", InterfaceID.Chatbox.SCROLLAREA);
+        Widget scroll = mock(Widget.class);
+        when(scroll.getDynamicChildren()).thenReturn(new Widget[]{sender, body, other});
+        when(c.getWidget(InterfaceID.Chatbox.SCROLLAREA)).thenReturn(scroll);
+        List<VerificationFrame.Region> regions = EventVerificationScreen.regions(c, source(event("kill_count"), message));
+        assertEquals(1, regions.size()); assertEquals(42, regions.get(0).value);
+        // The same line twice in the visible history is ambiguous and stays unread.
+        when(other.getText()).thenReturn(message);
+        assertTrue(EventVerificationScreen.regions(c, source(event("kill_count"), message)).isEmpty());
+        // A line scrolled out of the chat box is not visible evidence.
+        when(other.getText()).thenReturn("Someone: Hi");
+        Widget box = text("", 0); when(box.getBounds()).thenReturn(new Rectangle(0, 0, 5, 5)); when(body.getParent()).thenReturn(box);
+        assertTrue(EventVerificationScreen.regions(c, source(event("kill_count"), message)).isEmpty());
+    }
     @Test public void levelDialogueMayMaterializeLaterButUnrelatedOrbsAreNeverEvidence()
     {
         Client c=client();Map<String,Object> e=event("level_up");e.put("skill","Mining");e.put("level",9);
@@ -85,6 +104,27 @@ public class EventVerificationTest
         List<VerificationFrame.Region> regions=EventVerificationScreen.regions(c,source);
         assertEquals(1,regions.size());assertEquals(9,regions.get(0).value);
         when(w.isHidden()).thenReturn(true);assertTrue(EventVerificationScreen.regions(c,source).isEmpty());
+    }
+    @Test public void levelDialogueOfAnotherSkillIsNotThisEventsEvidence()
+    {
+        // A real 0.7.67 frame: source Hunter 9, the dialogue on screen was Slayer 9.
+        Client c=client();Map<String,Object> e=event("level_up");e.put("skill","Hunter");e.put("level",9);
+        EventVerification.Source source=source(e,null);
+        Widget w=text("Your Slayer level is now 9.", InterfaceID.LevelupDisplay.TEXT2);
+        when(c.getWidget(InterfaceID.LevelupDisplay.TEXT2)).thenReturn(w);
+        assertTrue(EventVerificationScreen.regions(c,source).isEmpty());
+        assertEquals("other_skill_dialogue",EventVerificationScreen.levelUpUnseenReason(c,source));
+        // The event's own skill with a different number is still selected: the discrepancy is kept for the reader.
+        when(w.getText()).thenReturn("Your Hunter level is now 10.");
+        List<VerificationFrame.Region> regions=EventVerificationScreen.regions(c,source);
+        assertEquals(1,regions.size());assertEquals(9,regions.get(0).value);
+        assertEquals("hunter",regions.get(0).inputs.get("skill"));
+        when(w.getText()).thenReturn("<col=000080>Congratulations, you've just advanced your Hunter level.</col> Your Hunter level is now 9.");
+        assertEquals(1,EventVerificationScreen.regions(c,source).size());
+        when(w.isHidden()).thenReturn(true);
+        assertEquals("source_not_visible",EventVerificationScreen.levelUpUnseenReason(c,source));
+        assertEquals(Boolean.FALSE,EventVerificationScreen.levelDialogueSkill("Your Hunter level is now 9.","Slayer"));
+        assertNull(EventVerificationScreen.levelDialogueSkill("Congratulations!","Hunter"));
     }
     @Test public void minigameScreenExpectedComesFromEventNotWidget()
     {

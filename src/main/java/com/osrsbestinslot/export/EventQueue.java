@@ -217,13 +217,20 @@ final class EventQueue
 		}
 		ev = PublicTransport.event(ev, plugin.grants.captureEnabled());
 		if (ev == null) { healthEventsLost.incrementAndGet(); return; }
-		if (eventEvidence && plugin.verificationProbe.takeEvent(System.currentTimeMillis()))
+		if (eventEvidence)
 		{
 			EventVerification.Source source = new EventVerification.Source(ev, plugin.currentLinkToken(), plugin.activeHash,
 				plugin.verificationEpoch.get(), plugin.client.getTickCount(), plugin.lastSnapshotCapturedAtMs, System.currentTimeMillis(), plugin.verificationMessage);
-			boolean queued = plugin.eventVerification.offer(source);
+			// The hourly admission is charged only for a source the pending queue accepts (client thread: room, then offer).
+			boolean queued = false;
+			plugin.verify.evictExpiredSources();
+			if (!plugin.eventVerification.room()) plugin.verify.eventEvidenceUnknown(source, "pending_capacity");
+			else if (!plugin.verificationProbe.takeEvent(System.currentTimeMillis()))
+			{
+				if (plugin.verificationProbe.reportEventBudget()) plugin.verify.eventEvidenceUnknown(source, "event_budget");
+			}
+			else if (!(queued = plugin.eventVerification.offer(source))) plugin.verify.eventEvidenceUnknown(source, "pending_capacity");
 			if ("verification_discovery".equals(type)) plugin.discoveryEvidenceQueued = queued;
-			if (!queued) plugin.verify.eventEvidenceUnknown(source, "pending_capacity");
 		}
 		ev.put(EVENT_TOKEN_FP, tokenFingerprint);
 		healthEventsQueued.incrementAndGet();
@@ -822,10 +829,7 @@ final class EventQueue
 			if (receipts.contains(EventQueueProtocol.Outcome.DURABLE)) healthLastEventUploadMs.set(System.currentTimeMillis());
 			if (!retry.isEmpty())
 			{
-				long delay = 0;
-				try { delay = Math.multiplyExact(Long.parseLong(response.header("Retry-After", "0")), 1000L); }
-				catch (NumberFormatException | ArithmeticException ignored) { }
-				requeueEvents(retry, delay);
+				requeueEvents(retry, retryAfterMillis(response));
 			}
 			else
 			{
@@ -855,25 +859,12 @@ final class EventQueue
 			}
 			return;
 		}
-		// Non-2xx: the server did NOT take these events. A 4xx other than 429 is not
-		// retryable (bad token / malformed body would fail identically forever), so only
-		// 429 and 5xx are requeued; anything else is dropped deliberately and logged.
+		// Provider route failures and request timeouts remain retryable, as in queue-v1.
+		// Revoked links and permanent application rejections retain their terminal handling.
 		int code = response.code();
-		if (code == 429 || code >= 500)
+		if (code == 404 || code == 408 || code == 429 || code >= 500)
 		{
-			long retryAfterMs = 0L;
-			String h = response.header("Retry-After");
-			if (h != null)
-			{
-				try
-				{
-					retryAfterMs = Long.parseLong(h.trim()) * 1000L;
-				}
-				catch (NumberFormatException ignored)
-				{
-					// non-numeric (HTTP-date form) — fall back to the backoff ladder
-				}
-			}
+			long retryAfterMs = retryAfterMillis(response);
 			log.debug("OSRS BiS event sync HTTP {} — requeueing {} events", code, batch.size());
 			requeueEvents(batch, retryAfterMs);
 		}
@@ -921,6 +912,14 @@ final class EventQueue
 		else { eventRetryBackoffMs = next; eventRetryBackoffUntilMs = plugin.nowMs() + next; }
 		eventPostInFlight = false;
 		completeFinalFlush();
+	}
+
+	/** Integer Retry-After, capped before conversion so a large header cannot overflow. */
+	static long retryAfterMillis(Response response)
+	{
+		Long seconds = SnapshotUploader.parseRetryAfterSeconds(response.header("Retry-After"));
+		return seconds == null ? 0L
+			: Math.min(seconds, EVENT_RETRY_MAX_BACKOFF_MS / 1000L) * 1000L;
 	}
 
 	/** Read a response body for the ack, or null. Never throws. */

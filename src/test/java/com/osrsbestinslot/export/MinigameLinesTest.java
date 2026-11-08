@@ -112,4 +112,25 @@ public class MinigameLinesTest
 			assertEquals(k, "unverified", KillContext.kindOf(k));
 		}
 	}
+
+	@Test
+	public void completionLinesReadFromRealDiscoverySamplesParse()
+	{
+		Map<String, Object> r = MinigameLines.parseDialogue("Congratulations! You managed to destroy all the portals! We've awarded you 4 Void Knight Commendation points. Please also accept these coins as a reward.");
+		assertEquals("pest_control", r.get("minigame"));
+		assertEquals("win", r.get("result"));
+		assertEquals(4L, r.get("count"));
+		assertNull("points awarded for this game are not a total", r.get("total"));
+		assertEquals("loss", MinigameLines.parseDialogue("The Void Knight was killed, another of our Order has fallen and that Island is lost.").get("result"));
+		assertNull("the Pest Control end text is a message box, not a chat line", p("The Void Knight was killed, another of our Order has fallen and that Island is lost."));
+		r = p("@mes_hl_gre@Jeff seems happy with your work. Talk to him for your reward.");
+		assertEquals("mahogany_homes", r.get("minigame"));
+		assertEquals("complete", r.get("result"));
+		r = p("You have completed 1,204 contracts with a total of 18,500 points.");
+		assertEquals("contracts", r.get("detail"));
+		assertEquals(1204L, r.get("total"));
+		assertNull("not a portal win without the full line", MinigameLines.parseDialogue("Congratulations! You managed to destroy all the portals!"));
+		assertNull("a shield dropping is progress, not a result", p("The yellow, south-eastern portal shield has dropped!"));
+		assertNull("dialogue about a contract is not a completion", p("What kind of contract would you like?"));
+	}
 }

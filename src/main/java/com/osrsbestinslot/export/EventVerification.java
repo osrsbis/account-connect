@@ -18,6 +18,12 @@ final class EventVerification
         final long epoch, revision, at;
         final int tick;
         final Map<String, Object> fields;
+        /** The source had frame room on its first look; a retry after a changed screen keeps that decision. */
+        boolean framePaid;
+        /** A full-window frame was decided for this source on its first look; retries keep it. */
+        boolean fullWindowPaid;
+        /** Why the last look was retried (changed screen, blank regions); reported if the delay runs out. */
+        String retryReason;
         Source(Map<String, Object> event, String token, String account, long epoch, int tick,
             long revision, long at, String text)
         {
@@ -52,6 +58,20 @@ final class EventVerification
         if (pending.size() >= MAX_PENDING) return false;
         pending.addLast(source);
         return true;
+    }
+    /**
+     * Room for one more source at this tick. Sources already past their delay hold no slot: they are removed here and
+     * returned, so the caller records each as UNKNOWN before admitting the new one.
+     */
+    synchronized List<Source> room(int nowTick, List<Source> expiredOut)
+    {
+        if (pending.size() >= MAX_PENDING)
+            for (java.util.Iterator<Source> it = pending.iterator(); it.hasNext(); )
+            {
+                Source s = it.next();
+                if (s.expired(nowTick)) { it.remove(); expiredOut.add(s); }
+            }
+        return expiredOut;
     }
     synchronized boolean room() { return pending.size() < MAX_PENDING; }
     synchronized List<Source> drain()

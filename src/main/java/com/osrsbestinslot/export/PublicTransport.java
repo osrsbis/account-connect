@@ -174,9 +174,9 @@ final class PublicTransport
     }
     private static Map<String,Object> geObservation(Object input)
     {
-        Set<String> numbers = keys("schema_v sequence cumulative_qty cumulative_gp delta_from_qty delta_from_gp observed_at_ms counter_observed_at_ms listing_price execution_price tax_gp delta_qty delta_gp interval_start_ms interval_end_ms");
-        Set<String> values = keys("runelite_grand_exchange_offer runelite_spent_tax_unknown ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session account_profile unknown baseline_only observed_counter_difference");
-        Set<String> labels = keys("source gp_semantics identity offer_key_scope delta_status fill_time");
+        Set<String> numbers = keys("schema_v sequence cumulative_qty cumulative_gp delta_from_qty delta_from_gp observed_at_ms counter_observed_at_ms listing_price execution_price tax_gp delta_qty delta_gp interval_start_ms interval_end_ms native_tax_gp native_tax_server_gp steps_dropped server_date_minutes server_clock_read_ms server_minute_seen_at_ms");
+        Set<String> values = keys("runelite_grand_exchange_offer runelite_spent_tax_unknown ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session account_profile unknown baseline_only observed_counter_difference varp_long_when_row_built client_callback_receipt");
+        Set<String> labels = keys("source gp_semantics identity offer_key_scope delta_status fill_time native_tax_source step_time");
         Map<String,Object> out = new LinkedHashMap<>();
         if (input instanceof Map) for (Map.Entry<?,?> e : ((Map<?,?>) input).entrySet())
         {
@@ -184,6 +184,26 @@ final class PublicTransport
             if (numbers.contains(key) && (value == null || value instanceof Number)
                 || labels.contains(key) && value instanceof String && values.contains(value))
                 out.put((String) key, value);
+            else if ("steps".equals(key) && value instanceof List) out.put("steps", geSteps((List<?>) value));
+        }
+        return out;
+    }
+    /** Per-callback GE steps: numbers and the kind label only, at most the tracker's own bound. */
+    private static List<Map<String,Object>> geSteps(List<?> input)
+    {
+        Set<String> numbers = keys("at_ms tick cumulative_qty cumulative_gp native_tax_gp native_tax_server_gp");
+        List<Map<String,Object>> out = new ArrayList<>();
+        for (Object o : input)
+        {
+            if (!(o instanceof Map) || out.size() >= GeObservationTracker.MAX_STEPS) continue;
+            Map<String,Object> m = new LinkedHashMap<>();
+            for (Map.Entry<?,?> e : ((Map<?,?>) o).entrySet())
+            {
+                Object key = e.getKey(), value = e.getValue();
+                if (numbers.contains(key) && value instanceof Number) m.put((String) key, value);
+                else if ("kind".equals(key) && ("counter".equals(value) || "tax".equals(value))) m.put("kind", value);
+            }
+            out.add(m);
         }
         return out;
     }

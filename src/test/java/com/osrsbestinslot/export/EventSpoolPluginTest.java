@@ -613,6 +613,66 @@ public class EventSpoolPluginTest
 		replayAndWaitNoRequest(p, before);
 	}
 
+	private void replayRetryAfterIsBounded(int code, String seconds, long expectedDelay) throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		emit(p, "trade");
+		releaseToReplay(p);
+		script.add(b -> new MockResponse().setResponseCode(code).setHeader("Retry-After", seconds));
+		replayAndWait(p, bodies.size() + 1);
+		assertEquals(1, pendingIds(p).size());
+		assertEquals("respect the bounded server delay", expectedDelay, p.spooler.spoolReplayBackoffMs);
+	}
+
+	@Test public void transient404ReplayHonorsRetryAfter() throws Exception
+	{
+		replayRetryAfterIsBounded(404, "120", 120000L);
+	}
+	@Test public void transient408ReplayHonorsRetryAfter() throws Exception
+	{
+		replayRetryAfterIsBounded(408, "120", 120000L);
+	}
+	@Test public void transient503ReplayHonorsRetryAfter() throws Exception
+	{
+		replayRetryAfterIsBounded(503, "120", 120000L);
+	}
+	@Test public void huge429RetryAfterCannotOverflowBeforeCapping() throws Exception
+	{
+		replayRetryAfterIsBounded(429, Long.toString(Long.MAX_VALUE), 300000L);
+	}
+
+	private void transientReplayRetainsPayload(int code) throws Exception
+	{
+		AccountConnectPlugin p = plugin(TOKEN_A, "12345");
+		grant(p);
+		emit(p, "trade");
+		releaseToReplay(p);
+		List<String> original = pendingIds(p);
+		int before = bodies.size();
+		script.add(b -> new MockResponse().setResponseCode(code).setBody("<html>temporary route failure</html>"));
+		if (code == 408) script.add(b -> new MockResponse().setResponseCode(code).setBody("request timeout"));
+		replayAndWait(p, before + (code == 408 ? 2 : 1));
+		assertEquals("transient response must retain the durable row", original, pendingIds(p));
+		assertEquals(0L, p.events.captureHealthSnapshot().get("spool_quarantined_total"));
+		assertTrue("retry remains bounded", p.spooler.spoolReplayBackoffUntilMs > 0);
+		replayAndWait(p, bodies.size() + 1);
+		assertTrue("a later per-ID receipt settles the original row", pendingIds(p).isEmpty());
+		assertEquals(original, idsIn(bodies.get(bodies.size() - 1)));
+	}
+
+	@Test
+	public void transient408ReplayRetainsPayload() throws Exception
+	{
+		transientReplayRetainsPayload(408);
+	}
+
+	@Test
+	public void provider404ReplayRetainsPayload() throws Exception
+	{
+		transientReplayRetainsPayload(404);
+	}
+
 	@Test
 	public void otherClientErrorQuarantinesMetadataAndNeverRetries() throws Exception
 	{

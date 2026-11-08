@@ -19,6 +19,31 @@ account to osrsbestinslot.com so the calculators fill in from the real account.
     builds. That suite cannot be narrowed.
 - Bump `version` in `build.gradle` with each release.
 
+## Engineering principles
+
+These rules come from the 0.7.67 simplification. They apply to every change.
+
+- The plugin owns what only the client can do: capture of transient game state, filtering before anything leaves the
+  client (the region frame keeps only the selected pixels), reliable delivery, and UI that must respond at once.
+- The server owns derived analysis: interpretation, history and comparisons.
+  - Before moving an analysis to the server, make sure ingest stores every input it needs. Send a missing input as
+    a field on a row the plugin already sends where that fits, rather than as a new row or request.
+  - Add the server reader in the same change, or record it as an open follow-up.
+- A new field or event is sent only after the server accepts it.
+- Reuse RuneLite events and the libraries the client already ships before writing new code.
+- Offline and replay models belong in `src/test` or outside the repository, never in the shipped plugin.
+- Merge two code paths only when their contracts match: the same account, tick and revision identity, storage and
+  purge rules, retries, receipts and behaviour for older clients. If any of these differ, keep the paths separate.
+- Prefer cohesive components with narrow interfaces. Split a class when that gives each part one job, not only to
+  meet a line count.
+- Measure a size or speed change before and after: the Plugin Hub reviewer's token count, JAR bytes, and any request,
+  payload or runtime cost the change touches. An estimate is not a result; label it as an estimate.
+- Code that cannot run (hard-wired off, or with no production caller) is removed as unused. Retiring a shipped
+  capability that the server can still switch on is a product decision, not an engineering one: keep the capability
+  until it is made, and record it with the change.
+- A simplification changes no user-facing wording and no release gate (see "Build and test" and "Plugin Hub rules"),
+  and removes nothing that is collected.
+
 ## Plugin Hub rules
 
 Every Hub update is reviewed by a RuneLite maintainer. Each rule below came from a review; do not repeat a rejected

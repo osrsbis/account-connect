@@ -2,6 +2,8 @@ package com.osrsbestinslot.export;
 
 import java.util.*;
 
+import static com.osrsbestinslot.export.EventValues.*;
+
 /** Closed projections of audited own-state families. Unknown is never an empty balance or gain. */
 final class OwnStateEvent
 {
@@ -217,15 +219,6 @@ final class OwnStateEvent
         return new LinkedHashMap<>(Map.of("start_slot", start, "slot_count", count, "coins", coins,
             "platinum_tokens", platinum, "currency_gp_equivalent", equivalent));
     }
-    private static Map<?,?> map(Object x) { if (!(x instanceof Map)) throw new IllegalArgumentException(); return (Map<?,?>)x; }
     private static List<?> list(Object x, int max) { if (!(x instanceof List) || ((List<?>)x).size() > max) throw new IllegalArgumentException(); return (List<?>)x; }
-    private static String choice(Object x, List<String> allowed) { if (!(x instanceof String) || !allowed.contains(x)) throw new IllegalArgumentException(); return (String)x; }
     private static Long nullable(Object x) { return x == null ? null : number(x, Integer.MIN_VALUE, Integer.MAX_VALUE); }
-    private static long number(Object x, long min, long max)
-    {
-        if (!(x instanceof Number)) throw new IllegalArgumentException();
-        Number n = (Number)x; long v = n.longValue();
-        if (!Double.isFinite(n.doubleValue()) || n.doubleValue() != v || v < min || v > max) throw new IllegalArgumentException();
-        return v;
-    }
 }

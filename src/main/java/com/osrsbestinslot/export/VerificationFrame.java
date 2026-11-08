@@ -38,6 +38,24 @@ final class VerificationFrame
         }
     }
 
+    /**
+     * True when every selected region is a single colour in this image: nothing was drawn there yet (the rig's
+     * sample right after login, 11-08, was all black). Such a frame holds no evidence and is not uploaded.
+     */
+    static boolean regionsBlank(BufferedImage image, List<Region> regions, int canvasWidth, int canvasHeight)
+    {
+        for (Region r : regions)
+        {
+            Rectangle p = pixels(r, image.getWidth(), image.getHeight(), canvasWidth, canvasHeight);
+            if (p.isEmpty()) continue;
+            int first = image.getRGB(p.x, p.y) & 0xFFFFFF;
+            for (int y = p.y; y < p.y + p.height; y++)
+                for (int x = p.x; x < p.x + p.width; x++)
+                    if ((image.getRGB(x, y) & 0xFFFFFF) != first) return false;
+        }
+        return true;
+    }
+
     static Rectangle pixels(Region region, int width, int height, int canvasWidth, int canvasHeight)
     {
         // Round inward: never include pixels outside the selected widget.
@@ -48,6 +66,27 @@ final class VerificationFrame
         int bottom = (int) Math.floor((b.y + b.height) * (double) height / canvasHeight);
         return new Rectangle(x, y, Math.max(0, right - x), Math.max(0, bottom - y))
             .intersection(new Rectangle(0, 0, width, height));
+    }
+
+    /**
+     * The selected regions at the client's native resolution, read from the client's own pixel buffer: the game draws
+     * its interface there before any stretched-mode or display (DPI) scaling, so text keeps its exact font pixels. Null
+     * when the buffer does not match the canvas the widget bounds refer to; the caller then uses the drawn frame.
+     */
+    static BufferedImage nativeRegions(int[] buffer, int bufferWidth, int bufferHeight, List<Region> regions,
+        int canvasWidth, int canvasHeight)
+    {
+        if (buffer == null || bufferWidth != canvasWidth || bufferHeight != canvasHeight
+            || bufferWidth <= 0 || bufferHeight <= 0 || buffer.length < bufferWidth * bufferHeight) return null;
+        BufferedImage out = new BufferedImage(bufferWidth, bufferHeight, BufferedImage.TYPE_INT_RGB);
+        for (Region r : regions)
+        {
+            Rectangle p = pixels(r, bufferWidth, bufferHeight, canvasWidth, canvasHeight);
+            for (int y = p.y; y < p.y + p.height; y++)
+                for (int x = p.x; x < p.x + p.width; x++)
+                    out.setRGB(x, y, buffer[y * bufferWidth + x] & 0xFFFFFF);
+        }
+        return out;
     }
 
     static BufferedImage retainRegions(BufferedImage source, List<Region> regions, int canvasWidth, int canvasHeight)

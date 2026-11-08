@@ -83,6 +83,13 @@ final class MinigameLines
 		{"chompy", "reward", "milestone_xp", "^You've been awarded ranged experience for your relentless pursuit of chompies!$", 0, 0},
 		// Forestry partial reward (wiki): the player was not there when the event started.
 		{"forestry", "reward", "reduced", "^As you weren't chopping near the event when it started, you aren't eligible for full rewards\\.$", 0, 0},
+		// Lines read from real 0.7.67 discovery samples (11-06/07), where the earlier research found no completion signal.
+		// Mahogany Homes: a finished contract, before the reward is collected (no number on this line). Independent Hub
+		// plugins parse both Mahogany lines as game messages (Mahogany Homes, Dude Where's My Stuff); none generates
+		// them.
+		{"mahogany_homes", "complete", null, "^[A-Z][a-z]{1,20} seems happy with your work\\. Talk to (?:him|her) for your reward\\.$", 0, 0},
+		// Mahogany Homes: the running totals the game states when a reward is collected (total contracts; points not kept).
+		{"mahogany_homes", "total", "contracts", "^You have completed " + NUM + " contracts with a total of " + NUM + " points\\.$", 0, 1},
 	};
 
 	private static final Pattern[] COMPILED = new Pattern[LINES.length];
@@ -111,6 +118,11 @@ final class MinigameLines
 		{"mage_arena", "complete", "mage_arena_2", "^Kolodion takes your cape and imbues it with the power of the gods before handing it back\\.$", 0, 0},
 		{"knight_waves", "complete", null, "^You receive access to the prayers Chivalry and Piety and .*$", 0, 0},
 		{"pete_kayer", "complete", "challenge", "^Congratulations! You have completed the challenge!$", 0, 0},
+		// Pest Control end of game, in the message box (real 0.7.67 discovery samples, dialogue surface; the same text is
+		// read from Messagebox.TEXT by the Hub plugin Dude Where's My Stuff). The win states the points awarded for this
+		// game (count), not a total.
+		{"pest_control", "win", null, "^Congratulations! You managed to destroy all the portals! We've awarded you " + NUM + " Void Knight Commendation points?\\. Please also accept these coins as a reward\\.$", 1, 0},
+		{"pest_control", "loss", null, "^The Void Knight was killed, another of our Order has fallen and that Island is lost\\.$", 0, 0},
 	};
 
 	/** Packed ids of the dialogue texts read: ChatLeft.TEXT, Messagebox.TEXT, Objectbox.TEXT, ObjectboxDouble.TEXT. */

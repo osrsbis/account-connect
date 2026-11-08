@@ -1,13 +1,13 @@
 # Own-gameplay capture
 
-These contracts describe capture controlled by `X-Own-Gameplay: on`. The 0.7.66 candidate can receive that
-grant through collection rollout independently of staff identity. Closed combat, signal, state and variable
-events use the existing granted, capped legacy event receiver, and are not sent while a `ge-v1` or
+These contracts describe capture shipped in 0.7.67, controlled by `X-Own-Gameplay: on`.
+The grant is delivered through collection rollout independently of staff identity. Closed combat, signal, state
+and variable events use the existing granted, capped legacy event receiver, and are not sent while a `ge-v1` or
 `own-history-v1` Queue grant is active. They are not kept in a durable public journal across a crash.
 No server grants a Queue scope for them: the server sends only `ge-v1`, `own-history-v1` or `off`, and the
 four `own-*` Queue scopes earlier candidates accepted were removed in the 0.7.67 simplification.
 
-## Own-event provenance (0.7.37 candidate)
+## Own-event provenance
 
 RuneLite subscriber names follow the actual event-bus contract. The 0.7.36 isolated Java17 client exposed a startup rejection for three noncanonical method names; the focused regression registers the plugin with RuneLite's EventBus. Exact-client gameplay and release acceptance remain separate.
 
@@ -80,9 +80,13 @@ locations, not the player's location or a resolved quest-dependent route. A
 observations and explicit ground/object tracking-capacity gaps. Ground events
 contain no location or player labels. Drop origin, removal cause and timers
 across client sessions remain unknown; removal is never a claimed pickup,
-expiry or completion. These additions are LOCAL and not activated.
+expiry or completion. These additions ship in 0.7.67 under the own-gameplay grant; each source still needs
+its own live evidence before its game-client behavior is considered verified.
 
-## Own-signal, own-vars and own-state events (candidate)
+## Own-signal, own-vars and own-state events (0.7.67)
+
+From 0.7.68, `EventValues` holds the scalar guards these closed projections share (a refactor; no output change).
+Each projection retains its field allowlist, numeric bounds, source checks and unknown-value behavior.
 
 `own_signal` events carry seven closed system-message and visible-check
 families: coal bag, fish barrel, grape barrel, chompy count,
@@ -105,7 +109,7 @@ room label (or unknown), and own tile overlap with a previously observed ToA
 acid object. Other actors and names are excluded. The death observation does not
 prove encounter membership or a team wipe; the overlap does not prove damage or
 a mistake. No location is uploaded in these events. Existing scene/account/grant
-gaps clear source continuity. Exact game-client timing and release remain open.
+gaps clear source continuity. These callbacks ship in 0.7.67; exact game-client timing remains unverified.
 
 
 A change of link token or of the own-gameplay grant starts a new capture baseline
@@ -151,14 +155,14 @@ original snapshot is preserved without duplicating split item arrays in its
 recent-history buffer. Unknown and empty remain distinct. Records keep
 item IDs, long quantities and packet time; estimates, victim fields and income
 claims are excluded. Scene/account/grant resets clear the six bounded dedupe
-states. These additions are unreleased and require exact-client acceptance.
+states. These additions ship in 0.7.67; source-specific exact-client acceptance remains unverified.
 
 Each source baseline/change is one event with its own `event_id` on the legacy receiver.
 Process-local observed/handed-off/failure counters are not durable delivery counts.
 There is one plugin artifact; capture grants and staff rights are separate.
 Exact-source review, a matched receiver and actual-client acceptance remain required before release.
 
-## Own-combat events (candidate)
+## Own-combat events (0.7.67)
 
 With the own-gameplay grant, own incoming hits and own hits on NPCs are sent as
 `combat_hit` and `combat_npc_end` events on the legacy receiver. Observed NPC
@@ -168,6 +172,7 @@ needed; later hits on the same target do not repeat it. No attacker,
 other-player name or player target is recorded. The existing snapshot remains, and its hit rows carry no `worn`.
 Session counters distinguish observations from event handoff;
 handoff does not prove disk persistence or server acceptance.
-This extension is local, default off and separate from the frozen public build.
-Exact-source review, the matched backend, disclosure, client QA and normal release
-are still required. It does not make all snapshot families durable.
+These events ship in 0.7.67 and are accepted by the granted legacy receiver. Captured events do not prove
+complete combat history: admission caps, memory-queue limits and missing observations still apply.
+The server reader for `loot.npc_id`, `death.death_tick` and `combat_hit.worn` remains a separate open follow-up.
+Storing those inputs does not yet establish encounter reconstruction. Not all snapshot families are durable.

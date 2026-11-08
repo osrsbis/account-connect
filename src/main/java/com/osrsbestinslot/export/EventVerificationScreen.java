@@ -25,6 +25,11 @@ final class EventVerificationScreen
             {
                 for (int id = InterfaceID.Chatbox.LINE0; id <= InterfaceID.Chatbox.LINE199; id++)
                     match(client, client.getWidget(id), event.text, matches);
+                // The static LINEn widgets hold only the sender; the message text is in the dynamic children of the
+                // chat scroll area (RuneLite ChatHistoryPlugin reads it there).
+                Widget scroll = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+                Widget[] lines = scroll == null ? null : scroll.getDynamicChildren();
+                if (lines != null) for (Widget line : lines) match(client, line, event.text, matches);
                 for (int id : MinigameLines.DIALOGUE_TEXTS) match(client, client.getWidget(id), event.text, matches);
             }
             // Repeated identical lines are ambiguous, not proof of the current event.
@@ -32,11 +37,13 @@ final class EventVerificationScreen
         }
         if ("level_up".equals(event.type))
         {
-            for (int id : new int[]{InterfaceID.LevelupDisplay.TEXT1, InterfaceID.LevelupDisplay.TEXT2})
+            // Only the dialogue of the event's own skill. Its number is not filtered, so a wrong level stays a mismatch;
+            // another skill's dialogue (several level-ups at once) is not this event's evidence.
+            for (int id : LEVEL_TEXTS)
             {
                 Widget w = client.getWidget(id);
                 String text = w == null ? null : EventVerification.clean(w.getText());
-                if (visible(client, w) && text != null && text.matches("(?i).*level is now [0-9]+[.!]?.*"))
+                if (visible(client, w) && levelDialogueSkill(text, event.fields.get("skill")) == Boolean.TRUE)
                     add(out, w, "level", event.fields.get("level"), "level_up", "level",
                         VerificationProbe.inputs("skill", VerificationProbe.safeKey(String.valueOf(event.fields.get("skill")))));
             }
@@ -54,6 +61,31 @@ final class EventVerificationScreen
         }
         if ("loot".equals(event.type)) reward(client, event, out);
         return out.size() > MAX_REGIONS ? new ArrayList<>(out.subList(0, MAX_REGIONS)) : out;
+    }
+
+    static final int[] LEVEL_TEXTS = {InterfaceID.LevelupDisplay.TEXT1, InterfaceID.LevelupDisplay.TEXT2};
+    private static final Pattern LEVEL_LINE = Pattern.compile("(?i)^(?:.*\\s)?your ([a-z]+) level is now [0-9,]+[.!]?.*$");
+
+    /** TRUE when the text is the level line of this skill, FALSE when it is another skill's, null when it is not one. */
+    static Boolean levelDialogueSkill(String text, Object skill)
+    {
+        if (text == null) return null;
+        java.util.regex.Matcher m = LEVEL_LINE.matcher(text);
+        if (!m.matches()) return null;
+        return skill instanceof String && m.group(1).trim().equalsIgnoreCase(((String) skill).trim());
+    }
+
+    /** Why a level-up source had no evidence: another skill's level dialogue was on screen, or nothing was. */
+    static String levelUpUnseenReason(Client client, EventVerification.Source event)
+    {
+        if (!"level_up".equals(event.type)) return "source_not_visible";
+        for (int id : LEVEL_TEXTS)
+        {
+            Widget w = client.getWidget(id);
+            if (visible(client, w) && levelDialogueSkill(EventVerification.clean(w.getText()), event.fields.get("skill")) == Boolean.FALSE)
+                return "other_skill_dialogue";
+        }
+        return "source_not_visible";
     }
 
     private static void match(Client client, Widget w, String text, List<Widget> out)

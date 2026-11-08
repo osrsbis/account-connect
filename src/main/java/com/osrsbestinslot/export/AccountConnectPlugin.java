@@ -130,7 +130,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	static final String PLUGIN_VERSION = "0.7.67";
+	static final String PLUGIN_VERSION = "0.7.68";
 	static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
@@ -812,6 +812,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			ge.resolveUnkeyed(client.getAccountHash());	// GE events held at hash -1: judge once the account is known
 		}
+		ge.flushDue();	// partial fills held by the per-minute throttle, sent once their window passes
 		if (activityLogActive())
 		{
 			if (++session.xpFlushTicks >= SessionEvents.XP_FLUSH_TICKS)
@@ -1238,6 +1239,13 @@ public class AccountConnectPlugin extends Plugin
 	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
 	{
 		ge.offerChanged(event);
+	}
+
+	@Subscribe
+	public void onVarbitChanged(net.runelite.api.events.VarbitChanged event)
+	{
+		ge.taxVarChanged(event);
+		ge.minuteVarChanged(event);
 	}
 
 	@Subscribe

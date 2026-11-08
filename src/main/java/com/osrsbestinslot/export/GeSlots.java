@@ -18,6 +18,7 @@ import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.Player;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.config.RuneScapeProfileType;
 
 
@@ -39,6 +40,30 @@ final class GeSlots
 		accountHash = -1L;
 		restoredFor = null;
 		unkeyed.clear();
+		minuteValue = 0;
+		minuteStartedAtMs = 0L;
+	}
+
+	/** The game's minute counter (varp DATE_MINUTES) last seen change, and when this client saw it step by exactly one. */
+	private int minuteValue;
+	/** Client time the current minute value arrived as a +1 step while logged in; 0 when not seen (login, jump, hop). */
+	private long minuteStartedAtMs;
+	/** A minute step is due every 60 s; past this, the stored step is too old to vouch for the current minute. */
+	static final long MINUTE_FRESH_MS = 65_000L;
+
+	/**
+	 * DATE_MINUTES changed. A +1 step outside the login burst is a minute boundary set by the game: its arrival time on
+	 * this client is that boundary plus the network delay, which lets a reader place the client clock against the
+	 * game's own. A first value, a jump or a value in the login burst only records the minute (start unknown).
+	 */
+	void minuteVarChanged(net.runelite.api.events.VarbitChanged event)
+	{
+		if (event.getVarpId() != VarPlayerID.DATE_MINUTES || event.getVarbitId() != -1 || plugin.client == null) return;
+		int v = event.getValue();
+		boolean step = minuteValue > 0 && v == minuteValue + 1 && plugin.client.getGameState() == GameState.LOGGED_IN
+			&& plugin.client.getTickCount() - loginTick > LOGIN_BURST_TICKS;
+		minuteStartedAtMs = step ? System.currentTimeMillis() : 0L;
+		minuteValue = v;
 	}
 
 	/** Tick of the last LOGGED_IN. The client replays every slot right after login; that replay is a baseline, not activity. */
@@ -290,6 +315,9 @@ final class GeSlots
 				loginTick = plugin.client.getTickCount();
 			}
 			observations.clear();
+			// The cleared slots stay saved under their own key: forget which key was loaded, so returning to it reads
+			// them back instead of starting fresh and overwriting the saved entry (review d1d15d0 P2).
+			restoredFor = null;
 			profileType = profile;
 			tokenFingerprint = token;
 		}
@@ -340,10 +368,66 @@ final class GeSlots
 	{
 		Map<String, Object> fields = observations.observe(slot, state, value, replay, tick, observedAt);
 		save();
+		emit(slot, fields);
+	}
+
+	/**
+	 * Once a tick: send partial fills the per-minute throttle held back (or a restart carried over) when no later
+	 * offer callback arrived to send them. Only for the slots' own account, in the world, after the login replay.
+	 */
+	void flushDue()
+	{
+		// awaitingLogin is not read here: it can be left stale while LOGGED_IN (see offerChanged).
+		if (plugin.client == null || plugin.client.getGameState() != GameState.LOGGED_IN || !unkeyed.isEmpty()) return;
+		// Only once this account's GE was seen (accountHash is set by a GE callback or the seed).
+		if (plugin.client.getAccountHash() != accountHash || accountHash == -1L) return;
+		// The slots belong to one link token, account and profile (the key they were restored or started under). The
+		// live profile and token are read first: a change drops the old slots here (they stay saved under their own
+		// key), so nothing of theirs is sent under the new identity (review P3-a: a hop to a seasonal world).
+		prepareContext();
+		// Back on an identity whose slots were saved: read them back (once per key), so a held fill is sent across the gap.
+		restore();
+		if (observations.isEmpty()) return;
+		int tick = plugin.client.getTickCount();
+		if (tick - loginTick <= LOGIN_BURST_TICKS || accountHash == -1L) return;
+		String key = key();
+		if (key == null || !key.equals(restoredFor)) return;
+		List<Map.Entry<Integer, Map<String, Object>>> due = observations.due(tick);
+		if (due.isEmpty()) return;
+		save();
+		for (Map.Entry<Integer, Map<String, Object>> e : due) emit(e.getKey(), e.getValue());
+	}
+
+	/**
+	 * A GE tax var (long varps GE_TAX_SLOT_LONG_0..7) changed. Recorded as a step of that slot with the client's value
+	 * and the last value the server set, so the order of tax and offer updates is on record. Own account only, in the
+	 * world, for slots the tracker already holds; nothing is sent by itself.
+	 */
+	void taxVarChanged(net.runelite.api.events.VarbitChanged event)
+	{
+		int varp = event.getVarpId();
+		int slot = varp - VarPlayerID.GE_TAX_SLOT_LONG_0;
+		if (slot < 0 || slot >= SLOT_COUNT || event.getVarbitId() != -1 || plugin.client == null
+			|| plugin.client.getGameState() != GameState.LOGGED_IN
+			|| plugin.client.getAccountHash() != accountHash || accountHash == -1L) return;
+		// The login burst re-sends every var: a replayed value is not a tax movement. (awaitingLogin can be stale while
+		// LOGGED_IN, so only the burst ticks decide.)
+		if (plugin.client.getTickCount() - loginTick <= LOGIN_BURST_TICKS) return;
+		long server;
+		try { server = plugin.client.getServerVarpLongValue(varp); }
+		catch (RuntimeException e) { server = GeObservationTracker.NO_TAX; }
+		observations.taxChanged(slot, event.getLongValue(), server, plugin.client.getTickCount(), System.currentTimeMillis());
+		save();	// a tax step survives a restart or an identity round trip like a counter step
+	}
+
+	private void emit(int slot, Map<String, Object> fields)
+	{
 		if (fields != null)
 		{
 			String type = (String) fields.remove("type");
 			fields.put("profile_type", profileType);
+			nativeTax(slot, fields.get("ge_observation"));
+			serverClock(fields.get("ge_observation"));
 			// The session upload loop may still name the previous account during login.
 			Player self = plugin.client == null ? null : plugin.client.getLocalPlayer();
 			fields.put("rsn", self == null ? null : self.getName());
@@ -352,6 +436,64 @@ final class GeSlots
 				fields.put("account_hash", Long.toString(accountHash));
 			}
 			plugin.events.emitEvent(type, fields);
+		}
+	}
+
+	/**
+	 * The game's own cumulative sale tax for this slot (long varps GE_TAX_SLOT_LONG_0..7, which the GE interface
+	 * subtracts from the gross to show the net), read when the row is built. It is recorded as observed, not as an
+	 * exact per-fill tax: when the varp updates relative to the offer change, and when it resets, is not yet known
+	 * from runtime evidence, so the server compares it across rows of the same offer before trusting it.
+	 */
+	private void nativeTax(int slot, Object observation)
+	{
+		if (!(observation instanceof Map) || plugin.client == null || slot < 0 || slot >= SLOT_COUNT) return;
+		@SuppressWarnings("unchecked") Map<String, Object> o = (Map<String, Object>) observation;
+		try
+		{
+			o.put("native_tax_gp", plugin.client.getVarpLongValue(VarPlayerID.GE_TAX_SLOT_LONG_0 + slot));
+			o.put("native_tax_source", "varp_long_when_row_built");
+		}
+		catch (RuntimeException e)
+		{
+			// A client without the long varp leaves the field out; the row is unchanged.
+		}
+		try
+		{
+			// The last value the server set, independent of any client-side prediction since.
+			o.put("native_tax_server_gp", plugin.client.getServerVarpLongValue(VarPlayerID.GE_TAX_SLOT_LONG_0 + slot));
+		}
+		catch (RuntimeException e)
+		{
+			// Left out when the client cannot say.
+		}
+	}
+
+	/**
+	 * The game's minute clock (varp DATE_MINUTES, which the game's own scripts compare with server-set times) and this
+	 * client's clock read at the same moment. It is an observed anchor, not an execution time: it lets a reader check
+	 * the client clock that dates every step against a clock the game sets, to the minute. Left out when unreadable or 0.
+	 */
+	private void serverClock(Object observation)
+	{
+		if (!(observation instanceof Map) || plugin.client == null) return;
+		@SuppressWarnings("unchecked") Map<String, Object> o = (Map<String, Object>) observation;
+		try
+		{
+			// Only a minute this client saw begin (a +1 step since login), and only within MINUTE_FRESH_MS of that step:
+			// the game is then updating the value now, so it cannot be a stale minute next to a fresh client time
+			// (reviews 843fcc4 P3-2 and 1dca800 P3-2). A game that stopped stepping simply sends nothing.
+			int minutes = plugin.client.getVarpValue(VarPlayerID.DATE_MINUTES);
+			long now = System.currentTimeMillis();
+			if (minutes <= 0 || minutes != minuteValue || minuteStartedAtMs <= 0L || now - minuteStartedAtMs > MINUTE_FRESH_MS
+				|| now < minuteStartedAtMs) return;
+			o.put("server_date_minutes", minutes);
+			o.put("server_clock_read_ms", now);
+			o.put("server_minute_seen_at_ms", minuteStartedAtMs);
+		}
+		catch (RuntimeException e)
+		{
+			// Left out when the client cannot say.
 		}
 	}
 

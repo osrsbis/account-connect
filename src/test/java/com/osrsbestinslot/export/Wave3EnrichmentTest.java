@@ -84,10 +84,21 @@ public class Wave3EnrichmentTest
 	{
 		AccountConnectPlugin plugin = linkedPlugin();
 		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
-		plugin.session.lastKeyboardIdleTicks = 900;
-		plugin.session.lastMouseIdleTicks = 900;	// no input for minutes -> idle
+		plugin.session.lastKeyboardIdleTicks = 15_000;
+		plugin.session.lastMouseIdleTicks = 15_000;	// 5 minutes of 20 ms client ticks -> idle
 		plugin.session.trackLogout();
 		assertEquals("idle", plugin.events.pendingEvents.get(0).get("reason"));
+	}
+
+	@Test
+	public void logoutReasonManualAfterShortPauseCountedInClientTicks() throws Exception
+	{
+		AccountConnectPlugin plugin = linkedPlugin();
+		plugin.session.sessionStartMillis = System.currentTimeMillis() - 60_000L;
+		plugin.session.lastKeyboardIdleTicks = 1_400;	// 28 s without input, then the Logout button
+		plugin.session.lastMouseIdleTicks = 1_400;
+		plugin.session.trackLogout();
+		assertEquals("manual", plugin.events.pendingEvents.get(0).get("reason"));
 	}
 
 	@Test

@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import net.runelite.api.Constants;
 import net.runelite.api.GameState;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
@@ -51,10 +52,12 @@ final class SessionEvents
 	volatile int lastKeyboardIdleTicks;
 	volatile int lastMouseIdleTicks;
 	// Logout-reason heuristics: a session within this window of 6h is the in-game six-hour cap; both idle
-	// counters above this tick count (0.6s/tick, ~5 min) at logout = an idle timeout, else a manual logout.
+	// counters at or above this count at logout = an idle timeout, else a manual logout. The counters count client
+	// ticks (Constants.CLIENT_TICK_LENGTH, 20 ms), not game ticks. The game's idle logout comes after 5 minutes without
+	// input; the sample is up to one 5 s sync old, so the bound is 5 minutes less 10 s.
 	private static final long SIX_HOUR_MS = 6L * 60L * 60L * 1000L;
 	private static final long SIX_HOUR_SLACK_MS = 3L * 60L * 1000L;
-	private static final int IDLE_LOGOUT_TICKS = 500;
+	static final int IDLE_LOGOUT_TICKS = (5 * 60 * 1000 - 10 * 1000) / Constants.CLIENT_TICK_LENGTH;
 	/** Dedup state for the broad activity sweep: emit a level event only on a real level change, a GE event
 	 *  only on a state transition (not every partial-fill tick). Client-thread only. */
 	final Map<String, Integer> lastSkillLevel = new HashMap<>();

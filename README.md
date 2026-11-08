@@ -22,8 +22,8 @@ the account that is logged in. The site sends that only for a link token on its 
 JVM property or other header turns them on, and they turn off again on the next answer without the
 grant, on a refused token, on a token change and while another account is logged in.
 
-With the grant, the plugin records trade screenshots, store and drop clips, and the other players
-near a shop or a drop pile: the nearby panel, the trade counterparty, `store_taken` and its buyer
+With the grant, the plugin records trade screenshots, store and drop clips, whole game-window
+verification images, and the other players near a shop or a drop pile: the nearby panel, the trade counterparty, `store_taken` and its buyer
 candidates. For a player, `PublicTransport` removes every other-player field before a row is queued
 or sent.
 

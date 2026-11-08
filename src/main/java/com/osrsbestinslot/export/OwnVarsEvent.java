@@ -2,6 +2,8 @@ package com.osrsbestinslot.export;
 
 import java.util.*;
 
+import static com.osrsbestinslot.export.EventValues.*;
+
 /** Closed raw own-player counters/settings; never inferred gains, durations or completion. */
 final class OwnVarsEvent
 {
@@ -95,12 +97,5 @@ final class OwnVarsEvent
         }
         input.put("values",flat);
         Map<String,Object> out = wire(input); if (out != null) out.put("type","own_vars"); return out;
-    }
-    private static long number(Object x,long min,long max)
-    {
-        if (!(x instanceof Number)) throw new IllegalArgumentException();
-        Number n=(Number)x;long v=n.longValue();
-        if (!Double.isFinite(n.doubleValue()) || n.doubleValue()!=v || v<min || v>max) throw new IllegalArgumentException();
-        return v;
     }
 }

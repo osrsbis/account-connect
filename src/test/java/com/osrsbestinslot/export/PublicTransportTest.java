@@ -127,6 +127,148 @@ public class PublicTransportTest
         plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
     }
+    /** Grants frames, runs client-thread work inline and keeps scheduled retries for the test to run. */
+    private List<Runnable> framesGrantedWithManualRetries() throws Exception
+    {
+        plugin.grants.applyServerPolicy(new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK")
+            .header("X-Verification", "on").header("X-Verification-Frames", "on").build());
+        net.runelite.client.callback.ClientThread thread = mock(net.runelite.client.callback.ClientThread.class);
+        doAnswer(i -> { ((Runnable) i.getArgument(0)).run(); return null; }).when(thread).invoke(any(Runnable.class));
+        put("clientThread", thread);
+        List<Runnable> retries = Collections.synchronizedList(new ArrayList<>());
+        java.util.concurrent.ScheduledExecutorService executor = mock(java.util.concurrent.ScheduledExecutorService.class);
+        doAnswer(i -> { retries.add(i.getArgument(0)); return null; }).when(executor)
+            .schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+        put("executor", executor);
+        return retries;
+    }
+    private static final String APP_REFUSAL = "{\"ok\":false,\"error\":\"Too many uploads for this link.\"}";
+    private void awaitRetries(List<Runnable> retries, int n) throws Exception
+    {
+        for (int i = 0; i < 50 && retries.size() < n; i++) Thread.sleep(20);
+        assertEquals(n, retries.size());
+    }
+    @Test public void frameRetryKeepsTheOriginalAccountAndStopsAfterAnAccountSwitch() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertTrue(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8().contains("12345"));
+        awaitRetries(retries, 1);
+        // Same link token, another account logged in: the old pixels are never sent under the new account.
+        put("activeHash", "99999");
+        int before = plugin.events.pendingEvents.size();
+        retries.get(0).run();
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS));
+        assertEquals("no outcome row under the new account", before, plugin.events.pendingEvents.size());
+    }
+    @Test public void frameRetryIsNotRevivedByARevokeAndRegrant() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"ok\":false,\"error\":\"Collection policy unavailable — retry.\"}"));
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        awaitRetries(retries, 1);
+        Response on = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK")
+            .header("X-Verification", "on").header("X-Verification-Frames", "on").build();
+        plugin.grants.applyServerPolicy(on.newBuilder().removeHeader("X-Verification").build());
+        plugin.grants.applyServerPolicy(on);
+        assertTrue("granted again", plugin.grants.verificationFramesEnabled());
+        retries.get(0).run();
+        assertNull("a queued retry from the earlier grant stays dead", server.takeRequest(200, TimeUnit.MILLISECONDS));
+    }
+    @Test public void aFullWindowRetryNeedsTheStaffGrantAgain() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        plugin.grants.staffApiBase = server.url("/api").toString();
+        plugin.grants.setStaffCapture(TOKEN, "12345");
+        assertTrue(plugin.grants.fullWindowCaptureAllowed());
+        server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
+        Map<String, Object> common = new LinkedHashMap<>(Map.of("plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", "0123456789abcdef"));
+        plugin.verify.uploadVerificationFrame(plugin.verify.currentOwner(TOKEN), new byte[]{1, 2}, "0123456789abcdef", 1234000L, common, 1, true);
+        assertNotNull("the first attempt goes while staff", server.takeRequest(3, TimeUnit.SECONDS));
+        awaitRetries(retries, 1);
+        // The link leaves the staff list before the retry: the whole window is never sent again.
+        plugin.grants.clearStaffCaptureGrant();
+        retries.get(0).run();
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS));
+        Map<String, Object> row = plugin.events.pendingEvents.get(plugin.events.pendingEvents.size() - 1);
+        assertEquals("upload", row.get("check"));
+        String results = gson.toJson(row.get("results"));
+        assertTrue(results, results.contains("dropped") && results.contains("staff_grant_cleared"));
+    }
+    @Test public void aPublicLinkNeverUploadsAFullWindowFromEitherCapturePath() throws Exception
+    {
+        // Both the event and the random-sample paths end in this upload; it is the last check before any bytes leave.
+        framesGrantedWithManualRetries();
+        assertFalse(plugin.grants.fullWindowCaptureAllowed());
+        Map<String, Object> common = new LinkedHashMap<>(Map.of("plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", "0123456789abcdef"));
+        plugin.verify.uploadVerificationFrame(plugin.verify.currentOwner(TOKEN), new byte[]{1, 2}, "0123456789abcdef", 1234000L, common, 1, true);
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS));
+    }
+    @Test public void aRegionFrameRetryNeedsNoStaffGrant() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":6}"));
+        Map<String, Object> common = new LinkedHashMap<>(Map.of("plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", "0123456789abcdef"));
+        plugin.verify.uploadVerificationFrame(plugin.verify.currentOwner(TOKEN), new byte[]{1, 2}, "0123456789abcdef", 1234000L, common, 1, false);
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        awaitRetries(retries, 1);
+        retries.get(0).run();
+        assertNotNull("a public region frame retries as before", server.takeRequest(3, TimeUnit.SECONDS));
+    }
+    @Test public void frameUploadsDoNotLetOkHttpResendAfterAConnectionFailure() throws Exception
+    {
+        // RuneLite's shared client retries on connection failure; OkHttp can then re-send a POST the server received.
+        assertTrue(new OkHttpClient().retryOnConnectionFailure());
+        assertFalse(plugin.verify.frameHttp().retryOnConnectionFailure());
+    }
+    @Test public void aNetworkFailureIsUnconfirmedAndNeverRetried() throws Exception
+    {
+        // A dropped connection after the body was sent can surface as ConnectException: never proof of "not stored".
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST));
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        for (int i = 0; i < 100 && plugin.events.pendingEvents.stream().noneMatch(r -> "upload".equals(r.get("check"))); i++) Thread.sleep(20);
+        Map<String, Object> row = plugin.events.pendingEvents.stream().filter(r -> "upload".equals(r.get("check"))).findFirst().get();
+        assertTrue(gson.toJson(row.get("results")).contains("unconfirmed"));
+        for (Runnable r : new ArrayList<>(retries)) r.run();
+        RecordedRequest again = server.takeRequest(300, TimeUnit.MILLISECONDS);
+        assertTrue("one POST only", again == null || !again.getPath().endsWith("/screenshot-ingest"));
+    }
+    @Test public void frameRetryResendsTheSameOwnerWhileUnchanged() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":5}"));
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        awaitRetries(retries, 1);
+        retries.get(0).run();
+        RecordedRequest second = server.takeRequest(3, TimeUnit.SECONDS);
+        assertNotNull(second);
+        String body = second.getBody().readUtf8();
+        assertTrue(body.contains("12345")); assertTrue(body.contains("0123456789abcdef"));
+    }
+    @Test public void bareProxy503IsUnconfirmedAndNotRetried() throws Exception
+    {
+        List<Runnable> retries = framesGrantedWithManualRetries();
+        server.enqueue(new MockResponse().setResponseCode(503).setBody("<html>Service Unavailable</html>"));
+        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
+        for (int i = 0; i < 50 && plugin.events.pendingEvents.isEmpty(); i++) Thread.sleep(20);
+        Map<String, Object> row = plugin.events.pendingEvents.get(plugin.events.pendingEvents.size() - 1);
+        assertEquals("upload", row.get("check"));
+        assertTrue(gson.toJson(row.get("results")).contains("unconfirmed"));
+        // Other plugin work may also be scheduled; running all of it must not resend the frame.
+        for (Runnable r : new ArrayList<>(retries)) r.run();
+        RecordedRequest again = server.takeRequest(200, TimeUnit.MILLISECONDS);
+        assertTrue("never retried", again == null || !again.getPath().endsWith("/screenshot-ingest"));
+    }
     @Test public void deliveryGrantAllowsCaptureWithoutStaffIdentityOrOverlays() throws Exception
     {
         plugin.grants.staffApiBase = server.url("/api").toString();

@@ -51,7 +51,7 @@ final class SpoolDriver
 	//             No `results` array (today's {"ok":true,"stored":N}), an unknown status, a malformed entry
 	//             or an id missing from the list deletes NOTHING: the row stays and replay backs off.
 	//             "filtered" is terminal and counted as a loss (spool_filtered_total).
-	//   429/5xx/network : keep, back off (Retry-After honoured); replay stops on the first 429.
+	//   404/408/429/5xx/network : keep, back off; replay stops on the first 429.
 	//   403     : the link is revoked; this identity's spool is purged.
 	//   other 4xx: the batch's rows go to terminal quarantine as metadata only and are never retried.
 	//
@@ -762,7 +762,7 @@ final class SpoolDriver
 				}
 				spool.maybeCompact();
 			}
-			else if (code == 429 || code >= 500 || code < 0)
+			else if (code == 404 || code == 408 || code == 429 || code >= 500 || code < 0)
 			{
 				armSpoolReplayBackoff(retryAfterMs);
 			}
@@ -954,7 +954,7 @@ final class SpoolDriver
 		}
 	}
 
-	/** The staff replay lane's answer: 403 revokes; 429 keeps its Retry-After for the replay ladder. */
+	/** The staff replay lane's answer: 403 revokes; retries retain their bounded server delay. */
 	private void replayAnswer(Map<String, String> sentIds, String sentToken, Response response)
 	{
 		int code = response.code();
@@ -964,12 +964,7 @@ final class SpoolDriver
 			finishReplay(sentIds, code, null, 0L);
 			return;
 		}
-		long retryAfterMs = 0L;
-		if (code == 429)
-		{
-			Long ra = SnapshotUploader.parseRetryAfterSeconds(response.header("Retry-After"));
-			retryAfterMs = ra == null ? 0L : ra * 1000L;
-		}
+		long retryAfterMs = EventQueue.retryAfterMillis(response);
 		finishReplay(sentIds, code, response.isSuccessful() ? EventQueue.readBody(response) : null, retryAfterMs);
 	}
 

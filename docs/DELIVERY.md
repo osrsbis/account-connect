@@ -3,6 +3,18 @@
 How events reach the server: delivery counters, the public bank journal, the latest bank in the snapshot (0.7.62)
 and the public Queue journal. Each section states its own release state.
 
+## Transient responses (0.7.68)
+
+The legacy memory sender and the staff replay spool retain events after HTTP 404 or 408, using their
+existing bounded retry delays. This matches the queue-v1 treatment of unavailable routes and request
+timeouts. Retried events keep their original event IDs; durable rows are not quarantined by these responses.
+Integer Retry-After values are honored on transient responses and capped at the existing five-minute ceiling
+before conversion to milliseconds, including headers large enough to overflow an uncapped multiplication.
+
+HTTP 403 retains the existing identity-revocation handling. Permanent application rejections, including
+HTTP 400, retain their terminal handling. This adds no collection grant, field, event or request type.
+This change is new in 0.7.68; 0.7.67 did not have it.
+
 ## Queue delivery health (local candidate)
 
 `source.capture_health.queue_delivery` separates valid broker-acceptance receipts
@@ -55,9 +67,13 @@ bank receipt, a visit's `bank_visit_open` and normal `bank_visit_close` send no 
 close item list when a snapshot queued for upload on the same token and account holds that
 exact bank with a known read time. They say so with `manifest_in_snapshot: true`, and the
 close sends `end_item_stacks` instead of `end_chunks`. The open counts the bank-open snapshot,
-whose read has no confirmed time yet; a failed upload is never counted. The close forces no
-upload: it waits up to 250 game ticks for a regular snapshot the server accepted (2xx) that holds
-its end bank with a known read time. Otherwise, and at a logout, hop or new open first, the list
+whose read has no confirmed time yet; a failed upload is never counted. An open sent while that upload is still
+in flight sends its open list as chunks after all, in the same visit, if the answer says nothing was stored (from
+0.7.68); a token or account change in between sends nothing. The close forces no
+upload: it waits up to 250 game ticks for a regular snapshot the server stored (a 2xx with `ok`
+that is neither `stale` nor `paused` from 0.7.68; before that, any 2xx) that holds its end bank
+with a known read time. Because the server keeps one bank per player, such a close's end bank can be
+read back only until the player's next stored bank replaces it (median 166 s on 0.7.67, recheck 11-08). Otherwise, and at a logout, hop or new open first, the list
 goes as chunks as before. A snapshot an event forces inside a widget-close script is built on the
 next game tick.
 Deposited and withdrawn lists, `bank_session` and teardown closes are unchanged. Staff

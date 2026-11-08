@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import net.runelite.api.GameState;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
@@ -66,6 +67,22 @@ final class BankVisit
 	private Map<String, Object> publicCloseFields;
 	private List<long[]> publicCloseList;
 	private int publicCloseTick;
+	// A public open sent with manifest_in_snapshot before its snapshot's answer came: the list it left out, and the upload
+	// it points at. If that upload is not stored, the list is sent after all (recheck 11-08, C2 open side).
+	// Every such open waits (a re-open while the first upload is in flight is a second entry), oldest first, bounded.
+	private static final class WaitingOpen
+	{
+		final String visit, token, account;
+		final long upload;
+		final List<long[]> list;
+
+		WaitingOpen(String visit, String token, String account, long upload, List<long[]> list)
+		{
+			this.visit = visit; this.token = token; this.account = account; this.upload = upload; this.list = list;
+		}
+	}
+	static final int MAX_WAITING_OPENS = 8;
+	private final List<WaitingOpen> waitingOpens = new ArrayList<>();
 	// A close waits at most this long for a regular snapshot to be accepted: the 120 s upload interval plus margin.
 	static final int PUBLIC_CLOSE_WAIT_TICKS = 250;
 	/** bank_session: at most this many items per list; the rest are dropped and the row says truncated. */
@@ -345,10 +362,18 @@ final class BankVisit
 			"plugin_version", AccountConnectPlugin.PLUGIN_VERSION);
 		// The bank-open snapshot was queued just before this visit started, with this exact bank. Its read has no
 		// confirmed time yet, so the server keeps it only until a timed bank arrives, which the close forces.
-		boolean inSnapshot = bankVisitPublic && snapshotQueuedWithBank(BankVisitManifest.sha256(list), false);
+		// Only while there is room to remember it: an open that could not wait sends its list now instead.
+		// The queued upload may already have answered (a later upload failed, so its marker stayed): stored means the
+		// server holds this bank and nothing waits; not stored means the list goes now.
+		long upload = plugin.uploader.queuedBankUpload;
+		Boolean answer = plugin.uploader.answeredUploads.get(upload);
+		boolean answered = answer != null;
+		boolean inSnapshot = bankVisitPublic && snapshotQueuedWithBank(BankVisitManifest.sha256(list), false)
+			&& (answered ? answer : waitingOpens.size() < MAX_WAITING_OPENS);
 		if (inSnapshot)
 		{
 			f.put("manifest_in_snapshot", true);
+			if (!answered) waitingOpens.add(new WaitingOpen(bankVisitId, plugin.currentLinkToken(), plugin.activeHash, upload, list));
 		}
 		plugin.events.emitEvent("bank_visit_open", f);
 		bankVisitOpenSent = true;
@@ -357,6 +382,28 @@ final class BankVisit
 		{
 			emitBankVisitChunks("open", list);
 		}
+	}
+
+	/**
+	 * The answer to snapshot upload number {@code upload}. Every open that pointed at it (a re-open while it was in
+	 * flight is a second one) keeps that pointer only if the snapshot was stored; otherwise its open list follows now as
+	 * chunks, in its own visit, while the open's token and account are still current (else nothing is sent).
+	 */
+	void snapshotAnswer(long upload, boolean stored)
+	{
+		for (java.util.Iterator<WaitingOpen> it = waitingOpens.iterator(); it.hasNext(); )
+		{
+			WaitingOpen w = it.next();
+			if (w.upload != upload) continue;
+			it.remove();
+			if (!stored && Objects.equals(w.token, plugin.currentLinkToken()) && Objects.equals(w.account, plugin.activeHash))
+				emitChunkList(w.visit, "open", w.list, chunksFor("open", w.list));
+		}
+	}
+
+	private void clearOpenInSnapshot()
+	{
+		waitingOpens.clear();
 	}
 
 	/**
@@ -496,6 +543,7 @@ final class BankVisit
 	{
 		publicCloseFields = null;
 		publicCloseList = null;
+		clearOpenInSnapshot();
 		bankClosePending = false;
 		bankVisitId = null;
 		bankVisitOpenSent = false;

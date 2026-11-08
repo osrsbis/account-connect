@@ -2,6 +2,8 @@ package com.osrsbestinslot.export;
 
 import java.util.*;
 
+import static com.osrsbestinslot.export.EventValues.*;
+
 /** Closed own system/check projections. A signal is not a balance delta or proof of activity during a gap. */
 final class OwnSignalEvent
 {
@@ -107,12 +109,5 @@ final class OwnSignalEvent
         input.put("observation",inferred?"inferred_observation":"observed_signal");input.put("gameplay_session",session.replace("-",""));
         input.put("source_sequence",row.get("sequence"));input.put("source_tick",row.get("tick"));input.put("observed_at_ms",row.get("observed_at_ms"));
         Map<String,Object> out=wire(input);if(out!=null)out.put("type","own_signal");return out;
-    }
-    private static String choice(Object x,List<String> allowed)
-    {if(!(x instanceof String)||!allowed.contains(x))throw new IllegalArgumentException();return (String)x;}
-    private static long number(Object x,long min,long max)
-    {
-        if(!(x instanceof Number))throw new IllegalArgumentException();Number n=(Number)x;long v=n.longValue();
-        if(!Double.isFinite(n.doubleValue())||n.doubleValue()!=v||v<min||v>max)throw new IllegalArgumentException();return v;
     }
 }

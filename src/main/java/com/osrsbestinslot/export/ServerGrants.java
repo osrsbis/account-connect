@@ -104,6 +104,12 @@ final class ServerGrants
 		return verificationGranted() && plugin.currentLinkToken().equals(verificationFramesGrantToken);
 	}
 
+	/** Unmasked whole-canvas uploads are restricted to the account-bound staff grant; public links keep region evidence. */
+	boolean fullWindowCaptureAllowed()
+	{
+		return verificationFramesEnabled() && staffCaptureEnabled();
+	}
+
 	void clearVerificationGrant()
 	{
 		verificationGrantToken = null;

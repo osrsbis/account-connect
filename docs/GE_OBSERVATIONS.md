@@ -24,6 +24,32 @@ side and offer key. `ge_observation.schema_v: 1` adds:
   and `tax_gp` are unknown (null, possibly omitted by JSON serialization).
   `gp_semantics` is `runelite_spent_tax_unknown`: no tax formula, gross/net
   conversion, listing-price multiplication or per-fill price is invented.
+- `native_tax_gp` (0.7.68): the game's own cumulative sale tax for the slot, the long varp
+  `GE_TAX_SLOT_LONG_<slot>` (5754-5761) that the GE interface subtracts from the gross to show the net, read when
+  the row is built (`native_tax_source: varp_long_when_row_built`). It is an observation, not `tax_gp`: when the varp
+  updates relative to the offer callback, and when it resets, is not yet established on a real client, so the server
+  must compare it across rows of the same offer before using it as the exact tax.
+- `native_tax_server_gp` (0.7.68): the same varp's last value set by the server
+  (`getServerVarpLongValue`), independent of client-side prediction. Both are Java longs; the server reads them as
+  JavaScript numbers, exact up to 2^53.
+- `steps` (0.7.68): when one row covers more than one counter change, or a tax var change, it lists each in
+  order: `kind` (`counter` or `tax`), `at_ms` and `tick` of the callback, the cumulative quantity and GP at that
+  moment, and for a tax step `native_tax_gp` / `native_tax_server_gp`. So two fills inside one throttle window keep
+  their own prices (e.g. 200 and 300 GP, not one 250 average) and times. At most 16 per row; `steps_dropped` counts
+  the rest (the row's totals still cover them). An identical repeat callback no longer moves `counter_observed_at_ms`.
+- Times: `at_ms`, `observed_at_ms` and `counter_observed_at_ms` are when this client received the callback
+  (`step_time: client_callback_receipt`); the outer `ts` is when the row was queued; the server's `created_at` is
+  when it arrived. None of them is the exchange's execution time, which RuneLite's GE offer, its offer event and the
+  GE scripts checked do not expose.
+- `server_date_minutes`, `server_clock_read_ms` and `server_minute_seen_at_ms` (0.7.68): the game's minute
+  counter (varp `DATE_MINUTES`, 3078, which the game's own scripts compare with server-set times), this client's
+  clock when the row is built, and when this client saw that minute begin. All three are sent together, and only when
+  the client saw the current minute begin as a +1 step while logged in (not at login, after a hop or a jump) at most
+  65 seconds earlier, so a minute the game stopped updating is never sent. The boundary's client time is the game's minute start plus the
+  network delay, which bounds the client clock's offset from the game's clock. Not an execution time.
+- `delta_gp / delta_qty` over one step is the exact average price of the units filled in that step (a rational
+  number; exact per unit only when one unit filled). Fills the game reports in one counter change cannot be
+  separated.
 - `identity`: `inferred_session_slot`, `inferred_across_gap`, or
   `ambiguous_counter_regression`. Quantity or GP regression retains the previous
   high-water tuple and quarantines subsequent deltas (null, `delta_status:
@@ -96,7 +122,10 @@ spending. Use an approved small item/GP budget for live orders.
 
 Real-client tests above have not been run here. The unchanged one-per-100-tick
 live partial cadence stays bounded; reconnects and terminal corrections may add
-rows. Backend acceptance/preservation of nested metadata, mixed-version ledger
+rows. From 0.7.68 a partial fill held back by that window (or carried
+across a restart) is sent as `ge_progress` once the window passes, even when no
+later offer callback arrives, dated by its counter observation; uncertain
+counters and terminal slots are never flushed this way. Backend acceptance/preservation of nested metadata, mixed-version ledger
 migration, bytes per event, queue/spool size, ingestion capacity and retention
 need separate server-side verification at expected concurrency before rollout.
 Exact trade timestamps, individual execution prices, tax allocation and unseen

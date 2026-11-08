@@ -31,6 +31,26 @@ final class SnapshotUploader
 	private static final long BACKOFF_CAP_MILLIS = 900_000L;    // exponential backoff cap
 	private static final long RETRY_AFTER_CAP_SECONDS = 3600L;  // never honor a Retry-After beyond 1h
 
+	/** The server's 2xx says it stored this snapshot: `ok` true, and neither `stale` nor `paused`. Unreadable is not stored. */
+	static boolean storedAnswer(String body)
+	{
+		if (body == null) return false;
+		try
+		{
+			com.google.gson.JsonElement e = new com.google.gson.JsonParser().parse(body);
+			if (!e.isJsonObject()) return false;
+			com.google.gson.JsonObject o = e.getAsJsonObject();
+			boolean ok = o.has("ok") && o.get("ok").isJsonPrimitive() && o.get("ok").getAsBoolean();
+			boolean stale = o.has("stale") && o.get("stale").isJsonPrimitive() && o.get("stale").getAsBoolean();
+			boolean paused = o.has("paused") && o.get("paused").isJsonPrimitive() && o.get("paused").getAsBoolean();
+			return ok && !stale && !paused;
+		}
+		catch (RuntimeException ex)
+		{
+			return false;
+		}
+	}
+
 	// Debounce interval is a field (not config) so tests can shrink it via same-package access.
 	long minUploadIntervalMillis = DEFAULT_MIN_UPLOAD_INTERVAL_MILLIS;
 	// Written on the client thread (tick/flush), read by the OkHttp callback thread and vice
@@ -55,6 +75,21 @@ final class SnapshotUploader
 	volatile String queuedBankAccount;
 	volatile String queuedBankSha;
 	volatile boolean queuedBankTimed;
+	/** Number of the newest snapshot upload queued (client thread); a bank open records the one it points at. */
+	volatile long queuedBankUpload;
+	/**
+	 * Recent answers (client thread only): upload number to stored. Answers can arrive out of order, so a few are kept.
+	 * A bank open whose queued upload has already answered does not wait for an answer that will not come again
+	 * (review 1dca800 P3-1).
+	 */
+	final Map<Long, Boolean> answeredUploads = new java.util.LinkedHashMap<Long, Boolean>(32, 0.75f, false)
+	{
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<Long, Boolean> eldest)
+		{
+			return size() > 16;
+		}
+	};
 	// The same for the newest snapshot the server ACCEPTED (2xx). A close is flagged only against this.
 	volatile String acceptedBankToken;
 	volatile String acceptedBankAccount;
@@ -253,6 +288,8 @@ final class SnapshotUploader
 		queuedBankAccount = bankAccount;
 		queuedBankSha = bankSha;
 		queuedBankTimed = bankTimed;
+		// The upload a bank open points at, so its answer reaches exactly the opens that counted on it.
+		final long bankUpload = ++queuedBankUpload;
 		Map<String, Object> body = Fields.of("token", token, "snapshot", sentSnapshot);
 
 		String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
@@ -273,10 +310,15 @@ final class SnapshotUploader
 				applyRateLimitBackoff(null);
 			}
 			forgetQueuedBank(bankSha);
+			bankAnswer(bankUpload, false);
 			log.debug("OSRS BiS sync failed", e);
 		}, response ->
 		{
-			if (!token.equals(plugin.currentLinkToken())) return; // stale identity cannot grant or ACK this cache
+			if (!token.equals(plugin.currentLinkToken()))
+			{
+				bankAnswer(bankUpload, false);	// releases a waiting open; it sends nothing under the new identity
+				return; // stale identity cannot grant or ACK this cache
+			}
 			int code = response.code();
 			plugin.grants.applyServerPolicy(response, token);	// server dictates cadence / screenshot-disable per token
 			if (code == 403)
@@ -285,10 +327,22 @@ final class SnapshotUploader
 			}
 			if (response.isSuccessful())
 			{
-				acceptedBankToken = token;
-				acceptedBankAccount = bankAccount;
-				acceptedBankSha = bankSha;
-				acceptedBankTimed = bankTimed;
+				// Only a snapshot the server actually stored holds this bank. A 2xx that says `stale` or `paused` stored
+				// nothing new, so a bank close must not point at it (recheck 11-08, cause C2).
+				boolean stored = storedAnswer(EventQueue.readBody(response));
+				if (stored)
+				{
+					acceptedBankToken = token;
+					acceptedBankAccount = bankAccount;
+					acceptedBankSha = bankSha;
+					acceptedBankTimed = bankTimed;
+				}
+				else
+				{
+					// Not stored: a later bank open must not point at this upload either (the queued marker it uses).
+					forgetQueuedBank(bankSha);
+				}
+				bankAnswer(bankUpload, stored);
 				onUploadAccepted(sentHash);
 				Object gv = sentSnapshot.get("game_vars");
 				if (gv instanceof Map)
@@ -301,10 +355,23 @@ final class SnapshotUploader
 				snapshotRetryPending = true;
 				applyRateLimitBackoff(response.header("Retry-After"));
 				forgetQueuedBank(bankSha);
+				bankAnswer(bankUpload, false);
 			}
 			// All failed snapshot requests remain pending behind bounded retry backoff.
 			log.debug("OSRS BiS sync response: {}", code);
 		}));
+	}
+
+	/** Tell a bank open that pointed at this upload whether it was stored; runs on the client thread like the visit. */
+	private void bankAnswer(long upload, boolean stored)
+	{
+		Runnable r = () ->
+		{
+			answeredUploads.put(upload, stored);
+			plugin.bankVisit.snapshotAnswer(upload, stored);
+		};
+		if (plugin.clientThread != null) plugin.clientThread.invoke(r);
+		else r.run();
 	}
 
 	/** A failed upload: a newer one may have replaced the queued record, so only the same bank is forgotten. */
