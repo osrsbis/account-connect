@@ -30,13 +30,13 @@ final class OwnStateEvent
             boolean direct = !"bank_tabs".equals(kind);
             if (!Boolean.valueOf(direct).equals(input.get("direct"))) return null;
             Map<String,Object> value = projectValue(kind, input.get("state_value")); if (value == null) return null;
-            Map<String,Object> out = new LinkedHashMap<>(); out.put("state_schema", 1); out.put("state_kind", kind);
-            out.put("source", "own_client_state"); out.put("gameplay_session", session); out.put("direct", direct);
-            out.put("observation", choice(input.get("observation"), Arrays.asList("baseline", "absolute_update")));
-            out.put("source_sequence", number(input.get("source_sequence"), 1, 9007199254740991L));
-            out.put("source_tick", number(input.get("source_tick"), 0, Integer.MAX_VALUE));
-            long at = number(input.get("observed_at_ms"), 1000000000000L, 9007199254740991L);
-            out.put("observed_at_ms", at); out.put("state_value", value);
+            Map<String,Object> out = Fields.of("state_schema", 1, "state_kind", kind,
+                "source", "own_client_state", "gameplay_session", session, "direct", direct,
+                "observation", choice(input.get("observation"), Arrays.asList("baseline", "absolute_update")),
+                "source_sequence", number(input.get("source_sequence"), 1, 9007199254740991L),
+                "source_tick", number(input.get("source_tick"), 0, Integer.MAX_VALUE),
+                "observed_at_ms", number(input.get("observed_at_ms"), 1000000000000L, 9007199254740991L), "state_value", value);
+            long at = (Long) out.get("observed_at_ms");
             if (("bank_tabs".equals(kind)||"loot_key_slot".equals(kind)) && value.get("container_observed_at_ms") != null
                 && (Long)value.get("container_observed_at_ms") > at) return null;
             return out;
@@ -51,13 +51,12 @@ final class OwnStateEvent
             String kind = KINDS.get(row.get("kind")); Map<?,?> value = map(row.get("value"));
             Object observation = value.get("observation");
             if (!Arrays.asList("baseline", "absolute_update").contains(observation)) return null;
-            Map<String,Object> out = new LinkedHashMap<>();
-            out.put("type", "own_state"); out.put("state_schema", 1); out.put("state_kind", kind);
-            out.put("gameplay_session", session.replace("-", "")); out.put("source", "own_client_state");
-            out.put("source_sequence", number(row.get("sequence"), 1, Long.MAX_VALUE));
-            out.put("source_tick", number(row.get("tick"), 0, Integer.MAX_VALUE));
-            out.put("observed_at_ms", number(row.get("observed_at_ms"), 1, 9007199254740991L));
-            out.put("observation", observation); out.put("direct", !"bank_tabs".equals(kind));
+            Map<String,Object> out = Fields.of("type", "own_state", "state_schema", 1, "state_kind", kind,
+                "gameplay_session", session.replace("-", ""), "source", "own_client_state",
+                "source_sequence", number(row.get("sequence"), 1, Long.MAX_VALUE),
+                "source_tick", number(row.get("tick"), 0, Integer.MAX_VALUE),
+                "observed_at_ms", number(row.get("observed_at_ms"), 1, 9007199254740991L),
+                "observation", observation, "direct", !"bank_tabs".equals(kind));
             Object shaped = value;
             if ("skill_goals".equals(kind))
             {
@@ -98,8 +97,7 @@ final class OwnStateEvent
                     String status = start == null || end == null ? "unknown" : end == 0 ? "unset"
                         : start < 0 || end <= start || end > 200000000 ? "invalid" : "configured";
                     if (!status.equals(g.get("status"))) throw new IllegalArgumentException();
-                    Map<String,Object> goal = new LinkedHashMap<>(); goal.put("skill", skill);
-                    goal.put("start_xp", start); goal.put("end_xp", end); goal.put("status", status); goals.add(goal);
+                    goals.add(Fields.of("skill", skill, "start_xp", start, "end_xp", end, "status", status));
                 }
                 out.put("goals", goals);
             }

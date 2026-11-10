@@ -185,7 +185,7 @@ public class StoreWorkflowRegressionTest
     private void assertUnknown()
     {
         assertNotNull(reset.render(graphics));
-        assertEquals("new visit must require a fresh probe", "sell junk", reset.lastTextForTest());
+        assertEquals("new visit must require a fresh probe", "sell junk", reset.lastText);
     }
 
     private void observeProbeReset()
@@ -194,7 +194,7 @@ public class StoreWorkflowRegressionTest
         stock(new Item(1191, 1));
         stock();
         assertNotNull("observed stock reset must render a countdown", reset.render(graphics));
-        String text = reset.lastTextForTest();
+        String text = reset.lastText;
         assertTrue("actual sell/container events never reached the visible timer: " + text, text.matches("[0-9]+s"));
         int seconds = Integer.parseInt(text.substring(0, text.length() - 1));
         assertTrue("countdown outside the store's 60-second cycle", seconds >= 1 && seconds <= 60);

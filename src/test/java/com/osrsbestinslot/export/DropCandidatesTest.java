@@ -23,12 +23,12 @@ public class DropCandidatesTest
 
 	private static DropCandidates.Observed at(String rsn, int x, int y)
 	{
-		return new DropCandidates.Observed(rsn, x, y, 0, 100);
+		return new DropCandidates.Observed(rsn, x, y, 0, 100, DropCandidates.NO_ANIMATION);
 	}
 
 	private static DropCandidates.Observed atPlane(String rsn, int x, int y, int plane)
 	{
-		return new DropCandidates.Observed(rsn, x, y, plane, 100);
+		return new DropCandidates.Observed(rsn, x, y, plane, 100, DropCandidates.NO_ANIMATION);
 	}
 
 	private static List<Map<String, Object>> candidates(DropCandidates.Observed... players)

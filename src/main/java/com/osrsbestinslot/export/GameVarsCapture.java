@@ -45,9 +45,7 @@ final class GameVarsCapture
 				canon.append(i).append('=').append(varps[i]).append(';');
 			}
 		}
-		Map<String, Object> out = Fields.of(
-			"n", varps.length, "nz", nz, "sha", SnapshotBuilder.sha256Hex(canon.toString()));
-		return out;
+		return Fields.of("n", varps.length, "nz", nz, "sha", EventSpool.sha256Hex(canon.toString()));
 	}
 
 	/** Decode one varbit from a varp value, given the varbit's bit range (inclusive). Used by tests and docs. */

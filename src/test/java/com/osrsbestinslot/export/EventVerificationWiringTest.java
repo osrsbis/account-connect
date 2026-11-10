@@ -39,7 +39,8 @@ public class EventVerificationWiringTest
             p.grants.verificationFramesGrantToken = TOKEN;p.grants.setStaffCapture(TOKEN, "123");set(p,"gson",new Gson());
             set(p,"drawManager",draws);set(p,"okHttpClient",http);p.lastSnapshotCapturedAtMs=999;
             // Frame uploads use a derived client (no connection-failure retry); the test seam points it at the mock.
-            p.verify.frameHttpForTest(http);
+            p.verify.frameHttp = http;
+            p.verify.frameHttpBase = http;
             when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
             when(client.getTickCount()).thenAnswer(i->tick);when(client.getAccountHash()).thenAnswer(i->account);
             when(client.getCanvasWidth()).thenReturn(800);when(client.getCanvasHeight()).thenReturn(600);

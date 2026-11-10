@@ -39,10 +39,9 @@ final class OwnConsumptionCapture
             int slot=entry.getKey(); Item after=slot<inv.getItems().length?inv.getItems()[slot]:null;
             int afterId=after==null?-1:after.getId(), afterQty=after==null?0:after.getQuantity();
             if(afterId==p.item && afterQty>=p.quantity) continue;
-            Map<String,Object> value=new LinkedHashMap<>(); value.put("item_id_before",p.item);
-            value.put("quantity_before",p.quantity); value.put("item_id_after",afterId); value.put("quantity_after",afterQty);
-            value.put("action",p.action.toLowerCase(Locale.ROOT)); value.put("intent_tick",p.tick);
-            value.put("inference","own_menu_and_slot_change_not_confirmed_effect_or_cooldown");
+            Map<String,Object> value=Fields.of("item_id_before",p.item,"quantity_before",p.quantity,"item_id_after",afterId,
+                "quantity_after",afterQty,"action",p.action.toLowerCase(Locale.ROOT),"intent_tick",p.tick,
+                "inference","own_menu_and_slot_change_not_confirmed_effect_or_cooldown");
             out.append("effects.consumption","MenuOptionClicked:149.0+own_inventory",c.getTickCount(),at,value,false); i.remove();
         }
     }

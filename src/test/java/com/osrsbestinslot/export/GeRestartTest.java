@@ -87,7 +87,7 @@ public class GeRestartTest
 		when(client.getWorldType()).thenAnswer(i -> world);
 		when(client.getGrandExchangeOffers()).thenAnswer(i -> new GrandExchangeOffer[8]);
 		inject("client", client);
-		p.spooler.setSpoolDataRootForTest(data);
+		SpoolHooks.dataRoot(p.spooler,data);
 		p.startUp();
 		p.events.pendingEvents.clear();	// rows the last close wrote to pending-events.json, already counted above
 	}

@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GameState;
 import net.runelite.api.Item;
@@ -30,14 +31,10 @@ import net.runelite.client.game.ItemStack;
 
 /** Own kills and activities: loot, reward chests, kill counts, milestones, minigame screens and slayer tasks. */
 @Slf4j
+@RequiredArgsConstructor
 final class KillActivity
 {
 	private final AccountConnectPlugin plugin;
-
-	KillActivity(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- chest / reward-interface loot (gap audit 2026-07-18): raids, Barrows, clues, Colosseum, Lunar,
 	// wildy loot chest. These NEVER fire LootManager (ServerNpcLoot) — RuneLite itself captures them only in
@@ -225,8 +222,7 @@ final class KillActivity
 		}
 		String kind = m.group(3) != null ? m.group(3).trim().toLowerCase(Locale.ROOT)
 			: m.group(1) != null ? m.group(1).trim().toLowerCase(Locale.ROOT) : "count";
-		Map<String, Object> out = Fields.of("source", source, "kind", kind, "count", count);
-		return out;
+		return Fields.of("source", source, "kind", kind, "count", count);
 	}
 
 	/**

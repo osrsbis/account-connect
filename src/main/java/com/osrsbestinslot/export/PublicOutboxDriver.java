@@ -11,18 +11,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /** The public journals' driver: the live and ended-session owner, capture before transmission, staging, recovery pump, settlement, erasure and revocation. */
 @Slf4j
+@RequiredArgsConstructor
 final class PublicOutboxDriver
 {
 	private final AccountConnectPlugin plugin;
-
-	PublicOutboxDriver(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	final Set<String> publicOutboxMemoryIds = ConcurrentHashMap.newKeySet();
 	final AtomicInteger publicOutboxWrites = new AtomicInteger();
@@ -48,12 +45,17 @@ final class PublicOutboxDriver
 	{
 		String token = plugin.currentLinkToken();
 		if (publicOutboxPaused || plugin.config == null || !plugin.uploadAllowed() || !plugin.session.sessionActive || token.equals(plugin.spooler.spoolGrantToken)
-			|| requireGrant && !(token.equals(plugin.grants.eventQueueGrantToken) || token.equals(plugin.grants.bankJournalGrantToken))
-			|| plugin.configManager == null || plugin.configManager.getProfile() == null) return null;
+			|| requireGrant && !(token.equals(plugin.grants.eventQueueGrantToken) || token.equals(plugin.grants.bankJournalGrantToken))) return null;
+		return context(token, plugin.activeHash, plugin.activeProfileType);
+	}
+
+	/** The journal identity for this token, account and mode in the current RuneLite profile, or null. */
+	private PublicEventOutbox.Context context(String token, String account, String mode)
+	{
+		if (plugin.configManager == null || plugin.configManager.getProfile() == null) return null;
 		try
 		{
-			return new PublicEventOutbox.Context(token, plugin.activeHash, plugin.activeProfileType,
-				Long.toString(plugin.configManager.getProfile().getId()));
+			return new PublicEventOutbox.Context(token, account, mode, Long.toString(plugin.configManager.getProfile().getId()));
 		}
 		catch (IllegalArgumentException unknown) { return null; }
 	}
@@ -66,16 +68,11 @@ final class PublicOutboxDriver
 		PublicEventOutbox.Context ended = endedPublicOwner;
 		String token = plugin.currentLinkToken();
 		if (ended == null || publicOutboxPaused || plugin.config == null || !plugin.uploadAllowed() || !token.equals(endedPublicToken)
-			|| token.equals(plugin.spooler.spoolGrantToken) || !(token.equals(plugin.grants.eventQueueGrantToken) || token.equals(plugin.grants.bankJournalGrantToken))
-			|| plugin.configManager == null || plugin.configManager.getProfile() == null)
+			|| token.equals(plugin.spooler.spoolGrantToken) || !(token.equals(plugin.grants.eventQueueGrantToken) || token.equals(plugin.grants.bankJournalGrantToken)))
 			return null;
-		try
-		{
-			// Rows wait for their own RuneLite profile too: a profile switched after the logout ends this window.
-			return ended.identity.equals(new PublicEventOutbox.Context(token, ended.account, ended.mode,
-				Long.toString(plugin.configManager.getProfile().getId())).identity) ? ended : null;
-		}
-		catch (IllegalArgumentException unknown) { return null; }
+		// Rows wait for their own RuneLite profile too: a profile switched after the logout ends this window.
+		PublicEventOutbox.Context check = context(token, ended.account, ended.mode);
+		return check != null && ended.identity.equals(check.identity) ? ended : null;
 	}
 
 	PublicEventOutbox publicBankOutbox;
@@ -100,10 +97,20 @@ final class PublicOutboxDriver
 
 	private void publicOutboxHealth()
 	{
-		publicOutboxPending = (publicOutbox == null ? 0 : publicOutbox.size()) + (publicBankOutbox == null ? 0 : publicBankOutbox.size());
-		publicOutboxBytes = (publicOutbox == null ? 0 : publicOutbox.bytes()) + (publicBankOutbox == null ? 0 : publicBankOutbox.bytes());
-		publicOutboxDropped = (publicOutbox == null ? 0 : publicOutbox.counters.dropped.get()) + (publicBankOutbox == null ? 0 : publicBankOutbox.counters.dropped.get());
-		publicOutboxPurged = (publicOutbox == null ? 0 : publicOutbox.counters.purged.get()) + (publicBankOutbox == null ? 0 : publicBankOutbox.counters.purged.get());
+		int pending = 0;
+		long bytes = 0, dropped = 0, purged = 0;
+		for (PublicEventOutbox o : new PublicEventOutbox[]{publicOutbox, publicBankOutbox})
+		{
+			if (o == null) continue;
+			pending += o.size();
+			bytes += o.bytes();
+			dropped += o.counters.dropped.get();
+			purged += o.counters.purged.get();
+		}
+		publicOutboxPending = pending;
+		publicOutboxBytes = bytes;
+		publicOutboxDropped = dropped;
+		publicOutboxPurged = purged;
 	}
 
 	static String publicOutboxIdentity(Map<String, Object> event)
@@ -140,13 +147,9 @@ final class PublicOutboxDriver
 		// disk write after logout, but do not replay until a matching logged-in identity returns.
 		if (!PublicBankProtocol.SCOPE.equals(scope) || publicOutboxPaused || !plugin.uploadAllowed()
 			|| !owner.account.equals(plugin.activeHash) || plugin.activeProfileType != null && !owner.mode.equals(plugin.activeProfileType)
-			|| plugin.configManager == null || plugin.configManager.getProfile() == null) return false;
-		try
-		{
-			return owner.identity.equals(new PublicEventOutbox.Context(plugin.currentLinkToken(), plugin.activeHash, owner.mode,
-				Long.toString(plugin.configManager.getProfile().getId())).identity);
-		}
-		catch (IllegalArgumentException unknown) { return false; }
+) return false;
+		PublicEventOutbox.Context check = context(plugin.currentLinkToken(), plugin.activeHash, owner.mode);
+		return check != null && owner.identity.equals(check.identity);
 	}
 
 	/** Capture before transmission; a bounded executor backlog is an explicit non-durable gap. */
@@ -212,7 +215,7 @@ final class PublicOutboxDriver
 		{
 			if (!publicOutboxMemoryIds.add(String.valueOf(event.get("event_id")))) return;
 			plugin.events.pendingEvents.add(retry);
-			while (plugin.events.pendingEvents.size() > EventQueue.MAX_PENDING_EVENTS) plugin.events.evictOneForOverflow();
+			plugin.events.trimPending();
 		}
 		plugin.events.scheduleCoalescedFlush();
 	}

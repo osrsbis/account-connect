@@ -46,7 +46,7 @@ public class GeDeferredIdentityAuditTest {
         when(client.getWorldType()).thenReturn(EnumSet.noneOf(WorldType.class));
         when(client.getGrandExchangeOffers()).thenReturn(new GrandExchangeOffer[8]);
         inject("client",client);
-        p.spooler.setSpoolDataRootForTest(tmp.newFolder("plugin-data").toPath());
+        SpoolHooks.dataRoot(p.spooler,tmp.newFolder("plugin-data").toPath());
         p.startUp();
         p.activeHash="111";
         p.activeProfileType="STANDARD";

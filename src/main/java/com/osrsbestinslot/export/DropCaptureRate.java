@@ -239,15 +239,4 @@ public class DropCaptureRate
 		preRollTimes.clear();
 		burstUntilMillis = 0L;
 	}
-
-	/**
-	 * Bytes one second of baseline footage costs, at a measured per-frame size.
-	 *
-	 * Used by the budget arithmetic in the tests, so the sizing claim is checked rather than
-	 * asserted in a comment.
-	 */
-	public static long baselineBytesPerSecond(int baselineFps, int bytesPerFrame)
-	{
-		return (long) baselineFps * bytesPerFrame;
-	}
 }

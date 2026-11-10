@@ -21,8 +21,6 @@ final class VerificationDiscovery
         {"temple_trekking", InterfaceID.TrekRewards.DESC},
         {"temple_trekking", InterfaceID.TrekRewards.TITLE}
     };
-    static final String[] UNOBSERVABLE_ACTIVITIES = {"intelligence_gathering", "mess", "aldarin_vineyard",
-        "keldagrim_tasks", "shayzien_combat_ring", "dorgesh_kaan_trading", "sled_racing", "underwater_agility_thieving"};
     private static final Set<String> COUNTERS = new HashSet<>();
     private static final int[] CONTRACT_VARS = {VarbitID.CON_CONTRACT_HOTSPOT_1_DISPLAY,
         VarbitID.CON_CONTRACT_HOTSPOT_2_DISPLAY, VarbitID.CON_CONTRACT_HOTSPOT_3_DISPLAY,
@@ -104,7 +102,7 @@ final class VerificationDiscovery
             String text = EventVerificationScreen.visible(client, w) ? EventVerification.clean(w.getText()) : null;
             String previous = widgetTexts.get(id);
             if (text == null) { widgetTexts.remove(id); continue; }
-            if (text == null || text.equals(previous)) continue;
+            if (text.equals(previous)) continue;
             context((String) row[0], "visible_widget", client.getTickCount());
             Map<String, Object> result = sample(client, (String) row[0], "visible_widget", "result_widget", id, text, now, false, true);
             if (result != null) { widgetTexts.put(id, text); out.add(result); }
@@ -116,7 +114,7 @@ final class VerificationDiscovery
             String text = EventVerificationScreen.visible(client, w) ? EventVerification.clean(w.getText()) : null;
             String previous = widgetTexts.get(id);
             if (text == null) { widgetTexts.remove(id); continue; }
-            if (text == null || text.equals(previous) || !current(client.getTickCount())
+            if (text.equals(previous) || !current(client.getTickCount())
                 || MinigameLines.parseDialogue(text) != null) continue;
             Map<String, Object> result = sample(client, activity, basis, "dialogue", id, text, now, false, true);
             if (result != null) { widgetTexts.put(id, text); out.add(result); }
@@ -131,7 +129,7 @@ final class VerificationDiscovery
         int widget, String text, long now, boolean unknown, boolean batch)
     {
         ArrayDeque<Long> budget = unknown ? unknownSamples : contextSamples;
-        while (!budget.isEmpty() && now - budget.peekFirst() >= VerificationProbe.HOUR_MS) budget.pollFirst();
+        VerificationProbe.prune(budget, now);
         seen.entrySet().removeIf(e -> now - e.getValue() >= VerificationProbe.HOUR_MS);
         String key = activity + ":" + surface + ":" + widget + ":" + text;
         if (seen.containsKey(key) || budget.size() >= (unknown ? MAX_UNKNOWN_HOUR : MAX_CONTEXT_HOUR)
@@ -139,13 +137,10 @@ final class VerificationDiscovery
         if (client.getLocalPlayer() == null || client.getLocalPlayer().getWorldLocation() == null) return null;
         budget.addLast(now); if (unknown) lastUnknown = now; else if (!batch) lastContext = now;
         seen.put(key, now); if (seen.size() > 64) seen.remove(seen.keySet().iterator().next());
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("activity", activity); fields.put("context_basis", basis); fields.put("surface", surface);
-        fields.put("widget", widget); fields.put("region_id", client.getLocalPlayer().getWorldLocation().getRegionID());
-        fields.put("discovery_status", "unparsed"); fields.put("verification_text", text);
-        // Internal admission receipt: PublicTransport never sends this field.
-        fields.put("_discovery_at", now);
-        return fields;
+        // _discovery_at is an internal admission receipt: PublicTransport never sends this field.
+        return Fields.of("activity", activity, "context_basis", basis, "surface", surface, "widget", widget,
+            "region_id", client.getLocalPlayer().getWorldLocation().getRegionID(), "discovery_status", "unparsed",
+            "verification_text", text, "_discovery_at", now);
     }
 
     /** A source refused by the outer shared budget/queue was never admitted; leave its visible text retryable. */

@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.IntToLongFunction;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * Bounded, passive first-party observations. No scene sweep, player target reads, raw chat, actions,
@@ -30,11 +31,6 @@ final class OwnGameplayCapture
     static final int MAX_OBSERVATION_BYTES = 96 * 1024;
     private static final int MAX_TARGETS = 16;
     // RuneLite API 1.13.1 constants, checked against the audited acquisition sources.
-    private static final Skill[] GOAL_SKILLS = {Skill.ATTACK, Skill.STRENGTH, Skill.RANGED,
-        Skill.MAGIC, Skill.DEFENCE, Skill.HITPOINTS, Skill.PRAYER, Skill.AGILITY, Skill.HERBLORE,
-        Skill.THIEVING, Skill.CRAFTING, Skill.RUNECRAFT, Skill.MINING, Skill.SMITHING, Skill.FISHING,
-        Skill.COOKING, Skill.FIREMAKING, Skill.WOODCUTTING, Skill.FLETCHING, Skill.SLAYER,
-        Skill.FARMING, Skill.CONSTRUCTION, Skill.HUNTER, Skill.SAILING};
     private String identity, session, profile;
     private Integer accountType;
     private int settledAt, lastTick = -1, splatTick = -1, evicted;
@@ -44,10 +40,9 @@ final class OwnGameplayCapture
     private final Deque<Integer> observationBytes = new ArrayDeque<>();
     private int bufferedBytes;
     private final Predicate<Map<String,Object>> eventSink;
-    private long combatObserved, combatHandedOff, combatNotHandedOff;
-    private long stateObserved, stateHandedOff, stateNotHandedOff;
-    private long varsObserved, varsHandedOff, varsNotHandedOff;
-    private long signalsObserved,signalsHandedOff,signalsNotHandedOff;
+    // Hand-off counters per stream in HAND_OFF_STREAMS order: observed, handed off, not handed off.
+    private static final String[] HAND_OFF_STREAMS = {"combat", "state", "signal", "vars"};
+    private final long[] handOffs = new long[12];
     OwnGameplayCapture() { this(row -> false); }
     OwnGameplayCapture(Predicate<Map<String,Object>> sink) { this(sink,id -> -1); }
     OwnGameplayCapture(Predicate<Map<String,Object>> sink,IntToLongFunction prices)
@@ -81,12 +76,9 @@ final class OwnGameplayCapture
         identity = session = profile = null;
         accountType = null;
         observations.clear(); observationBytes.clear(); bufferedBytes = 0;
-        states.clear(); targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
-        lastTick = splatTick = -1; sequence = lastReadAt = 0; evicted = 0;
-        combatObserved = combatHandedOff = combatNotHandedOff = 0;
-        stateObserved = stateHandedOff = stateNotHandedOff = 0;
-        varsObserved = varsHandedOff = varsNotHandedOff = 0;
-        signalsObserved=signalsHandedOff=signalsNotHandedOff=0;
+        gap();	// every per-scene part; gapReason is set below
+        sequence = lastReadAt = 0; evicted = 0;
+        Arrays.fill(handOffs, 0);
         gapReason = "not_observed";
     }
 
@@ -211,10 +203,8 @@ final class OwnGameplayCapture
 
     private void append(String kind,String source,int tick,long at,Map<String,Object> value,boolean direct,boolean keepSnapshot)
     {
-        Map<String,Object> row = new LinkedHashMap<>();
-        row.put("sequence", ++sequence); row.put("event_id", session + ":" + sequence);
-        row.put("kind", kind); row.put("source", source); row.put("tick", tick);
-        row.put("observed_at_ms", at); row.put("direct", direct); row.put("value", value);
+        Map<String,Object> row = Fields.of("sequence", ++sequence, "event_id", session + ":" + sequence,
+            "kind", kind, "source", source, "tick", tick, "observed_at_ms", at, "direct", direct, "value", value);
         int bytes = jsonBytes(row) + 1;
         if (bytes > MAX_OBSERVATION_BYTES) { evicted++; return; }
         if(keepSnapshot)
@@ -227,37 +217,21 @@ final class OwnGameplayCapture
         }
         Map<String,Object> combat = OwnCombatEvent.from(session, row);
         if (combat != null && wornAtHit != null && "combat_hit".equals(combat.get("type"))) combat.put("worn", wornAtHit);
-        if (combat != null)
-        {
-            combatObserved++;
-            boolean handedOff = false;
-            try { handedOff = eventSink.test(combat); }
-            catch (RuntimeException failure) { /* The snapshot still contains the observation. */ }
-            if (handedOff) combatHandedOff++; else combatNotHandedOff++;
-        }
-        if (OwnStateEvent.supports(kind))
-        {
-            stateObserved++; boolean handedOff = false;
-            Map<String,Object> event = OwnStateEvent.from(session, row);
-            try { handedOff = event != null && eventSink.test(event); }
-            catch (RuntimeException failure) { /* snapshot remains; a handoff is not a durable ACK */ }
-            if (handedOff) stateHandedOff++; else stateNotHandedOff++;
-        }
-        if(OwnSignalEvent.supports(kind))
-        {
-            signalsObserved++;boolean handedOff=false;Map<String,Object> event=OwnSignalEvent.from(session,row);
-            try { handedOff=event!=null&&eventSink.test(event); }
-            catch(RuntimeException failure) { /* Bounded snapshot remains; no durable ACK claim. */ }
-            if(handedOff)signalsHandedOff++;else signalsNotHandedOff++;
-        }
-        if (OwnVarsEvent.supports(kind))
-        {
-            varsObserved++; boolean handedOff = false;
-            Map<String,Object> event = OwnVarsEvent.from(session,row);
-            try { handedOff = event != null && eventSink.test(event); }
-            catch (RuntimeException failure) { /* Retain the snapshot and count the missing handoff. */ }
-            if (handedOff) varsHandedOff++; else varsNotHandedOff++;
-        }
+        if (combat != null) handOff(0, () -> combat);
+        if (OwnStateEvent.supports(kind)) handOff(1, () -> OwnStateEvent.from(session, row));
+        if (OwnSignalEvent.supports(kind)) handOff(2, () -> OwnSignalEvent.from(session, row));
+        if (OwnVarsEvent.supports(kind)) handOff(3, () -> OwnVarsEvent.from(session, row));
+    }
+
+    /** Count one observed event of a stream, build it, and count whether the sink took it. */
+    private void handOff(int stream, Supplier<Map<String,Object>> build)
+    {
+        handOffs[stream * 3]++;
+        Map<String,Object> event = build.get();
+        boolean handedOff = false;
+        try { handedOff = event != null && eventSink.test(event); }
+        catch (RuntimeException failure) { /* The snapshot still contains the observation; a handoff is not a durable ACK. */ }
+        handOffs[stream * 3 + (handedOff ? 1 : 2)]++;
     }
 
     void state(String kind, String source, Map<String,Object> value, int tick, long at)
@@ -270,10 +244,7 @@ final class OwnGameplayCapture
         Map<String,Object> previous = states.get(kind);
         if (previous == null || !Objects.equals(previous.get("value"), value))
         {
-            Map<String,Object> sample = new LinkedHashMap<>();
-            sample.put("value", value); sample.put("observed_at_ms", at);
-            sample.put("source", source); sample.put("tick", tick);
-            states.put(kind, sample);
+            states.put(kind, Fields.of("value", value, "observed_at_ms", at, "source", source, "tick", tick));
             Map<String,Object> change = new LinkedHashMap<>(value);
             change.put("observation", previous == null ? "baseline" : "absolute_update");
             append(kind, source, tick, at, change, direct);
@@ -323,17 +294,16 @@ final class OwnGameplayCapture
         state("minigame.arena_state", "varbits:5964,10732,5962", arena, tick, at);
 
         Map<String,Object> goals = new LinkedHashMap<>();
-        for (int i = 0; i < GOAL_SKILLS.length; i++)
+        // The 24 skills in the XpTracker goal order (OwnStateEvent.SKILLS is the same list in the same order).
+        for (int i = 0; i < OwnStateEvent.SKILLS.size(); i++)
         {
+            String skill = OwnStateEvent.SKILLS.get(i);
             // Sailing is outside the original contiguous 23-skill ranges. Pinned1.13.1 XpTracker uses these named varps.
-            Integer start = AccountProgressCapture.varp(vars, GOAL_SKILLS[i] == Skill.SAILING ? VarPlayerID.XPDROPS_SAILING_START : 1229+i);
-            Integer end = AccountProgressCapture.varp(vars, GOAL_SKILLS[i] == Skill.SAILING ? VarPlayerID.XPDROPS_SAILING_END : 1253+i);
-            Map<String,Object> goal = new LinkedHashMap<>();
-            goal.put("start_xp", start); goal.put("end_xp", end);
+            Integer start = AccountProgressCapture.varp(vars, skill.equals("SAILING") ? VarPlayerID.XPDROPS_SAILING_START : 1229+i);
+            Integer end = AccountProgressCapture.varp(vars, skill.equals("SAILING") ? VarPlayerID.XPDROPS_SAILING_END : 1253+i);
             // Preserve raw values; no division, fictional gain, or inferred completion.
-            goal.put("status", start == null || end == null ? "unknown" : end == 0 ? "unset"
-                : start < 0 || end <= start || end > 200000000 ? "invalid" : "configured");
-            goals.put(GOAL_SKILLS[i].name(), goal);
+            goals.put(skill, Fields.of("start_xp", start, "end_xp", end, "status", start == null || end == null ? "unknown" : end == 0 ? "unset"
+                : start < 0 || end <= start || end > 200000000 ? "invalid" : "configured"));
         }
         state("skills.goal_xp", "varps:1229-1251,1253-1275,4964,4965", goals, tick, at);
         state("storage.rune_pouch", "own_inventory,varbits,enum:982", OwnRunePouchCapture.read(client,vars), tick, at);
@@ -356,9 +326,8 @@ final class OwnGameplayCapture
         if (tick != splatTick) { splats.clear(); splatTick = tick; }
         if (splats.size() >= MAX_OBSERVATIONS) { evicted++; return; }
         if (!splats.add(splat)) return; // identical callback object only; equal amounts can be two hits
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("direction", incoming ? "received" : "dealt_to_npc");
-        value.put("amount", splat.getAmount()); value.put("hitsplat_type", splat.getHitsplatType());
+        Map<String,Object> value = Fields.of("direction", incoming ? "received" : "dealt_to_npc",
+            "amount", splat.getAmount(), "hitsplat_type", splat.getHitsplatType());
         if (!incoming)
         {
             NPC npc = (NPC) actor;
@@ -403,11 +372,8 @@ final class OwnGameplayCapture
 
     private void npcEnd(Target target, boolean death, String order, int tick, long at)
     {
-        Map<String,Object> value = new LinkedHashMap<>();
-        value.put("npc_id", target.npcId); value.put("target_observation_id", target.id);
-        value.put("first_own_hit_tick", target.firstTick);
-        value.put("end", death ? "observed_death" : "despawn_not_death");
-        value.put("kill_credit", "unknown");
+        Map<String,Object> value = Fields.of("npc_id", target.npcId, "target_observation_id", target.id,
+            "first_own_hit_tick", target.firstTick, "end", death ? "observed_death" : "despawn_not_death", "kill_credit", "unknown");
         if (order != null) value.put("event_order", order);
         // Observation interval only: spawn, encounter start, ownership and kill time are not implied.
         append("combat.npc_lifecycle", death ? "ActorDeath" : "NpcDespawned", tick, at, value);
@@ -415,22 +381,18 @@ final class OwnGameplayCapture
 
     Map<String,Object> snapshot()
     {
-        Map<String,Object> out = new LinkedHashMap<>();
-        out.put("schema_v", 1); out.put("decoder_version", "own-gameplay-v2");
-        out.put("collector_session", session); out.put("profile_type", profile); out.put("account_type_raw", accountType);
-        out.put("last_authoritative_read_ms", lastReadAt == 0 ? null : lastReadAt);
-        out.put("completeness_scope", "bounded_recent_observations"); out.put("complete", false);
-        out.put("gap_reason", evicted > 0 ? "buffer_eviction" : gapReason); out.put("evicted", evicted);
-        out.put("buffered_bytes", bufferedBytes);
+        Map<String,Object> out = Fields.of("schema_v", 1, "decoder_version", "own-gameplay-v2",
+            "collector_session", session, "profile_type", profile, "account_type_raw", accountType,
+            "last_authoritative_read_ms", lastReadAt == 0 ? null : lastReadAt,
+            "completeness_scope", "bounded_recent_observations", "complete", false,
+            "gap_reason", evicted > 0 ? "buffer_eviction" : gapReason, "evicted", evicted, "buffered_bytes", bufferedBytes);
         // Handoff is not disk durability or server ACK. Scope is this capture session only.
-        out.put("combat_events_observed", combatObserved);out.put("combat_events_handed_off", combatHandedOff);
-        out.put("combat_events_not_handed_off", combatNotHandedOff);
-        out.put("state_events_observed", stateObserved); out.put("state_events_handed_off", stateHandedOff);
-        out.put("state_events_not_handed_off", stateNotHandedOff);
-        out.put("signal_events_observed",signalsObserved);out.put("signal_events_handed_off",signalsHandedOff);
-        out.put("signal_events_not_handed_off",signalsNotHandedOff);
-        out.put("vars_events_observed",varsObserved); out.put("vars_events_handed_off",varsHandedOff);
-        out.put("vars_events_not_handed_off",varsNotHandedOff);
+        for (int s = 0; s < HAND_OFF_STREAMS.length; s++)
+        {
+            out.put(HAND_OFF_STREAMS[s] + "_events_observed", handOffs[s * 3]);
+            out.put(HAND_OFF_STREAMS[s] + "_events_handed_off", handOffs[s * 3 + 1]);
+            out.put(HAND_OFF_STREAMS[s] + "_events_not_handed_off", handOffs[s * 3 + 2]);
+        }
         out.put("states", new LinkedHashMap<>(states)); out.put("observations", new ArrayList<>(observations));
         return out;
     }

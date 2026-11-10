@@ -47,11 +47,6 @@ final class EventQueueProtocol
         } catch (RuntimeException ignored) { return false; }
     }
 
-    static List<Outcome> receipts(String body, List<Map<String,Object>> batch)
-    {
-        return parseReceipts(body, batch).outcomes;
-    }
-
     static ReceiptSet parseReceipts(String body, List<Map<String,Object>> batch)
     {
         ReceiptSet parsed = new ReceiptSet(batch.size()); List<Outcome> out = parsed.outcomes;

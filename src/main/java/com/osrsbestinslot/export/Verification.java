@@ -12,6 +12,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
@@ -29,23 +33,17 @@ import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.kit.KitType;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.Text;
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
-import okhttp3.Response;
 
 /** Verification: cross-check reads of the live client and the verification frames, under the verification grant. */
 @Slf4j
+@RequiredArgsConstructor
 final class Verification
 {
 	private final AccountConnectPlugin plugin;
-
-	Verification(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	boolean discoveryReady()
 	{
@@ -119,7 +117,11 @@ final class Verification
 
 	private boolean verificationFrameBlocked()
 	{
-		if (plugin.client.isMenuOpen()) return true;
+		return plugin.client.isMenuOpen() || widgetBlocked();
+	}
+
+	private boolean widgetBlocked()
+	{
 		for (int group : VERIFY_FRAME_BLOCKERS)
 		{
 			Widget w = plugin.client.getWidget(group, 0);
@@ -175,12 +177,7 @@ final class Verification
 			{
 				// A reward screen often settles a tick after its event. Look again while the source is still within its
 				// delay; the regions are selected afresh, and only an expired source is reported as changed.
-				plugin.clientThread.invoke(() ->
-				{
-					source.retryReason = "screen_changed_before_frame";
-					if (!source.expired(plugin.client.getTickCount()) && plugin.eventVerification.offer(source)) return;
-					eventEvidenceUnknown(source, "screen_changed_before_frame");
-				});
+				retryOrUnknown(source, "screen_changed_before_frame");
 				return;
 			}
 			final BufferedImage nativePixels = nativeRegions(regions, canvasW, canvasH);
@@ -192,20 +189,14 @@ final class Verification
 			if (VerificationFrame.regionsBlank(pixels, regions, canvasW, canvasH))
 			{
 				// Nothing drawn in the selected regions yet: look again within the delay, as for a changed screen.
-				plugin.clientThread.invoke(() ->
-				{
-					source.retryReason = "regions_blank";
-					if (!source.expired(plugin.client.getTickCount()) && plugin.eventVerification.offer(source)) return;
-					eventEvidenceUnknown(source, "regions_blank");
-				});
+				retryOrUnknown(source, "regions_blank");
 				return;
 			}
 			final String pixelSource = nativePixels != null ? "client_buffer" : "drawn_frame";
 			final long frameMs = System.currentTimeMillis();
 			// The full window comes from the drawn frame: in GPU mode only it holds the 3D scene.
-			final BufferedImage drawn = source.fullWindowPaid && img != null ? (rgb != null ? rgb : StoreClips.toRgbFrame(img)) : null;
-			final boolean drawnBlank = drawn != null && FullWindowFrame.blank(drawn);
-			final BufferedImage full = drawn;
+			final BufferedImage full = source.fullWindowPaid && img != null ? (rgb != null ? rgb : StoreClips.toRgbFrame(img)) : null;
+			final boolean drawnBlank = full != null && FullWindowFrame.blank(full);
 			final String fullRef = full == null ? null : randomRef();
 			plugin.executor.submit(() ->
 			{
@@ -229,15 +220,31 @@ final class Verification
 						VerificationProbe.observed("width", pixels.getWidth()), VerificationProbe.observed("height", pixels.getHeight()),
 						VerificationProbe.observed("pixel_source", pixelSource), VerificationProbe.observed("scope", "regions"),
 						VerificationProbe.observed("paired_ref", fullRef));
-					for (Map<String, Object> row : VerificationProbe.rows("frame", "capture", capture, common)) plugin.events.emitEvent("verification", row);
+					emitRows("frame", "capture", capture, common);
 					List<Map<String, Object>> results = VerificationFrame.results(regions, pixels.getWidth(), pixels.getHeight(), canvasW, canvasH);
 					results.addAll(EventVerificationScreen.missing(source, regions, "source_field_not_visible"));
 					emitEventScreenRows(results, common);
-					uploadVerificationFrame(owner, png, ref, frameMs, common, 1);
+					uploadVerificationFrame(owner, png, ref, frameMs, common, 1, false);
 					if (full != null) emitFullWindow(owner, source.common(readTick), "ocr_event", full, drawnBlank, fullPng, fullRef, ref, readTick, frameMs - readMs, frameMs, regions, canvasW, canvasH);
 				});
 			});
 		});
+	}
+
+	/** A reward screen often settles a tick after its event: look again while the source is within its delay. */
+	private void retryOrUnknown(EventVerification.Source source, String reason)
+	{
+		plugin.clientThread.invoke(() ->
+		{
+			source.retryReason = reason;
+			if (!source.expired(plugin.client.getTickCount()) && plugin.eventVerification.offer(source)) return;
+			eventEvidenceUnknown(source, reason);
+		});
+	}
+
+	private void emitRows(String area, String check, List<Map<String, Object>> results, Map<String, Object> common)
+	{
+		for (Map<String, Object> r : VerificationProbe.rows(area, check, results, common)) plugin.events.emitEvent("verification", r);
 	}
 
 	/**
@@ -259,11 +266,11 @@ final class Verification
 			VerificationProbe.observed("paired_ref", regionRef), VerificationProbe.observed("gpu", plugin.client.isGpu()),
 			VerificationProbe.observed("encoded", encoded), VerificationProbe.observed("drawn_blank", drawnBlank),
 			VerificationProbe.observed("uploaded", budget)));
-		for (Map<String, Object> row : VerificationProbe.rows("frame", "capture", capture, common)) plugin.events.emitEvent("verification", row);
+		emitRows("frame", "capture", capture, common);
 		if (!budget) return;
 		List<Map<String, Object>> checks = VerificationFrame.results(regions, full.getWidth(), full.getHeight(), canvasW, canvasH);
 		if ("ocr_event".equals(screenCheck)) emitEventScreenRows(checks, common);
-		else for (Map<String, Object> r : VerificationProbe.rows("screen", screenCheck, checks, common)) plugin.events.emitEvent("verification", r);
+		else emitRows("screen", screenCheck, checks, common);
 		uploadVerificationFrame(owner, png, fullRef, frameMs, common, 1, true);
 	}
 
@@ -297,12 +304,7 @@ final class Verification
 	{
 		long nowMs = System.currentTimeMillis();
 		int tick = plugin.client.getTickCount();
-		boolean blocked = false;
-		for (int g : VERIFY_FRAME_BLOCKERS)
-		{
-			Widget w = plugin.client.getWidget(g, 0);
-			if (w != null && !w.isHidden()) blocked = true;
-		}
+		boolean blocked = widgetBlocked();
 		// Room only: the slot is taken when the sample's frame is uploaded.
 		boolean frame = !blocked && plugin.uploadAllowed() && plugin.grants.verificationFramesEnabled() && plugin.verificationProbe.frameRoom(nowMs);
 		String ref = frame ? randomRef() : null;
@@ -375,11 +377,11 @@ final class Verification
 		int spec = plugin.client.getVarpValue(VarPlayerID.SA_ENERGY);
 		Integer hpOrb = widgetInt(InterfaceID.Orbs.HEALTH_TEXT), prayerOrb = widgetInt(InterfaceID.Orbs.PRAYER_TEXT),
 			runOrb = widgetInt(InterfaceID.Orbs.RUNENERGY_TEXT), specOrb = widgetInt(InterfaceID.Orbs.SPECENERGY_TEXT);
-		out.add(VerificationProbe.shown("hitpoints_orb", null, hp, VerificationProbe.orbUndrawn(since, hp, hpOrb) ? null : hpOrb));
-		out.add(VerificationProbe.shown("prayer_orb", null, prayer, VerificationProbe.orbUndrawn(since, prayer, prayerOrb) ? null : prayerOrb));
-		out.add(VerificationProbe.shown("run_energy_orb", VerificationProbe.inputs("energy_raw", plugin.client.getEnergy()),
+		out.add(VerificationProbe.result("hitpoints_orb", null, hp, VerificationProbe.orbUndrawn(since, hp, hpOrb) ? null : hpOrb));
+		out.add(VerificationProbe.result("prayer_orb", null, prayer, VerificationProbe.orbUndrawn(since, prayer, prayerOrb) ? null : prayerOrb));
+		out.add(VerificationProbe.result("run_energy_orb", VerificationProbe.inputs("energy_raw", plugin.client.getEnergy()),
 			run, VerificationProbe.orbUndrawn(since, run, runOrb) ? null : runOrb));
-		out.add(VerificationProbe.shown("special_energy_orb", VerificationProbe.inputs("sa_energy", spec), spec / 10,
+		out.add(VerificationProbe.result("special_energy_orb", VerificationProbe.inputs("sa_energy", spec), spec / 10,
 			VerificationProbe.orbUndrawn(since, spec / 10, specOrb) ? null : specOrb));
 		return out;
 	}
@@ -506,7 +508,7 @@ final class Verification
 			stacks++;
 			if (it.getQuantity() == 0) placeholders++;
 		}
-		out.add(VerificationProbe.shown("occupied_slots", VerificationProbe.inputs("stacks", stacks, "placeholders", placeholders),
+		out.add(VerificationProbe.result("occupied_slots", VerificationProbe.inputs("stacks", stacks, "placeholders", placeholders),
 			stacks, KillContext.widgetNumber(used.getText())));
 		return out;
 	}
@@ -563,6 +565,7 @@ final class Verification
 		final String token = plugin.currentLinkToken();
 		final long epoch = plugin.verificationEpoch.get();
 		final FrameOwner owner = currentOwner(token);
+		final BiConsumer<String, Integer> skip = (reason, frameTick) -> sampleFrameSkipped(ref, readTick, snapshotRevision, epoch, token, reason, frameTick);
 		// Keep only known numeric widget interiors. A chat mask alone misses names in overlays and menus.
 		final List<VerificationFrame.Region> regions = new ArrayList<>();
 		Object[][] fixed = {
@@ -574,8 +577,8 @@ final class Verification
 		for (Object[] c : fixed) addVerificationRegion(regions, (String) c[0], (int) c[1]);
 		for (Object[] c : KillContext.WIDGET_COUNTERS) addVerificationRegion(regions, (String) c[0], (int) c[1]);
 		// The sample rows already carry this ref: every way the frame is not taken leaves a capture row saying why.
-		if (regions.isEmpty()) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"no_numeric_region", null); return; }
-		if (plugin.client.isMenuOpen()) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"menu_open", null); return; }
+		if (regions.isEmpty()) { skip.accept("no_numeric_region", null); return; }
+		if (plugin.client.isMenuOpen()) { skip.accept("menu_open", null); return; }
 		final int canvasW = Math.max(1, plugin.client.getCanvasWidth());
 		final int canvasH = Math.max(1, plugin.client.getCanvasHeight());
 		plugin.drawManager.requestNextFrameListener(img ->
@@ -592,16 +595,15 @@ final class Verification
 				: plugin.client.getCanvasWidth() != canvasW || plugin.client.getCanvasHeight() != canvasH ? "canvas_resized"
 				: !drawnMatchesCanvas(img, canvasW, canvasH) ? "frame_size_mismatch"
 				: now == readTick + 1 && !regionsUnchanged(regions) ? "screen_changed_before_frame" : null;
-			if (changed != null) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,changed, now); return; }
+			if (changed != null) { skip.accept(changed, now); return; }
 			final int frameTick = now;
 			final long frameMs = System.currentTimeMillis();
 			final BufferedImage nativePixels = nativeRegions(regions, canvasW, canvasH);
 			BufferedImage rgb = nativePixels != null || img == null ? null : StoreClips.toRgbFrame(img);
-			if (nativePixels == null && rgb == null) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"frame_unavailable", frameTick); return; }
-			if (nativePixels == null && FullWindowFrame.blank(rgb)) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"drawn_blank", frameTick); return; }
+			if (nativePixels == null && rgb == null) { skip.accept("frame_unavailable", frameTick); return; }
+			if (nativePixels == null && FullWindowFrame.blank(rgb)) { skip.accept("drawn_blank", frameTick); return; }
 			final BufferedImage scaled = nativePixels != null ? nativePixels : VerificationFrame.retainRegions(rgb, regions, canvasW, canvasH);
-			if (scaled == null) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"frame_unavailable", frameTick); return; }
-			if (VerificationFrame.regionsBlank(scaled, regions, canvasW, canvasH)) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token, "regions_blank", frameTick); return; }
+			if (VerificationFrame.regionsBlank(scaled, regions, canvasW, canvasH)) { skip.accept("regions_blank", frameTick); return; }
 			final String pixelSource = nativePixels != null ? "client_buffer" : "drawn_frame";
 			// A sample that found a discrepancy also keeps the whole window (the drawn frame as drawn), linked by ref.
 			final BufferedImage full = fullWindow && img != null ? (rgb != null ? rgb : StoreClips.toRgbFrame(img)) : null;
@@ -618,36 +620,29 @@ final class Verification
 				catch (RuntimeException e)
 				{
 					// An exception in a submitted task is otherwise lost in its Future.
-					sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"frame_encoding_failed", frameTick);
+					skip.accept("frame_encoding_failed", frameTick);
 					return;
 				}
 				if (png == null || png.length == 0 || png.length > TradeCapture.MAX_SCREENSHOT_UPLOAD_BYTES)
-				{ sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token,"frame_encoding_failed", frameTick); return; }
+				{ skip.accept("frame_encoding_failed", frameTick); return; }
 				plugin.clientThread.invoke(() ->
 				{
 					if (epoch != plugin.verificationEpoch.get() || !plugin.grants.verificationFramesEnabled() || token == null || !token.equals(plugin.currentLinkToken())) return;
 					if (!ownerCurrent(owner)) return;
-					if (verificationFrameBlocked()) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token, "frame_blocked", frameTick); return; }
+					if (verificationFrameBlocked()) { skip.accept("frame_blocked", frameTick); return; }
 					// The frame slot is taken here, for a frame that is about to be uploaded, never earlier.
-					if (!plugin.verificationProbe.takeFrame(System.currentTimeMillis())) { sampleFrameSkipped(ref, readMs, readTick, snapshotRevision, epoch, token, "frame_budget", frameTick); return; }
+					if (!plugin.verificationProbe.takeFrame(System.currentTimeMillis())) { skip.accept("frame_budget", frameTick); return; }
 					Map<String, Object> row = Fields.of(
 						"tick", frameTick, "snapshot_revision", snapshotRevision > 0 ? snapshotRevision : null,
 						"plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", ref);
-					List<Map<String, Object>> results = new ArrayList<>();
-					results.add(VerificationProbe.observed("frame_tick", frameTick));
-					results.add(VerificationProbe.observed("sample_tick", readTick));
-					results.add(VerificationProbe.observed("frame_delay_ms", frameMs - readMs));
-					results.add(VerificationProbe.observed("width", scaled.getWidth()));
-					results.add(VerificationProbe.observed("height", scaled.getHeight()));
-					results.add(VerificationProbe.observed("pixel_source", pixelSource));
-					results.add(VerificationProbe.observed("retained_regions", regions.size()));
-					results.add(VerificationProbe.observed("scope", "regions"));
-					results.add(VerificationProbe.observed("paired_ref", fullRef));
-					for (Map<String, Object> r : VerificationProbe.rows("frame", "capture", results, row)) plugin.events.emitEvent("verification", r);
-					for (Map<String, Object> r : VerificationProbe.rows("screen", "ocr_numeric",
-						VerificationFrame.results(regions, scaled.getWidth(), scaled.getHeight(), canvasW, canvasH), row))
-						plugin.events.emitEvent("verification", r);
-					uploadVerificationFrame(owner, png, ref, frameMs, row, 1);
+					emitRows("frame", "capture", Arrays.asList(
+						VerificationProbe.observed("frame_tick", frameTick), VerificationProbe.observed("sample_tick", readTick),
+						VerificationProbe.observed("frame_delay_ms", frameMs - readMs),
+						VerificationProbe.observed("width", scaled.getWidth()), VerificationProbe.observed("height", scaled.getHeight()),
+						VerificationProbe.observed("pixel_source", pixelSource), VerificationProbe.observed("retained_regions", regions.size()),
+						VerificationProbe.observed("scope", "regions"), VerificationProbe.observed("paired_ref", fullRef)), row);
+					emitRows("screen", "ocr_numeric", VerificationFrame.results(regions, scaled.getWidth(), scaled.getHeight(), canvasW, canvasH), row);
+					uploadVerificationFrame(owner, png, ref, frameMs, row, 1, false);
 					if (full != null) emitFullWindow(owner, row, "ocr_numeric", full, drawnBlank, fullPng, fullRef, ref, frameTick, frameMs - readMs, frameMs,
 						regions, canvasW, canvasH);
 				});
@@ -690,7 +685,7 @@ final class Verification
 		{
 			Widget w = plugin.client.getWidget(r.widget);
 			if (w == null || w.isHidden() || w.getBounds() == null || !r.bounds.equals(w.getBounds())) return false;
-			if (!java.util.Objects.equals(r.value, KillContext.widgetNumber(Text.removeTags(w.getText()).trim()))) return false;
+			if (!Objects.equals(r.value, KillContext.widgetNumber(Text.removeTags(w.getText()).trim()))) return false;
 		}
 		return true;
 	}
@@ -699,7 +694,7 @@ final class Verification
 	 * A random sample whose frame was charged but not taken: one capture row under its ref with the reason
 	 * (`frame_skipped`), so a ref with no image is explained. Written on the client thread, only for the same grant.
 	 */
-	private void sampleFrameSkipped(String ref, long readMs, int readTick, long snapshotRevision, long epoch, String token, String reason, Integer frameTick)
+	private void sampleFrameSkipped(String ref, int readTick, long snapshotRevision, long epoch, String token, String reason, Integer frameTick)
 	{
 		Runnable write = () ->
 		{
@@ -711,9 +706,9 @@ final class Verification
 			results.add(VerificationProbe.observed("frame_skipped", reason));
 			if ("drawn_blank".equals(reason)) { results.add(VerificationProbe.observed("pixel_source", "drawn_frame")); results.add(VerificationProbe.observed("drawn_blank", true)); }
 			results.add(VerificationProbe.observed("uploaded", false));
-			for (Map<String, Object> r : VerificationProbe.rows("frame", "capture", results, row)) plugin.events.emitEvent("verification", r);
+			emitRows("frame", "capture", results, row);
 		};
-		if (plugin.clientThread != null) plugin.clientThread.invoke(write); else write.run();
+		plugin.onClientThread(write);
 	}
 
 	/** The regions from the client's native pixel buffer (exact font pixels at any stretch or display scale), or null. */
@@ -755,17 +750,11 @@ final class Verification
 	 * attempt and its outcome row use these, never the client's state at upload time; a changed token, account or
 	 * epoch (a revoke and regrant included) ends the upload.
 	 */
+	@AllArgsConstructor
 	static final class FrameOwner
 	{
 		final String token, account;
 		final long epoch;
-
-		FrameOwner(String token, String account, long epoch)
-		{
-			this.token = token;
-			this.account = account;
-			this.epoch = epoch;
-		}
 	}
 
 	FrameOwner currentOwner(String token)
@@ -783,15 +772,15 @@ final class Verification
 		return live == -1L || owner.account.equals(Long.toString(live));
 	}
 
-	private okhttp3.OkHttpClient frameHttp;
-	private okhttp3.OkHttpClient frameHttpBase;
+	OkHttpClient frameHttp;
+	OkHttpClient frameHttpBase;
 
 	/**
 	 * The shared client without OkHttp's own retry on a connection failure: RuneLite's client keeps it on, and OkHttp
 	 * then re-sends a POST on a pooled connection after the server already received it, which stores the frame twice.
 	 * Same pool and dispatcher.
 	 */
-	okhttp3.OkHttpClient frameHttp()
+	OkHttpClient frameHttp()
 	{
 		if (frameHttp == null || frameHttpBase != plugin.okHttpClient)
 		{
@@ -801,34 +790,13 @@ final class Verification
 		return frameHttp;
 	}
 
-	/** Test seam: the client frame uploads use, as frameHttp() would derive it. */
-	void frameHttpForTest(okhttp3.OkHttpClient client)
-	{
-		frameHttp = client;
-		frameHttpBase = plugin.okHttpClient;
-	}
-
-	/** POST one verification frame (kind "verify", the sample's ref, the time the frame was drawn). */
-	void uploadVerificationFrame(String token, byte[] pngBytes, String ref, long frameMs)
-	{
-		Map<String, Object> common = Fields.of("plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", ref);
-		uploadVerificationFrame(currentOwner(token), pngBytes, ref, frameMs, common, 1);
-	}
-
 	/**
 	 * POST one verification frame and record what the server did with it, on its own row (area "frame", check
 	 * "upload", the frame's ref and source fields): stored (an id, or pending after durable storage), dropped (a
 	 * deliberate 200 drop: paused, not granted, screenshots off; never retried), refused (another 4xx), failed (still
 	 * refused before storage after the bounded retries) or unconfirmed (the answer was lost or unreadable; the frame may
 	 * or may not be stored). A capture row without a stored image is then explained.
-	 */
-	void uploadVerificationFrame(FrameOwner owner, byte[] pngBytes, String ref, long frameMs, Map<String, Object> common, int attempt)
-	{
-		uploadVerificationFrame(owner, pngBytes, ref, frameMs, common, attempt, false);
-	}
-
-	/**
-	 * As above; a full window (an unmasked whole canvas) also needs the staff grant at EVERY attempt, so a retry after the
+	 * A full window (an unmasked whole canvas) also needs the staff grant at EVERY attempt, so a retry after the
 	 * grant was withdrawn (or the API base changed) sends nothing and its upload row says `dropped` `staff_grant_cleared`.
 	 */
 	void uploadVerificationFrame(FrameOwner owner, byte[] pngBytes, String ref, long frameMs, Map<String, Object> common, int attempt, boolean fullWindow)
@@ -848,38 +816,27 @@ final class Verification
 			.addFormDataPart("captured_at", Long.toString(frameMs / 1000L))
 			.addFormDataPart("file", "verify-" + ref + ".png", RequestBody.create(TradeCapture.PNG, pngBytes))
 			.build();
-		String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
+		String base = plugin.apiBase();
 		Request request = new Request.Builder().url(base + "/screenshot-ingest").post(body).build();
-		frameHttp().newCall(request).enqueue(new Callback()
+		frameHttp().newCall(request).enqueue(EventQueue.answered(e ->
 		{
-			@Override
-			public void onFailure(Call call, IOException e)
+			log.debug("OSRS BiS verification frame upload failed", e);
+			// A network failure can come after the server received the whole body (OkHttp reports a dropped
+			// connection to a host that stopped listening as ConnectException), so none is proof of "not stored".
+			uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, "unconfirmed", "no_answer", null, fullWindow);
+		}, response ->
+		{
+			try
 			{
-				log.debug("OSRS BiS verification frame upload failed", e);
-				// A network failure can come after the server received the whole body (OkHttp reports a dropped
-				// connection to a host that stopped listening as ConnectException), so none is proof of "not stored".
-				uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, "unconfirmed", "no_answer", null, fullWindow);
+				String[] outcome = uploadResult(plugin.gson, response.code(), response.body() == null ? null : response.body().string());
+				if ("stored".equals(outcome[0])) plugin.events.healthLastMediaUploadMs.set(System.currentTimeMillis());
+				uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, outcome[0], outcome[1], response.code(), fullWindow);
 			}
-
-			@Override
-			public void onResponse(Call call, Response response)
+			catch (IOException | RuntimeException e)
 			{
-				try
-				{
-					String[] outcome = uploadResult(plugin.gson, response.code(), response.body() == null ? null : response.body().string());
-					if ("stored".equals(outcome[0])) plugin.events.healthLastMediaUploadMs.set(System.currentTimeMillis());
-					uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, outcome[0], outcome[1], response.code(), fullWindow);
-				}
-				catch (IOException | RuntimeException e)
-				{
-					uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, "unconfirmed", "unreadable_response", response.code(), fullWindow);
-				}
-				finally
-				{
-					response.close();
-				}
+				uploadOutcome(owner, pngBytes, ref, frameMs, common, attempt, "unconfirmed", "unreadable_response", response.code(), fullWindow);
 			}
-		});
+		}));
 	}
 
 	/**
@@ -917,7 +874,7 @@ final class Verification
 		{
 			// The retry starts on the client thread so the owner (and, for a full window, staff) check reads consistent client state.
 			plugin.executor.schedule(() -> plugin.clientThread.invoke(() -> uploadVerificationFrame(owner, pngBytes, ref, frameMs, common, attempt + 1, fullWindow)),
-				UPLOAD_RETRY_DELAYS_MS[attempt - 1], java.util.concurrent.TimeUnit.MILLISECONDS);
+				UPLOAD_RETRY_DELAYS_MS[attempt - 1], TimeUnit.MILLISECONDS);
 			return;
 		}
 		if (plugin.clientThread == null) return;
@@ -932,7 +889,7 @@ final class Verification
 				VerificationProbe.observed("upload_status", finalStatus), VerificationProbe.observed("upload_reason", reason),
 				VerificationProbe.observed("attempts", attempt)));
 			if (httpCode != null) results.add(VerificationProbe.observed("http_status", httpCode));
-			for (Map<String, Object> r : VerificationProbe.rows("frame", "upload", results, row)) plugin.events.emitEvent("verification", r);
+			emitRows("frame", "upload", results, row);
 		});
 	}
 }

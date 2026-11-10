@@ -38,6 +38,10 @@ These rules come from the 0.7.67 simplification. They apply to every change.
   meet a line count.
 - Measure a size or speed change before and after: the Plugin Hub reviewer's token count, JAR bytes, and any request,
   payload or runtime cost the change touches. An estimate is not a result; label it as an estimate.
+- A release stays under 200,000 tokens as the Plugin Hub reviewer counts them; above that the Hub does not review it
+  automatically. The release check estimates the count with the `cl100k_base` tokenizer over the `src/main` Java
+  sources with comments removed, which reads slightly above the reviewer, and refuses a candidate at or over the limit.
+  - The optimization target is 150,000 on the same count. It is reported with every release, and it never blocks one.
 - Code that cannot run (hard-wired off, or with no production caller) is removed as unused. Retiring a shipped
   capability that the server can still switch on is a product decision, not an engineering one: keep the capability
   until it is made, and record it with the change.

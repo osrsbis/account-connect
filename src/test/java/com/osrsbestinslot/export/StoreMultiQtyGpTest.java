@@ -27,6 +27,50 @@ import org.junit.Test;
  */
 public class StoreMultiQtyGpTest
 {
+	// Short forms for the tests: an unmeasured item count and an unmerged quantity, as the shipped methods
+	// take explicitly.
+	private static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
+		boolean ambiguous)
+	{
+		return buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, false);
+	}
+
+	private static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
+		boolean ambiguous, boolean qtyMerged)
+	{
+		return StoreTools.buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, qtyMerged);
+	}
+
+	private static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter,
+		boolean ambiguous, boolean qtyMerged, long executedQty)
+	{
+		return StoreTools.buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, qtyMerged, executedQty);
+	}
+
+	private static StoreTools.StorePending mergeStorePending(StoreTools.StorePending prev, String type, int item, int qty,
+		long coinsBefore, int tick)
+	{
+		return StoreTools.mergeStorePending(prev, type, item, qty, coinsBefore, StoreTools.UNKNOWN_ITEM_COUNT, tick);
+	}
+
+	private static StoreTools.StorePending mergeStorePending(StoreTools.StorePending prev, String type, int item, int qty,
+		long coinsBefore, long itemBefore, int tick)
+	{
+		return StoreTools.mergeStorePending(prev, type, item, qty, coinsBefore, itemBefore, tick);
+	}
+
+	private static StoreTools.StorePending storePending(String type, int item, int qty, long coinsBefore, int tick,
+		boolean ambiguous)
+	{
+		return new StoreTools.StorePending(type, item, qty, coinsBefore, StoreTools.UNKNOWN_ITEM_COUNT, tick, ambiguous, false);
+	}
+
+	private static StoreTools.StorePending storePending(String type, int item, int qty, long coinsBefore, long itemBefore,
+		int tick, boolean ambiguous, boolean qtyMerged)
+	{
+		return new StoreTools.StorePending(type, item, qty, coinsBefore, itemBefore, tick, ambiguous, qtyMerged);
+	}
+
 	private static final int TICK = 4242;
 	private static final int COAL = 453;
 	private static final int ORE = 440;
@@ -38,9 +82,9 @@ public class StoreMultiQtyGpTest
 	{
 		// Two "Buy 10" clicks on the same tick, coins 1,000,000 before either.
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
+			mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
 
 		assertFalse("a same-item same-tick repeat is NOT ambiguous — one delta covers both",
 			merged.ambiguous);
@@ -49,7 +93,7 @@ public class StoreMultiQtyGpTest
 			1_000_000L, merged.coinsBefore);
 
 		// 20 coal cost 2,000 total; coins end at 998,000. Both clicks executed here.
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L, merged.ambiguous, merged.qtyMerged);
 
 		assertEquals("the exact transacted gold must be present", 2_000L, fields.get("gp_total"));
@@ -62,7 +106,7 @@ public class StoreMultiQtyGpTest
 	public void beforeTheFixThisExactCaseEmittedNoGold()
 	{
 		// The old behaviour, reproduced by passing ambiguous=true: item and qty survive, gold does not.
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			"store_buy", COAL, 20, 1_000_000L, 998_000L, true);
 
 		assertNull("this is the production defect: 37.1% of multi-qty buys looked like this",
@@ -90,14 +134,14 @@ public class StoreMultiQtyGpTest
 	public void mergedQuantityNeverProducesAHalfPriceUnitCost()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
+			mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
 
 		assertTrue("a merged pending must be marked as such", merged.qtyMerged);
 
 		// Only the FIRST click executed: 10 coal at 100 gp = 1,000 gp. Coins 1,000,000 -> 999,000.
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 999_000L, merged.ambiguous, merged.qtyMerged);
 
 		assertEquals("the coin delta is ground truth and stays exact", 1_000L, fields.get("gp_total"));
@@ -115,16 +159,16 @@ public class StoreMultiQtyGpTest
 	public void unmergedMultiQuantityCarriesAUnitPriceOnlyWhenTheExecutedQuantityMatchesTheClick()
 	{
 		StoreTools.StorePending p =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
 		assertFalse("a single click is not merged", p.qtyMerged);
 
-		Map<String, Object> confirmed = StoreTools.buildStoreTxFields(
+		Map<String, Object> confirmed = buildStoreTxFields(
 			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged, 20L);
 		assertEquals(2_000L, confirmed.get("gp_total"));
 		assertEquals("a MEASURED denominator yields a unit price", 100L, confirmed.get("unit_price_gp"));
 
 		// Same click, but the shop only had 5 — the field-observed shape.
-		Map<String, Object> partial = StoreTools.buildStoreTxFields(
+		Map<String, Object> partial = buildStoreTxFields(
 			p.type, p.item, p.qty, p.coinsBefore, 999_500L, p.ambiguous, p.qtyMerged, 5L);
 		assertEquals("the coin delta is still exact", 500L, partial.get("gp_total"));
 		assertEquals(Boolean.TRUE, partial.get("qty_partial"));
@@ -139,7 +183,7 @@ public class StoreMultiQtyGpTest
 	public void theFieldObservedPartialFillsAreLabelledRatherThanPriced()
 	{
 		// BUY 50 on a shop holding 5: 26,207,203 -> 26,203,278 coins, 0 -> 5 packs.
-		Map<String, Object> buy = StoreTools.buildStoreTxFields(
+		Map<String, Object> buy = buildStoreTxFields(
 			"store_buy", 22660, 50, 26_207_203L, 26_203_278L, false, false, 5L);
 		assertEquals(3_925L, buy.get("gp_total"));
 		assertEquals(Boolean.TRUE, buy.get("qty_partial"));
@@ -147,7 +191,7 @@ public class StoreMultiQtyGpTest
 		assertNull("78 gp/item against a true ~785", buy.get("unit_price_gp"));
 
 		// SELL 50 holding 27: coins +2,175, 27 -> 0 packs.
-		Map<String, Object> sell = StoreTools.buildStoreTxFields(
+		Map<String, Object> sell = buildStoreTxFields(
 			"store_sell", 22660, 50, 26_201_103L, 26_203_278L, false, false, 27L);
 		assertEquals(2_175L, sell.get("gp_total"));
 		assertEquals(Boolean.TRUE, sell.get("qty_partial"));
@@ -164,11 +208,11 @@ public class StoreMultiQtyGpTest
 	public void aMergedRowPublishesTheMeasuredQuantityAlongsideItsUpperBound()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, 0L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, 0L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, 0L, TICK + 1);
+			mergeStorePending(first, "store_buy", COAL, 10, 999_000L, 0L, TICK + 1);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_500L,
 			merged.ambiguous, merged.qtyMerged, 15L);	// the shop ran short: 15 of 20 arrived
 
@@ -182,17 +226,17 @@ public class StoreMultiQtyGpTest
 	@Test
 	public void anImpossibleItemDeltaIsTreatedAsUnmeasuredRatherThanAsAQuantity()
 	{
-		StoreTools.StorePending buy = new StoreTools.StorePending(
+		StoreTools.StorePending buy = storePending(
 			"store_buy", COAL, 10, 1_000_000L, 40L, TICK, false, false);
 		assertEquals("a buy whose item count FELL measures nothing",
 			StoreTools.UNKNOWN_ITEM_COUNT, StoreTools.executedQty(buy, 30L));
 
-		StoreTools.StorePending sell = new StoreTools.StorePending(
+		StoreTools.StorePending sell = storePending(
 			"store_sell", COAL, 10, 1_000_000L, 30L, TICK, false, false);
 		assertEquals("a sell whose item count ROSE measures nothing",
 			StoreTools.UNKNOWN_ITEM_COUNT, StoreTools.executedQty(sell, 40L));
 
-		StoreTools.StorePending noBase = new StoreTools.StorePending(
+		StoreTools.StorePending noBase = storePending(
 			"store_buy", COAL, 10, 1_000_000L, TICK, false);
 		assertEquals("no baseline, no measurement",
 			StoreTools.UNKNOWN_ITEM_COUNT, StoreTools.executedQty(noBase, 10L));
@@ -209,11 +253,11 @@ public class StoreMultiQtyGpTest
 	public void aMergedRowIsLabelledSoConsumersTreatQtyAsAnUpperBound()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
+			mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L, merged.ambiguous, merged.qtyMerged);
 
 		assertEquals("coins that really moved", 2_000L, fields.get("gp_total"));
@@ -225,9 +269,9 @@ public class StoreMultiQtyGpTest
 	public void anUnmergedRowCarriesNoMergedMarker()
 	{
 		StoreTools.StorePending p =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 20, 1_000_000L, 0L, TICK);
 		// all 20 arrived, so the denominator is confirmed
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			p.type, p.item, p.qty, p.coinsBefore, 998_000L, p.ambiguous, p.qtyMerged, 20L);
 
 		assertNull("a single click needs no caveat", fields.get("qty_merged"));
@@ -239,14 +283,14 @@ public class StoreMultiQtyGpTest
 	public void sameTickRepeatSellOnOneItemAlsoResolves()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_sell", COAL, 5, 500_000L, TICK);
+			mergeStorePending(null, "store_sell", COAL, 5, 500_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_sell", COAL, 5, 500_100L, TICK);
+			mergeStorePending(first, "store_sell", COAL, 5, 500_100L, TICK);
 
 		assertFalse(merged.ambiguous);
 		assertEquals(10, merged.qty);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 500_800L, merged.ambiguous, merged.qtyMerged);
 		assertEquals("sell proceeds must be captured", 800L, fields.get("gp_total"));
 		assertNull("merged sell qty is intent too — no unit price", fields.get("unit_price_gp"));
@@ -258,13 +302,13 @@ public class StoreMultiQtyGpTest
 	public void sameTickClicksOnDifferentItemsStayAmbiguousBecauseOneDeltaCannotBeSplit()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", ORE, 10, 999_000L, TICK);
+			mergeStorePending(first, "store_buy", ORE, 10, 999_000L, TICK);
 
 		assertTrue("two different items in one delta cannot be attributed", merged.ambiguous);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 990_000L, merged.ambiguous);
 		assertNull("we must still refuse to emit a guessed number", fields.get("gp_total"));
 	}
@@ -273,9 +317,9 @@ public class StoreMultiQtyGpTest
 	public void sameTickBuyThenSellStaysAmbiguous()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_sell", COAL, 10, 999_000L, TICK);
+			mergeStorePending(first, "store_sell", COAL, 10, 999_000L, TICK);
 
 		assertTrue("opposite directions net against each other in one delta", merged.ambiguous);
 	}
@@ -284,11 +328,11 @@ public class StoreMultiQtyGpTest
 	public void anAlreadyAmbiguousPendingStaysAmbiguousWhenAThirdClickLands()
 	{
 		StoreTools.StorePending a =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending b =
-			StoreTools.mergeStorePending(a, "store_buy", ORE, 10, 999_000L, TICK);
+			mergeStorePending(a, "store_buy", ORE, 10, 999_000L, TICK);
 		StoreTools.StorePending c =
-			StoreTools.mergeStorePending(b, "store_buy", COAL, 10, 998_000L, TICK);
+			mergeStorePending(b, "store_buy", COAL, 10, 998_000L, TICK);
 
 		assertTrue("ambiguity must not be laundered away by a later same-item click", c.ambiguous);
 	}
@@ -312,15 +356,15 @@ public class StoreMultiQtyGpTest
 	public void clicksMergeInsideTheResolutionWindowAndAreIndependentOutsideIt()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 
-		StoreTools.StorePending inside = StoreTools.mergeStorePending(
+		StoreTools.StorePending inside = mergeStorePending(
 			first, "store_buy", COAL, 10, 999_000L, TICK + StoreTools.STORE_PENDING_MAX_TICKS);
 		assertTrue("still unresolved, so still one delta", inside.qtyMerged);
 		assertEquals(20, inside.qty);
 		assertEquals("the original pre-transaction reading", 1_000_000L, inside.coinsBefore);
 
-		StoreTools.StorePending outside = StoreTools.mergeStorePending(
+		StoreTools.StorePending outside = mergeStorePending(
 			first, "store_buy", COAL, 10, 999_000L,
 			TICK + StoreTools.STORE_PENDING_MAX_TICKS + 1);
 		assertFalse("past the window the resolver would drop it anyway", outside.qtyMerged);
@@ -348,10 +392,10 @@ public class StoreMultiQtyGpTest
 	public void singleQuantityBuyIsUnchanged()
 	{
 		StoreTools.StorePending p =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 1, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 1, 1_000_000L, TICK);
 		assertFalse(p.ambiguous);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			p.type, p.item, p.qty, p.coinsBefore, 999_900L, p.ambiguous);
 		assertEquals(100L, fields.get("gp_total"));
 		assertNull("no average unit price for a single item", fields.get("unit_price_gp"));
@@ -361,7 +405,7 @@ public class StoreMultiQtyGpTest
 	public void wrongSignDeltaStillDegradesRatherThanEmittingNonsense()
 	{
 		// A buy whose coin count went UP cannot be that buy's delta — refuse it.
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			"store_buy", COAL, 20, 1_000_000L, 1_005_000L, false);
 		assertNull(fields.get("gp_total"));
 	}
@@ -419,16 +463,16 @@ public class StoreMultiQtyGpTest
 	public void adjacentTickRepeatBuyMergesInsteadOfPairingOneQtyWithTwoClicksOfGold()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK + 1);
+			mergeStorePending(first, "store_buy", COAL, 10, 999_000L, TICK + 1);
 
 		assertTrue("an unresolved pending one tick back must still merge", merged.qtyMerged);
 		assertEquals("quantities sum", 20, merged.qty);
 		assertEquals("the ORIGINAL pre-transaction coin reading survives",
 			1_000_000L, merged.coinsBefore);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 998_000L,
 			merged.ambiguous, merged.qtyMerged);
 		assertEquals("both clicks' gold", 2_000L, fields.get("gp_total"));
@@ -444,11 +488,11 @@ public class StoreMultiQtyGpTest
 	public void theFieldObservedAdjacentTickBuyNoLongerFabricatesAUnitPrice()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", 22660, 10, 26_233_393L, TICK);
+			mergeStorePending(null, "store_buy", 22660, 10, 26_233_393L, TICK);
 		StoreTools.StorePending merged =
-			StoreTools.mergeStorePending(first, "store_buy", 22660, 10, 26_227_000L, TICK + 1);
+			mergeStorePending(first, "store_buy", 22660, 10, 26_227_000L, TICK + 1);
 
-		Map<String, Object> fields = StoreTools.buildStoreTxFields(
+		Map<String, Object> fields = buildStoreTxFields(
 			merged.type, merged.item, merged.qty, merged.coinsBefore, 26_222_068L,
 			merged.ambiguous, merged.qtyMerged);
 
@@ -467,8 +511,8 @@ public class StoreMultiQtyGpTest
 	public void aPendingOlderThanTheMergeWindowDoesNotMerge()
 	{
 		StoreTools.StorePending first =
-			StoreTools.mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
-		StoreTools.StorePending second = StoreTools.mergeStorePending(
+			mergeStorePending(null, "store_buy", COAL, 10, 1_000_000L, TICK);
+		StoreTools.StorePending second = mergeStorePending(
 			first, "store_buy", COAL, 10, 999_000L, TICK + StoreTools.STORE_PENDING_MAX_TICKS + 1);
 
 		assertFalse("too far apart to share one delta", second.qtyMerged);

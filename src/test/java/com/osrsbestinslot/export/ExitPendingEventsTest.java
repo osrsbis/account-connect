@@ -74,7 +74,7 @@ public class ExitPendingEventsTest
 				return base;
 			}
 		});
-		p.spooler.setSpoolDataRootForTest(data);
+		SpoolHooks.dataRoot(p.spooler,data);
 		return p;
 	}
 

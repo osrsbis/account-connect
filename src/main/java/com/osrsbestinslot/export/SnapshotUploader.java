@@ -1,25 +1,26 @@
 package com.osrsbestinslot.export;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GameState;
 import okhttp3.Request;
 import okhttp3.RequestBody;
+import okhttp3.Response;
 
 /** The account snapshot upload: change and debounce gates, forced and logout sends, the policy heartbeat, grant stripping at send, bank records and the 429 backoff. */
 @Slf4j
+@RequiredArgsConstructor
 final class SnapshotUploader
 {
 	private final AccountConnectPlugin plugin;
-
-	SnapshotUploader(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- snapshot upload gating ----
 	// The @Schedule tick (every 5s) is only the CHECKER: it always builds + tracks the snapshot, but an
@@ -37,18 +38,20 @@ final class SnapshotUploader
 		if (body == null) return false;
 		try
 		{
-			com.google.gson.JsonElement e = new com.google.gson.JsonParser().parse(body);
+			JsonElement e = new JsonParser().parse(body);
 			if (!e.isJsonObject()) return false;
-			com.google.gson.JsonObject o = e.getAsJsonObject();
-			boolean ok = o.has("ok") && o.get("ok").isJsonPrimitive() && o.get("ok").getAsBoolean();
-			boolean stale = o.has("stale") && o.get("stale").isJsonPrimitive() && o.get("stale").getAsBoolean();
-			boolean paused = o.has("paused") && o.get("paused").isJsonPrimitive() && o.get("paused").getAsBoolean();
-			return ok && !stale && !paused;
+			JsonObject o = e.getAsJsonObject();
+			return flag(o, "ok") && !flag(o, "stale") && !flag(o, "paused");
 		}
 		catch (RuntimeException ex)
 		{
 			return false;
 		}
+	}
+
+	private static boolean flag(JsonObject o, String key)
+	{
+		return o.has(key) && o.get(key).isJsonPrimitive() && o.get(key).getAsBoolean();
 	}
 
 	// Debounce interval is a field (not config) so tests can shrink it via same-package access.
@@ -101,6 +104,12 @@ final class SnapshotUploader
 	String deferredForceTrigger;
 	long deferredForceBuildSeq;
 	volatile boolean snapshotRetryPending;
+	/**
+	 * Snapshot uploads sent and not yet answered. While one is in flight an event-forced snapshot waits for the next
+	 * game tick after the answer (deferredForce), so a burst of alchs or drops sends one upload, then one more with the
+	 * newest state, instead of one per event. Overlapping uploads of one account race on the server and can be refused.
+	 */
+	final java.util.concurrent.atomic.AtomicInteger snapshotsInFlight = new java.util.concurrent.atomic.AtomicInteger();
 	// State-changing events whose wealth/state must land immediately also force a snapshot. Chat / level_up
 	// are excluded (too frequent / not wealth-moving); login is bound separately by syncTask's new-login send.
 	private static final Set<String> SNAPSHOT_TRIGGER_EVENTS = new HashSet<>(
@@ -119,9 +128,10 @@ final class SnapshotUploader
 			// first snapshot holding it. Readers place the row inside that snapshot even in the same ms.
 			long changeSeq = triggerChangeBuildSeq;
 			String trigger = changeSeq >= 0 && changeSeq == snapshotBuildSeq ? eventId : null;
-			if (widgetClosing)
+			if (widgetClosing || snapshotsInFlight.get() > 0)
 			{
-				// Inside a widget-close script (a shop closed with a buy still pending): build on the next tick.
+				// Inside a widget-close script (a shop closed with a buy still pending), or while an upload is in flight:
+				// build on the first tick after it answers. That build reads the containers then, so it holds this event.
 				if (!deferredForce || deferredForceTrigger == null)
 				{
 					deferredForceTrigger = trigger;
@@ -175,7 +185,7 @@ final class SnapshotUploader
 		{
 			return;
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return; // no / malformed token configured yet
@@ -214,7 +224,7 @@ final class SnapshotUploader
 		{
 			return;
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return;
@@ -240,7 +250,7 @@ final class SnapshotUploader
 		{
 			return;
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return;
@@ -270,8 +280,10 @@ final class SnapshotUploader
 			return;		// upload switch off — send nothing
 		}
 		final Map<String, Object> sentSnapshot = new LinkedHashMap<>(snapshot);
-		// Shared group storage follows the same explicit broad-capture grant, not staff identity.
 		if (!plugin.grants.broadCaptureEnabled()) stripBroadCapture(sentSnapshot);
+		// Group Ironman shared storage holds other players' items: never sent, broad grant or not, until its data policy
+		// is approved (0.7.69). The server drops it too.
+		sentSnapshot.remove("group_storage");
 		// Recheck separate grants at serialization, including cached logout snapshots.
 		if (!plugin.grants.progressGranted() || !token.equals(plugin.grants.progressGrantToken)) sentSnapshot.remove("account_progress");
 		if (!plugin.grants.gameplayGranted() || !token.equals(plugin.grants.gameplayGrantToken)) sentSnapshot.remove("own_gameplay");
@@ -292,27 +304,52 @@ final class SnapshotUploader
 		final long bankUpload = ++queuedBankUpload;
 		Map<String, Object> body = Fields.of("token", token, "snapshot", sentSnapshot);
 
-		String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
+		String base = plugin.apiBase();
 		Request request = new Request.Builder()
 			.url(base + "/account-ingest")
 			.post(RequestBody.create(AccountConnectPlugin.JSON, plugin.gson.toJson(body)))
 			.build();
 
+		snapshotsInFlight.incrementAndGet();
+		// The in-flight count drops only after the answer's backoff is applied (finally), so a tick in between cannot send
+		// against a Retry-After (audit 0.7.69 P3-4); every path, an exception included, still releases it.
 		plugin.okHttpClient.newCall(request).enqueue(EventQueue.answered(e ->
 		{
-			if (token.equals(plugin.currentLinkToken()))
+			try
 			{
-				plugin.grants.clearVerificationGrant();
-				plugin.grants.clearDeliveryCaptureGrant();
-				plugin.grants.pluginInventoryGrantToken = null;
-				if (plugin.grants.collectionAccountRequired) plugin.grants.collectionGrantAccount = null;
-				snapshotRetryPending = true;
-				applyRateLimitBackoff(null);
+				if (token.equals(plugin.currentLinkToken()))
+				{
+					plugin.grants.clearVerificationGrant();
+					plugin.grants.clearDeliveryCaptureGrant();
+					plugin.grants.pluginInventoryGrantToken = null;
+					if (plugin.grants.collectionAccountRequired) plugin.grants.collectionGrantAccount = null;
+					snapshotRetryPending = true;
+					applyRateLimitBackoff(null);
+				}
+				forgetQueuedBank(bankSha);
+				bankAnswer(bankUpload, false);
+				log.debug("OSRS BiS sync failed", e);
 			}
-			forgetQueuedBank(bankSha);
-			bankAnswer(bankUpload, false);
-			log.debug("OSRS BiS sync failed", e);
+			finally
+			{
+				snapshotsInFlight.decrementAndGet();
+			}
 		}, response ->
+		{
+			try
+			{
+				answerSnapshot(response, token, sentSnapshot, sentHash, bankUpload, bankSha, bankAccount, bankTimed);
+			}
+			finally
+			{
+				snapshotsInFlight.decrementAndGet();
+			}
+		}));
+	}
+
+	private void answerSnapshot(Response response, String token, Map<String, Object> sentSnapshot, String sentHash,
+		long bankUpload, String bankSha, String bankAccount, boolean bankTimed)
+	{
 		{
 			if (!token.equals(plugin.currentLinkToken()))
 			{
@@ -359,7 +396,7 @@ final class SnapshotUploader
 			}
 			// All failed snapshot requests remain pending behind bounded retry backoff.
 			log.debug("OSRS BiS sync response: {}", code);
-		}));
+		}
 	}
 
 	/** Tell a bank open that pointed at this upload whether it was stored; runs on the client thread like the visit. */
@@ -370,8 +407,7 @@ final class SnapshotUploader
 			answeredUploads.put(upload, stored);
 			plugin.bankVisit.snapshotAnswer(upload, stored);
 		};
-		if (plugin.clientThread != null) plugin.clientThread.invoke(r);
-		else r.run();
+		plugin.onClientThread(r);
 	}
 
 	/** A failed upload: a newer one may have replaced the queued record, so only the same bank is forgotten. */
@@ -420,14 +456,9 @@ final class SnapshotUploader
 		{
 			return null;
 		}
-		String trimmed = header.trim();
-		if (trimmed.isEmpty())
-		{
-			return null;
-		}
 		try
 		{
-			long seconds = Long.parseLong(trimmed);
+			long seconds = Long.parseLong(header.trim());
 			return seconds < 0 ? null : seconds;
 		}
 		catch (NumberFormatException e)
@@ -442,7 +473,7 @@ final class SnapshotUploader
 		{
 			return;
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return; // no / malformed token configured yet

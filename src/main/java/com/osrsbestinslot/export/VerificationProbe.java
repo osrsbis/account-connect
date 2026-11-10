@@ -5,6 +5,7 @@ import java.util.regex.Pattern;
 import net.runelite.api.Experience;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntUnaryOperator;
+import lombok.AllArgsConstructor;
 
 /**
  * Verification rows: the plugin checks its own readings against a second source on the same tick, so production
@@ -83,7 +84,7 @@ final class VerificationProbe
 	/** The sample due now, or null. An occasion waits (up to the gap) rather than being lost to the budget. */
 	synchronized Sample due(long nowMs)
 	{
-		while (!samples.isEmpty() && nowMs - samples.peekFirst() >= HOUR_MS) samples.pollFirst();
+		prune(samples, nowMs);
 		boolean occasion = pendingTrigger != null;
 		if (!occasion && random.applyAsInt(RANDOM_ONE_IN) != 0) return null;
 		if (nowMs - lastSampleMs < MIN_GAP_MS || samples.size() >= MAX_SAMPLES_PER_HOUR) return null;
@@ -97,8 +98,7 @@ final class VerificationProbe
 	/** Transient activity evidence bypasses the random-sample spacing, never the shared hourly budget. */
 	synchronized boolean takeEvent(long nowMs)
 	{
-		while (!samples.isEmpty() && nowMs - samples.peekFirst() >= HOUR_MS) samples.pollFirst();
-		if (samples.size() >= MAX_SAMPLES_PER_HOUR) return false;
+		if (prune(samples, nowMs) >= MAX_SAMPLES_PER_HOUR) return false;
 		samples.addLast(nowMs);
 		lastSampleMs = nowMs;
 		eventBudgetReported = false;
@@ -119,31 +119,26 @@ final class VerificationProbe
 	/** Room for a region frame now, without counting it: the slot is taken only when the frame is uploaded. */
 	synchronized boolean frameRoom(long nowMs)
 	{
-		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
-		return frames.size() < MAX_FRAMES_PER_HOUR;
+		return prune(frames, nowMs) < MAX_FRAMES_PER_HOUR;
 	}
 
 	synchronized boolean eventRoom(long nowMs)
 	{
-		while (!samples.isEmpty() && nowMs - samples.peekFirst() >= HOUR_MS) samples.pollFirst();
-		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
+		prune(samples, nowMs);
+		prune(frames, nowMs);
 		return samples.size() < MAX_SAMPLES_PER_HOUR && frames.size() < MAX_FRAMES_PER_HOUR;
 	}
 
 	/** True when this sample may also take a frame; counts it. */
 	synchronized boolean takeFrame(long nowMs)
 	{
-		while (!frames.isEmpty() && nowMs - frames.peekFirst() >= HOUR_MS) frames.pollFirst();
-		if (frames.size() >= MAX_FRAMES_PER_HOUR) return false;
-		frames.addLast(nowMs);
-		return true;
+		return take(frames, MAX_FRAMES_PER_HOUR, nowMs);
 	}
 
 	/** Room for a full-window frame now, without counting it. */
 	synchronized boolean fullWindowRoom(long nowMs)
 	{
-		while (!fullWindows.isEmpty() && nowMs - fullWindows.peekFirst() >= HOUR_MS) fullWindows.pollFirst();
-		return fullWindows.size() < FullWindowFrame.MAX_PER_HOUR;
+		return prune(fullWindows, nowMs) < FullWindowFrame.MAX_PER_HOUR;
 	}
 
 	/**
@@ -152,24 +147,29 @@ final class VerificationProbe
 	 */
 	synchronized boolean takeFullWindow(long nowMs)
 	{
-		while (!fullWindows.isEmpty() && nowMs - fullWindows.peekFirst() >= HOUR_MS) fullWindows.pollFirst();
-		if (fullWindows.size() >= FullWindowFrame.MAX_PER_HOUR) return false;
-		fullWindows.addLast(nowMs);
+		return take(fullWindows, FullWindowFrame.MAX_PER_HOUR, nowMs);
+	}
+
+	/** Drops times older than an hour from a budget window; returns how many remain. */
+	static int prune(ArrayDeque<Long> times, long nowMs)
+	{
+		while (!times.isEmpty() && nowMs - times.peekFirst() >= HOUR_MS) times.pollFirst();
+		return times.size();
+	}
+
+	private static boolean take(ArrayDeque<Long> times, int max, long nowMs)
+	{
+		if (prune(times, nowMs) >= max) return false;
+		times.addLast(nowMs);
 		return true;
 	}
 
+	@AllArgsConstructor
 	static final class Sample
 	{
 		final String trigger;
 		final String key;
 		final Integer value;
-
-		Sample(String trigger, String key, Integer value)
-		{
-			this.trigger = trigger;
-			this.key = key;
-			this.value = value;
-		}
 	}
 
 	// ---- results ----
@@ -201,8 +201,7 @@ final class VerificationProbe
 	/** An observation with no second source: recorded for the screen check, never a match. */
 	static Map<String, Object> observed(String key, Object observed)
 	{
-		Map<String, Object> r = Fields.of("key", key, "observed", observed, "match", null);
-		return r;
+		return Fields.of("key", key, "observed", observed, "match", null);
 	}
 
 	private static boolean same(Object a, Object b)
@@ -375,11 +374,5 @@ final class VerificationProbe
 	static boolean orbUndrawn(int ticksSinceLogin, int expected, Integer orbText)
 	{
 		return ticksSinceLogin >= 0 && ticksSinceLogin <= ORB_DRAW_TICKS && orbText != null && orbText == 0 && expected != 0;
-	}
-
-	/** A number shown on screen against the value the plugin holds. A widget not on screen is unknown. */
-	static Map<String, Object> shown(String key, Map<String, Object> inputs, Integer held, Integer onScreen)
-	{
-		return result(key, inputs, held, onScreen);
 	}
 }

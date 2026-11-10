@@ -5,9 +5,7 @@ import java.util.*;
 /** Per-client observation context, not a stable game session/order identifier. */
 final class EventObservationContext
 {
-    static final Set<String> MODES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-        "NORMAL", "IRONMAN", "ULTIMATE_IRONMAN", "HARDCORE_IRONMAN", "GROUP_IRONMAN",
-        "HARDCORE_GROUP_IRONMAN", "UNRANKED_GROUP_IRONMAN")));
+    static final Set<String> MODES = Collections.unmodifiableSet(new HashSet<>(SnapshotBuilder.ACCOUNT_TYPES));
     private String owner, session, mode;
     private long sequence, observedAt;
     private Integer tick;
@@ -32,16 +30,12 @@ final class EventObservationContext
     {
         if (identity == null) return null;
         bind(identity);
-        Map<String,Object> out = new LinkedHashMap<>();
-        out.put("schema_v", 1); out.put("collector_session", session); out.put("sequence", ++sequence);
-        out.put("plugin_version", version); out.put("source", "public_event_emitter");
         boolean fresh = observedAt > 0 && now >= observedAt && now - observedAt <= 10_000;
-        out.put("context_status", fresh ? "observed_client_tick" : "unknown_or_stale");
-        out.put("context_observed_at_ms", fresh ? observedAt : null);
-        out.put("context_tick", fresh ? tick : null);
-        out.put("account_mode", fresh ? mode : null);
-        out.put("account_mode_source", fresh && mode != null ? "varbit_1777" : null);
-        return out;
+        return Fields.of("schema_v", 1, "collector_session", session, "sequence", ++sequence,
+            "plugin_version", version, "source", "public_event_emitter",
+            "context_status", fresh ? "observed_client_tick" : "unknown_or_stale",
+            "context_observed_at_ms", fresh ? observedAt : null, "context_tick", fresh ? tick : null,
+            "account_mode", fresh ? mode : null, "account_mode_source", fresh && mode != null ? "varbit_1777" : null);
     }
 
     /** Strict nested replay projection: no raw profile ID, token, account name or free text. */

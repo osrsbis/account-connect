@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import lombok.RequiredArgsConstructor;
 import net.runelite.api.Constants;
 import net.runelite.api.GameState;
 import net.runelite.api.ItemContainer;
@@ -15,14 +16,10 @@ import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.WorldChanged;
 
 /** Own session rows: login, logout with its reason, world hop, region change, xp gains and equipment changes. */
+@RequiredArgsConstructor
 final class SessionEvents
 {
 	private final AccountConnectPlugin plugin;
-
-	SessionEvents(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// Equipment change capture: last-seen worn-item counts, diffed on each WORN-container change to emit
 	// equip_change {equipped[], unequipped[]}. Only a change in the SET of worn item ids emits: a quantity
@@ -346,6 +343,29 @@ final class SessionEvents
 	}
 
 	/** Clog + trade state are per-account — clear them on hop / relog so we never mix two accounts. */
+	/**
+	 * The teardown shared by a hop or relog, a disconnect and a logout: an armed drop/pickup/alch never survives it; a
+	 * bank left open is closed with the reason and its session ends incomplete, never diffed against the next session;
+	 * the xp window is flushed (never dropped) and xp and level deltas re-baseline per account; ground state is per
+	 * world and per account; a drop session ends as INTERRUPTED and its footage still uploads.
+	 */
+	private void endWorldSession(String bankReason)
+	{
+		plugin.offBook.clearInvDeltaPendings();
+		plugin.bankVisit.closeBankVisit(bankReason, null);
+		plugin.bankVisit.endBankSession(false);
+		flushXpGain();
+		xpFlushTicks = 0;
+		lastSkillXp.clear();
+		lastSkillLevel.clear();
+		xpAccum.clear();
+		lastRegion = null;
+		plugin.piles.groundObservationUnreliable = true;
+		plugin.piles.clearGroundDrops();
+		plugin.piles.clearPendingRemovals();
+		plugin.dropProof.interruptDropSession();
+	}
+
 	void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
@@ -413,20 +433,8 @@ final class SessionEvents
 				plugin.clogSeen = false;
 				plugin.ge.awaitingLogin = true;	// the next LOGGED_IN replays the GE slots
 				plugin.trade.resetTradeState();	// a pending trade frame must never leak across accounts/sessions
-				plugin.offBook.clearInvDeltaPendings();	// an armed drop/pickup/alch must never resolve across a hop/relog
-				plugin.bankVisit.closeBankVisit(BankVisit.teardownReason(event.getGameState()), null);
-				plugin.bankVisit.endBankSession(false);	// a bank left open across a hop/relog: incomplete, never diffed against another account
 				equipLast = null;	// re-baseline equipment on the next change so a relog emits no full-kit diff
-				flushXpGain();		// a hop ends the xp window: emit what accumulated, never drop it
-				xpFlushTicks = 0;
-				lastSkillXp.clear();	// xp deltas re-baseline per account
-				lastSkillLevel.clear();	// level-ups too: the next account's login burst only baselines
-				xpAccum.clear();
-				lastRegion = null;
-				plugin.piles.groundObservationUnreliable = true;
-				plugin.piles.clearGroundDrops();
-				plugin.piles.clearPendingRemovals();		// ground state is per world AND per account
-				plugin.dropProof.interruptDropSession();	// a hop ends the session as INTERRUPTED; footage still uploads
+				endWorldSession(BankVisit.teardownReason(event.getGameState()));
 				plugin.store.shopVisitNearby.clear();	// nearby-candidate set must not carry rsns across accounts
 				plugin.store.shopStock.clear();		// stock/sold/at-tx state is per visit AND per account
 				plugin.store.storeResetAnchorMs = 0;	// phase is per-visit: never carry it across accounts
@@ -449,20 +457,8 @@ final class SessionEvents
 				plugin.clogSeen = false;
 				plugin.ge.awaitingLogin = true;
 				plugin.trade.resetTradeState();
-				plugin.offBook.clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a disconnect
-				plugin.bankVisit.closeBankVisit("disconnect", null);
-				plugin.bankVisit.endBankSession(false);	// a bank open at disconnect: incomplete, never diffed against the next session
 				equipLast = null;	// re-baseline equipment on reconnect
-				flushXpGain();		// a disconnect ends the xp window: emit what accumulated, never drop it
-				xpFlushTicks = 0;
-				lastSkillXp.clear();
-				lastSkillLevel.clear();
-				xpAccum.clear();
-				lastRegion = null;
-				plugin.piles.groundObservationUnreliable = true;
-				plugin.piles.clearGroundDrops();
-				plugin.piles.clearPendingRemovals();
-				plugin.dropProof.interruptDropSession();	// a disconnect ends the session as INTERRUPTED; footage still uploads
+				endWorldSession("disconnect");
 				// a feed-death then instant disconnect: record the death, but the containers here are null or
 				// not-yet-settled, so OMIT items_lost (computeLoss=false) rather than emit a wrong diff.
 				plugin.death.resolveDeathPending(null, false);
@@ -474,21 +470,9 @@ final class SessionEvents
 				// Real logout (HOPPING keeps the session and is handled above, without a flush).
 				plugin.ge.awaitingLogin = true;
 				plugin.ge.unkeyed.clear();	// held -1 GE events belong to the login that just ended
-				plugin.offBook.clearInvDeltaPendings();	// an armed drop/pickup/alch must never survive a logout
-				plugin.bankVisit.closeBankVisit("logout", null);
-				plugin.bankVisit.endBankSession(false);	// a bank open at logout: incomplete, never diffed against the next session
-				lastWorld = 0;
-				pendingWorldHop = null;	// a hop that never reached the new world is not sent	// the next login's WorldChanged must not be read as a hop
-				flushXpGain();		// flush accumulated xp before the session ends
-				xpFlushTicks = 0;
-				lastSkillXp.clear();
-				lastSkillLevel.clear();
-				xpAccum.clear();
-				lastRegion = null;
-				plugin.piles.groundObservationUnreliable = true;
-				plugin.piles.clearGroundDrops();
-				plugin.piles.clearPendingRemovals();
-				plugin.dropProof.interruptDropSession();	// a logout ends the session as INTERRUPTED; footage still uploads
+				lastWorld = 0;	// the next login's WorldChanged must not be read as a hop
+				pendingWorldHop = null;	// a hop that never reached the new world is not sent
+				endWorldSession("logout");
 				plugin.death.resolveDeathPending(null, false);	// feed-death then logout: record death, omit untrustworthy items_lost
 				trackLogout(); // buffer a "logout" event (duration + reason); flushed live (WAVE 2) / next tick
 				plugin.uploader.flushPendingSnapshot();

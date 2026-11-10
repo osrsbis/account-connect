@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import lombok.AllArgsConstructor;
 
 public final class DropCandidates
 {
@@ -59,6 +60,7 @@ public final class DropCandidates
 	public static final int NO_ANIMATION = -1;
 
 	/** One observed player, in world tiles. Deliberately a plain value type, not a RuneLite Player. */
+	@AllArgsConstructor
 	public static final class Observed
 	{
 		public final String rsn;
@@ -68,21 +70,6 @@ public final class DropCandidates
 		public final int combatLevel;
 		/** The animation the player was playing at the moment of observation, or NO_ANIMATION. */
 		public final int animation;
-
-		public Observed(String rsn, int x, int y, int plane, int combatLevel)
-		{
-			this(rsn, x, y, plane, combatLevel, NO_ANIMATION);
-		}
-
-		public Observed(String rsn, int x, int y, int plane, int combatLevel, int animation)
-		{
-			this.rsn = rsn;
-			this.x = x;
-			this.y = y;
-			this.plane = plane;
-			this.combatLevel = combatLevel;
-			this.animation = animation;
-		}
 	}
 
 	/**
@@ -90,6 +77,7 @@ public final class DropCandidates
 	 * caster) or the impact graphic on the tile (which does not). A grab takes a pile from up to ten
 	 * tiles away, so a player standing on the tile when it vanished may be an innocent bystander.
 	 */
+	@AllArgsConstructor
 	public static final class TelegrabSighting
 	{
 		public final int x;
@@ -104,20 +92,6 @@ public final class DropCandidates
 		public final boolean casterSelf;
 		public final int casterX;
 		public final int casterY;
-
-		public TelegrabSighting(int x, int y, int plane, int tick, String via,
-			String caster, boolean casterSelf, int casterX, int casterY)
-		{
-			this.x = x;
-			this.y = y;
-			this.plane = plane;
-			this.tick = tick;
-			this.via = via;
-			this.caster = caster;
-			this.casterSelf = casterSelf;
-			this.casterX = casterX;
-			this.casterY = casterY;
-		}
 	}
 
 	/**
@@ -253,17 +227,11 @@ public final class DropCandidates
 			{
 				break;
 			}
-			Map<String, Object> m = new LinkedHashMap<>();
-			m.put("rsn", p.rsn);
-			// Offsets FROM THE PILE, not from us. A reader must never have to know where we stood.
-			m.put("dx", p.x - pileX);
-			m.put("dy", p.y - pileY);
-			m.put("dist", tileDistance(p.x, p.y, pileX, pileY));
-			m.put("cb", p.combatLevel);
-			// What the player was DOING when the pile vanished. A floor pickup plays one animation and a
-			// grab cast another, so a reader can rule out a bystander who was doing something else.
-			m.put("anim", p.animation);
-			out.add(m);
+			// Offsets FROM THE PILE, not from us. A reader must never have to know where we stood. "anim" is what
+			// the player was DOING when the pile vanished. A floor pickup plays one animation and a grab cast
+			// another, so a reader can rule out a bystander who was doing something else.
+			out.add(Fields.of("rsn", p.rsn, "dx", p.x - pileX, "dy", p.y - pileY,
+				"dist", tileDistance(p.x, p.y, pileX, pileY), "cb", p.combatLevel, "anim", p.animation));
 		}
 		return out;
 	}

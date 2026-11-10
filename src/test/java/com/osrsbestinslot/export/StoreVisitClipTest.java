@@ -19,6 +19,12 @@ import static org.junit.Assert.assertTrue;
  */
 public class StoreVisitClipTest
 {
+	/** Number of buy / sell / taken moments marked this visit (the first anchor is the visit start). */
+	private static int momentCount(StoreVisitClip v)
+	{
+		return Math.max(0, v.anchors.size() - 1);
+	}
+
 	/** Measured mean frame size at 704px / q0.55 (StoreClipCaptureTest pins the width). */
 	private static final int FRAME_BYTES = 30 * 1024;
 	private static final long FRAME_MS = 1000L / StoreClips.CLIP_FPS;
@@ -68,7 +74,7 @@ public class StoreVisitClipTest
 			bytes += f.length;
 		}
 		assertTrue("byte budget exceeded: " + bytes, bytes <= StoreClips.MAX_CLIP_BURST_BYTES);
-		assertEquals("byteSize must match the snapshot", bytes, v.byteSize());
+		assertEquals("byteSize must match the snapshot", bytes, v.keptBytes);
 		for (int i = 1; i < s.capturedAtMillis.size(); i++)
 		{
 			assertTrue("frames must be in capture order",
@@ -121,7 +127,7 @@ public class StoreVisitClipTest
 		StoreVisitClip.Snapshot s = run(v, 120_000L);
 
 		assertWithinBudget(v, s);
-		assertEquals("no moments were marked", 0, v.momentCount());
+		assertEquals("no moments were marked", 0, momentCount(v));
 		// 2s start at 30fps (60) + one baseline frame a second for the other ~118s.
 		assertTrue("idle visit should be about 180 frames, got " + s.frames.size(),
 			s.frames.size() >= 170 && s.frames.size() <= 185);
@@ -195,7 +201,7 @@ public class StoreVisitClipTest
 		StoreVisitClip.Snapshot s = v.snapshot();
 		assertEquals("every frame of a 360-frame visit at 44 KB is kept", 360, s.frames.size());
 		assertWithinBudget(v, s);
-		assertEquals(360, StoreClips.selectStoreClipFrames(s.frames, StoreClips.MAX_CLIP_FRAMES,
+		assertEquals(360, StoreClips.selectStoreClipFrameIndexes(s.frames, StoreClips.MAX_CLIP_FRAMES,
 			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES).size());
 		assertEquals("the retry budget is two visits (32 MiB)", 32L * 1024 * 1024, StoreClips.CLIP_RETRY_BYTE_BUDGET);
 	}
@@ -216,7 +222,7 @@ public class StoreVisitClipTest
 			v.offer(new byte[100_000], t);	// 100KB: the byte cap (16 MiB = 167 frames) binds first
 		}
 		StoreVisitClip.Snapshot s = v.snapshot();
-		assertTrue("16 MiB cap", v.byteSize() <= StoreClips.MAX_CLIP_BURST_BYTES);
+		assertTrue("16 MiB cap", v.keptBytes <= StoreClips.MAX_CLIP_BURST_BYTES);
 		assertTrue("bytes cap bound the frame count", s.frames.size() <= 167);
 		for (long sale : sales)
 		{
@@ -258,13 +264,13 @@ public class StoreVisitClipTest
 		org.mockito.Mockito.when(sell.getItemId()).thenReturn(1511);
 		plugin.onMenuOptionClicked(sell);
 
-		assertEquals("the sell click must mark one moment", 1, v.momentCount());
+		assertEquals("the sell click must mark one moment", 1, momentCount(v));
 		assertTrue("and still flag the visit for upload", plugin.clips.storeTxThisVisit);
 
 		// Outside a capturing visit nothing is marked.
 		plugin.clips.clipCapturing = false;
 		plugin.onMenuOptionClicked(sell);
-		assertEquals(1, v.momentCount());
+		assertEquals(1, momentCount(v));
 	}
 
 	/** The uploader stamps each chunk with its OWN first frame's capture time, not a derived one. */

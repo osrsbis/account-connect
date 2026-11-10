@@ -110,7 +110,7 @@ public class DropFrameSegmenterTest
 		for (int i = 0; i < 10_000; i++)
 		{
 			seg.add(frame(30_000), T0 + i);
-			maxBuffered = Math.max(maxBuffered, seg.bufferedFrames());
+			maxBuffered = Math.max(maxBuffered, seg.current.size());
 		}
 		assertTrue("never more than one segment in memory, saw " + maxBuffered, maxBuffered < 40);
 		assertEquals("every frame was accounted for", 10_000, seg.acceptedFrames());
@@ -123,9 +123,9 @@ public class DropFrameSegmenterTest
 		DropFrameSegmenter seg = new DropFrameSegmenter(3, 1000, 1_000_000);
 		seg.add(frame(10), T0);
 		seg.add(frame(10), T0);
-		assertEquals(2, seg.bufferedFrames());
+		assertEquals(2, seg.current.size());
 		seg.add(frame(10), T0);
-		assertEquals("handing a segment over empties the buffer", 0, seg.bufferedFrames());
+		assertEquals("handing a segment over empties the buffer", 0, seg.current.size());
 	}
 
 	// ---- the tail segment ----
@@ -164,7 +164,7 @@ public class DropFrameSegmenterTest
 		assertNull(seg.add(frame(101), T0));
 		assertEquals(0, seg.acceptedFrames());
 		assertEquals("every refusal is counted, never silently dropped", 3, seg.rejectedFrames());
-		assertEquals(0, seg.bufferedFrames());
+		assertEquals(0, seg.current.size());
 	}
 
 	/**
@@ -211,7 +211,7 @@ public class DropFrameSegmenterTest
 		seg.add(frame(10), T0);
 		seg.add(frame(10), T0);
 		seg.clear();
-		assertEquals(0, seg.bufferedFrames());
+		assertEquals(0, seg.current.size());
 		assertNull(seg.flushRemainder());
 	}
 

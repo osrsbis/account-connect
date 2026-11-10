@@ -136,11 +136,11 @@ public class EventQueueDeliveryTest
     {
         List<Map<String,Object>> batch=Arrays.asList(event(A,"ge_progress"),event(B,"ge_progress"));
         List<EventQueueProtocol.Outcome> retry=Arrays.asList(EventQueueProtocol.Outcome.RETRY,EventQueueProtocol.Outcome.RETRY);
-        assertEquals(retry,EventQueueProtocol.receipts(receipt(row(0,B,"queued",",\"broker_ack\":true")),batch));
-        assertEquals(retry,EventQueueProtocol.receipts(receipt(row(0,A,"queued",",\"broker_ack\":\"true\"")),batch));
-        assertEquals(retry,EventQueueProtocol.receipts(receipt(row(0,A,"stored",",\"d1_receipt\":true")),batch));
-        assertEquals(retry,EventQueueProtocol.receipts(receipt(row(0,A,"queued",",\"broker_ack\":true"),row(0,A,"retry","")),batch));
-        assertEquals(Arrays.asList(EventQueueProtocol.Outcome.ERASED,EventQueueProtocol.Outcome.RETRY),EventQueueProtocol.receipts(receipt(row(0,A,"rejected",",\"reason\":\"erased\"")),batch));
+        assertEquals(retry,EventQueueProtocol.parseReceipts(receipt(row(0,B,"queued",",\"broker_ack\":true")),batch).outcomes);
+        assertEquals(retry,EventQueueProtocol.parseReceipts(receipt(row(0,A,"queued",",\"broker_ack\":\"true\"")),batch).outcomes);
+        assertEquals(retry,EventQueueProtocol.parseReceipts(receipt(row(0,A,"stored",",\"d1_receipt\":true")),batch).outcomes);
+        assertEquals(retry,EventQueueProtocol.parseReceipts(receipt(row(0,A,"queued",",\"broker_ack\":true"),row(0,A,"retry","")),batch).outcomes);
+        assertEquals(Arrays.asList(EventQueueProtocol.Outcome.ERASED,EventQueueProtocol.Outcome.RETRY),EventQueueProtocol.parseReceipts(receipt(row(0,A,"rejected",",\"reason\":\"erased\"")),batch).outcomes);
     }
     @Test public void queueEnvelopeOverheadIsIncludedAtByteBoundary()
     {
@@ -148,6 +148,6 @@ public class EventQueueDeliveryTest
         List<String> rows=Arrays.asList(huge,"{}");
         int kept=EventQueue.fitEventBatch(token,rows,true);
         assertEquals(1,kept);assertTrue(EventQueue.eventBatchBody(token,rows.subList(0,kept),true).contains("queue-v1"));
-        assertFalse(EventQueue.eventBatchBody(token,rows.subList(0,1)).contains("queue-v1"));
+        assertFalse(EventQueue.eventBatchBody(token,rows.subList(0,1),false).contains("queue-v1"));
     }
 }

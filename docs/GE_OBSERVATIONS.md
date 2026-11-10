@@ -26,9 +26,11 @@ side and offer key. `ge_observation.schema_v: 1` adds:
   conversion, listing-price multiplication or per-fill price is invented.
 - `native_tax_gp` (0.7.68): the game's own cumulative sale tax for the slot, the long varp
   `GE_TAX_SLOT_LONG_<slot>` (5754-5761) that the GE interface subtracts from the gross to show the net, read when
-  the row is built (`native_tax_source: varp_long_when_row_built`). It is an observation, not `tax_gp`: when the varp
-  updates relative to the offer callback, and when it resets, is not yet established on a real client, so the server
-  must compare it across rows of the same offer before using it as the exact tax.
+  the row is built (`native_tax_source: varp_long_when_row_built`). It is an observation, not `tax_gp`. On a real
+  client (two sells, 0.7.68 test build) it is cumulative per offer (for example 10, 20 and then 250 GP for one offer of
+  25 items at 516 GP that filled in three parts), the client and server values are equal, the tax step arrives 1-2 ms before the counter step on
+  the same tick, and the collect does not clear it (the next offer does). The collected coins equal the gross counter
+  minus this tax. The server derives the tax of each fill as the difference between rows of the same offer.
 - `native_tax_server_gp` (0.7.68): the same varp's last value set by the server
   (`getServerVarpLongValue`), independent of client-side prediction. Both are Java longs; the server reads them as
   JavaScript numbers, exact up to 2^53.

@@ -66,8 +66,8 @@ public class SurroundingPlayersTest
 			inject(plugin, "client", client);
 			inject(plugin, "gson", new Gson());
 			players.add(self);
-			plugin.grants.setStoreToolsForTest(staff);
-			plugin.grants.setDropProofRolloutForTest(staff);
+			plugin.grants.serverStoreToolsEnabled = staff;
+			plugin.grants.serverDropProofEnabled = staff;
 		}
 	}
 
@@ -101,7 +101,7 @@ public class SurroundingPlayersTest
 			(java.util.Deque<OffBookPendings.InvDeltaPending>) f.get(r.plugin.offBook);
 		d.clear();
 		d.add(new OffBookPendings.InvDeltaPending("drop", 526, null, 1L, 0L, null, wildAtClick, 100));
-		r.plugin.offBook.resolveDropPendingOnGroundSpawn(526, 1, 0L, 101);
+		r.plugin.offBook.resolveDropPendingOnGroundSpawn(r.plugin.offBook.pendingDropForSpawn(526, 101), 0L, 101, -1, -1, -1, -1);
 		Map<String, Object> e = eventOfType(r.plugin, "drop");
 		assertNotNull("the own-account drop row must still go out", e);
 		return e;
@@ -235,7 +235,7 @@ public class SurroundingPlayersTest
 	public void storeToolsWithoutTheDropProofGrantCarriesNothing() throws Exception
 	{
 		Rig r = new Rig(true, true);
-		r.plugin.grants.setDropProofRolloutForTest(false);
+		r.plugin.grants.serverDropProofEnabled = false;
 		r.players.add(player("Bystander", 3201, 3700, 3));
 		assertFalse(drop(r, true).containsKey("surrounding_at_drop"));
 		assertFalse(trade(r, null).containsKey("surrounding_at_trade"));

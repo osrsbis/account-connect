@@ -21,6 +21,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.IntToLongFunction;
+import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
 import net.runelite.api.Actor;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
@@ -33,14 +35,10 @@ import net.runelite.client.ui.overlay.infobox.Timer;
 import net.runelite.client.util.Text;
 
 /** Staff store tools: shop visit state, store transaction rows, the nearby-player feed and the reset clock. */
+@RequiredArgsConstructor
 final class StoreTools
 {
 	private final AccountConnectPlugin plugin;
-
-	StoreTools(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	/** Shop interface (SHOPMAIN 300) open — so a Buy/Sell menu click is a general-store transaction. */
 	volatile boolean shopOpen;
@@ -100,12 +98,6 @@ final class StoreTools
 		// +58 clears the control row entirely. Measured: the grid box bottom sits ~14px above the
 		// "Value check" / "Quantity" row, which is ~26px tall, so +30 landed ON it (seen live).
 		return new Point(gridRight, gridBottom + 58);
-	}
-
-	/** Test seam: drive the shop-open gate without a game client. */
-	void setShopOpenForTest(boolean open)
-	{
-		shopOpen = open;
 	}
 
 	// Store-transfer counterparty inference: while a shop is open, accumulate every nearby player seen
@@ -239,6 +231,7 @@ final class StoreTools
 	static final long UNKNOWN_ITEM_COUNT = -1L;
 
 	/** An armed store buy/sell awaiting its inventory-change resolution. coinsBefore is a long: bank-stack totals overflow int. */
+	@AllArgsConstructor
 	static final class StorePending
 	{
 		final String type;			// "store_buy" | "store_sell"
@@ -257,29 +250,6 @@ final class StoreTools
 		 * is omitted. Never derive a unit price from an uncertain denominator.
 		 */
 		final boolean qtyMerged;
-
-		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous)
-		{
-			this(type, item, qty, coinsBefore, tick, ambiguous, false);
-		}
-
-		StorePending(String type, int item, int qty, long coinsBefore, int tick, boolean ambiguous, boolean qtyMerged)
-		{
-			this(type, item, qty, coinsBefore, UNKNOWN_ITEM_COUNT, tick, ambiguous, qtyMerged);
-		}
-
-		StorePending(String type, int item, int qty, long coinsBefore, long itemBefore, int tick,
-			boolean ambiguous, boolean qtyMerged)
-		{
-			this.type = type;
-			this.item = item;
-			this.qty = qty;
-			this.coinsBefore = coinsBefore;
-			this.itemBefore = itemBefore;
-			this.tick = tick;
-			this.ambiguous = ambiguous;
-			this.qtyMerged = qtyMerged;
-		}
 	}
 
 	/**
@@ -339,11 +309,6 @@ final class StoreTools
 	 * cannot be split out of one delta, so those stay {@code ambiguous} and still degrade to
 	 * {item, qty} — the audit's rule that we never emit a guessed number is unchanged.
 	 */
-	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore, int tick)
-	{
-		return mergeStorePending(prev, type, item, qty, coinsBefore, UNKNOWN_ITEM_COUNT, tick);
-	}
-
 	static StorePending mergeStorePending(StorePending prev, String type, int item, int qty, long coinsBefore,
 		long itemBefore, int tick)
 	{
@@ -361,29 +326,6 @@ final class StoreTools
 			return new StorePending(type, item, qty, coinsBefore, itemBefore, tick, true, false);
 		}
 		return new StorePending(type, item, qty, coinsBefore, itemBefore, tick, false, false);
-	}
-
-	/**
-	 * Resolve an armed store pending against the post-transaction coin count. Consumes the pending (one
-	 * inventory change resolves at most one click) and emits the store event, with the exact-gp price when it
-	 * can be cleanly attributed. Stale pendings (a failed click that never moved the inventory, then some
-	 * unrelated later change) are dropped rather than paired. Package-private seam so the async path is unit
-	 * testable without a live client.
-	 */
-	void resolveStorePendingOnInventoryChange(long coinsAfter, int currentTick)
-	{
-		resolveStorePendingOnInventoryChange(coinsAfter, UNKNOWN_ITEM_COUNT, currentTick);
-	}
-
-	/**
-	 * @param itemAfter post-transaction count of the transacted item, or {@link #UNKNOWN_ITEM_COUNT} when it
-	 *                  could not be read. Its distance from the pending's baseline is the quantity the
-	 *                  server ACTUALLY moved, which is what makes a unit price safe to derive — see
-	 *                  {@link #buildStoreTxFields}.
-	 */
-	void resolveStorePendingOnInventoryChange(long coinsAfter, long itemAfter, int currentTick)
-	{
-		resolveStorePendingsOnInventoryChange(coinsAfter, id -> itemAfter, currentTick);
 	}
 
 	/**
@@ -521,24 +463,10 @@ final class StoreTools
 		{
 			return rows;
 		}
-		List<Player> players = plugin.client.getPlayers();
-		if (players == null)
+		for (Player player : WildernessPlayers.otherPlayers(plugin.client))
 		{
-			return rows;
-		}
-		for (Player player : players)
-		{
-			if (player == null || player == self)
-			{
-				continue;
-			}
-			String name = player.getName();
+			String name = Text.removeTags(player.getName());
 			WorldPoint location = player.getWorldLocation();
-			if (name == null || location == null)
-			{
-				continue;
-			}
-			name = Text.removeTags(name);
 			int distance = location.distanceTo(me);
 			if (name.isEmpty() || distance > StoreNearbyOverlay.DISPLAY_RANGE_TILES)
 			{
@@ -602,21 +530,12 @@ final class StoreTools
 			return out;
 		}
 		Player self = plugin.client.getLocalPlayer();
-		List<Player> players = plugin.client.getPlayers();
 		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
+		if (me == null)
 		{
 			return out;
 		}
-		List<Player> others = new ArrayList<>();
-		for (Player p : players)
-		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
-			{
-				continue;
-			}
-			others.add(p);
-		}
+		List<Player> others = WildernessPlayers.otherPlayers(plugin.client);
 		others.sort((a, b) -> Integer.compare(a.getWorldLocation().distanceTo(me), b.getWorldLocation().distanceTo(me)));
 		for (Player p : others)
 		{
@@ -701,16 +620,6 @@ final class StoreTools
 
 	/** Counts tick-driven re-arms. Test seam: the re-arm decision is otherwise invisible. */
 	int reArmAttempts;
-
-	int reArmAttemptsForTest()
-	{
-		return reArmAttempts;
-	}
-
-	boolean resetPhaseKnownForTest()
-	{
-		return resetPhaseKnown(storeResetAnchorMs);
-	}
 
 	/** Milliseconds until the next reset, or 0 when the phase has not been observed yet. */
 	long msUntilNextResetForDisplay()
@@ -1208,19 +1117,14 @@ final class StoreTools
 			return;
 		}
 		Player self = plugin.client.getLocalPlayer();
-		List<Player> players = plugin.client.getPlayers();
 		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
+		if (me == null)
 		{
 			return;
 		}
 		int tick = plugin.client.getTickCount();
-		for (Player p : players)
+		for (Player p : WildernessPlayers.otherPlayers(plugin.client))
 		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || p.getWorldLocation() == null)
-			{
-				continue;
-			}
 			int dist = p.getWorldLocation().distanceTo(me);
 			String rsn = Text.removeTags(p.getName());
 			int[] rec = shopVisitNearby.get(rsn);
@@ -1269,13 +1173,7 @@ final class StoreTools
 	 * and not a same-tick batch. unit_price_gp is a LABELLED average (gp_total/qty), only meaningful for
 	 * qty>1; per-item price scales mid-batch as stock moves, so it is never a flat rate. When the delta can't
 	 * be trusted, degrade to {item, qty} only (option D) rather than emit a guess. Pure/static: no client.
-	 */
-	static Map<String, Object> buildStoreTxFields(String type, int item, int qty, long coinsBefore, long coinsAfter, boolean ambiguous)
-	{
-		return buildStoreTxFields(type, item, qty, coinsBefore, coinsAfter, ambiguous, false);
-	}
-
-	/**
+	 *
 	 * @param qtyMerged qty is the SUM of same-tick clicks (intent), not a confirmed executed quantity —
 	 *                  gp_total stays exact (it is the measured coin delta) but unit_price_gp is OMITTED,
 	 *                  because dividing an exact total by an unconfirmed denominator yields a wrong unit

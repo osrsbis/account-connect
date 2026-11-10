@@ -1,5 +1,6 @@
 package com.osrsbestinslot.export;
 
+import com.google.common.primitives.Longs;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -179,8 +180,7 @@ final class MinigameLines
 			if (v != null) values.put(e.getKey(), v);
 		}
 		if (values.isEmpty()) return null;
-		Map<String, Object> out = Fields.of("minigame", minigame, "result", "screen", "screen", values);
-		return out;
+		return Fields.of("minigame", minigame, "result", "screen", "screen", values);
 	}
 
 	private static final Pattern[] DIALOGUE_COMPILED = new Pattern[DIALOGUE.length];
@@ -229,14 +229,7 @@ final class MinigameLines
 		String g = m.group(group);
 		if (g == null) return null;
 		if (g.equalsIgnoreCase("one")) return 1L;
-		try
-		{
-			long v = Long.parseLong(g.replace(",", ""));
-			return v < 0 || v > Integer.MAX_VALUE ? null : v;
-		}
-		catch (NumberFormatException e)
-		{
-			return null;
-		}
+		Long v = Longs.tryParse(g.replace(",", ""));
+		return v == null || v < 0 || v > Integer.MAX_VALUE ? null : v;
 	}
 }

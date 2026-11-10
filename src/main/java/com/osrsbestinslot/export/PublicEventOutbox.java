@@ -86,7 +86,6 @@ final class PublicEventOutbox
         this.counters = counters;
     }
 
-    Path root() { return root; }
 
     /** The journal of `id` is open and usable. */
     boolean isOpen(String id) { return journal != null && id.equals(openId) && !journal.isFailed(); }

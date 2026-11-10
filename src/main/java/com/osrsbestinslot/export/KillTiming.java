@@ -1,5 +1,6 @@
 package com.osrsbestinslot.export;
 
+import com.google.common.primitives.Longs;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,7 +26,6 @@ final class KillTiming
 
 	/** m:ss, mm:ss, h:mm:ss or mmm:ss, with optional tenths/hundredths. */
 	private static final String TIME = "([0-9]{1,3}(?::[0-9]{2}){1,2}(?:\\.[0-9]{1,2})?)";
-	private static final String PB = "(?:\\s*\\(new personal best\\)|\\.?\\s*Personal best:\\s*" + TIME + ")?";
 
 	private static final Pattern RAID = Pattern.compile(
 		"^Congratulations - your raid is complete!\\s*Team size:\\s*([0-9]{1,2}(?:\\+|-[0-9]{1,2})? players?|Solo)\\s+"
@@ -111,10 +111,8 @@ final class KillTiming
 	{
 		Double duration = seconds(time);
 		if (duration == null) return null;
-		Map<String, Object> t = Fields.of(
-			"label", label, "duration_s", duration, "new_pb", newPb,
+		return Fields.of("label", label, "duration_s", duration, "new_pb", newPb,
 			"personal_best_s", newPb ? duration : seconds(pbTime));
-		return t;
 	}
 
 	/** {source, kind, count} for the activity count lines the kill_count gate does not match, or null. */
@@ -137,16 +135,7 @@ final class KillTiming
 
 	private static Map<String, Object> count(String source, String kind, String digits)
 	{
-		long n;
-		try
-		{
-			n = Long.parseLong(digits.replace(",", ""));
-		}
-		catch (NumberFormatException e)
-		{
-			return null;
-		}
-		Map<String, Object> out = Fields.of("source", source, "kind", kind, "count", n);
-		return out;
+		Long n = Longs.tryParse(digits.replace(",", ""));
+		return n == null ? null : Fields.of("source", source, "kind", kind, "count", n);
 	}
 }

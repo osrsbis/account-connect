@@ -1,5 +1,6 @@
 package com.osrsbestinslot.export;
 
+import com.google.common.primitives.Longs;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -190,8 +191,7 @@ final class GeHistoryCapture
     {
         Matcher match = pattern.matcher(text);
         if (!match.find()) return null;
-        try { return Long.parseLong(match.group(1).replace(",", "")); }
-        catch (NumberFormatException ex) { return null; }
+        return Longs.tryParse(match.group(1).replace(",", ""));
     }
 
     Map<String, Object> snapshot()

@@ -4,18 +4,15 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import lombok.RequiredArgsConstructor;
 import okhttp3.MultipartBody;
 import okhttp3.Response;
 
 /** Server-dictated policy: every grant bound to the token (and account) the server named, the off switches, the rollout flags and the checks that read them. */
+@RequiredArgsConstructor
 final class ServerGrants
 {
 	private final AccountConnectPlugin plugin;
-
-	ServerGrants(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	volatile String pluginInventoryGrantToken;
 	volatile String collectionGrantAccount;
@@ -42,10 +39,16 @@ final class ServerGrants
 	volatile String gameplayGrantToken;
 	volatile long gameplayGrantEpoch;
 
-	boolean gameplayGranted()
+	/** The current link token is a well-formed token and is the one this grant was answered for. */
+	private boolean granted(String grantToken)
 	{
 		String token = plugin.currentLinkToken();
-		return token != null && token.matches("[a-f0-9]{32}") && token.equals(gameplayGrantToken) && collectionAccountMatches();
+		return token != null && token.matches("[a-f0-9]{32}") && token.equals(grantToken);
+	}
+
+	boolean gameplayGranted()
+	{
+		return granted(gameplayGrantToken) && collectionAccountMatches();
 	}
 
 	volatile String progressGrantToken;
@@ -53,8 +56,7 @@ final class ServerGrants
 
 	boolean progressGranted()
 	{
-		String token = plugin.currentLinkToken();
-		return token != null && token.matches("[a-f0-9]{32}") && token.equals(progressGrantToken) && collectionAccountMatches();
+		return granted(progressGrantToken) && collectionAccountMatches();
 	}
 
 	/**
@@ -67,8 +69,7 @@ final class ServerGrants
 
 	boolean killDetailGranted()
 	{
-		String token = plugin.currentLinkToken();
-		return token != null && token.matches("[a-f0-9]{32}") && token.equals(killDetailGrantToken) && collectionAccountMatches();
+		return granted(killDetailGrantToken) && collectionAccountMatches();
 	}
 
 	/**
@@ -81,8 +82,7 @@ final class ServerGrants
 
 	boolean killContextGranted()
 	{
-		String token = plugin.currentLinkToken();
-		return token != null && token.matches("[a-f0-9]{32}") && token.equals(killContextGrantToken) && collectionAccountMatches() && plugin.activityLogActive();
+		return granted(killContextGrantToken) && collectionAccountMatches() && plugin.activityLogActive();
 	}
 
 	/**
@@ -95,8 +95,7 @@ final class ServerGrants
 
 	boolean verificationGranted()
 	{
-		String token = plugin.currentLinkToken();
-		return token != null && token.matches("[a-f0-9]{32}") && token.equals(verificationGrantToken) && plugin.activityLogActive();
+		return granted(verificationGrantToken) && plugin.activityLogActive();
 	}
 
 	boolean verificationFramesEnabled()
@@ -160,7 +159,12 @@ final class ServerGrants
 	 */
 	static boolean storeToolsDevOverride()
 	{
-		String v = System.getProperty("osrsbis.storetools");
+		return devOverride("osrsbis.storetools");
+	}
+
+	private static boolean devOverride(String property)
+	{
+		String v = System.getProperty(property);
 		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
 	}
 
@@ -224,16 +228,17 @@ final class ServerGrants
 
 	boolean staffCaptureEnabled()
 	{
-		String token = staffCaptureGrantToken;
-		String account = staffCaptureGrantAccount;
-		if (token == null || account == null || !plugin.uploadAllowed() || !configuredForStaffApi()
-			|| !account.equals(plugin.activeHash) || !plugin.currentLinkToken().equals(token))
-		{
-			return false;
-		}
-		// activeHash follows a relog only at the next session start, seconds later. The client knows at once.
-		long live = plugin.client == null ? -1L : plugin.client.getAccountHash();
-		return live == -1L || account.equals(Long.toString(live));
+		return accountGrant(staffCaptureGrantToken, staffCaptureGrantAccount);
+	}
+
+	/**
+	 * An account-bound grant: this token, uploads allowed, the staff API, and the grant's account both as the session's
+	 * account and as the live client's (activeHash follows a relog only at the next session start; the client knows at once).
+	 */
+	private boolean accountGrant(String token, String account)
+	{
+		return token != null && account != null && plugin.uploadAllowed() && configuredForStaffApi()
+			&& token.equals(plugin.currentLinkToken()) && captureAccountMatches(account);
 	}
 
 
@@ -246,12 +251,7 @@ final class ServerGrants
 	/** Collection permission only: never grants staff identity, overlays, API access or quota exemptions. */
 	boolean deliveryCaptureEnabled()
 	{
-		String token = deliveryCaptureToken;
-		String account = deliveryCaptureAccount;
-		if (token == null || account == null || !plugin.uploadAllowed() || !configuredForStaffApi()
-			|| !account.equals(plugin.activeHash) || !token.equals(plugin.currentLinkToken())) return false;
-		long live = plugin.client == null ? -1L : plugin.client.getAccountHash();
-		return live == -1L || account.equals(Long.toString(live));
+		return accountGrant(deliveryCaptureToken, deliveryCaptureAccount);
 	}
 
 	boolean captureEnabled()
@@ -286,12 +286,6 @@ final class ServerGrants
 	volatile String eventQueueGrantToken;
 	volatile String eventQueueScope;
 	volatile String bankJournalGrantToken;
-
-	/** Test seam: grant the server-side store-tools half of the gate. */
-	void setStoreToolsForTest(boolean on)
-	{
-		serverStoreToolsEnabled = on;
-	}
 
 	/**
 	 * Trade screenshots require an account-bound staff or delivery collection grant to
@@ -347,12 +341,6 @@ final class ServerGrants
 			|| (deliveryCaptureEnabled() && deliveryClipsAllowed && deliveryDropProofAllowed);
 	}
 
-	/** Test hook for the rollout flag. The real one is only ever written by applyServerPolicy. */
-	void setDropProofRolloutForTest(boolean on)
-	{
-		serverDropProofEnabled = on;
-	}
-
 	/**
 	 * LOCAL TEST OVERRIDE for the clips half of the drop-proof gate.
 	 *
@@ -368,8 +356,7 @@ final class ServerGrants
 	 */
 	static boolean dropProofDevOverride()
 	{
-		String v = System.getProperty("osrsbis.dropproof");
-		return v != null && ("on".equals(v) || "true".equals(v) || "1".equals(v));
+		return devOverride("osrsbis.dropproof");
 	}
 
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */

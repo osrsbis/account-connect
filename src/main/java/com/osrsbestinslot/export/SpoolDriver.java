@@ -12,13 +12,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.RuneLite;
 import okhttp3.OkHttpClient;
@@ -27,14 +27,10 @@ import okhttp3.Response;
 
 /** The staff durable event spool: grant and identity, force-before-network gate, purge triggers, paced replay and settlement, and the disk thread every journal uses. */
 @Slf4j
+@RequiredArgsConstructor
 final class SpoolDriver
 {
-	private final AccountConnectPlugin plugin;
-
-	SpoolDriver(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
+	final AccountConnectPlugin plugin;
 
 	// =====================================================================================================
 	// DURABLE EVENT SPOOL (staff only). See EventSpool for the file format.
@@ -85,13 +81,14 @@ final class SpoolDriver
 	volatile long spoolReplayBackoffUntilMs;
 	volatile long spoolReplayBackoffMs;
 	volatile boolean spoolReplayInFlight;
-	private volatile Path spoolDataRootOverride;
+	volatile Path spoolDataRootOverride;
 	volatile ExecutorService spoolExec;
 	/**
 	 * Which identity GENERATION a spooled event belongs to. The generation counts every change of the active
 	 * identity, so X -> Y -> X gives X a new generation: a purge decided for the old X releases only gates and
 	 * memory ownership of generations up to the one it was decided in, never the re-activated X's.
 	 */
+	@RequiredArgsConstructor
 	private static final class SpoolTag
 	{
 		final String identity;
@@ -99,12 +96,6 @@ final class SpoolDriver
 		final long sinceNanos = System.nanoTime();
 		/** The durability gate timed out: the memory POST went out before the row was durable. */
 		volatile boolean gateTimedOut;
-
-		SpoolTag(String identity, long generation)
-		{
-			this.identity = identity;
-			this.generation = generation;
-		}
 
 		boolean coveredBy(String id, long maxGeneration)
 		{
@@ -115,7 +106,7 @@ final class SpoolDriver
 	/** event_id -> tag, for spooled events the memory path still owns. */
 	final Map<String, SpoolTag> spoolMemoryOwned = new ConcurrentHashMap<>();
 	/** event_id -> tag, for allowlisted events whose durable append has not been forced yet. */
-	private final Map<String, SpoolTag> spoolDurabilityPending = new ConcurrentHashMap<>();
+	final Map<String, SpoolTag> spoolDurabilityPending = new ConcurrentHashMap<>();
 	/** Incremented under spoolStateLock whenever spoolIdentity changes value. */
 	private long spoolGeneration;
 	/**
@@ -135,14 +126,10 @@ final class SpoolDriver
 	static final long SPOOL_REPLAY_CALL_TIMEOUT_MS = 30_000L;
 
 	/** Request tag: the oldest created_ms in a replay batch. */
+	@RequiredArgsConstructor
 	static final class SpoolReplayAge
 	{
 		final long oldestCreatedMs;
-
-		SpoolReplayAge(long oldestCreatedMs)
-		{
-			this.oldestCreatedMs = oldestCreatedMs;
-		}
 	}
 
 	private volatile OkHttpClient spoolReplayHttp;
@@ -183,8 +170,8 @@ final class SpoolDriver
 	private volatile long spoolOldestSnapshotMs = -1L;
 
 	// Writer-thread state. Touched only on spoolExec.
-	private PublicEventOutbox staffJournal;
-	private boolean spoolDead;
+	PublicEventOutbox staffJournal;
+	boolean spoolDead;
 	private final Set<String> spoolReplayIds = new HashSet<>();
 
 	Path spoolDataRoot()
@@ -779,19 +766,13 @@ final class SpoolDriver
 
 	private void armSpoolReplayBackoff(long retryAfterMs)
 	{
-		long next = spoolReplayBackoffMs <= 0
-			? EventQueue.EVENT_RETRY_BASE_BACKOFF_MS
-			: Math.min(spoolReplayBackoffMs * 2, EventQueue.EVENT_RETRY_MAX_BACKOFF_MS);
-		if (retryAfterMs > 0)
-		{
-			next = Math.max(next, Math.min(retryAfterMs, EventQueue.EVENT_RETRY_MAX_BACKOFF_MS));
-		}
+		long next = EventQueue.nextBackoff(spoolReplayBackoffMs, retryAfterMs);
 		spoolReplayBackoffMs = next;
 		spoolReplayBackoffUntilMs = plugin.nowMs() + next;
 	}
 
 	/** Writer thread. Replay candidates: oldest first, recovered rows first, never an id something else owns. */
-	private List<EventSpool.Record> spoolReplayCandidates()
+	List<EventSpool.Record> spoolReplayCandidates()
 	{
 		List<EventSpool.Record> out = new ArrayList<>();
 		EventSpool spool = spool();
@@ -866,7 +847,7 @@ final class SpoolDriver
 	{
 		String live = plugin.currentLinkToken();
 		String account = plugin.activeHash;
-		return token.equals(live) && SnapshotBuilder.sha256Hex("event-token:" + token).equals(plugin.events.currentEventTokenFingerprint())
+		return token.equals(live) && EventSpool.sha256Hex("event-token:" + token).equals(plugin.events.currentEventTokenFingerprint())
 			&& validSpoolAccount(account) && id.equals(EventSpool.identityKey(live, account))
 			&& id.equals(spoolIdentity);
 	}
@@ -911,7 +892,7 @@ final class SpoolDriver
 			candidates = eligible;
 			if (candidates.isEmpty()) return false;
 			String tokenJson = plugin.gson.toJson(token);
-			int kept = EventQueue.fitEventBatch(tokenJson, encoded);
+			int kept = EventQueue.fitEventBatch(tokenJson, encoded, false);
 			final Map<String, String> sentIds = new LinkedHashMap<>();
 			long oldestCreated = Long.MAX_VALUE;
 			for (int i = 0; i < kept; i++)
@@ -1007,24 +988,18 @@ final class SpoolDriver
 
 	void addSpoolHealth(Map<String, Object> h)
 	{
-		h.put("spool_active", spoolIdentity != null);
-		h.put("spool_records_pending", spoolPendingSnapshot);
-		h.put("spool_bytes", spoolBytesSnapshot);
 		long oldest = spoolOldestSnapshotMs;
-		h.put("spool_oldest_age_s", oldest > 0 ? Math.max(0L, (wallClock.getAsLong() - oldest) / 1000L) : 0L);
-		h.put("spool_replayed_total", spoolCounters.replayed.get());
-		h.put("spool_acked_total", spoolCounters.acked.get());
-		h.put("spool_dropped_total", spoolCounters.dropped.get());
-		h.put("spool_corrupt_total", spoolCounters.corrupt.get());
-		h.put("spool_quarantined_total", spoolCounters.quarantined.get());
-		h.put("spool_filtered_total", spoolCounters.filtered.get());
-		h.put("spool_unacked_2xx_total", spoolCounters.unacked2xx.get());
-		h.put("spool_purged_total", spoolCounters.purged.get());
-		h.put("spool_append_failed_total", spoolCounters.appendFailed.get());
-		h.put("spool_reopen_failed_total", spoolCounters.reopenFailed.get());
-		h.put("spool_gate_timeout_total", spoolCounters.gateTimeout.get());
-		h.put("spool_replay_aged_at_dispatch_total", spoolCounters.replayAgedAtDispatch.get());
-		long ack = spoolCounters.lastAckMs.get();
+		EventSpool.Counters c = spoolCounters;
+		h.putAll(Fields.of("spool_active", spoolIdentity != null, "spool_records_pending", spoolPendingSnapshot,
+			"spool_bytes", spoolBytesSnapshot,
+			"spool_oldest_age_s", oldest > 0 ? Math.max(0L, (wallClock.getAsLong() - oldest) / 1000L) : 0L,
+			"spool_replayed_total", c.replayed.get(), "spool_acked_total", c.acked.get(),
+			"spool_dropped_total", c.dropped.get(), "spool_corrupt_total", c.corrupt.get(),
+			"spool_quarantined_total", c.quarantined.get(), "spool_filtered_total", c.filtered.get(),
+			"spool_unacked_2xx_total", c.unacked2xx.get(), "spool_purged_total", c.purged.get(),
+			"spool_append_failed_total", c.appendFailed.get(), "spool_reopen_failed_total", c.reopenFailed.get(),
+			"spool_gate_timeout_total", c.gateTimeout.get(), "spool_replay_aged_at_dispatch_total", c.replayAgedAtDispatch.get()));
+		long ack = c.lastAckMs.get();
 		if (ack > 0)
 		{
 			h.put("last_spool_ack_at", ack / 1000L);
@@ -1056,95 +1031,5 @@ final class SpoolDriver
 			if (plugin.outbox.publicBankOutbox != null) plugin.outbox.publicBankOutbox.close();
 			if (staffJournal != null) staffJournal.close();
 		});
-	}
-
-	// ---- test hooks (same package only) ----
-
-	void setSpoolDataRootForTest(Path root)
-	{
-		spoolDataRootOverride = root;
-	}
-
-	int spoolDurabilityPendingCountForTest()
-	{
-		return spoolDurabilityPending.size();
-	}
-
-	/** Simulate process death: drop the shard handle and lock, write nothing, do nothing ever again. */
-	void crashSpoolForTest() throws Exception
-	{
-		ExecutorService e = spoolExec;
-		if (e == null || e.isShutdown())
-		{
-			spoolDead = true;
-			return;
-		}
-		e.submit(() ->
-		{
-			if (plugin.outbox.publicOutbox != null) plugin.outbox.publicOutbox.crashForTest();
-			if (plugin.outbox.publicBankOutbox != null) plugin.outbox.publicBankOutbox.crashForTest();
-			if (staffJournal != null) staffJournal.crashForTest();
-			spoolDead = true;
-		}).get(5, TimeUnit.SECONDS);
-		e.shutdown();
-	}
-
-	void awaitSpoolIdleForTest() throws Exception
-	{
-		ExecutorService e = spoolExec;
-		if (e != null && !e.isShutdown())
-		{
-			e.submit(() -> { }).get(5, TimeUnit.SECONDS);
-		}
-	}
-
-	private <T> T onSpoolThreadAndWait(Callable<T> c, T empty) throws Exception
-	{
-		ExecutorService e = spoolExec;
-		if (e == null || e.isShutdown())
-		{
-			return empty;
-		}
-		return e.submit(c).get(5, TimeUnit.SECONDS);
-	}
-
-	List<String> spoolPendingIdsForTest() throws Exception
-	{
-		return onSpoolThreadAndWait(() ->
-		{
-			List<String> out = new ArrayList<>();
-			EventSpool spool = spool();
-			if (spool != null)
-			{
-				for (EventSpool.Record r : spool.pending())
-				{
-					out.add(r.eventId);
-				}
-			}
-			return out;
-		}, new ArrayList<>());
-	}
-
-	List<String> spoolReplayCandidatesForTest() throws Exception
-	{
-		return onSpoolThreadAndWait(() ->
-		{
-			List<String> out = new ArrayList<>();
-			for (EventSpool.Record r : spoolReplayCandidates())
-			{
-				out.add(r.eventId);
-			}
-			return out;
-		}, new ArrayList<>());
-	}
-
-	Path spoolShardFileForTest() throws Exception
-	{
-		return onSpoolThreadAndWait(() -> spool() == null ? null : spool().shardFile(), null);
-	}
-
-	void recoverAbandonedShardsNow() throws Exception
-	{
-		onSpoolThreadAndWait(() -> spool() == null ? 0 : spool().recover(), 0);
 	}
 }

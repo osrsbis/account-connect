@@ -107,7 +107,7 @@ public class BankVisitEvidenceTest
 
 		void close()
 		{
-			p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+			p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		}
 
 		void state(GameState s)
@@ -504,7 +504,7 @@ public class BankVisitEvidenceTest
 		r.p.onWidgetClosed(new WidgetClosed(BANK_GROUP, 0, true));
 		r.p.shutDown();
 		r.p.onGameTick(new GameTick());
-		r.p.bankVisit.handleBankWidgetClosed(BANK_GROUP);	// a close after re-enable must not finish the old visit
+		r.p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);	// a close after re-enable must not finish the old visit
 		assertTrue(r.of("bank_visit_close").isEmpty());
 	}
 

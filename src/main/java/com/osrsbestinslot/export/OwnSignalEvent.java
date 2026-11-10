@@ -79,9 +79,9 @@ final class OwnSignalEvent
             if(source.equals("own_client_dialog")&&!List.of("storage.coal_bag","storage.fish_barrel").contains(kind))return null;
             if(kind.equals("storage.fish_barrel")&&!source.equals("own_client_dialog"))return null;
             Map<String,Object> value=value(kind,p.get("signal_value"));if(value==null)return null;
-            Map<String,Object> out=new LinkedHashMap<>();out.put("signal_schema",1);out.put("signal_kind",kind);
-            out.put("source",source);out.put("direct",!inferred);out.put("observation",p.get("observation"));out.put("gameplay_session",session);
-            out.put("source_sequence",number(p.get("source_sequence"),1,9007199254740991L));
+            Map<String,Object> out=Fields.of("signal_schema",1,"signal_kind",kind,"source",source,"direct",!inferred,
+                "observation",p.get("observation"),"gameplay_session",session,
+                "source_sequence",number(p.get("source_sequence"),1,9007199254740991L));
             long tick=number(p.get("source_tick"),0,Integer.MAX_VALUE);
             if(kind.equals("combat.toa_hazards")&&(Long)value.get("spawn_tick")>=tick)return null;
             if(inferred)OwnInferredSignal.checkTick(kind,value,tick);out.put("source_tick",tick);
@@ -104,10 +104,9 @@ final class OwnSignalEvent
         else if("ChatMessage:GAMEMESSAGE:exact_english_projection".equals(rawSource)||"ChatMessage:SPAM:exact_english_projection".equals(rawSource))source="own_client_system";
         else if("ClientTick:widget:193.2;own_inventory_possession".equals(rawSource))source="own_client_dialog";
         else return null;
-        Map<String,Object> input=new LinkedHashMap<>();input.put("signal_schema",1);input.put("signal_kind",row.get("kind"));
-        input.put("signal_value",row.get("value"));input.put("source",source);input.put("direct",row.get("direct"));
-        input.put("observation",inferred?"inferred_observation":"observed_signal");input.put("gameplay_session",session.replace("-",""));
-        input.put("source_sequence",row.get("sequence"));input.put("source_tick",row.get("tick"));input.put("observed_at_ms",row.get("observed_at_ms"));
-        Map<String,Object> out=wire(input);if(out!=null)out.put("type","own_signal");return out;
+        Map<String,Object> out=wire(Fields.of("signal_schema",1,"signal_kind",row.get("kind"),"signal_value",row.get("value"),
+            "source",source,"direct",row.get("direct"),"observation",inferred?"inferred_observation":"observed_signal",
+            "gameplay_session",session.replace("-",""),"source_sequence",row.get("sequence"),"source_tick",row.get("tick"),
+            "observed_at_ms",row.get("observed_at_ms")));if(out!=null)out.put("type","own_signal");return out;
     }
 }

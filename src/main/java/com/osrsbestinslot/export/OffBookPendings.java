@@ -2,13 +2,13 @@ package com.osrsbestinslot.export;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import lombok.RequiredArgsConstructor;
 import net.runelite.api.InventoryID;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
@@ -22,14 +22,10 @@ import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.events.MenuOptionClicked;
 
 /** Off-book item moves: drop, pickup and alch clicks armed as pendings and resolved against the inventory and the ground. */
+@RequiredArgsConstructor
 final class OffBookPendings
 {
 	private final AccountConnectPlugin plugin;
-
-	OffBookPendings(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	/**
 	 * The quantity in a store menu option, once tags are stripped: the trailing run of digits.
@@ -311,27 +307,8 @@ final class OffBookPendings
 		return event.getId();	// ground Take: the item id lives in the entry identifier
 	}
 
-	/**
-	 * Ground-spawn confirmation for drops (the M3 redesign). A "drop" pending resolves ONLY when BOTH signals
-	 * co-occur: the armed item APPEARS ON THE GROUND on/adjacent to the player's tile, AND the player's
-	 * inventory holds fewer of it than at click time. An inventory removal alone (equip / eat / bank deposit /
-	 * destroy — including via widget buttons that carry no item id) spawns no ground item, so it can never
-	 * fabricate a drop; a ground item alone (another player's drop becoming visible) shows no inventory loss,
-	 * so it never resolves either. Package-private + primitives so it is unit-testable without a client.
-	 */
-	/** Backwards-compatible overload — a plain ItemSpawned is always a fresh (grown) ground item. */
-	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick)
-	{
-		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, true);
-	}
-
-	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick, boolean stackGrew)
-	{
-		resolveDropPendingOnGroundSpawn(spawnedItemId, dist, invCountAfter, currentTick, stackGrew, -1, -1, -1);
-	}
-
 	/** The oldest matching click which has not already consumed a ground spawn. */
-	private InvDeltaPending pendingDropForSpawn(int item, int tick)
+	InvDeltaPending pendingDropForSpawn(int item, int tick)
 	{
 		if (plugin.death.deathPending != null)
 		{
@@ -363,15 +340,14 @@ final class OffBookPendings
 		}
 	}
 
-	/** @param tileX tileY tilePlane the spawn's world tile, recorded on the drop row; -1 when unknown. */
-	void resolveDropPendingOnGroundSpawn(int spawnedItemId, int dist, long invCountAfter, int currentTick,
-		boolean stackGrew, int tileX, int tileY, int tilePlane)
-	{
-		if (dist > DROP_SPAWN_MAX_DIST || !stackGrew) return;
-		resolveDropPendingOnGroundSpawn(pendingDropForSpawn(spawnedItemId, currentTick), invCountAfter,
-			currentTick, tileX, tileY, tilePlane, -1);
-	}
-
+	/**
+	 * Ground-spawn confirmation for drops (the M3 redesign). A "drop" pending resolves ONLY when BOTH signals
+	 * co-occur: the armed item APPEARS ON THE GROUND on/adjacent to the player's tile, AND the player's
+	 * inventory holds fewer of it than at click time. An inventory removal alone (equip / eat / bank deposit /
+	 * destroy — including via widget buttons that carry no item id) spawns no ground item, so it can never
+	 * fabricate a drop; a ground item alone (another player's drop becoming visible) shows no inventory loss,
+	 * so it never resolves either.
+	 */
 	void resolveDropPendingOnGroundSpawn(InvDeltaPending p, long invCountAfter, int currentTick,
 		int tileX, int tileY, int tilePlane, long quantityAdded)
 	{
@@ -436,15 +412,6 @@ final class OffBookPendings
 		synchronized (invDeltaPendings)
 		{
 			invDeltaPendings.remove(p);
-		}
-	}
-
-	/** The oldest armed pending, or null. Kept so the single-pending call sites read unchanged. */
-	private InvDeltaPending peekInvDeltaPending()
-	{
-		synchronized (invDeltaPendings)
-		{
-			return invDeltaPendings.peekFirst();
 		}
 	}
 
@@ -549,22 +516,6 @@ final class OffBookPendings
 			(long) event.getNewQuantity() - event.getOldQuantity());
 	}
 
-	/** True when a "drop" pending for this item is armed — i.e. this ground pile is one we just dropped. */
-	boolean hasArmedDropFor(int item)
-	{
-		synchronized (invDeltaPendings)
-		{
-			for (InvDeltaPending p : invDeltaPendings)
-			{
-				if ("drop".equals(p.base) && p.item == item)
-				{
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
 	/**
 	 * True when a local Take that could explain THIS pile is still in flight.
 	 *
@@ -620,30 +571,6 @@ final class OffBookPendings
 	}
 
 	/**
-	 * Resolve an armed pickup/alch pending against the post-change inventory. pickup fires when the item count
-	 * ROSE (an inventory removal can't fake a rise); alch fires only when the item fell AND coins rose in the
-	 * same change (an alch always yields coins — an item removal without a coin gain is an equip/bank/destroy,
-	 * never an alch). "drop" pendings NEVER resolve here: an inventory removal alone could be a bank deposit /
-	 * destroy / equip, so drops resolve exclusively via ground-spawn confirmation
-	 * (resolveDropPendingOnGroundSpawn) — this path only expires a stale drop pending. Unrelated inventory
-	 * changes are ignored and the pending kept until it lands or its tick window expires (so a "Take" that
-	 * completes after a short walk still logs). Package-private + primitive args so it is unit-testable.
-	 */
-	void resolveInvDeltaPending(long itemCountAfter, long coinsAfter, int currentTick)
-	{
-		// Head-only entry point, kept for the single-pending call shape. The live client path uses
-		// resolveInvDeltaPendings(ItemContainer, ...) instead, which walks EVERY armed pending: with a queue,
-		// an unconfirmed drop sits at the head and would otherwise hide a later pickup behind it forever.
-		InvDeltaPending p = peekInvDeltaPending();
-		if (p == null)
-		{
-			return;
-		}
-		resolveOnePending(p, itemCountAfter, coinsAfter, currentTick,
-			Collections.singletonList(p));
-	}
-
-	/**
 	 * Resolve EVERY armed pending against one inventory change, each against ITS OWN item count.
 	 *
 	 * A single pending slot could rely on the head being the only candidate. A queue cannot: a Drop whose
@@ -687,8 +614,17 @@ final class OffBookPendings
 	 * Resolve exactly ONE armed pending. Removes it only when its own signals landed or its window
 	 * expired. Returns the quantity it CONSUMED, so the caller can withhold that evidence from the
 	 * remaining pendings; 0 when nothing landed.
+	 *
+	 * An armed pickup/alch pending resolves against the post-change inventory. pickup fires when the item count
+	 * ROSE (an inventory removal can't fake a rise); alch fires only when the item fell AND coins rose in the
+	 * same change (an alch always yields coins — an item removal without a coin gain is an equip/bank/destroy,
+	 * never an alch). "drop" pendings NEVER resolve here: an inventory removal alone could be a bank deposit /
+	 * destroy / equip, so drops resolve exclusively via ground-spawn confirmation
+	 * (resolveDropPendingOnGroundSpawn) — this path only expires a stale drop pending. Unrelated inventory
+	 * changes are ignored and the pending kept until it lands or its tick window expires (so a "Take" that
+	 * completes after a short walk still logs).
 	 */
-	private long resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter,
+	long resolveOnePending(InvDeltaPending p, long itemCountAfter, long coinsAfter,
 		int currentTick, List<InvDeltaPending> snapshot)
 	{
 		// Resolution removes ONE pending — the one whose signals landed. The lifecycle disarms (logout, hop,

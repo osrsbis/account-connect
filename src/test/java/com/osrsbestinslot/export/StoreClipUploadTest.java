@@ -39,6 +39,14 @@ import static org.junit.Assert.assertTrue;
  */
 public class StoreClipUploadTest
 {
+	/** The frames StoreClips.selectStoreClipFrameIndexes keeps, in order. */
+	private static List<byte[]> selectStoreClipFrames(List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
+	{
+		List<byte[]> out = new ArrayList<>();
+		for (int i : StoreClips.selectStoreClipFrameIndexes(encoded, maxFrames, maxFrameBytes, maxBurstBytes)) out.add(encoded.get(i));
+		return out;
+	}
+
 	private static final String TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 	private static final byte[] JPEG_SOI = {(byte) 0xFF, (byte) 0xD8};
 
@@ -117,7 +125,7 @@ public class StoreClipUploadTest
 		encoded.add(sized(StoreClips.MAX_CLIP_FRAME_BYTES + 1, 1));	// over per-frame cap -> dropped
 		encoded.add(sized(500_000, 2));					// ok
 
-		List<byte[]> kept = StoreClips.selectStoreClipFrames(
+		List<byte[]> kept = selectStoreClipFrames(
 			encoded, StoreClips.MAX_CLIP_FRAMES,
 			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES);
 
@@ -155,7 +163,7 @@ public class StoreClipUploadTest
 		{
 			encoded.add(sized(1_000_000, i));			// each == per-frame cap, allowed
 		}
-		List<byte[]> kept = StoreClips.selectStoreClipFrames(
+		List<byte[]> kept = selectStoreClipFrames(
 			encoded, StoreClips.MAX_CLIP_FRAMES,
 			StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES);
 

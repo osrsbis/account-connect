@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
@@ -24,14 +25,10 @@ import net.runelite.client.config.RuneScapeProfileType;
 
 /** Own Grand Exchange slots: login replay, the hash -1 hold, and the slots saved across a restart. */
 @Slf4j
+@RequiredArgsConstructor
 final class GeSlots
 {
 	private final AccountConnectPlugin plugin;
-
-	GeSlots(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	/** Disable: clear client-thread GE state so a re-enable starts from a fresh baseline. */
 	void reset()
@@ -344,17 +341,11 @@ final class GeSlots
 		List<Map.Entry<Integer, Object[]>> held = new ArrayList<>(unkeyed.entrySet());
 		unkeyed.clear();
 		int tick = plugin.client == null ? 0 : plugin.client.getTickCount();
-		if (acct == accountHash)
+		if (acct != accountHash)
 		{
-			restore();
-			for (Map.Entry<Integer, Object[]> e : held)
-			{
-				judge(e.getKey(), (GrandExchangeOfferState) e.getValue()[0], (long[]) e.getValue()[1], true, tick, (Long) e.getValue()[2]);
-			}
-			return;
+			observations.clear();
+			accountHash = acct;
 		}
-		observations.clear();
-		accountHash = acct;
 		restore();
 		for (Map.Entry<Integer, Object[]> e : held)
 		{

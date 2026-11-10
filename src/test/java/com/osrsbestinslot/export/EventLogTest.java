@@ -29,6 +29,39 @@ import static org.mockito.Mockito.when;
  */
 public class EventLogTest
 {
+	/**
+	 * Resolve an armed store pending against the post-transaction coin count. Consumes the pending (one
+	 * inventory change resolves at most one click) and emits the store event, with the exact-gp price when it
+	 * can be cleanly attributed. Stale pendings (a failed click that never moved the inventory, then some
+	 * unrelated later change) are dropped rather than paired. The item count is unknown here.
+	 */
+	private static void resolveStorePendingOnInventoryChange(StoreTools store, long coinsAfter, int currentTick)
+	{
+		resolveStorePendingOnInventoryChange(store, coinsAfter, StoreTools.UNKNOWN_ITEM_COUNT, currentTick);
+	}
+
+	/**
+	 * @param itemAfter post-transaction count of the transacted item, or StoreTools.UNKNOWN_ITEM_COUNT when it
+	 *                  could not be read. Its distance from the pending's baseline is the quantity the
+	 *                  server ACTUALLY moved, which is what makes a unit price safe to derive.
+	 */
+	private static void resolveStorePendingOnInventoryChange(StoreTools store, long coinsAfter, long itemAfter, int currentTick)
+	{
+		store.resolveStorePendingsOnInventoryChange(coinsAfter, id -> itemAfter, currentTick);
+	}
+
+	private static StoreTools.StorePending storePending(String type, int item, int qty, long coinsBefore, int tick,
+		boolean ambiguous)
+	{
+		return new StoreTools.StorePending(type, item, qty, coinsBefore, StoreTools.UNKNOWN_ITEM_COUNT, tick, ambiguous, false);
+	}
+
+	private static StoreTools.StorePending storePending(String type, int item, int qty, long coinsBefore, long itemBefore,
+		int tick, boolean ambiguous, boolean qtyMerged)
+	{
+		return new StoreTools.StorePending(type, item, qty, coinsBefore, itemBefore, tick, ambiguous, qtyMerged);
+	}
+
 	private static final String TEST_TOKEN = "0123456789abcdef0123456789abcdef";
 
 	/** A linked config: valid token → activity log active (core sync, no toggle). */
@@ -302,7 +335,7 @@ public class EventLogTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		plugin.store.shopOpen = true;
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, false));
 		MenuOptionClicked ev = mock(MenuOptionClicked.class);
 		when(ev.getMenuOption()).thenReturn("Buy 1");
 		when(ev.getItemId()).thenReturn(-1);
@@ -321,7 +354,7 @@ public class EventLogTest
 		// 0.7.1 (the build on the Hub) emits the degraded {item, qty} form instead; that must not regress.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, false));
 
 		// Drive the REAL event, not the helper: a mutation that reverts the call site back to
 		// `storePending = null` leaves the helper itself perfect and the feature dead, and a test
@@ -353,8 +386,8 @@ public class EventLogTest
 		// (a) buy → coins fell exactly; gp_total is the coins that left, qty==1 so no unit average.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
-		plugin.store.resolveStorePendingOnInventoryChange(700L, 6); // coins fell 300, one tick later
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, false));
+		resolveStorePendingOnInventoryChange(plugin.store,700L, 6); // coins fell 300, one tick later
 		assertEquals(1, plugin.events.pendingEvents.size());
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("store_buy", e.get("type"));
@@ -377,9 +410,9 @@ public class EventLogTest
 		// AccountConnectPlugin#buildStoreTxFields and singleClickPartialFillIsLabelledNotPriced below.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending(
+		arm(plugin, storePending(
 			"store_sell", 1391, 5, 200L, 5L, 5, false, false));	// itemBefore 5
-		plugin.store.resolveStorePendingOnInventoryChange(950L, 0L, 5);	// coins rose 750, all 5 items gone
+		resolveStorePendingOnInventoryChange(plugin.store,950L, 0L, 5);	// coins rose 750, all 5 items gone
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("store_sell", e.get("type"));
 		assertEquals(750L, e.get("gp_total"));
@@ -393,8 +426,8 @@ public class EventLogTest
 		// still the exact measured coin movement.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_sell", 1391, 5, 200L, 5, false));
-		plugin.store.resolveStorePendingOnInventoryChange(950L, 5);
+		arm(plugin, storePending("store_sell", 1391, 5, 200L, 5, false));
+		resolveStorePendingOnInventoryChange(plugin.store,950L, 5);
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals(750L, e.get("gp_total"));
 		assertNull("no evidence is not confirmation", e.get("unit_price_gp"));
@@ -416,9 +449,9 @@ public class EventLogTest
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
 		// "Buy 50" with 0 in the inventory; only 5 arrive, costing 3,925 gp.
-		arm(plugin, new StoreTools.StorePending(
+		arm(plugin, storePending(
 			"store_buy", 22660, 50, 26_207_203L, 0L, 5, false, false));
-		plugin.store.resolveStorePendingOnInventoryChange(26_203_278L, 5L, 5);
+		resolveStorePendingOnInventoryChange(plugin.store,26_203_278L, 5L, 5);
 
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("the measured coin movement, exact as always", 3_925L, e.get("gp_total"));
@@ -434,8 +467,8 @@ public class EventLogTest
 		// (c) "Buy 50" but only 10 filled → gp_total is the coins that ACTUALLY moved, never qty×unitguess.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 50, 100000L, 5, false));
-		plugin.store.resolveStorePendingOnInventoryChange(97000L, 6); // only 3000 coins actually left
+		arm(plugin, storePending("store_buy", 4151, 50, 100000L, 5, false));
+		resolveStorePendingOnInventoryChange(plugin.store,97000L, 6); // only 3000 coins actually left
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals("gp_total must be the coins that actually moved", 3000L, e.get("gp_total"));
 	}
@@ -447,8 +480,8 @@ public class EventLogTest
 		// window must NOT be paired with the stale coinsBefore — emit nothing, drop the pending.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 10, false));
-		plugin.store.resolveStorePendingOnInventoryChange(50000L, 15); // 5 ticks later (> STORE_PENDING_MAX_TICKS)
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 10, false));
+		resolveStorePendingOnInventoryChange(plugin.store,50000L, 15); // 5 ticks later (> STORE_PENDING_MAX_TICKS)
 		assertTrue("stale pending must emit nothing", plugin.events.pendingEvents.isEmpty());
 		assertNull("stale pending must be cleared", storePending(plugin));
 	}
@@ -459,7 +492,7 @@ public class EventLogTest
 		// (e) closing the shop widget drops any armed-but-unresolved pending.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, false));
 		WidgetClosed wc = new WidgetClosed(300, 0, false); // SHOPMAIN — final class, use the real event
 		plugin.onWidgetClosed(wc);
 		assertNull("closing the shop must drop any armed pending", storePending(plugin));
@@ -472,8 +505,8 @@ public class EventLogTest
 		// never emit a wrong-sign price.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, false));
-		plugin.store.resolveStorePendingOnInventoryChange(1200L, 6); // wrong sign for a buy
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, false));
+		resolveStorePendingOnInventoryChange(plugin.store,1200L, 6); // wrong sign for a buy
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertEquals(4151, e.get("item"));
 		assertEquals(1, e.get("qty"));
@@ -487,8 +520,8 @@ public class EventLogTest
 		// sign is right, rather than attribute both to one click's qty.
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
 		inject(plugin, "config", onConfig());
-		arm(plugin, new StoreTools.StorePending("store_buy", 4151, 1, 1000L, 5, true));
-		plugin.store.resolveStorePendingOnInventoryChange(700L, 5); // sign ok but batch-ambiguous
+		arm(plugin, storePending("store_buy", 4151, 1, 1000L, 5, true));
+		resolveStorePendingOnInventoryChange(plugin.store,700L, 5); // sign ok but batch-ambiguous
 		Map<String, Object> e = plugin.events.pendingEvents.get(0);
 		assertFalse("same-tick batched clicks must omit gp_total", e.containsKey("gp_total"));
 	}

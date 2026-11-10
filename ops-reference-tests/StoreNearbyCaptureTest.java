@@ -303,7 +303,7 @@ public class StoreNearbyCaptureTest
 
 		plugin.store.handleShopStockChanged(shopWith(new int[][]{}));
 
-		assertEquals("store_taken must mark one moment on the visit clip", 1, clip.momentCount());
+		assertEquals("store_taken must mark one moment on the visit clip", 1, clip.anchors.size() - 1);
 	}
 
 	/**

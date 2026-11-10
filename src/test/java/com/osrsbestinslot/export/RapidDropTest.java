@@ -65,7 +65,7 @@ public class RapidDropTest
 		}
 		for (int i = 0; i < items.length; i++)
 		{
-			plugin.offBook.resolveDropPendingOnGroundSpawn(items[i], 0, 0L, 101);
+			OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,items[i], 0, 0L, 101);
 		}
 
 		List<Integer> emitted = droppedItemIds(plugin);
@@ -85,8 +85,8 @@ public class RapidDropTest
 		tick(plugin, 200);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 200);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 200);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,TBOW, 0, 0L, 200);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,SCYTHE, 0, 0L, 200);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals("both same-tick drops must emit", 2, emitted.size());
@@ -104,9 +104,9 @@ public class RapidDropTest
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
 		plugin.onMenuOptionClicked(menu("Drop", "", FANG));
 		// spawns land reversed
-		plugin.offBook.resolveDropPendingOnGroundSpawn(FANG, 0, 0L, 300);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 300);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 300);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,FANG, 0, 0L, 300);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,SCYTHE, 0, 0L, 300);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,TBOW, 0, 0L, 300);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals(3, emitted.size());
@@ -125,7 +125,7 @@ public class RapidDropTest
 		tick(plugin, 400);
 		plugin.onMenuOptionClicked(menu("Drop", "", DEATH_RUNE));
 		assertNotNull("a single drop still arms", firstPending(plugin));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(DEATH_RUNE, 0, 0L, 400);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,DEATH_RUNE, 0, 0L, 400);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals(1, emitted.size());
@@ -145,8 +145,8 @@ public class RapidDropTest
 		AccountConnectPlugin plugin = newPlugin();
 		tick(plugin, 500);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 500);   // another player's tbow appearing
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,TBOW, 0, 0L, 500);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,TBOW, 0, 0L, 500);   // another player's tbow appearing
 		assertEquals("a drop must never emit twice", 1, droppedItemIds(plugin).size());
 	}
 
@@ -161,7 +161,7 @@ public class RapidDropTest
 		tick(plugin, 600);
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.offBook.resolveInvDeltaPending(0L, 0L, 601);       // items left the inventory: bank / equip / destroy
+		OffBookHooks.resolveInvDeltaPending(plugin.offBook,0L, 0L, 601);       // items left the inventory: bank / equip / destroy
 		assertTrue("no ground spawn = no drop, ever", plugin.events.pendingEvents.isEmpty());
 	}
 
@@ -173,7 +173,7 @@ public class RapidDropTest
 		tick(plugin, 700);
 		plugin.onMenuOptionClicked(menu("Trade with", "Leegsonly", TBOW));
 		assertNull("a trade click must not arm a drop pending", firstPending(plugin));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(TBOW, 0, 0L, 700);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,TBOW, 0, 0L, 700);
 		assertTrue("a trade must never emit a drop", plugin.events.pendingEvents.isEmpty());
 	}
 
@@ -186,7 +186,7 @@ public class RapidDropTest
 		plugin.onMenuOptionClicked(menu("Drop", "", TBOW));     // never lands
 		tick(plugin, 900);
 		plugin.onMenuOptionClicked(menu("Drop", "", SCYTHE));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(SCYTHE, 0, 0L, 900);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,SCYTHE, 0, 0L, 900);
 
 		List<Integer> emitted = droppedItemIds(plugin);
 		assertEquals("the later real drop must still emit", 1, emitted.size());

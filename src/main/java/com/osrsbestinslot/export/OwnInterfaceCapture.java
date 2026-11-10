@@ -85,14 +85,12 @@ final class OwnInterfaceCapture
                     String name=text.substring(colon+2);
                     if(name.matches("Your house(?: \\([A-Za-z ]{1,32}\\))?")) name="Your house";
                     if(!TREES.contains(name)) continue;
-                    Map<String,Object> row=new LinkedHashMap<>(); row.put("destination",name);
                     // UI color is only an observation; never assert permanent unlock or account ownership of a POH.
-                    row.put("disabled_style_observed",raw!=null && raw.contains("<col=5f5f5f>")); entries.add(row);
+                    entries.add(Fields.of("destination",name,"disabled_style_observed",raw!=null && raw.contains("<col=5f5f5f>")));
                 }
             }
         }
-        Map<String,Object> value=new LinkedHashMap<>(); value.put("visible_destinations",entries);
-        value.put("authority","classic_ui_not_unlock_proof");
+        Map<String,Object> value=Fields.of("visible_destinations",entries,"authority","classic_ui_not_unlock_proof");
         out.state("travel.spirit_destinations","widget:187.0 title:1;187.3 bounded allowlist",value,client.getTickCount(),at);
     }
 
@@ -111,14 +109,12 @@ final class OwnInterfaceCapture
                 // Other subtypes need a live ClueScrollPlugin context and are deliberately not called with null.
                 WorldPoint point=map!=null?map.getLocation(null):coordinate!=null?coordinate.getLocation(null):null;
                 if(point==null) continue;
-                Map<String,Object> value=new LinkedHashMap<>(); value.put("kind",map!=null?"map":"coordinate");
-                value.put("x",point.getX()); value.put("y",point.getY()); value.put("plane",point.getPlane());
-                value.put("qualification","library_base_location_not_resolved_quest_alternative");
-                destinations.put(String.valueOf(item.getId()),value);
+                destinations.put(String.valueOf(item.getId()),Fields.of("kind",map!=null?"map":"coordinate",
+                    "x",point.getX(),"y",point.getY(),"plane",point.getPlane(),
+                    "qualification","library_base_location_not_resolved_quest_alternative"));
             }
         }
-        Map<String,Object> value=new LinkedHashMap<>(); value.put("inventory_map_coordinate_clues",destinations);
-        value.put("complete",false);
+        Map<String,Object> value=Fields.of("inventory_map_coordinate_clues",destinations,"complete",false);
         out.state("clues.destination","own_inventory+RuneLite1.13.1_map_coordinate_tables",value,client.getTickCount(),at);
     }
 
@@ -161,8 +157,7 @@ final class OwnInterfaceCapture
             String episode=kind+":"+count;
             if(episode.equals(checkEpisode)) return;
             checkEpisode=episode;
-            Map<String,Object> value=new LinkedHashMap<>(); value.put("count_observed",count);
-            value.put("scope","visible_check_only_not_continuous_balance");
+            Map<String,Object> value=Fields.of("count_observed",count,"scope","visible_check_only_not_continuous_balance");
             out.append(kind,"ClientTick:widget:193.2;own_inventory_possession",client.getTickCount(),at,value);
         }
         else checkEpisode=null;

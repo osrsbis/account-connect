@@ -6,20 +6,18 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import lombok.RequiredArgsConstructor;
+import net.runelite.api.Client;
 import net.runelite.api.Player;
 import net.runelite.api.Varbits;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.util.Text;
 
 /** Players the client has loaded around us in the Wilderness, attached to own drop and trade rows. */
+@RequiredArgsConstructor
 final class WildernessPlayers
 {
 	private final AccountConnectPlugin plugin;
-
-	WildernessPlayers(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- WILDERNESS SURROUNDING PLAYERS (staff only) ----
 	//
@@ -45,6 +43,25 @@ final class WildernessPlayers
 	 */
 	static final int SURROUNDING_EVENT_BUDGET = 7680;
 
+	/**
+	 * The other players the client lists: never ourselves, never one without a name or a location. Every staff scan of
+	 * nearby players (Wilderness, shop, drop) starts from this list and applies its own range.
+	 */
+	static List<Player> otherPlayers(Client client)
+	{
+		List<Player> out = new ArrayList<>();
+		Player self = client.getLocalPlayer();
+		List<Player> players = client.getPlayers();
+		for (Player p : players == null ? Collections.<Player>emptyList() : players)
+		{
+			if (p != null && p != self && p.getName() != null && !p.getName().isEmpty() && p.getWorldLocation() != null)
+			{
+				out.add(p);
+			}
+		}
+		return out;
+	}
+
 	/** Is our character in the Wilderness right now? The same varbit drop.wilderness and death_kind use. */
 	boolean inWilderness()
 	{
@@ -65,19 +82,14 @@ final class WildernessPlayers
 			return out;
 		}
 		Player self = plugin.client.getLocalPlayer();
-		List<Player> players = plugin.client.getPlayers();
 		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null || players == null)
+		if (me == null)
 		{
 			return out;
 		}
-		for (Player p : players)
+		for (Player p : otherPlayers(plugin.client))
 		{
-			WorldPoint loc = p == null ? null : p.getWorldLocation();
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty() || loc == null)
-			{
-				continue;
-			}
+			WorldPoint loc = p.getWorldLocation();
 			int dx = loc.getX() - me.getX();
 			int dy = loc.getY() - me.getY();
 			Map<String, Object> m = Fields.of(

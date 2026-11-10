@@ -254,7 +254,7 @@ public class LatestBankSnapshotTest
 	 */
 	private void close()
 	{
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		regularUpload();
 		tick++;
@@ -468,7 +468,7 @@ public class LatestBankSnapshotTest
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
 		int before = server.getRequestCount();
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);			// the close script's WidgetClosed
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);			// the close script's WidgetClosed
 		tick++;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		assertEquals("no extra upload for a visit", before, server.getRequestCount());
@@ -487,7 +487,7 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		executor.hold = true;
 		regularUpload();									// sent, no answer yet
 		tick++;
@@ -529,7 +529,7 @@ public class LatestBankSnapshotTest
 		assertEquals("an answered upload leaves nothing waiting", 0, ((List<?>) f.get(plugin.bankVisit)).size());
 		assertTrue(chunks("open").isEmpty());
 		// A refused upload that already answered: its marker is cleared, so the open sends its list at once.
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		tick += 2;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
@@ -547,7 +547,7 @@ public class LatestBankSnapshotTest
 		executor.hold = true;
 		nextAnswer = "{\"ok\":true,\"captured_at\":1,\"stale\":true}";
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		tick++;
 		plugin.onGameTick(new net.runelite.api.events.GameTick());
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
@@ -600,7 +600,7 @@ public class LatestBankSnapshotTest
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		assertFalse(of("bank_visit_open").get(0).containsKey("manifest_in_snapshot"));
 		assertEquals(1, chunks("open").size());
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		assertTrue("a backoff after the loss", plugin.uploader.backoffUntilMillis > System.currentTimeMillis());
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));	// a reopen during the backoff
 		Map<String, Object> second = of("bank_visit_open").get(1);
@@ -614,7 +614,7 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		failNext = 1;
 		regularUpload();									// fails: nothing on the server holds the end bank
 		tick += BankVisit.PUBLIC_CLOSE_WAIT_TICKS;
@@ -644,7 +644,7 @@ public class LatestBankSnapshotTest
 		policy();
 		open(container(new int[]{995, 1000}, new int[]{4151, 1}));
 		change(container(new int[]{995, 1000}));
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
 		net.runelite.api.events.GameStateChanged e = new net.runelite.api.events.GameStateChanged();
 		e.setGameState(GameState.LOGIN_SCREEN);

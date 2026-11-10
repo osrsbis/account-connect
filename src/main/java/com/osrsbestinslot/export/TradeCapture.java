@@ -8,12 +8,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -25,14 +27,10 @@ import okhttp3.Response;
 
 /** Own trades: both offers, the counterparty, the trade row and the staff confirm-screen screenshot. */
 @Slf4j
+@RequiredArgsConstructor
 final class TradeCapture
 {
 	private final AccountConnectPlugin plugin;
-
-	TradeCapture(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// Trade-screenshot delivery proof (opt-in, see uploadTradeScreenshots): grab one frame when the
 	// trade CONFIRM screen (group 334) loads, buffer it, and upload it only on "Accepted trade.".
@@ -180,18 +178,21 @@ final class TradeCapture
 			return;
 		}
 		addReceivedItem(w, out);
+		for (Widget k : kids(w))
+		{
+			addReceivedItem(k, out);
+		}
+	}
+
+	/** The widget's children, or its dynamic children when it has none: some interfaces expose item slots only there. */
+	private static Widget[] kids(Widget w)
+	{
 		Widget[] kids = w.getChildren();
 		if (kids == null || kids.length == 0)
 		{
-			kids = w.getDynamicChildren();	// some interfaces expose item slots only via the dynamic-child array
+			kids = w.getDynamicChildren();
 		}
-		if (kids != null)
-		{
-			for (Widget k : kids)
-			{
-				addReceivedItem(k, out);
-			}
-		}
+		return kids == null ? new Widget[0] : kids;
 	}
 
 	/** Append {id, qty} if this widget carries a real item (id/qty > 0). */
@@ -246,17 +247,9 @@ final class TradeCapture
 		}
 		StringBuilder sb = new StringBuilder();
 		appendReceivedText(w, sb);
-		Widget[] kids = w.getChildren();
-		if (kids == null || kids.length == 0)
+		for (Widget k : kids(w))
 		{
-			kids = w.getDynamicChildren();
-		}
-		if (kids != null)
-		{
-			for (Widget k : kids)
-			{
-				appendReceivedText(k, sb);
-			}
+			appendReceivedText(k, sb);
 		}
 		String raw = sb.toString().trim();
 		return Text.removeTags(raw).trim().isEmpty() ? null : raw;
@@ -351,7 +344,7 @@ final class TradeCapture
 			{
 				if (plugin.grants.screenshotsEnabled())	// re-check: toggle may flip before the frame lands
 				{
-					pendingTradeFrame.set(AccountConnectPlugin.toBufferedImage(image));
+					pendingTradeFrame.set(ImageUtil.bufferedImageFromImage(image));
 				}
 			});
 		}
@@ -431,14 +424,14 @@ final class TradeCapture
 			// confirm screen (items + partner) and the completion frame (proof it actually went through).
 			// Only capture when a valid token is configured: nothing to upload otherwise, and this also
 			// keeps the no-token path from touching drawManager.
-			String completedToken = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+			String completedToken = plugin.currentLinkToken();
 			if (completedToken.matches("^[a-f0-9]{32}$"))
 			{
 				plugin.drawManager.requestNextFrameListener(image ->
 				{
 					if (plugin.grants.screenshotsEnabled())	// re-check: the gate may close before the frame lands
 					{
-						submitTradeScreenshotUpload(AccountConnectPlugin.toBufferedImage(image), "completed");
+						submitTradeScreenshotUpload(ImageUtil.bufferedImageFromImage(image), "completed");
 					}
 				});
 			}
@@ -490,7 +483,7 @@ final class TradeCapture
 		{
 			return;		// upload switch off — send nothing
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return;	// same guard as syncTask: no / malformed token configured yet — never POST
@@ -513,11 +506,6 @@ final class TradeCapture
 		});
 	}
 
-	void uploadTradeScreenshot(String token, byte[] pngBytes, String phase)
-	{
-		uploadTradeScreenshot(token, pngBytes, phase, plugin.activeHash);
-	}
-
 	void uploadTradeScreenshot(String token, byte[] pngBytes, String phase, String captureAccount)
 	{
 		if (!plugin.grants.captureAccountMatches(captureAccount) || !plugin.grants.screenshotsEnabled() || !plugin.uploadAllowed() || !token.equals(plugin.currentLinkToken()))
@@ -535,7 +523,7 @@ final class TradeCapture
 			.addFormDataPart("file", "trade-" + phase + "-" + capturedAt + ".png", RequestBody.create(PNG, pngBytes))
 			.build();
 
-		String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
+		String base = plugin.apiBase();
 		Request request = new Request.Builder()
 			.url(base + "/screenshot-ingest")
 			.post(body)

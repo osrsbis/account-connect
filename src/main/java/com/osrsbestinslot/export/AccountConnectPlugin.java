@@ -74,8 +74,6 @@ import net.runelite.client.ui.DrawManager;
 import net.runelite.client.util.Text;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
-import java.awt.Graphics2D;
-import java.awt.Image;
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -130,7 +128,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	static final String PLUGIN_VERSION = "0.7.68";
+	static final String PLUGIN_VERSION = "0.7.69";
 	static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
@@ -150,12 +148,6 @@ public class AccountConnectPlugin extends Plugin
 	final OwnGameplayCapture ownGameplay = new OwnGameplayCapture(this::emitOwnGameplayEvent, id -> this.itemManager == null ? -1 : this.itemManager.getItemPrice(id));
 	@Inject
 	PluginManager pluginManager;
-
-	boolean emitOwnCombat(Map<String,Object> observation)
-	{
-		if (!"combat_hit".equals(observation.get("type")) && !"combat_npc_end".equals(observation.get("type"))) return false;
-		return emitOwnGameplayEvent(observation);
-	}
 
 	boolean emitOwnGameplayEvent(Map<String,Object> observation)
 	{
@@ -321,14 +313,7 @@ public class AccountConnectPlugin extends Plugin
 			// Enabled while in the world: no replay will come, so take the slots as they stand now as the
 			// baseline. The first real change is then judged against the truth, and the seed itself emits
 			// nothing. The GE maps are client-thread state, so seed there.
-			if (clientThread != null)
-			{
-				clientThread.invoke(ge::seed);
-			}
-			else
-			{
-				ge.seed();
-			}
+			onClientThread(ge::seed);
 		}
 		if (overlayManager != null)
 		{
@@ -402,14 +387,7 @@ public class AccountConnectPlugin extends Plugin
 		store.storeResetAnchorMs = 0;
 		// The phase history is client-thread state that a running shop handler may be iterating, and shutDown
 		// runs on the Swing thread. Clear it on the client thread, like the GE seed.
-		if (clientThread != null)
-		{
-			clientThread.invoke(this::clearClientThreadStateOnShutdown);
-		}
-		else
-		{
-			clearClientThreadStateOnShutdown();
-		}
+		onClientThread(this::clearClientThreadStateOnShutdown);
 		store.removeResetTimer();
 		// A disabled plugin sees no GameStateChanged, so a bank session left here could later be diffed
 		// against another account's bank. Discard it without a row.
@@ -456,6 +434,13 @@ public class AccountConnectPlugin extends Plugin
 	/** gameval BANK container id: its first contents after an empty open become the bank-move baseline. */
 	static final int BANK_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BANK;
 
+	/** Runs on the client thread, or inline when there is none (unit tests). */
+	void onClientThread(Runnable r)
+	{
+		if (clientThread != null) clientThread.invoke(r);
+		else r.run();
+	}
+
 	/** The configured link token exactly as the upload paths read it: trimmed, never null. */
 	String currentLinkToken()
 	{
@@ -464,6 +449,12 @@ public class AccountConnectPlugin extends Plugin
 			return "";
 		}
 		return config.linkToken().trim();
+	}
+
+	/** The configured API base without trailing slashes, as every upload path builds its URL from it. */
+	String apiBase()
+	{
+		return config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
 	}
 
 	/**
@@ -532,7 +523,7 @@ public class AccountConnectPlugin extends Plugin
 		{
 			return;		// upload switch off — send nothing
 		}
-		String token = config.linkToken() == null ? "" : config.linkToken().trim();
+		String token = currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$") || frames == null || frames.isEmpty()
 			|| capturedAtMillis == null || capturedAtMillis.size() != frames.size())
 		{
@@ -544,14 +535,14 @@ public class AccountConnectPlugin extends Plugin
 		executor.submit(() ->
 		{
 			// Frames arrive ALREADY ENCODED and already inside the visit budget (StoreVisitClip).
-			// selectStoreClipFrames still filters null / oversized entries as a second line.
+			// selectStoreClipFrameIndexes still filters null / oversized entries as a second line.
 			List<Integer> kept = StoreClips.selectStoreClipFrameIndexes(
 				allFrames, StoreClips.MAX_CLIP_FRAMES, StoreClips.MAX_CLIP_FRAME_BYTES, StoreClips.MAX_CLIP_BURST_BYTES);
 			if (kept.isEmpty())
 			{
 				return;
 			}
-			String base = config.apiBaseUrl() == null ? "" : config.apiBaseUrl().replaceAll("/+$", "");
+			String base = apiBase();
 			for (int off = 0; off < kept.size(); off += StoreClips.CLIP_CHUNK_FRAMES)
 			{
 				List<Integer> idx = kept.subList(off, Math.min(off + StoreClips.CLIP_CHUNK_FRAMES, kept.size()));
@@ -582,8 +573,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	boolean activityLogActive()
 	{
-		String token = config.linkToken() == null ? "" : config.linkToken().trim();
-		return token.matches("^[a-f0-9]{32}$");
+		return currentLinkToken().matches("^[a-f0-9]{32}$");
 	}
 
 	/**
@@ -771,9 +761,11 @@ public class AccountConnectPlugin extends Plugin
 		session.finishPendingWorldHop();
 		bankVisit.finishPendingBankClose();
 		bankVisit.finishPublicBankClose(false);
-		if (uploader.deferredForce)
+		if (uploader.deferredForce && uploader.snapshotsInFlight.get() == 0 && System.currentTimeMillis() >= uploader.backoffUntilMillis)
 		{
 			// A trigger name stays valid only if no snapshot was built since the event asked for one.
+			// Held while an upload is in flight, and while the server's Retry-After runs (a send then would be dropped):
+			// the burst it covers goes as one upload after the answer, or as soon as the wait ends.
 			uploader.deferredForce = false;
 			uploader.forceSendSnapshot(uploader.deferredForceBuildSeq == uploader.snapshotBuildSeq ? uploader.deferredForceTrigger : null);
 		}
@@ -1262,41 +1254,20 @@ public class AccountConnectPlugin extends Plugin
 
 	// ---- trade screenshot: capture + upload ----
 
-	/** Safe Image -> BufferedImage copy (the frame-listener contract only guarantees Image). */
-	static BufferedImage toBufferedImage(Image img)
-	{
-		if (img instanceof BufferedImage)
-		{
-			return (BufferedImage) img;
-		}
-		BufferedImage bi = new BufferedImage(
-			img.getWidth(null), img.getHeight(null), BufferedImage.TYPE_INT_ARGB);
-		Graphics2D g = bi.createGraphics();
-		g.drawImage(img, 0, 0, null);
-		g.dispose();
-		return bi;
-	}
-
-	/** In-memory encode via JDK ImageIO (same encoder core ImageCapture uses). fmt e.g. "png". Null on failure. */
-	static byte[] encodeImage(BufferedImage image, String fmt)
+	/** In-memory PNG encode (trade path) via JDK ImageIO (same encoder core ImageCapture uses). Null on failure. */
+	static byte[] encodePng(BufferedImage image)
 	{
 		ByteArrayOutputStream buf = new ByteArrayOutputStream();
 		try
 		{
-			ImageIO.write(image, fmt, buf);
+			ImageIO.write(image, "png", buf);
 		}
 		catch (IOException e)
 		{
-			log.debug("OSRS BiS image encode ({}) failed", fmt, e);
+			log.debug("OSRS BiS image encode ({}) failed", "png", e);
 			return null;
 		}
 		return buf.toByteArray();
-	}
-
-	/** In-memory PNG encode (trade path). Delegates to the generalized encoder. */
-	static byte[] encodePng(BufferedImage image)
-	{
-		return encodeImage(image, "png");
 	}
 
 	/**

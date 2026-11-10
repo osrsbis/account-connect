@@ -18,6 +18,20 @@ import static org.junit.Assert.assertTrue;
  */
 public class DropSessionRecorderTest
 {
+	/**
+	 * Milliseconds left on the tail, or -1 when no stop is armed. Reporting only.
+	 *
+	 * Clamped at 0 so an overdue stop reads as "due now" rather than as a negative duration.
+	 */
+	private static long tailRemainingMillis(DropSessionRecorder r, long nowMillis)
+	{
+		if (r.stopAtMillis == DropSessionRecorder.NO_STOP)
+		{
+			return -1L;
+		}
+		return Math.max(0L, r.stopAtMillis - nowMillis);
+	}
+
 	private static final long T0 = 1_000_000L;
 
 	private static String key(int item, int seq)
@@ -93,10 +107,10 @@ public class DropSessionRecorderTest
 		r.onDropAction("s", T0);
 		r.pileActive(key(1, 1), 1);
 		r.pileRemoved(key(1, 1), T0);
-		assertEquals(5_000L, r.tailRemainingMillis(T0));
-		assertEquals(1L, r.tailRemainingMillis(T0 + 4_999));
-		assertEquals(0L, r.tailRemainingMillis(T0 + 5_000));
-		assertEquals("an overdue tail reads as due now, never negative", 0L, r.tailRemainingMillis(T0 + 9_999));
+		assertEquals(5_000L, tailRemainingMillis(r,T0));
+		assertEquals(1L, tailRemainingMillis(r,T0 + 4_999));
+		assertEquals(0L, tailRemainingMillis(r,T0 + 5_000));
+		assertEquals("an overdue tail reads as due now, never negative", 0L, tailRemainingMillis(r,T0 + 9_999));
 	}
 
 	/**
@@ -150,10 +164,10 @@ public class DropSessionRecorderTest
 		r.pileActive(key(995, a), a);
 		int b = r.onDropAction("s", T0);
 		r.pileActive(key(995, b), b);
-		assertEquals("two live piles", 2, r.activePileCount());
+		assertEquals("two live piles", 2, r.activePiles.size());
 
 		r.pileRemoved(key(995, a), T0 + 500);
-		assertEquals(1, r.activePileCount());
+		assertEquals(1, r.activePiles.size());
 		assertFalse("the other pile is still live", r.stopPending());
 		r.pileRemoved(key(995, b), T0 + 600);
 		assertTrue(r.stopPending());
@@ -167,7 +181,7 @@ public class DropSessionRecorderTest
 		r.pileActive(key(995, 1), 1);
 		r.pileRemoved(key(4151, 9), T0 + 100);	// never ours
 		assertFalse("an unknown pile must not arm the tail", r.stopPending());
-		assertEquals(1, r.activePileCount());
+		assertEquals(1, r.activePiles.size());
 	}
 
 	@Test
@@ -180,7 +194,7 @@ public class DropSessionRecorderTest
 		r.pileRemoved(key(995, 1), T0 + 100);
 		r.pileRemoved(key(995, 1), T0 + 200);	// duplicate
 		assertFalse("a duplicate removal must not empty the set", r.stopPending());
-		assertEquals(1, r.activePileCount());
+		assertEquals(1, r.activePiles.size());
 	}
 
 	// ---- finishing ----

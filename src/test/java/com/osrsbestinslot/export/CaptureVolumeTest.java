@@ -233,7 +233,7 @@ public class CaptureVolumeTest
 		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(full);
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, full));	// contents arrive = baseline only
-		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		assertEquals("the first contents are a baseline, never a whole-bank deposit", 0, ofType(p, "bank_session").size());
 	}
 
@@ -250,7 +250,7 @@ public class CaptureVolumeTest
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, full));	// baseline
 		p.onItemContainerChanged(new ItemContainerChanged(BANK, plusSharks));	// the real deposit
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(plusSharks);
-		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		List<Map<String, Object>> sess = ofType(p, "bank_session");
 		assertEquals(1, sess.size());
 		@SuppressWarnings("unchecked")
@@ -270,7 +270,7 @@ public class CaptureVolumeTest
 		p.bankVisit.handleCaptureOnOpenWidgetLoaded(BANK_GROUP);
 		ItemContainer full = container(new int[]{995, 1_000_000});
 		when(client.getItemContainer(InventoryID.BANK)).thenReturn(full);	// readable only at close
-		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		assertTrue(p.events.pendingEvents.isEmpty());
 	}
 

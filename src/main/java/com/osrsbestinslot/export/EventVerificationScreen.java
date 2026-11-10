@@ -44,8 +44,7 @@ final class EventVerificationScreen
                 Widget w = client.getWidget(id);
                 String text = w == null ? null : EventVerification.clean(w.getText());
                 if (visible(client, w) && levelDialogueSkill(text, event.fields.get("skill")) == Boolean.TRUE)
-                    add(out, w, "level", event.fields.get("level"), "level_up", "level",
-                        VerificationProbe.inputs("skill", VerificationProbe.safeKey(String.valueOf(event.fields.get("skill")))));
+                    addLevel(out, w, event);
             }
         }
         if ("minigame".equals(event.type) && event.fields.get("screen") instanceof Map)
@@ -128,10 +127,15 @@ final class EventVerificationScreen
             }
         }
         else if ("level_up".equals(event.type))
-            add(out, widget, "level", event.fields.get("level"), "level_up", "level",
-                VerificationProbe.inputs("skill", VerificationProbe.safeKey(String.valueOf(event.fields.get("skill")))));
+            addLevel(out, widget, event);
         else if (event.fields.get("verification_text") instanceof String)
             add(out, widget, "message", event.fields.get("verification_text"), "text", "verification_text", null);
+    }
+
+    private static void addLevel(List<VerificationFrame.Region> out, Widget w, EventVerification.Source event)
+    {
+        add(out, w, "level", event.fields.get("level"), "level_up", "level",
+            VerificationProbe.inputs("skill", VerificationProbe.safeKey(String.valueOf(event.fields.get("skill")))));
     }
 
     private static void add(List<VerificationFrame.Region> out, Widget w, String key, Object value,

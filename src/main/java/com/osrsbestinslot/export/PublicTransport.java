@@ -134,8 +134,7 @@ final class PublicTransport
                         Map<?,?> g = (Map<?,?>) entry;
                         if (g.get("skill") instanceof String && g.get("xp") instanceof Number)
                         {
-                            Map<String,Object> gain = new LinkedHashMap<>();
-                            gain.put("skill", g.get("skill")); gain.put("xp", g.get("xp")); gains.add(gain);
+                            gains.add(Fields.of("skill", g.get("skill"), "xp", g.get("xp")));
                         }
                     }
                     out.put(k, gains);
@@ -154,22 +153,10 @@ final class PublicTransport
         if ("loot".equals(type) && !"npc".equals(input.get("source_type")) && !"event".equals(input.get("source_type")))
             out.remove("source_name");
         if ("ground_removed".equals(type)) out.put("recipient", "UNKNOWN");
-        if ("own_signal".equals(type))
-        {
-            Map<String,Object> signal=OwnSignalEvent.wire(input);if(signal==null)return null;out.putAll(signal);
-        }
-        if ("own_vars".equals(type))
-        {
-            Map<String,Object> vars = OwnVarsEvent.wire(input);
-            if (vars == null) return null;
-            out.putAll(vars);
-        }
-        if ("own_state".equals(type))
-        {
-            Map<String,Object> state = OwnStateEvent.wire(input);
-            if (state == null) return null;
-            out.putAll(state);
-        }
+        Map<String,Object> own = "own_signal".equals(type) ? OwnSignalEvent.wire(input) : "own_vars".equals(type) ? OwnVarsEvent.wire(input)
+            : "own_state".equals(type) ? OwnStateEvent.wire(input) : Collections.emptyMap();
+        if (own == null) return null;
+        out.putAll(own);
         return out;
     }
     private static Map<String,Object> geObservation(Object input)

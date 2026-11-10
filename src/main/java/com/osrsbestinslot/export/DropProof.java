@@ -10,8 +10,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
@@ -19,21 +19,16 @@ import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MultipartBody;
-import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
 /** Staff drop proof: the drop session, its frames and segments, the audit and the final manifest. */
 @Slf4j
+@RequiredArgsConstructor
 final class DropProof
 {
 	private final AccountConnectPlugin plugin;
-
-	DropProof(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- DROP-TRADE PROOF: session lifecycle, segmented capture, pile-centred candidates ----
 	//
@@ -68,6 +63,7 @@ final class DropProof
 		new AtomicInteger();
 
 	/** Per-session reconciliation that survives async segment callbacks and the next session starting. */
+	@RequiredArgsConstructor
 	static final class DropSessionAudit
 	{
 		final String sessionId;
@@ -91,16 +87,6 @@ final class DropProof
 		volatile long endedAtMillis;
 		volatile boolean closed;
 		volatile boolean finalEmitted;
-
-		DropSessionAudit(String sessionId, String accountHash, String rsn, String tokenFingerprint,
-			long startedAtMillis)
-		{
-			this.sessionId = sessionId;
-			this.accountHash = accountHash;
-			this.rsn = rsn;
-			this.tokenFingerprint = tokenFingerprint;
-			this.startedAtMillis = startedAtMillis;
-		}
 	}
 
 	final ConcurrentHashMap<String, DropSessionAudit> dropAudits =
@@ -402,7 +388,7 @@ final class DropProof
 		dropFramePending = false;
 		if (seg == null)
 		{
-			DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+			DropSessionAudit audit = audit(sessionId);
 			if (audit != null)
 			{
 				audit.declaredSegments = 0;
@@ -451,9 +437,14 @@ final class DropProof
 		}
 	}
 
+	private DropSessionAudit audit(String sessionId)
+	{
+		return sessionId == null ? null : dropAudits.get(sessionId);
+	}
+
 	void noteDropAuditEvent(String sessionId)
 	{
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit != null)
 		{
 			audit.dropEvents.incrementAndGet();
@@ -462,7 +453,7 @@ final class DropProof
 
 	void noteDropAuditRemoval(String sessionId, boolean resolvedCounterparty)
 	{
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit != null)
 		{
 			audit.removals.incrementAndGet();
@@ -475,7 +466,7 @@ final class DropProof
 
 	private void noteDropAuditLocalFailure(String sessionId)
 	{
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit != null)
 		{
 			audit.localFailures++;
@@ -488,7 +479,7 @@ final class DropProof
 		{
 			return;
 		}
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit != null && audit.segmentResults.putIfAbsent(segmentIndex, result) != null)
 		{
 			return;
@@ -522,7 +513,7 @@ final class DropProof
 	private void closeDropAudit(DropFrameSegmenter seg, DropSessionRecorder.Outcome outcome,
 		String sessionId, int dropCount, String reason)
 	{
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit == null || seg == null)
 		{
 			return;
@@ -542,7 +533,7 @@ final class DropProof
 
 	void maybeEmitFinalDropManifest(String sessionId)
 	{
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		if (audit == null)
 		{
 			return;
@@ -719,7 +710,7 @@ final class DropProof
 		{
 			return;
 		}
-		DropSessionAudit audit = sessionId == null ? null : dropAudits.get(sessionId);
+		DropSessionAudit audit = audit(sessionId);
 		DropFrameSegmenter owner = audit != null && audit.segmenter != null ? audit.segmenter : dropSegmenter;
 		boolean legacyCurrent = audit == null || !audit.closed;
 		if ("uploaded".equals(result))
@@ -760,13 +751,13 @@ final class DropProof
 			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			finishDropSegment(segment, sessionId, "failed");
 			return;
 		}
-		final String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
+		final String base = plugin.apiBase();
 		if (plugin.executor == null)
 		{
 			// No executor means the segment cannot be sent at all. COUNT it rather than throwing:
@@ -836,12 +827,7 @@ final class DropProof
 				.url(base + "/store-frames-ingest")
 			.post(ServerGrants.withMediaAccount(buildDropSegmentBody(segment, token, sessionId), captureAccount))
 			.build();
-		OkHttpClient uploadClient = plugin.okHttpClient.newBuilder()
-			.writeTimeout(StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.readTimeout(StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.callTimeout(StoreClips.CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.build();
-		uploadClient.newCall(request).enqueue(new Callback()
+		StoreClips.uploadClient(plugin.okHttpClient).newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -1071,11 +1057,6 @@ final class DropProof
 	 * it. The one despawn the game fires then releases that one key. A pile the session ALREADY owns
 	 * needs no adoption, only the pending resolved against it, because its key already exists.
 	 */
-	void adoptMergedPileIntoDropSession(OwnPiles.DroppedGroundItem existing)
-	{
-		adoptMergedPileIntoDropSession(existing, pendingDropSessionId, pendingDropSeq);
-	}
-
 	void adoptMergedPileIntoDropSession(OwnPiles.DroppedGroundItem existing, String sid, int seq)
 	{
 		if (existing == null || !dropSession.active())
@@ -1114,14 +1095,16 @@ final class DropProof
 		{
 			return;
 		}
+		dropSession.pileAbandoned(detachPile(g), System.currentTimeMillis());
+	}
+
+	/** Forget the pile's session link; its recorder key, or null when it was not part of a session (a no-op there). */
+	private String detachPile(OwnPiles.DroppedGroundItem g)
+	{
 		int seq = dropSeqForPile(g);
 		dropPileSeq.remove(g);
 		dropPileSession.remove(g);
-		if (seq > 0)
-		{
-			dropSession.pileAbandoned(
-				DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), System.currentTimeMillis());
-		}
+		return seq > 0 ? DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq) : null;
 	}
 
 	/** The drop sequence a tracked pile belongs to, or -1 when it is not part of a session. */
@@ -1175,17 +1158,14 @@ final class DropProof
 		{
 			return;
 		}
-		int seq = dropSeqForPile(g);
-		dropPileSeq.remove(g);
-		dropPileSession.remove(g);
-		if (seq > 0)
+		String key = detachPile(g);
+		if (key != null)
 		{
 			// Mark the moment FIRST. The pre-roll it flushes is the two seconds leading up to the
 			// pile vanishing, which is the single most important stretch in the whole clip: it is
 			// where a player walks onto the tile.
 			markDropMoment(DropCaptureRate.Event.PILE_REMOVED, System.currentTimeMillis());
-			dropSession.pileRemoved(
-				DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), System.currentTimeMillis());
+			dropSession.pileRemoved(key, System.currentTimeMillis());
 		}
 	}
 
@@ -1433,14 +1413,7 @@ final class DropProof
 		}
 		for (OwnPiles.DroppedGroundItem g : gone)
 		{
-			int seq = dropSeqForPile(g);
-			dropPileSeq.remove(g);
-			dropPileSession.remove(g);
-			if (seq > 0)
-			{
-				dropSession.pileGoneFromScene(
-					DropSessionRecorder.pileKey(g.item, g.x, g.y, g.plane, seq), nowMillis);
-			}
+			dropSession.pileGoneFromScene(detachPile(g), nowMillis);
 		}
 	}
 
@@ -1563,19 +1536,8 @@ final class DropProof
 		{
 			return out;
 		}
-		Player self = plugin.client.getLocalPlayer();
-		List<Player> players = plugin.client.getPlayers();
-		if (players == null)
+		for (Player p : WildernessPlayers.otherPlayers(plugin.client))
 		{
-			return out;
-		}
-		for (Player p : players)
-		{
-			if (p == null || p == self || p.getName() == null || p.getName().isEmpty()
-				|| p.getWorldLocation() == null)
-			{
-				continue;
-			}
 			WorldPoint loc = p.getWorldLocation();
 			out.add(new DropCandidates.Observed(Text.removeTags(p.getName()),
 				loc.getX(), loc.getY(), loc.getPlane(), p.getCombatLevel(), p.getAnimation()));

@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import lombok.RequiredArgsConstructor;
 import net.runelite.api.InventoryID;
 import net.runelite.api.NPC;
 import net.runelite.api.Varbits;
@@ -12,14 +13,10 @@ import net.runelite.api.WorldType;
 import net.runelite.api.events.ActorDeath;
 
 /** Own death: the settle window and the item loss read from the live containers. */
+@RequiredArgsConstructor
 final class Death
 {
 	private final AccountConnectPlugin plugin;
-
-	Death(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- death items-lost: read pre-death inv+equip live at ActorDeath, resolve the loss diff once the
 	// containers have settled (a few ticks later, at syncTask) or on logout — whichever comes first. ----

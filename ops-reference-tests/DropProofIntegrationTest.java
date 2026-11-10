@@ -40,8 +40,8 @@ public class DropProofIntegrationTest
 			}
 
 		});
-		p.grants.setStoreToolsForTest(true);		// the shop-overlay grant
-		p.grants.setDropProofRolloutForTest(true);	// the SEPARATE drop-proof rollout flag (finding F4)
+		p.grants.serverStoreToolsEnabled = true;		// the shop-overlay grant
+		p.grants.serverDropProofEnabled = true;	// the SEPARATE drop-proof rollout flag (finding F4)
 		return p;
 	}
 
@@ -121,7 +121,7 @@ public class DropProofIntegrationTest
 		attach(p, g);
 		assertEquals("the pile knows its drop sequence", 1, p.dropProof.dropSeqForPile(g));
 		assertEquals("and its session", sid, p.dropProof.dropSessionForPile(g));
-		assertEquals(1, p.dropProof.dropSession.activePileCount());
+		assertEquals(1, p.dropProof.dropSession.activePiles.size());
 	}
 
 	@Test
@@ -139,7 +139,7 @@ public class DropProofIntegrationTest
 
 		assertEquals(1, p.dropProof.dropSeqForPile(a));
 		assertEquals(2, p.dropProof.dropSeqForPile(b));
-		assertEquals("two distinct live piles", 2, p.dropProof.dropSession.activePileCount());
+		assertEquals("two distinct live piles", 2, p.dropProof.dropSession.activePiles.size());
 
 		release(p, a);
 		assertFalse("one pile still live — no tail yet", p.dropProof.dropSession.stopPending());
@@ -178,11 +178,11 @@ public class DropProofIntegrationTest
 		dropAction(p);
 		OwnPiles.DroppedGroundItem g = pile(995, 5L, 3200, 3400);
 		attach(p, g);
-		assertEquals(1, p.dropProof.dropSession.activePileCount());
+		assertEquals(1, p.dropProof.dropSession.activePiles.size());
 
 		p.piles.emitGroundRemoval(g, 120, false);
 
-		assertEquals("emitting the removal releases the pile", 0, p.dropProof.dropSession.activePileCount());
+		assertEquals("emitting the removal releases the pile", 0, p.dropProof.dropSession.activePiles.size());
 		assertTrue(p.dropProof.dropSession.stopPending());
 	}
 
@@ -369,7 +369,7 @@ public class DropProofIntegrationTest
 			}
 
 		});
-		// setStoreToolsForTest NOT called: no grant.
+		// serverStoreToolsEnabled NOT set: no grant.
 		dropAction(p);
 		assertFalse("an ungranted client records nothing", p.dropProof.dropSession.active());
 		assertTrue(p.events.pendingEvents.isEmpty());
@@ -410,7 +410,7 @@ public class DropProofIntegrationTest
 			}
 
 		});
-		p.grants.setDropProofRolloutForTest(true);
+		p.grants.serverDropProofEnabled = true;
 		try
 		{
 			System.setProperty("osrsbis.dropproof", "on");
@@ -438,7 +438,7 @@ public class DropProofIntegrationTest
 		DropFrameSegmenter seg = (DropFrameSegmenter) p.dropProof.dropSegmenter;
 		assertNotNull(seg);
 		assertEquals("two full segments handed over", 2, seg.segmentCount());
-		assertEquals("the remainder is still buffered", 15, seg.bufferedFrames());
+		assertEquals("the remainder is still buffered", 15, seg.current.size());
 		assertEquals(95, seg.acceptedFrames());
 
 		p.dropProof.interruptDropSession();
@@ -501,7 +501,7 @@ public class DropProofIntegrationTest
 		// needs a live client. What this pins is the FIELD NAMES the row must carry, which a
 		// downstream reader depends on.
 		List<Map<String, Object>> c = DropCandidates.candidatesAt(
-			java.util.Arrays.asList(new DropCandidates.Observed("Customer", 3200, 3400, 0, 90)),
+			java.util.Arrays.asList(new DropCandidates.Observed("Customer", 3200, 3400, 0, 90, DropCandidates.NO_ANIMATION)),
 			3200, 3400, 0);
 		String resolved = DropCandidates.resolveCounterparty(c);
 		assertEquals("Customer", resolved);

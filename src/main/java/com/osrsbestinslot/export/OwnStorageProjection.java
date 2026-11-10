@@ -9,7 +9,7 @@ final class OwnStorageProjection
 {
     static Map<String,Object> value(String kind,Map<?,?> p)
     {
-        Map<String,Object> out=new LinkedHashMap<>();out.put("basis","own_visible_key_cache");out.put("complete",false);out.put("new_loot_verified",false);
+        Map<String,Object> out=Fields.of("basis","own_visible_key_cache","complete",false,"new_loot_verified",false);
         Object status=p.get("status");
         if(kind.equals("loot_key_interface"))
         {

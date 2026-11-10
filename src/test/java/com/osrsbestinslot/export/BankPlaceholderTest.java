@@ -121,7 +121,7 @@ public class BankPlaceholderTest
 	private void close()
 	{
 		when(client.getLocalPlayer()).thenReturn(null);
-		p.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		p.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		bank = null;
 	}
 

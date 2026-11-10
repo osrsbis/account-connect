@@ -260,10 +260,8 @@ final class AccountProgressCapture
                 ids.add(e.getKey());
             }
         }
-        Map<String, Object> out = Fields.of(
-            "obtained_item_ids", ids, "game_obtained_count", varp(vars, 2943), "game_total_count", varp(vars, 2944),
+        return Fields.of("obtained_item_ids", ids, "game_obtained_count", varp(vars, 2943), "game_total_count", varp(vars, 2944),
             "verified_at_ms", scanVerifiedAt);
-        return out;
     }
 
     private long positiveCollectionCount()
@@ -469,7 +467,7 @@ final class AccountProgressCapture
             if ((words.get(w) & (1 << b)) != 0) ((List<Integer>) byTier.get(e.getValue())).add(e.getKey());
         }
         out.put("catalog_source", "enum:3981..3986,param:1306");
-        out.put("catalog_sha256", SnapshotBuilder.sha256Hex(canon.toString()));
+        out.put("catalog_sha256", EventSpool.sha256Hex(canon.toString()));
         out.put("completed_by_tier", byTier);
         out.put("catalog_task_totals", totals);
         return out;

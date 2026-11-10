@@ -86,7 +86,7 @@ public class BankMoveCaptureTest
 
 		void close()
 		{
-			plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+			plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		}
 
 		void state(GameState s)
@@ -398,7 +398,7 @@ public class BankMoveCaptureTest
 	{
 		Rig r = rig();
 		r.open(containerOf(new int[]{1, 10}));
-		r.plugin.bankVisit.handleBankWidgetClosed(335);	// trade group, not the bank
+		r.plugin.bankVisit.handleBankWidgetClosed(335, false);	// trade group, not the bank
 		assertTrue(r.plugin.events.pendingEvents.isEmpty());
 		assertNotNull("bankAtOpen untouched for a non-bank widget", r.plugin.bankVisit.bankAtOpen);
 	}

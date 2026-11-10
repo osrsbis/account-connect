@@ -44,8 +44,7 @@ final class OwnClueProjection
                     "qualification","library_base_location_not_resolved_quest_alternative"));
             }
         }
-        Map<String,Object> out=new LinkedHashMap<>();out.put("inventory_map_coordinate_clues",clues);out.put("complete",false);
-        out.put("source_table","runelite_1_13_1_primary");return out;
+        return Fields.of("inventory_map_coordinate_clues",clues,"complete",false,"source_table","runelite_1_13_1_primary");
     }
     static Map<String,Object> signal(String kind,Map<?,?> p)
     {
@@ -62,9 +61,9 @@ final class OwnClueProjection
             ||!"current_client_session_only".equals(p.get("clock_scope")))throw new IllegalArgumentException();
         Object observation=p.get("observation");if(!"appeared".equals(observation)&&!"left_scene".equals(observation))throw new IllegalArgumentException();
         if("appeared".equals(observation)?p.get("outcome")!=null:!"taken_expired_or_scene_change_unknown".equals(p.get("outcome")))throw new IllegalArgumentException();
-        Map<String,Object> out=new LinkedHashMap<>();out.put("observation_id",observationId);out.put("item_id",(long)item);
-        out.put("quantity",number(p.get("quantity"),1,Integer.MAX_VALUE));out.put("ownership","self_at_observation");out.put("drop_origin","unverified");
-        Object tick=p.get("despawn_server_tick");out.put("despawn_server_tick",tick==null?null:number(tick,1,Integer.MAX_VALUE));
-        out.put("clock_scope","current_client_session_only");out.put("observation",observation);out.put("outcome",p.get("outcome"));return out;
+        Object tick=p.get("despawn_server_tick");
+        return Fields.of("observation_id",observationId,"item_id",(long)item,"quantity",number(p.get("quantity"),1,Integer.MAX_VALUE),
+            "ownership","self_at_observation","drop_origin","unverified","despawn_server_tick",tick==null?null:number(tick,1,Integer.MAX_VALUE),
+            "clock_scope","current_client_session_only","observation",observation,"outcome",p.get("outcome"));
     }
 }

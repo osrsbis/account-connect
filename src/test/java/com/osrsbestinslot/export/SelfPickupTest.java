@@ -45,9 +45,9 @@ public class SelfPickupTest
 		plugin.onMenuOptionClicked(menu("Drop", "", COINS));
 
 		setInventory(plugin);	// inventory now empty of all three
-		plugin.offBook.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,CHAPS, 0, 0L, 100);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,DIAMOND, 0, 0L, 105);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,COINS, 0, 0L, 108);
 
 		assertEquals("all three drops must emit", 3, eventsOfType(plugin, "drop").size());
 
@@ -78,7 +78,7 @@ public class SelfPickupTest
 		tick(plugin, 100);
 		plugin.onMenuOptionClicked(menu("Drop", "", DIAMOND));
 		setInventory(plugin);
-		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 100);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,DIAMOND, 0, 0L, 100);
 		assertEquals("the single drop must emit", 1, eventsOfType(plugin, "drop").size());
 
 		tick(plugin, 140);
@@ -203,13 +203,13 @@ public class SelfPickupTest
 		AccountConnectPlugin plugin = newPlugin(CHAPS, 1, DIAMOND, 1, COINS, 10);
 		tick(plugin, 100);
 		plugin.onMenuOptionClicked(menu("Drop", "", CHAPS));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(CHAPS, 0, 0L, 100);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,CHAPS, 0, 0L, 100);
 		tick(plugin, 105);
 		plugin.onMenuOptionClicked(menu("Drop", "", DIAMOND));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(DIAMOND, 0, 0L, 105);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,DIAMOND, 0, 0L, 105);
 		tick(plugin, 108);
 		plugin.onMenuOptionClicked(menu("Drop", "", COINS));
-		plugin.offBook.resolveDropPendingOnGroundSpawn(COINS, 0, 0L, 108);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,COINS, 0, 0L, 108);
 		setInventory(plugin);
 		assertEquals("live shape: all three drops emitted", 3, eventsOfType(plugin, "drop").size());
 

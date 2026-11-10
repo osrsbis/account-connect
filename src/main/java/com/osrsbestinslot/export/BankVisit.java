@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import lombok.RequiredArgsConstructor;
 import net.runelite.api.GameState;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
@@ -14,14 +15,10 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.gameval.InterfaceID;
 
 /** Own bank visits: the open baseline, the moves during the visit and the close manifest. */
+@RequiredArgsConstructor
 final class BankVisit
 {
 	private final AccountConnectPlugin plugin;
-
-	BankVisit(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// Capture-on-open groups: opening either forces an immediate snapshot so the bank / collection log
 	// sync the moment they become readable (verified vs runelite-api 1.12.32 gameval enums, javap).
@@ -218,16 +215,6 @@ final class BankVisit
 	}
 
 	/**
-	 * Bank close: fold in the final bank read, then emit ONE bank_session for the session. Bank transfers
-	 * fire no trade / GE / store event, so this is the only event-plane record of what left or entered the
-	 * bank. Own account; same data class as the bank snapshot, which the hub already approved.
-	 */
-	void handleBankWidgetClosed(int groupId)
-	{
-		handleBankWidgetClosed(groupId, false);
-	}
-
-	/**
 	 * True when a bank close happens because the client is leaving the world (hop, logout, disconnect)
 	 * rather than the player closing it. NOT WidgetClosed.isUnload(): the rig (2026-09-27, 0.7.15 @ 1af4d7f)
 	 * showed an ordinary X-button bank close arrives with unload=true, which marked every visit incomplete.
@@ -240,6 +227,10 @@ final class BankVisit
 	}
 
 	/**
+	 * Bank close: fold in the final bank read, then emit ONE bank_session for the session. Bank transfers
+	 * fire no trade / GE / store event, so this is the only event-plane record of what left or entered the
+	 * bank. Own account; same data class as the bank snapshot, which the hub already approved.
+	 *
 	 * @param unload true when the client tore the bank down for a hop or logout rather than the player
 	 *               closing it: the session is incomplete and the bank read during teardown is not used.
 	 */

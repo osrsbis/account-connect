@@ -98,10 +98,7 @@ final class OwnBankTabsCapture
             if (observed[i][0] == ItemID.COINS) coins += observed[i][1];
             if (observed[i][0] == ItemID.PLATINUM) platinum += observed[i][1];
         }
-        Map<String,Object> row = new LinkedHashMap<>();
-        row.put("start_slot", start); row.put("slot_count", count);
-        row.put("coins", coins); row.put("platinum_tokens", platinum);
-        row.put("currency_gp_equivalent", coins + platinum * 1000L);
-        return row;
+        return Fields.of("start_slot", start, "slot_count", count, "coins", coins, "platinum_tokens", platinum,
+            "currency_gp_equivalent", coins + platinum * 1000L);
     }
 }

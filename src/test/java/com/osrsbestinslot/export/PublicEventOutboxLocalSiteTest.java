@@ -34,12 +34,12 @@ public class PublicEventOutboxLocalSiteTest
         when(manager.getProfile()).thenReturn(profile); when(profile.getId()).thenReturn(7L);
         set(p,"config",config); set(p,"configManager",manager); set(p,"gson",gson); set(p,"okHttpClient",http);
         set(p,"activeHash","own-a"); set(p,"activeProfileType","STANDARD"); p.session.sessionActive = true;
-        p.spooler.setSpoolDataRootForTest(data);
+        SpoolHooks.dataRoot(p.spooler,data);
         // Synthetic policy receipt is scoped to this local test identity, never a live grant.
         Response policy = new Response.Builder().request(new Request.Builder().url(base).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-history-v1")
             .header("X-Own-Gameplay","off").build();
-        p.grants.applyServerPolicy(policy,TOKEN); p.spooler.awaitSpoolIdleForTest(); return p;
+        p.grants.applyServerPolicy(policy,TOKEN); SpoolHooks.awaitIdle(p.spooler); return p;
     }
 
     private void command(String path) throws Exception
@@ -53,7 +53,7 @@ public class PublicEventOutboxLocalSiteTest
     {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
         while(p.events.eventPostInFlight && System.nanoTime()<end) Thread.sleep(10);
-        assertFalse("uploader did not settle",p.events.eventPostInFlight); p.spooler.awaitSpoolIdleForTest();
+        assertFalse("uploader did not settle",p.events.eventPostInFlight); SpoolHooks.awaitIdle(p.spooler);
     }
 
     @Test public void actualSiteReceiptSettlesOnlyItsRowsAfterLostResponseAndRestart() throws Exception
@@ -71,14 +71,14 @@ public class PublicEventOutboxLocalSiteTest
             for(int i=0;i<90;i++) rows.add(Map.of("id",1000+i,"qty",2000000000));
             p.events.emitEvent("bank_session",new LinkedHashMap<>(Map.of("deposited",rows,"withdrawn",rows,"complete",true)));
             int valid=2,total=valid+1;
-            p.spooler.awaitSpoolIdleForTest(); assertEquals(total,p.events.pendingEvents.size());
+            SpoolHooks.awaitIdle(p.spooler); assertEquals(total,p.events.pendingEvents.size());
             List<String> ids=new ArrayList<>();
             for(Map<String,Object> event:p.events.pendingEvents) ids.add((String)event.get("event_id"));
             command("/test/lose-next"); p.events.flushEvents(); done(p);
             assertEquals(total,p.events.pendingEvents.size());
             assertEquals(total,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
             command("/test/drain-two");
-            p.spooler.crashSpoolForTest(); p=fresh(); assertEquals(total,p.events.pendingEvents.size());
+            SpoolHooks.crash(p.spooler); p=fresh(); assertEquals(total,p.events.pendingEvents.size());
             p.events.flushEvents(); done(p);
             assertEquals(0,p.events.pendingEvents.size());
             assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
@@ -87,7 +87,7 @@ public class PublicEventOutboxLocalSiteTest
             command("/test/drain-two");
             command("/test/erase");
             p.events.emitEvent("pickup",new LinkedHashMap<>(Map.of("item",2,"qty",1)));
-            p.spooler.awaitSpoolIdleForTest(); p.events.flushEvents(); done(p);
+            SpoolHooks.awaitIdle(p.spooler); p.events.flushEvents(); done(p);
             assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
             assertEquals((long)valid,p.events.captureHealthSnapshot().get("events_sent_total"));
             assertEquals(2L,p.events.captureHealthSnapshot().get("events_lost_total"));
@@ -97,7 +97,7 @@ public class PublicEventOutboxLocalSiteTest
         }
         finally
         {
-            for(AccountConnectPlugin p:instances) p.spooler.crashSpoolForTest();
+            for(AccountConnectPlugin p:instances) SpoolHooks.crash(p.spooler);
             http.dispatcher().executorService().shutdownNow(); http.connectionPool().evictAll();
             try(java.util.stream.Stream<Path> paths=Files.walk(data))
             { for(Path path:(Iterable<Path>)paths.sorted(Comparator.reverseOrder())::iterator) Files.deleteIfExists(path); }

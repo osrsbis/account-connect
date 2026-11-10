@@ -123,7 +123,7 @@ public class DropSessionRecorder
 	public static final long ORPHANED_STATE_GRACE_MILLIS = 30_000L;
 
 	/** No stop is pending. Deliberately not 0, which is a legal clock value under test. */
-	private static final long NO_STOP = -1L;
+	static final long NO_STOP = -1L;
 
 	/** How a session ended. The clip is uploaded either way — INTERRUPTED is evidence, not litter. */
 	public enum Outcome
@@ -164,10 +164,10 @@ public class DropSessionRecorder
 	private String sessionId;
 	private int nextSeq;
 	private long startedAtMillis;
-	private long stopAtMillis = NO_STOP;
+	long stopAtMillis = NO_STOP;
 	private boolean interrupted;
 	/** Pile keys still on the ground for THIS session. A LinkedHashSet so ordering is reproducible. */
-	private final Set<String> activePiles = new LinkedHashSet<>();
+	final Set<String> activePiles = new LinkedHashSet<>();
 	/**
 	 * Drop actions that have not yet produced an observable pile, mapped to the instant they give up.
 	 *
@@ -175,7 +175,7 @@ public class DropSessionRecorder
 	 * leaves NOTHING outstanding, the tail arms off a pile removal that can never come, and the
 	 * recorder runs until an external interrupt. A LinkedHashMap so expiry order is reproducible.
 	 */
-	private final Map<Integer, Long> pendingDrops = new LinkedHashMap<>();
+	final Map<Integer, Long> pendingDrops = new LinkedHashMap<>();
 	/** Drops recorded this session. Kept so a session that never spawned a pile still reports its size. */
 	private int dropCount;
 	/** Set the moment anything happens that makes full coverage unprovable. Never cleared mid-session. */
@@ -213,17 +213,6 @@ public class DropSessionRecorder
 	public int dropCount()
 	{
 		return dropCount;
-	}
-
-	public int activePileCount()
-	{
-		return activePiles.size();
-	}
-
-	/** Drop actions still waiting for a pile. Zero live piles AND zero of these means the tail may arm. */
-	public int pendingDropCount()
-	{
-		return pendingDrops.size();
 	}
 
 	/** True when this session can no longer prove it covered every drop end to end. */
@@ -572,20 +561,6 @@ public class DropSessionRecorder
 	public boolean shouldStop(long nowMillis)
 	{
 		return stopAtMillis != NO_STOP && nowMillis >= stopAtMillis;
-	}
-
-	/**
-	 * Milliseconds left on the tail, or -1 when no stop is armed. Reporting only.
-	 *
-	 * Clamped at 0 so an overdue stop reads as "due now" rather than as a negative duration.
-	 */
-	public long tailRemainingMillis(long nowMillis)
-	{
-		if (stopAtMillis == NO_STOP)
-		{
-			return -1L;
-		}
-		return Math.max(0L, stopAtMillis - nowMillis);
 	}
 
 	/**

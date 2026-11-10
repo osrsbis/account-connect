@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -21,14 +22,10 @@ import okhttp3.Response;
 
 /** Staff store clips: frame sampling during a shop visit and the chunked upload after a buy or sell. */
 @Slf4j
+@RequiredArgsConstructor
 final class StoreClips
 {
 	private final AccountConnectPlugin plugin;
-
-	StoreClips(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	// ---- store delivery-proof: burst frame capture (Task B2) ----
 	// While a shop is open, sample the render at a WALL-CLOCK rate into a bounded StoreVisitClip. On
@@ -249,7 +246,7 @@ final class StoreClips
 	/**
 	 * Copy any rendered Image into a TYPE_INT_RGB (no-alpha) BufferedImage. The JDK JPEG writer corrupts
 	 * ARGB rasters, so store-clip frames are always RGB. This is deliberately SEPARATE from the trade
-	 * path's ARGB toBufferedImage — never reuse that here.
+	 * path's ARGB ImageUtil.bufferedImageFromImage — never reuse that here.
 	 */
 	static BufferedImage toRgbFrame(Image img)
 	{
@@ -326,8 +323,8 @@ final class StoreClips
 	 */
 	static final int CLIP_UPLOAD_TIMEOUT_SECONDS = 90;
 
-	/**
-	 * POST one chunk of a (possibly multi-chunk) store-clip burst.
+	/*
+	 * POST one chunk of a (possibly multi-chunk) store-clip burst (postStoreClipChunk below).
 	 *
 	 * ⚠ THE TIMEOUT IS THE WHOLE POINT OF THIS METHOD'S CLIENT OVERRIDE (2026-09-03).
 	 * RuneLite's injected OkHttpClient keeps OkHttp's DEFAULT 10s read/write timeouts, and a real
@@ -344,10 +341,6 @@ final class StoreClips
 	 * So the upload gets its own client with a timeout sized to the payload, not to a page fetch.
 	 * Do NOT drop this back to the shared client.
 	 */
-	void postStoreClipChunk(String base, String token, List<byte[]> chunk, long capturedAt)
-	{
-		postStoreClipChunk(base, token, chunk, capturedAt, 0, false, plugin.activeHash);
-	}
 
 	/**
 	 * Attempts for ONE store-clip chunk, the first included (finding F-A3, 2026-09-25).
@@ -415,13 +408,7 @@ final class StoreClips
 			.post(ServerGrants.withMediaAccount(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS), captureAccount))
 			.build();
 
-		OkHttpClient uploadClient = plugin.okHttpClient.newBuilder()
-			.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-			.build();
-
-		uploadClient.newCall(request).enqueue(new Callback()
+		uploadClient(plugin.okHttpClient).newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -552,18 +539,8 @@ final class StoreClips
 	 * the per-frame cap. Pass 2: keep the NEWEST suffix that fits both maxFrames and maxBurstBytes, walking
 	 * from the END — the shop-close / sale frames are the actual delivery evidence, so an oversized burst
 	 * must drop the OLDEST frames, never the newest. Chronological order within the kept suffix is preserved.
+	 * Returns indexes into `encoded`, so a caller can keep each frame's capture time.
 	 */
-	static List<byte[]> selectStoreClipFrames(List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
-	{
-		List<byte[]> out = new ArrayList<>();
-		for (int i : selectStoreClipFrameIndexes(encoded, maxFrames, maxFrameBytes, maxBurstBytes))
-		{
-			out.add(encoded.get(i));
-		}
-		return out;
-	}
-
-	/** selectStoreClipFrames as indexes into `encoded`, so a caller can keep each frame's capture time. */
 	static List<Integer> selectStoreClipFrameIndexes(List<byte[]> encoded, int maxFrames, int maxFrameBytes, int maxBurstBytes)
 	{
 		List<Integer> valid = new ArrayList<>(encoded.size());
@@ -606,5 +583,15 @@ final class StoreClips
 		}
 		builder.addFormDataPart("frame_count", Integer.toString(kept.size()));
 		return builder.build();
+	}
+
+	/** The shared client with the clip upload's write, read and call timeouts (store clips and drop segments). */
+	static OkHttpClient uploadClient(OkHttpClient base)
+	{
+		return base.newBuilder()
+			.writeTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+			.readTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+			.callTimeout(CLIP_UPLOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+			.build();
 	}
 }

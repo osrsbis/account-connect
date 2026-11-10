@@ -65,16 +65,17 @@ import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
+import com.google.common.hash.Hashing;
+import com.google.common.io.BaseEncoding;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.NoSuchFileException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.function.Consumer;
+import lombok.AllArgsConstructor;
 
 final class EventSpool
 {
@@ -121,19 +122,13 @@ final class EventSpool
 
 	static final Mover ATOMIC = (from, to) -> Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
 
+	@AllArgsConstructor
 	static final class Limits
 	{
 		static final Limits DEFAULT = new Limits(5L * 1024 * 1024, 5000, MAX_AGE_MS);
 		final long maxBytes;
 		final int maxRecords;
 		final long maxAgeMs;
-
-		Limits(long maxBytes, int maxRecords, long maxAgeMs)
-		{
-			this.maxBytes = maxBytes;
-			this.maxRecords = maxRecords;
-			this.maxAgeMs = maxAgeMs;
-		}
 	}
 
 	/** Cumulative, content-free counters. Shared by every spool instance of one plugin process. */
@@ -200,8 +195,8 @@ final class EventSpool
 	private final LongSupplier clock;
 	private final Mover mover;
 	private final Limits limits;
-	private final Counters counters;
-	private final String shardId;
+	final Counters counters;
+	final String shardId;
 
 	private FileChannel ch;
 	private Locked ownLock;
@@ -248,19 +243,9 @@ final class EventSpool
 		return dir.resolve("shard-" + shardId + ".spl");
 	}
 
-	String shardId()
-	{
-		return shardId;
-	}
-
 	Path dir()
 	{
 		return dir;
-	}
-
-	Counters counters()
-	{
-		return counters;
 	}
 
 	boolean isOpen()
@@ -410,11 +395,7 @@ final class EventSpool
 			sb.append(l).append('\n');
 		}
 		Path tmp = dir.resolve(QUARANTINE + ".next");
-		try (FileChannel t = open(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
-		{
-			writeFully(t, ByteBuffer.wrap(sb.toString().getBytes(StandardCharsets.UTF_8)), 0L);
-			t.force(true);
-		}
+		writeForced(tmp, sb.toString());
 		try
 		{
 			mover.move(tmp, q);
@@ -529,13 +510,8 @@ final class EventSpool
 		FileChannel reopen(Path shard) throws IOException;
 	}
 
-	private Reopener reopener = p -> FileChannel.open(p, StandardOpenOption.READ, StandardOpenOption.WRITE);
+	Reopener reopener = p -> FileChannel.open(p, StandardOpenOption.READ, StandardOpenOption.WRITE);
 	private boolean failed;
-
-	void setReopenerForTest(Reopener r)
-	{
-		reopener = r;
-	}
 
 	/** True once this writer can no longer append (a reopen failed). It takes no rows after that. */
 	boolean isFailed()
@@ -751,9 +727,7 @@ final class EventSpool
 				}
 				try
 				{
-					Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl"));
-					Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl.next"));
-					Files.deleteIfExists(dir.resolve("shard-" + sid + ".corrupt"));
+					deleteShardFiles(dir, sid);
 				}
 				finally
 				{
@@ -773,15 +747,7 @@ final class EventSpool
 		{
 			rl.releaseAndDelete();
 		}
-		try
-		{
-			Files.deleteIfExists(dir);
-			return true;
-		}
-		catch (DirectoryNotEmptyException e)
-		{
-			return false;
-		}
+		return deleteDirIfEmpty(dir);
 	}
 
 	/**
@@ -826,13 +792,9 @@ final class EventSpool
 			}
 			for (String sid : shardIds(dir))
 			{
-				Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl"));
-				Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl.next"));
-				Files.deleteIfExists(dir.resolve("shard-" + sid + ".corrupt"));
+				deleteShardFiles(dir, sid);
 			}
-			Files.deleteIfExists(dir.resolve(QUARANTINE));
-			Files.deleteIfExists(dir.resolve(QUARANTINE + ".next"));
-			Files.deleteIfExists(dir.resolve(MARKER));
+			deleteIdentityFiles(dir);
 		}
 		finally
 		{
@@ -842,6 +804,26 @@ final class EventSpool
 			}
 			rl.releaseAndDelete();
 		}
+		return deleteDirIfEmpty(dir);
+	}
+
+	private static void deleteShardFiles(Path dir, String sid) throws IOException
+	{
+		Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl"));
+		Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl.next"));
+		Files.deleteIfExists(dir.resolve("shard-" + sid + ".corrupt"));
+	}
+
+	private static void deleteIdentityFiles(Path dir) throws IOException
+	{
+		Files.deleteIfExists(dir.resolve(QUARANTINE));
+		Files.deleteIfExists(dir.resolve(QUARANTINE + ".next"));
+		Files.deleteIfExists(dir.resolve(MARKER));
+	}
+
+	/** True when the directory is gone; false when another process put something in it meanwhile. */
+	private static boolean deleteDirIfEmpty(Path dir) throws IOException
+	{
 		try
 		{
 			Files.deleteIfExists(dir);
@@ -855,10 +837,15 @@ final class EventSpool
 
 	private static void writeMarker(Path dir, long nowMs) throws IOException
 	{
-		Path m = dir.resolve(MARKER);
-		try (FileChannel c = open(m, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
+		writeForced(dir.resolve(MARKER), "{\"v\":1,\"requested_ms\":" + nowMs + "}");
+	}
+
+	/** Create or truncate, write the whole text and force it to disk before the caller moves or relies on it. */
+	private static void writeForced(Path p, String text) throws IOException
+	{
+		try (FileChannel c = open(p, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
 		{
-			writeFully(c, ByteBuffer.wrap(("{\"v\":1,\"requested_ms\":" + nowMs + "}").getBytes(StandardCharsets.UTF_8)), 0L);
+			writeFully(c, ByteBuffer.wrap(text.getBytes(StandardCharsets.UTF_8)), 0L);
 			c.force(true);
 		}
 	}
@@ -869,11 +856,6 @@ final class EventSpool
 	 * skipped; middle corruption is quarantined exactly as recovery does; a torn shard is aged by its
 	 * valid prefix. A directory left with no shard is removed.
 	 */
-	static void sweepAged(Path root, LongSupplier clock, long maxAgeMs) throws IOException
-	{
-		sweepAged(root, clock, maxAgeMs, new Counters());
-	}
-
 	static void sweepAged(Path root, LongSupplier clock, long maxAgeMs, Counters counters) throws IOException
 	{
 		if (!Files.isDirectory(root))
@@ -941,10 +923,7 @@ final class EventSpool
 					}
 					finally
 					{
-						boolean keep = Files.exists(d.resolve("shard-" + sid + ".spl"))
-							|| Files.exists(d.resolve("shard-" + sid + ".spl.next"))
-							|| Files.exists(d.resolve("shard-" + sid + ".corrupt"));
-						if (keep)
+						if (hasShardData(d, sid))
 						{
 							sl.close();
 						}
@@ -957,9 +936,7 @@ final class EventSpool
 				empty = shardIds(d).isEmpty();
 				if (empty)
 				{
-					Files.deleteIfExists(d.resolve(QUARANTINE));
-					Files.deleteIfExists(d.resolve(QUARANTINE + ".next"));
-					Files.deleteIfExists(d.resolve(MARKER));
+					deleteIdentityFiles(d);
 				}
 			}
 			finally
@@ -968,14 +945,7 @@ final class EventSpool
 			}
 			if (empty)
 			{
-				try
-				{
-					Files.deleteIfExists(d);
-				}
-				catch (DirectoryNotEmptyException ignored)
-				{
-					// another process created something meanwhile
-				}
+				deleteDirIfEmpty(d);	// false: another process created something meanwhile
 			}
 		}
 	}
@@ -1082,24 +1052,10 @@ final class EventSpool
 				forceDir(root);
 				return;
 			}
-			StringBuilder body = new StringBuilder("{\"v\":2,\"identities\":[");
-			boolean first = true;
-			for (Map.Entry<String, Long> e : idx.entrySet())
-			{
-				if (!first)
-				{
-					body.append(',');
-				}
-				first = false;
-				body.append("{\"identity\":\"").append(e.getKey()).append("\",\"updated_ms\":").append(e.getValue()).append('}');
-			}
-			body.append("]}");
+			List<String> rows = new ArrayList<>();
+			idx.forEach((k, v) -> rows.add("{\"identity\":\"" + k + "\",\"updated_ms\":" + v + "}"));
 			Path tmp = root.resolve(POINTER + ".next");
-			try (FileChannel c = open(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
-			{
-				writeFully(c, ByteBuffer.wrap(body.toString().getBytes(StandardCharsets.UTF_8)), 0L);
-				c.force(true);
-			}
+			writeForced(tmp, "{\"v\":2,\"identities\":[" + String.join(",", rows) + "]}");
 			try
 			{
 				Files.move(tmp, root.resolve(POINTER), StandardCopyOption.ATOMIC_MOVE);
@@ -1146,27 +1102,14 @@ final class EventSpool
 	static Scan scan(byte[] b)
 	{
 		Scan s = new Scan();
-		if (b.length < HEADER)
+		// A short file that is a prefix of the header is a torn tail; any other header mismatch is corrupt.
+		int n = Math.min(b.length, HEADER);
+		boolean prefix = Arrays.equals(b, 0, n, header(), 0, n);
+		if (!prefix || n < HEADER)
 		{
-			boolean prefix = true;
-			byte[] h = header();
-			for (int i = 0; i < b.length; i++)
-			{
-				prefix &= b[i] == h[i];
-			}
 			s.status = prefix ? ScanStatus.TORN_TAIL : ScanStatus.CORRUPT;
 			s.validEnd = 0;
 			return s;
-		}
-		byte[] h = header();
-		for (int i = 0; i < HEADER; i++)
-		{
-			if (b[i] != h[i])
-			{
-				s.status = ScanStatus.CORRUPT;
-				s.validEnd = 0;
-				return s;
-			}
 		}
 		int pos = HEADER;
 		while (true)
@@ -1428,12 +1371,12 @@ final class EventSpool
 		{
 			return;
 		}
-		ByteArrayBuilder all = new ByteArrayBuilder();
+		ByteArrayOutputStream all = new ByteArrayOutputStream();
 		for (String p : payloads)
 		{
-			all.add(frame(p));
+			all.writeBytes(frame(p));
 		}
-		byte[] bytes = all.toArray();
+		byte[] bytes = all.toByteArray();
 		writeFully(ch, ByteBuffer.wrap(bytes), fileBytes);
 		ch.force(false);
 		fileBytes += bytes.length;
@@ -1579,10 +1522,14 @@ final class EventSpool
 	 */
 	private static Locked lockOther(Path dir, String sid) throws IOException
 	{
-		boolean hasData = Files.exists(dir.resolve("shard-" + sid + ".spl"))
+		return lock(lockPath(dir, sid), hasShardData(dir, sid));
+	}
+
+	private static boolean hasShardData(Path dir, String sid)
+	{
+		return Files.exists(dir.resolve("shard-" + sid + ".spl"))
 			|| Files.exists(dir.resolve("shard-" + sid + ".spl.next"))
 			|| Files.exists(dir.resolve("shard-" + sid + ".corrupt"));
-		return lock(lockPath(dir, sid), hasData);
 	}
 
 	/** An exclusive lock, or null when another holder (this JVM or another process) has it. */
@@ -1630,18 +1577,12 @@ final class EventSpool
 		}
 	}
 
+	@AllArgsConstructor
 	static final class Locked
 	{
 		private final Path file;
 		private final FileChannel channel;
 		private final FileLock lock;
-
-		Locked(Path file, FileChannel channel, FileLock lock)
-		{
-			this.file = file;
-			this.channel = channel;
-			this.lock = lock;
-		}
 
 		void close()
 		{
@@ -1744,40 +1685,14 @@ final class EventSpool
 		return written;
 	}
 
-	private static final class ByteArrayBuilder
-	{
-		private final ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-		void add(byte[] b)
-		{
-			out.write(b, 0, b.length);
-		}
-
-		byte[] toArray()
-		{
-			return out.toByteArray();
-		}
-	}
-
+	/** Lowercase hex SHA-256 of the UTF-8 text: the one fingerprint the plugin uses (Guava, shipped by the client). */
 	static String sha256Hex(String s)
 	{
-		try
-		{
-			return hex(MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8)));
-		}
-		catch (NoSuchAlgorithmException e)
-		{
-			throw new IllegalStateException("SHA-256 unavailable", e);
-		}
+		return Hashing.sha256().hashString(s, StandardCharsets.UTF_8).toString();
 	}
 
 	private static String hex(byte[] b)
 	{
-		StringBuilder sb = new StringBuilder(b.length * 2);
-		for (byte x : b)
-		{
-			sb.append(Character.forDigit((x >> 4) & 0xf, 16)).append(Character.forDigit(x & 0xf, 16));
-		}
-		return sb.toString();
+		return BaseEncoding.base16().lowerCase().encode(b);
 	}
 }

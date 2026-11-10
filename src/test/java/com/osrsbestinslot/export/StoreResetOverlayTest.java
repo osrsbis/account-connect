@@ -45,8 +45,8 @@ public class StoreResetOverlayTest
 	public void alwaysDrawsExactlyOneRowWhateverTheState() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.store.setShopOpenForTest(true);
-		p.grants.setStoreToolsForTest(true);
+		p.store.shopOpen = true;
+		p.grants.serverStoreToolsEnabled = true;
 		StoreResetOverlay o = new StoreResetOverlay(p);
 
 		// phase unknown
@@ -65,8 +65,8 @@ public class StoreResetOverlayTest
 	public void repeatedRendersDoNotAccumulateRows() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.store.setShopOpenForTest(true);
-		p.grants.setStoreToolsForTest(true);
+		p.store.shopOpen = true;
+		p.grants.serverStoreToolsEnabled = true;
 		StoreResetOverlay o = new StoreResetOverlay(p);
 		for (int i = 0; i < 25; i++)
 		{
@@ -79,11 +79,11 @@ public class StoreResetOverlayTest
 	public void drawsNothingOutsideAShopOrWithoutTheGrant() throws Exception
 	{
 		AccountConnectPlugin outside = plugin();
-		outside.grants.setStoreToolsForTest(true);
+		outside.grants.serverStoreToolsEnabled = true;
 		assertNull("no shop, no overlay", new StoreResetOverlay(outside).render(graphics()));
 
 		AccountConnectPlugin ungranted = plugin();
-		ungranted.store.setShopOpenForTest(true);
+		ungranted.store.shopOpen = true;
 		assertNull("no grant, no overlay", new StoreResetOverlay(ungranted).render(graphics()));
 	}
 
@@ -91,8 +91,8 @@ public class StoreResetOverlayTest
 	public void drawsWhileAShopIsOpenAndGranted() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.store.setShopOpenForTest(true);
-		p.grants.setStoreToolsForTest(true);
+		p.store.shopOpen = true;
+		p.grants.serverStoreToolsEnabled = true;
 		Dimension d = new StoreResetOverlay(p).render(graphics());
 		assertNotNull(d);
 	}
@@ -103,13 +103,13 @@ public class StoreResetOverlayTest
 		// A blank or red waiting state is the failure: blank looks broken, red is a standing
 		// "do not hand off" warning on a shop that has never reset.
 		AccountConnectPlugin p = plugin();
-		p.store.setShopOpenForTest(true);
-		p.grants.setStoreToolsForTest(true);
+		p.store.shopOpen = true;
+		p.grants.serverStoreToolsEnabled = true;
 		StoreResetOverlay o = new StoreResetOverlay(p);
 		o.render(graphics());
-		assertEquals("sell junk", o.lastTextForTest());
+		assertEquals("sell junk", o.lastText);
 		org.junit.Assert.assertNotEquals("waiting must not look urgent",
-			StoreResetOverlay.countdownColor(1), o.lastColorForTest());
+			StoreResetOverlay.countdownColor(1), o.lastColor);
 	}
 
 	@Test

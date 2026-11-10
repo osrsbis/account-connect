@@ -17,6 +17,17 @@ import static org.junit.Assert.assertTrue;
  */
 public class DropCaptureRateTest
 {
+	/**
+	 * Bytes one second of baseline footage costs, at a measured per-frame size.
+	 *
+	 * Used by the budget arithmetic in the tests, so the sizing claim is checked rather than
+	 * asserted in a comment.
+	 */
+	private static long baselineBytesPerSecond(int baselineFps, int bytesPerFrame)
+	{
+		return (long) baselineFps * bytesPerFrame;
+	}
+
 	private static final long T0 = 1_000_000L;
 	/** One sampled frame at 30fps. */
 	private static final long STEP = 1000L / DropCaptureRate.SAMPLE_FPS;
@@ -274,7 +285,7 @@ public class DropCaptureRateTest
 	@Test
 	public void theRetryBufferAbsorbsMinutesOfTotalUploadOutage()
 	{
-		long perSecond = DropCaptureRate.baselineBytesPerSecond(
+		long perSecond = baselineBytesPerSecond(
 			DropCaptureRate.BASELINE_FPS, (int) MEASURED_FRAME_BYTES);
 		long outageSeconds = DropFrameSegmenter.UNACKED_BYTE_BUDGET / perSecond;
 		assertTrue("a total upload outage of " + outageSeconds + "s is absorbed; expected over 120",
@@ -284,7 +295,7 @@ public class DropCaptureRateTest
 	@Test
 	public void theBaselineSizingIsCheckedNotAsserted()
 	{
-		long perSecond = DropCaptureRate.baselineBytesPerSecond(DropCaptureRate.BASELINE_FPS, 40_000);
+		long perSecond = baselineBytesPerSecond(DropCaptureRate.BASELINE_FPS, 40_000);
 		assertEquals(240_000L, perSecond);
 	}
 

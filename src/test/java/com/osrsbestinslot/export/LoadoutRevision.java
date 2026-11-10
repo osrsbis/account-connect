@@ -151,7 +151,7 @@ final class LoadoutRevision
         {
             canon.append(SLOT_NAMES[e.getKey()]).append('=').append(e.getValue()).append(';');
         }
-        return SnapshotBuilder.sha256Hex(canon.toString());
+        return EventSpool.sha256Hex(canon.toString());
     }
 
     private static Map<String, Object> named(Map<Integer, Integer> slots)

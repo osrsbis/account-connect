@@ -38,6 +38,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import lombok.AllArgsConstructor;
 
 public class StoreVisitClip
 {
@@ -61,31 +62,20 @@ public class StoreVisitClip
 	static final int BASELINE = -1;
 	static final int START = 0;
 
+	@AllArgsConstructor
 	private static final class Frame
 	{
 		final byte[] jpeg;
 		final long at;
 		final int group;
-
-		Frame(byte[] jpeg, long at, int group)
-		{
-			this.jpeg = jpeg;
-			this.at = at;
-			this.group = group;
-		}
 	}
 
 	/** A snapshot for the uploader: frames and their capture times, oldest first. */
+	@AllArgsConstructor
 	public static final class Snapshot
 	{
 		public final List<byte[]> frames;
 		public final List<Long> capturedAtMillis;
-
-		Snapshot(List<byte[]> frames, List<Long> capturedAtMillis)
-		{
-			this.frames = frames;
-			this.capturedAtMillis = capturedAtMillis;
-		}
 	}
 
 	private final int maxFrames;
@@ -95,8 +85,8 @@ public class StoreVisitClip
 	private final List<Frame> kept = new ArrayList<>();
 	private final Deque<Frame> preRoll = new ArrayDeque<>();
 	/** Anchor time per group id: index 0 is the visit start, then one entry per moment. */
-	private final List<Long> anchors = new ArrayList<>();
-	private long keptBytes;
+	final List<Long> anchors = new ArrayList<>();
+	long keptBytes;
 	private long lastBaselineMillis = Long.MIN_VALUE;
 
 	public StoreVisitClip(int maxFrames, long maxBytes, int maxFrameBytes)
@@ -190,21 +180,10 @@ public class StoreVisitClip
 		return kept.size();
 	}
 
-	public synchronized long byteSize()
-	{
-		return keptBytes;
-	}
-
 	/** Frames held for the lookbehind. Bounded by PRE_ROLL_MILLIS at the sample rate. */
 	public synchronized int preRollSize()
 	{
 		return preRoll.size();
-	}
-
-	/** Number of buy / sell / taken moments marked this visit. */
-	public synchronized int momentCount()
-	{
-		return Math.max(0, anchors.size() - 1);
 	}
 
 	public synchronized void clear()

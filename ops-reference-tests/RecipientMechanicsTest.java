@@ -217,7 +217,7 @@ public class RecipientMechanicsTest
 		Player caster = player("Caster", PX + 6, PY + 2, DropCandidates.TELEGRAB_CAST_ANIMATION);
 		Client c = client(me, 116, bystander, caster);
 		inject(p, "client", c);
-		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false, p.dropProof.pendingDropSessionId, p.dropProof.pendingDropSeq);
 		grabProjectile(p, c, caster, PX, PY);
 		assertEquals(1, p.piles.telegrabSightings.size());
 
@@ -244,8 +244,8 @@ public class RecipientMechanicsTest
 		Player caster = player("Caster", PX + 6, PY, DropCandidates.TELEGRAB_CAST_ANIMATION);
 		Client c = client(me, 100, customer, caster);
 		inject(p, "client", c);
-		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
-		p.piles.trackGroundDrop(995, 5L, PX + 2, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false, p.dropProof.pendingDropSessionId, p.dropProof.pendingDropSeq);
+		p.piles.trackGroundDrop(995, 5L, PX + 2, PY, 0, null, 100, 400, false, p.dropProof.pendingDropSessionId, p.dropProof.pendingDropSeq);
 		grabProjectile(p, c, caster, PX, PY);			// at our tile, but 20 ticks before the removal
 		when(c.getTickCount()).thenReturn(118);
 		grabProjectile(p, c, caster, PX + 2, PY);		// recent, but at the other pile's tile
@@ -272,7 +272,7 @@ public class RecipientMechanicsTest
 	public void telegrabSightingsAreBounded() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false, p.dropProof.pendingDropSessionId, p.dropProof.pendingDropSeq);
 		for (int i = 0; i < 100; i++)
 		{
 			p.piles.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 100, "impact", null, false, PX, PY));
@@ -315,7 +315,7 @@ public class RecipientMechanicsTest
 	public void aSelfPickupNeverCarriesAGrab() throws Exception
 	{
 		AccountConnectPlugin p = plugin();
-		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false);
+		p.piles.trackGroundDrop(995, 5L, PX, PY, 0, null, 100, 400, false, p.dropProof.pendingDropSessionId, p.dropProof.pendingDropSeq);
 		p.piles.recordTelegrabSighting(new DropCandidates.TelegrabSighting(PX, PY, 0, 118, "impact", null, false, PX, PY));
 		OwnPiles.DroppedGroundItem g = pile();
 		g.selfPickedUp = true;

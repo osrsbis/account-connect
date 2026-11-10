@@ -52,7 +52,7 @@ public class StoreToolsGateTest
 		for (String bad : new String[]{"", "   ", "not-a-token", "0123456789abcdef"})
 		{
 			AccountConnectPlugin p = withToken(bad);
-			p.grants.setStoreToolsForTest(true);
+			p.grants.serverStoreToolsEnabled = true;
 			assertFalse("token '" + bad + "' must not enable store tools", p.grants.storeToolsEnabled());
 		}
 	}
@@ -62,7 +62,7 @@ public class StoreToolsGateTest
 	public void neitherOverlayDrawsWithoutTheGrant() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.store.setShopOpenForTest(true);		// shop open, grant withheld
+		p.store.shopOpen = true;		// shop open, grant withheld
 		assertNull("reset overlay must stay hidden", new StoreResetOverlay(p).render(g()));
 		assertNull("nearby overlay must stay hidden", new StoreNearbyOverlay(p).render(g()));
 	}
@@ -72,8 +72,8 @@ public class StoreToolsGateTest
 	public void bothOverlaysDrawWhenGrantedInsideAShop() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.store.setShopOpenForTest(true);
-		p.grants.setStoreToolsForTest(true);
+		p.store.shopOpen = true;
+		p.grants.serverStoreToolsEnabled = true;
 		org.junit.Assert.assertNotNull(new StoreResetOverlay(p).render(g()));
 		org.junit.Assert.assertNotNull(new StoreNearbyOverlay(p).render(g()));
 	}
@@ -83,7 +83,7 @@ public class StoreToolsGateTest
 	public void theGrantDoesNotFollowTheUserOutOfTheShop() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.grants.setStoreToolsForTest(true);		// granted, but no shop open
+		p.grants.serverStoreToolsEnabled = true;		// granted, but no shop open
 		assertNull(new StoreResetOverlay(p).render(g()));
 		assertNull(new StoreNearbyOverlay(p).render(g()));
 	}
@@ -120,10 +120,10 @@ public class StoreToolsGateTest
 	public void aRevokeClosesTheGate() throws Exception
 	{
 		AccountConnectPlugin p = withToken("0123456789abcdef0123456789abcdef");
-		p.grants.setStoreToolsForTest(true);
-		p.store.setShopOpenForTest(true);
+		p.grants.serverStoreToolsEnabled = true;
+		p.store.shopOpen = true;
 		assertTrue(p.grants.storeToolsEnabled());
-		p.grants.setStoreToolsForTest(false);
+		p.grants.serverStoreToolsEnabled = false;
 		assertFalse("revoke must take effect at once", p.grants.storeToolsEnabled());
 		assertNull(new StoreNearbyOverlay(p).render(g()));
 	}

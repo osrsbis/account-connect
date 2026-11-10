@@ -56,7 +56,8 @@ loot (with the NPC's id for NPC kills), items you drop, pick up or alch, when yo
 deaths (with the game tick), kill counts, level-ups and XP,
 gear changes, bank visits, region changes, world hops, and login and logout times.
 
-Two further parts send nothing unless the site turns them on for your link (they are off by default):
+Two further parts send nothing unless the site turns them on for your link. The plugin starts with them off; the site
+currently turns them on for every linked player:
 
 - kill detail: fight, lap and raid durations with personal bests, Hallowed Sepulchre and Guardians of the Rift counts,
   and the rewards of Tempoross, Wintertodt, Guardians of the Rift and Herbiboar;
@@ -65,6 +66,11 @@ Two further parts send nothing unless the site turns them on for your link (they
   Doom of Mokhaiotl clears, Colosseum waves, Tempoross permits and Tithe Farm and Barbarian Assault points.
 
 Details are in [Kill detail and kill context](docs/KILL_DETAIL.md).
+
+Verification checks, also turned on by the site per link (currently for every linked player), compare what the plugin
+read with what the game showed: at most 60 checks an hour, each sending the values compared, and at most 30 small images
+an hour of only the interface areas checked (a chat line, a skill or a counter), with everything else black. They never send an image of
+the whole game window for a player; that is a staff tool (above). Details are in [Verification](docs/VERIFICATION.md).
 
 It does **not** read or send your password, email, payment details, or any Jagex-account
 credentials — RuneLite does not expose those to plugins.

@@ -14,9 +14,8 @@ final class OwnCombatEvent
         if (session == null || !session.matches("[a-f0-9-]{36}") || !Boolean.TRUE.equals(row.get("direct"))
             || !(row.get("value") instanceof Map)) return null;
         Map<?,?> value = (Map<?,?>) row.get("value");
-        Map<String,Object> out = new LinkedHashMap<>();
-        out.put("type", hit ? "combat_hit" : "combat_npc_end");
-        out.put("combat_schema", 1); out.put("gameplay_session", session.replace("-", ""));
+        Map<String,Object> out = Fields.of("type", hit ? "combat_hit" : "combat_npc_end", "combat_schema", 1,
+            "gameplay_session", session.replace("-", ""));
         for (String key : Arrays.asList("sequence", "tick", "observed_at_ms"))
         {
             Object v = row.get(key);

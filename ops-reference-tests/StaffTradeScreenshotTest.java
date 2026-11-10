@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.util.ImageUtil;
 import okhttp3.OkHttpClient;
 import org.junit.Test;
 
@@ -54,7 +55,7 @@ public class StaffTradeScreenshotTest
 	@Test
 	public void toBufferedImagePassesThroughAndEncodesEndToEnd()
 	{
-		BufferedImage converted = AccountConnectPlugin.toBufferedImage(syntheticFrame(64, 48));
+		BufferedImage converted = ImageUtil.bufferedImageFromImage(syntheticFrame(64, 48));
 		byte[] bytes = AccountConnectPlugin.encodePng(converted);
 		assertNotNull(bytes);
 		assertTrue(startsWith(bytes, PNG_MAGIC));

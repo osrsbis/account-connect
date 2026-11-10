@@ -38,10 +38,9 @@ final class OwnSequenceCapture
             // End at the last stationary sample, not at the new moving sample.
             if(point!=null && previousTick>startTick)
             {
-                Map<String,Object> value=new LinkedHashMap<>();
-                value.put("start_tick",startTick); value.put("end_tick",previousTick);
-                value.put("monotonic_elapsed_ms",(previousNanos-anchorNanos)/1_000_000L);
-                value.put("inference","same_tile_at_sample_times_not_game_aura_or_idle_input");
+                Map<String,Object> value=Fields.of("start_tick",startTick,"end_tick",previousTick,
+                    "monotonic_elapsed_ms",(previousNanos-anchorNanos)/1_000_000L,
+                    "inference","same_tile_at_sample_times_not_game_aura_or_idle_input");
                 out.append("session.stationary_ge","own_world_tile;System.nanoTime",tick,at,value,false);
             }
             anchor=null;
@@ -60,10 +59,8 @@ final class OwnSequenceCapture
                 long loss=inventory.getOrDefault(pair[0],0L)-current.getOrDefault(pair[0],0L);
                 long gain=current.getOrDefault(pair[1],0L)-inventory.getOrDefault(pair[1],0L);
                 if(loss<=0 || loss!=gain) continue;
-                Map<String,Object> value=new LinkedHashMap<>();
-                value.put("input_item_id",pair[0]); value.put("output_item_id",pair[1]);
-                value.put("matched_quantity",gain); value.put("magic_xp_change",xp-magicXp);
-                value.put("inference","inventory_xp_coincidence_not_confirmed_cast");
+                Map<String,Object> value=Fields.of("input_item_id",pair[0],"output_item_id",pair[1],
+                    "matched_quantity",gain,"magic_xp_change",xp-magicXp,"inference","inventory_xp_coincidence_not_confirmed_cast");
                 out.append("skills.item_transformation","GameTick:own_inventory+MagicXP",tick,at,value,false);
             }
         }
@@ -72,10 +69,6 @@ final class OwnSequenceCapture
 
     private static Map<Integer,Long> quantities(ItemContainer container)
     {
-        if(container==null || container.getItems()==null || container.getItems().length>28) return null;
-        Map<Integer,Long> result=new HashMap<>();
-        for(Item item:container.getItems()) if(item!=null && item.getId()>0 && item.getQuantity()>0)
-            result.merge(item.getId(),(long)item.getQuantity(),Long::sum);
-        return result;
+        return container==null || container.getItems()==null || container.getItems().length>28 ? null : KillActivity.inventoryCounts(container);
     }
 }

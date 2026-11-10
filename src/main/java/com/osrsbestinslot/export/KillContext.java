@@ -1,5 +1,6 @@
 package com.osrsbestinslot.export;
 
+import com.google.common.primitives.Longs;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import java.util.ArrayList;
@@ -288,15 +289,8 @@ final class KillContext
 		if (text == null) return null;
 		Matcher m = WIDGET_NUMBER.matcher(text.replaceAll("<[^>]*>", "").trim());
 		if (!m.matches()) return null;
-		try
-		{
-			long v = Long.parseLong(m.group(1).replace(",", ""));
-			return v > Integer.MAX_VALUE ? null : (int) v;
-		}
-		catch (NumberFormatException e)
-		{
-			return null;
-		}
+		Long v = Longs.tryParse(m.group(1).replace(",", ""));
+		return v == null || v > Integer.MAX_VALUE ? null : v.intValue();
 	}
 
 
@@ -374,9 +368,7 @@ final class KillContext
 			Map<String, Object> out = null;
 			if (streak != null && lastStreak != null && streak == lastStreak + 1)
 			{
-				out = new LinkedHashMap<>();
-				out.put("tasks_completed", streak);
-				out.put("task_target_id", lastTarget != null && lastTarget > 0 ? lastTarget : null);
+				out = Fields.of("tasks_completed", streak, "task_target_id", lastTarget != null && lastTarget > 0 ? lastTarget : null);
 			}
 			if (streak != null) lastStreak = streak;
 			// Keep the last real task: the game clears the target when the task ends, on the same tick or the next.

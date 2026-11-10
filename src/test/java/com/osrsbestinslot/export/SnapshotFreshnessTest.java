@@ -136,7 +136,7 @@ public class SnapshotFreshnessTest
 
 	private void close()
 	{
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		bank = null;
 	}
 
@@ -276,7 +276,7 @@ public class SnapshotFreshnessTest
 	{
 		open(container(new Item(COINS, 100)));
 		bank = container();								// the close reads an empty container: the close waits
-		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP);
+		plugin.bankVisit.handleBankWidgetClosed(BANK_GROUP, false);
 		bank = container(new Item(COINS, 100));			// a read arriving after the close
 		assertNull(openAtCapture(snapshot()));
 	}

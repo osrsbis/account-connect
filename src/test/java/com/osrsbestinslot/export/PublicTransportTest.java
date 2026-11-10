@@ -33,11 +33,11 @@ public class PublicTransportTest
         when(config.apiBaseUrl()).thenReturn(server.url("/api").toString());
         put("config", config); put("gson", gson); put("okHttpClient", new OkHttpClient());
         put("activeHash", "12345"); put("activeRsn", "OwnPlayer");
-        plugin.spooler.setSpoolDataRootForTest(data);
+        SpoolHooks.dataRoot(plugin.spooler,data);
     }
     @After public void teardown() throws Exception
     {
-        plugin.spooler.crashSpoolForTest(); server.shutdown(); EventSpoolCodecTest.deleteTree(data);
+        SpoolHooks.crash(plugin.spooler); server.shutdown(); EventSpoolCodecTest.deleteTree(data);
     }
     private void put(String key, Object value) throws Exception
     {
@@ -108,23 +108,29 @@ public class PublicTransportTest
         assertFalse("A -> B -> A cannot restore the earlier grant", plugin.grants.verificationGranted());
         assertFalse(plugin.grants.verificationFramesEnabled());
     }
+    /** POST one verification frame (kind "verify", the sample's ref, the time the frame was drawn). */
+    private void uploadFrame()
+    {
+        Map<String, Object> common = Fields.of("plugin_version", AccountConnectPlugin.PLUGIN_VERSION, "ref", "0123456789abcdef");
+        plugin.verify.uploadVerificationFrame(plugin.verify.currentOwner(TOKEN), new byte[]{1, 2}, "0123456789abcdef", 1234000L, common, 1, false);
+    }
     @Test public void verificationFrameUploadWorksWithoutStaffDeliveryPermission() throws Exception
     {
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
         Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Screenshots", "off")
             .header("X-Verification", "on").header("X-Verification-Frames", "on").build();
         plugin.grants.applyServerPolicy(policy);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
         assertNotNull(request);
         assertEquals("/api/screenshot-ingest", request.getPath());
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("verify")); assertTrue(body.contains("0123456789abcdef")); assertTrue(body.contains("1234"));
         plugin.grants.applyServerPolicy(policy.newBuilder().header("X-Verification-Frames", "off").build());
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
     }
     /** Grants frames, runs client-thread work inline and keeps scheduled retries for the test to run. */
@@ -153,7 +159,7 @@ public class PublicTransportTest
     {
         List<Runnable> retries = framesGrantedWithManualRetries();
         server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertTrue(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8().contains("12345"));
         awaitRetries(retries, 1);
         // Same link token, another account logged in: the old pixels are never sent under the new account.
@@ -167,7 +173,7 @@ public class PublicTransportTest
     {
         List<Runnable> retries = framesGrantedWithManualRetries();
         server.enqueue(new MockResponse().setResponseCode(503).setBody("{\"ok\":false,\"error\":\"Collection policy unavailable — retry.\"}"));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
         awaitRetries(retries, 1);
         Response on = new Response.Builder().request(new Request.Builder().url(server.url("/")).build())
@@ -231,7 +237,7 @@ public class PublicTransportTest
         // A dropped connection after the body was sent can surface as ConnectException: never proof of "not stored".
         List<Runnable> retries = framesGrantedWithManualRetries();
         server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
         for (int i = 0; i < 100 && plugin.events.pendingEvents.stream().noneMatch(r -> "upload".equals(r.get("check"))); i++) Thread.sleep(20);
         Map<String, Object> row = plugin.events.pendingEvents.stream().filter(r -> "upload".equals(r.get("check"))).findFirst().get();
@@ -245,7 +251,7 @@ public class PublicTransportTest
         List<Runnable> retries = framesGrantedWithManualRetries();
         server.enqueue(new MockResponse().setResponseCode(429).setBody(APP_REFUSAL));
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":5}"));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
         awaitRetries(retries, 1);
         retries.get(0).run();
@@ -258,7 +264,7 @@ public class PublicTransportTest
     {
         List<Runnable> retries = framesGrantedWithManualRetries();
         server.enqueue(new MockResponse().setResponseCode(503).setBody("<html>Service Unavailable</html>"));
-        plugin.verify.uploadVerificationFrame(TOKEN, new byte[]{1, 2}, "0123456789abcdef", 1234000L);
+        uploadFrame();
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
         for (int i = 0; i < 50 && plugin.events.pendingEvents.isEmpty(); i++) Thread.sleep(20);
         Map<String, Object> row = plugin.events.pendingEvents.get(plugin.events.pendingEvents.size() - 1);
@@ -285,7 +291,7 @@ public class PublicTransportTest
         plugin.events.emitEvent("trade", Map.of("given", List.of(), "received", List.of(), "counterparty", "OtherPlayer"));
         assertEquals("OtherPlayer", plugin.events.pendingEvents.get(0).get("counterparty"));
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
-        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1, 2}, "confirm");
+        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1, 2}, "confirm", plugin.activeHash);
         RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
         assertNotNull(request); String body = request.getBody().readUtf8();
         assertTrue(body.contains("account_hash")); assertTrue(body.contains("12345"));
@@ -339,17 +345,17 @@ public class PublicTransportTest
             EventSpool.ATOMIC, EventSpool.Limits.DEFAULT, new EventSpool.Counters());
         assertTrue(old.append(ID, "trade", System.currentTimeMillis(), gson.toJson(legacyTrade())));
         old.crashForTest();
-        plugin.grants.applyServerPolicy(grant()); plugin.spooler.awaitSpoolIdleForTest();
+        plugin.grants.applyServerPolicy(grant()); SpoolHooks.awaitIdle(plugin.spooler);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
         plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
         for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
-        plugin.spooler.awaitSpoolIdleForTest();
-        assertEquals(1, plugin.spooler.spoolPendingIdsForTest().size());
+        SpoolHooks.awaitIdle(plugin.spooler);
+        assertEquals(1, SpoolHooks.pendingIds(plugin.spooler).size());
         plugin.spooler.spoolReplayNotBeforeMs=0; plugin.spooler.spoolReplayBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody("{\"results\":[{\"event_id\":\""+ID+"\",\"status\":\"stored\"}]}"));
         plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
         for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
-        plugin.spooler.awaitSpoolIdleForTest(); assertEquals(0, plugin.spooler.spoolPendingIdsForTest().size());
+        SpoolHooks.awaitIdle(plugin.spooler); assertEquals(0, SpoolHooks.pendingIds(plugin.spooler).size());
     }
     @Test public void remoteGrantsCannotEnablePublicMediaOrFirehose() throws Exception
     {
@@ -357,8 +363,8 @@ public class PublicTransportTest
         plugin.grants.applyServerPolicy(grant());
         assertFalse(plugin.grants.screenshotsEnabled()); assertFalse(plugin.grants.storeClipsEnabled());
         assertFalse(plugin.grants.dropProofEnabled());
-        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1,2}, "confirm");
-        plugin.clips.postStoreClipChunk(server.url("/api").toString(),TOKEN,Arrays.asList(new byte[]{1,2}),1L);
+        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1,2}, "confirm", plugin.activeHash);
+        plugin.clips.postStoreClipChunk(server.url("/api").toString(),TOKEN,Arrays.asList(new byte[]{1,2}),1L,0,false,plugin.activeHash);
         assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS));
     }
     @Test public void cachedSnapshotDoesNotUploadSharedStorage() throws Exception
@@ -371,6 +377,21 @@ public class PublicTransportTest
         RecordedRequest r=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(r);
         String body=r.getBody().readUtf8(); assertFalse(body,body.contains("OTHER_CANARY"));
         assertTrue(body,body.contains("OwnPlayer"));
+    }
+    @Test public void sharedGroupStorageIsNeverSentEvenUnderTheBroadGrant() throws Exception
+    {
+        plugin.grants.setBroadCaptureGrant(TOKEN, true);
+        assertTrue(plugin.grants.broadCaptureEnabled());
+        Map<String,Object> snap = new LinkedHashMap<>();
+        snap.put("account", Map.of("rsn", "OwnPlayer"));
+        snap.put("game_vars", Map.of("own", "OWN_GAME_VARS"));
+        snap.put("group_storage", Map.of("items", "OTHER_CANARY"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        plugin.uploader.postSnapshot(TOKEN, snap, "broad-hash");
+        RecordedRequest r = server.takeRequest(3, TimeUnit.SECONDS); assertNotNull(r);
+        String body = r.getBody().readUtf8();
+        assertFalse("other group members' items never leave the client", body.contains("OTHER_CANARY"));
+        assertTrue("the player's own broad blocks still go under the grant", body.contains("OWN_GAME_VARS"));
     }
     @Test public void otherPlayerContextsAreRemovedWhileOwnGeFactsSurvive() throws Exception
     {
@@ -404,10 +425,10 @@ public class PublicTransportTest
             EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
         Map<String,Object> e=legacyTrade(); e.put("type","store_taken");
         assertTrue(old.append(ID,"store_taken",System.currentTimeMillis(),gson.toJson(e))); old.crashForTest();
-        plugin.grants.applyServerPolicy(grant()); plugin.spooler.awaitSpoolIdleForTest();
-        plugin.spooler.replaySpoolTick(); plugin.spooler.awaitSpoolIdleForTest();
+        plugin.grants.applyServerPolicy(grant()); SpoolHooks.awaitIdle(plugin.spooler);
+        plugin.spooler.replaySpoolTick(); SpoolHooks.awaitIdle(plugin.spooler);
         assertNull(server.takeRequest(200,TimeUnit.MILLISECONDS));
-        assertEquals(0,plugin.spooler.spoolPendingIdsForTest().size());
+        assertEquals(0,SpoolHooks.pendingIds(plugin.spooler).size());
         try (java.util.stream.Stream<Path> files=Files.walk(dir))
         {
             String q=files.filter(f -> f.getFileName().toString().contains("quarantine"))
@@ -435,7 +456,7 @@ public class PublicTransportTest
         EventSpool old=new EventSpool(data,dir,System::currentTimeMillis,
             EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
         assertTrue(old.append(ID,"bank_visit_manifest_chunk",System.currentTimeMillis(),gson.toJson(bank)));old.crashForTest();
-        plugin.grants.applyServerPolicy(grant());plugin.spooler.awaitSpoolIdleForTest();
+        plugin.grants.applyServerPolicy(grant());SpoolHooks.awaitIdle(plugin.spooler);
         server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.spooler.replaySpoolTick();
         RecordedRequest replay=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(replay);
         sent=new com.google.gson.JsonParser().parse(replay.getBody().readUtf8())

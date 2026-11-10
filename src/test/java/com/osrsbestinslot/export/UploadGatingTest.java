@@ -338,8 +338,8 @@ public class UploadGatingTest
 	{
 		buildPlugin();
 		plugin.uploader.minUploadIntervalMillis = 1;
-		plugin.grants.setStoreToolsForTest(true);
-		plugin.grants.setDropProofRolloutForTest(true);
+		plugin.grants.serverStoreToolsEnabled = true;
+		plugin.grants.serverDropProofEnabled = true;
 		assertFalse("the public artifact cannot arm media", plugin.grants.dropProofEnabled());
 
 		server.enqueue(new MockResponse().setResponseCode(200));
@@ -456,8 +456,8 @@ public class UploadGatingTest
 	{
 		buildPlugin();
 		plugin.uploader.minUploadIntervalMillis = 1;
-		plugin.grants.setStoreToolsForTest(true);
-		plugin.grants.setDropProofRolloutForTest(true);
+		plugin.grants.serverStoreToolsEnabled = true;
+		plugin.grants.serverDropProofEnabled = true;
 
 		server.enqueue(new MockResponse().setResponseCode(200));
 		setSkillXp(1000);

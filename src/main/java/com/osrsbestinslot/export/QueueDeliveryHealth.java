@@ -53,16 +53,14 @@ final class QueueDeliveryHealth
     }
     synchronized Map<String,Object> snapshot()
     {
-        Map<String,Object> out = new LinkedHashMap<>(), byFamily = new LinkedHashMap<>();
+        Map<String,Object> byFamily = new LinkedHashMap<>();
         families.forEach((family,values) -> {
             Map<String,Long> counters = new LinkedHashMap<>();
             for(int i=0;i<COUNTERS.length;i++)counters.put(COUNTERS[i],values[i]);
             byFamily.put(family,counters);
         });
-        out.put("schema_v",1);out.put("scope","process_queue_operations");out.put("by_family",byFamily);
-        out.put("unique_events",null);out.put("complete_capture",null);out.put("archival_after_broker_receipt","unknown");
-        out.put("counts_are_not_a_partition",true);out.put("recovery_may_predate_process",true);
-        out.put("network_failures_not_response_rows",true);
-        return out;
+        return Fields.of("schema_v",1,"scope","process_queue_operations","by_family",byFamily,
+            "unique_events",null,"complete_capture",null,"archival_after_broker_receipt","unknown",
+            "counts_are_not_a_partition",true,"recovery_may_predate_process",true,"network_failures_not_response_rows",true);
     }
 }

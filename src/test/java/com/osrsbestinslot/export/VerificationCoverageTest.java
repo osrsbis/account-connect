@@ -13,6 +13,9 @@ import static org.junit.Assert.*;
 /** Generates the diagnostic inventory from real code tables, without treating source agreement as live proof. */
 public class VerificationCoverageTest
 {
+    /** Activities with no completion signal in the maintained catalogue (moved here from the shipped plugin, which never read it). */
+    private static final String[] UNOBSERVABLE_ACTIVITIES = {"intelligence_gathering", "mess", "aldarin_vineyard",
+        "keldagrim_tasks", "shayzien_combat_ring", "dorgesh_kaan_trading", "sled_racing", "underwater_agility_thieving"};
     private static void add(Map<String, Map<String,Object>> rows, String id, String label, String source,
         String comparison, String screen, String trigger)
     {
@@ -77,7 +80,7 @@ public class VerificationCoverageTest
         for(String family:Arrays.asList("inventory","equipment","location")) add(rows,"family:"+family,family,
             "AccountConnectPlugin."+family+"Results","existing structural comparison","no independent sprite/location reader","random sampling");
         List<Map<String,String>> gaps=new ArrayList<>();
-        for(String activity:VerificationDiscovery.UNOBSERVABLE_ACTIVITIES)
+        for(String activity:UNOBSERVABLE_ACTIVITIES)
         {
             Map<String,String> gap=new LinkedHashMap<>();gap.put("activity",activity);
             gap.put("completion_signal","not found in maintained catalogue");

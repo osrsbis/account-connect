@@ -23,8 +23,6 @@ final class PluginInventoryCapture
                 "active", manager.isPluginActive(plugin));
             rows.add(row);
         }
-        Map<String, Object> out = Fields.of(
-            "schema_v", 1, "observed_at_ms", now, "plugins", rows, "truncated", plugins.size() > MAX_PLUGINS);
-        return out;
+        return Fields.of("schema_v", 1, "observed_at_ms", now, "plugins", rows, "truncated", plugins.size() > MAX_PLUGINS);
     }
 }

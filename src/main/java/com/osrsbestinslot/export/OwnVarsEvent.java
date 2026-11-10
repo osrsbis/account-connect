@@ -61,24 +61,21 @@ final class OwnVarsEvent
             }
             if ("combat.raid_points".equals(family) && !Long.valueOf(1).equals(closed.get("in_raid"))
                 && closed.get("personal_points") != null) return null;
-            Map<String,Object> out = new LinkedHashMap<>();
-            out.put("vars_schema",1); out.put("var_family",family); out.put("source","own_client_vars");
-            out.put("gameplay_session",session); out.put("direct",true); out.put("observation",observation);
-            out.put("source_sequence",number(input.get("source_sequence"),1,9007199254740991L));
-            out.put("source_tick",number(input.get("source_tick"),0,Integer.MAX_VALUE));
-            out.put("observed_at_ms",number(input.get("observed_at_ms"),1000000000000L,9007199254740991L));
-            out.put("values",closed); return out;
+            return Fields.of("vars_schema",1,"var_family",family,"source","own_client_vars",
+                "gameplay_session",session,"direct",true,"observation",observation,
+                "source_sequence",number(input.get("source_sequence"),1,9007199254740991L),
+                "source_tick",number(input.get("source_tick"),0,Integer.MAX_VALUE),
+                "observed_at_ms",number(input.get("observed_at_ms"),1000000000000L,9007199254740991L),"values",closed);
         }
         catch (IllegalArgumentException invalid) { return null; }
     }
     static Map<String,Object> from(String session, Map<String,Object> row)
     {
         if (!supports(row.get("kind")) || session == null || !session.matches("[a-f0-9-]{36}") || !(row.get("value") instanceof Map)) return null;
-        Map<?,?> value = (Map<?,?>)row.get("value"); Map<String,Object> input = new LinkedHashMap<>();
-        input.put("vars_schema",1); input.put("var_family",row.get("kind")); input.put("source","own_client_vars");
-        input.put("gameplay_session",session.replace("-","")); input.put("direct",row.get("direct"));
-        input.put("observation",value.get("observation")); input.put("source_sequence",row.get("sequence"));
-        input.put("source_tick",row.get("tick")); input.put("observed_at_ms",row.get("observed_at_ms"));
+        Map<?,?> value = (Map<?,?>)row.get("value");
+        Map<String,Object> input = Fields.of("vars_schema",1,"var_family",row.get("kind"),"source","own_client_vars",
+            "gameplay_session",session.replace("-",""),"direct",row.get("direct"),"observation",value.get("observation"),
+            "source_sequence",row.get("sequence"),"source_tick",row.get("tick"),"observed_at_ms",row.get("observed_at_ms"));
         Map<String,Object> flat=new LinkedHashMap<>();
         for(String key:FIELDS.get(row.get("kind")))
         {

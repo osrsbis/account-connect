@@ -43,9 +43,8 @@ final class OwnSceneCapture
             {
                 if(!s.reported)
                 {
-                    Map<String,Object> value=new LinkedHashMap<>(); value.put("world",s.world);
-                    value.put("object_id",s.id); value.put("x",s.point.getX()); value.put("y",s.point.getY()); value.put("plane",s.point.getPlane());
-                    value.put("scope","personally_observed_object_not_worldwide_absence");
+                    Map<String,Object> value=Fields.of("world",s.world,"object_id",s.id,"x",s.point.getX(),"y",s.point.getY(),
+                        "plane",s.point.getPlane(),"scope","personally_observed_object_not_worldwide_absence");
                     out.append("world.crop_circle","GameObjectSpawned;next_tick_no_despawn",tick,at,value); s.reported=true;
                 }
             }
@@ -54,8 +53,8 @@ final class OwnSceneCapture
                 boolean overlap=s.point.equals(self);
                 if(overlap && !s.overlapping)
                 {
-                    Map<String,Object> value=new LinkedHashMap<>(); value.put("object_id",s.id); value.put("spawn_tick",s.tick);
-                    value.put("classification","own_tile_overlap_not_proven_damage_or_mistake");
+                    Map<String,Object> value=Fields.of("object_id",s.id,"spawn_tick",s.tick,
+                        "classification","own_tile_overlap_not_proven_damage_or_mistake");
                     out.append("combat.toa_hazards","own_tile+observed_acid_object",tick,at,value);
                 }
                 s.overlapping=overlap;

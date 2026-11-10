@@ -239,7 +239,7 @@ public class NarrowRuleProbeTest
 		setInventory(plugin);
 		plugin.onItemQuantityChanged(new net.runelite.api.events.ItemQuantityChanged(
 			tileItem(COINS, 1200, 401), tile(TILE_X, TILE_Y, 0), 1000, 1200));
-		assertEquals("one real stack is tracked twice", 2, plugin.piles.groundDropCount());
+		assertEquals("one real stack is tracked twice", 2, plugin.piles.groundDrops.size());
 
 		tick(plugin, 150);
 		plugin.onMenuOptionClicked(groundTakeAt("Coins", COINS, TILE_X, TILE_Y));
@@ -323,7 +323,7 @@ public class NarrowRuleProbeTest
 		tick(plugin, 160);
 		plugin.onGameTick(null);
 		assertEquals("the pile is still on the ground, so nothing was recovered",
-			1, plugin.piles.groundDropCount());
+			1, plugin.piles.groundDrops.size());
 		tick(plugin, 350);
 		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));
 		tick(plugin, 360);
@@ -637,7 +637,7 @@ public class NarrowRuleProbeTest
 		plugin.onItemContainerChanged(invChanged(plugin));
 		tick(plugin, 160);
 		plugin.onGameTick(null);
-		assertEquals("the pile really is still on the ground", 1, plugin.piles.groundDropCount());
+		assertEquals("the pile really is still on the ground", 1, plugin.piles.groundDrops.size());
 		tick(plugin, 120);						// the clock moves BACKWARDS
 		plugin.onItemDespawned(despawn(POT, 1, TILE_X, TILE_Y, 0));	// CUSTOMER collects
 		tick(plugin, 121);

@@ -193,22 +193,15 @@ final class StorageRecoveryCapture
         // RuneLite gameval 1.13.1 PLANK_SACK_*; no runtime linkage to newer constants.
         for (int i = 0; i < names.length; i++)
             values.put(names[i], AccountProgressCapture.bit(client, vars, 18171 + i));
-        plankSack = new LinkedHashMap<>();
-        plankSack.put("quantities", values);
-        plankSack.put("source", "sampled_varbits_18171_18177");
-        plankSack.put("last_seen_ms", now);
-        plankSack.put("full_or_partial", "partial");
-        plankSack.put("authority", "client_varbit_values");
-        plankSack.put("server_freshness", "unknown");
-        plankSack.put("ownership", "unknown"); // zero counts do not prove possession of a sack
+        // ownership unknown: zero counts do not prove possession of a sack
+        plankSack = Fields.of("quantities", values, "source", "sampled_varbits_18171_18177", "last_seen_ms", now,
+            "full_or_partial", "partial", "authority", "client_varbit_values", "server_freshness", "unknown", "ownership", "unknown");
     }
 
     private static Map<String, Object> containerBlock(Map<Integer, Long> items, Long seen, boolean uncertain)
     {
-        Map<String, Object> out = Fields.of(
-            "items", items == null ? null : new TreeMap<>(items), "last_seen_ms", seen, "full_or_partial", "partial",
+        return Fields.of("items", items == null ? null : new TreeMap<>(items), "last_seen_ms", seen, "full_or_partial", "partial",
             "source", "item_container_changed", "uncertain", uncertain);
-        return out;
     }
 
     static Map<Integer, Long> counts(ItemContainer container)

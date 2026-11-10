@@ -1,8 +1,5 @@
 package com.osrsbestinslot.export;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -11,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GrandExchangeOffer;
@@ -32,14 +30,10 @@ import net.runelite.client.config.RuneScapeProfileType;
 
 /** The account snapshot: skills, quests, diaries, containers, storage and game vars, built from the live client. */
 @Slf4j
+@RequiredArgsConstructor
 final class SnapshotBuilder
 {
 	private final AccountConnectPlugin plugin;
-
-	SnapshotBuilder(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	static final int COINS_ID = 995;
 
@@ -65,8 +59,7 @@ final class SnapshotBuilder
 		{"mixology_lye", 4414}, {"mixology_aga", 4415}, {"mixology_mox", 4416},
 	};
 	// Off-book snapshot containers (verified vs runelite-api 1.12.32 gameval enums, javap). gameval int ids so
-	// they match ItemContainerChanged.getContainerId(); Group-Ironman shared storage has no gameval constant, so
-	// its snapshot read uses the legacy InventoryID.GROUP_STORAGE overload of client.getItemContainer(...).
+	// they match ItemContainerChanged.getContainerId().
 	private static final int LOOTING_BAG_CONTAINER_ID = net.runelite.api.gameval.InventoryID.LOOTING_BAG;	// 516
 	private static final int SEED_VAULT_CONTAINER_ID = net.runelite.api.gameval.InventoryID.SEED_VAULT;		// 626
 	private static final int BONDS_POUCH_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_POUCH;	// 536
@@ -136,49 +129,18 @@ final class SnapshotBuilder
 		canonical.remove("trigger_event_id");	// names the build's cause, not account state
 		canonical.remove("wealth");
 		canonical.remove("game_vars");	// varps change constantly; game_vars rides on its own interval (gameVarsBlock)
-		Object gameplay = canonical.get("own_gameplay");
-		if (gameplay instanceof Map)
+		// Keep freshness on the wire, but a passive poll alone must never trigger an upload; the same bank read with the
+		// bank open or closed is no account change; capture health is not account state. Each block is copied, so the
+		// snapshot itself keeps these fields.
+		for (String[] nested : new String[][]{{"own_gameplay", "last_authoritative_read_ms"}, {"bank", "open_at_capture"}, {"source", "capture_health"}})
 		{
-			Map<String,Object> stableGameplay = new LinkedHashMap<>((Map<String,Object>) gameplay);
-			// Keep freshness on the wire, but a passive poll alone must never trigger an upload.
-			stableGameplay.remove("last_authoritative_read_ms");
-			canonical.put("own_gameplay", stableGameplay);
+			Object block = canonical.get(nested[0]);
+			if (!(block instanceof Map)) continue;
+			Map<String, Object> stable = new LinkedHashMap<>((Map<String, Object>) block);
+			stable.remove(nested[1]);
+			canonical.put(nested[0], stable);
 		}
-		Object bankBlock = canonical.get("bank");
-		if (bankBlock instanceof Map && ((Map<?, ?>) bankBlock).containsKey("open_at_capture"))
-		{
-			// The same bank read with the bank open or closed is no account change.
-			Map<String, Object> stableBank = new LinkedHashMap<>((Map<String, Object>) bankBlock);
-			stableBank.remove("open_at_capture");
-			canonical.put("bank", stableBank);
-		}
-		Object src = canonical.get("source");
-		if (src instanceof Map)
-		{
-			Map<String, Object> stableSource = new LinkedHashMap<>((Map<String, Object>) src);
-			stableSource.remove("capture_health");
-			canonical.put("source", stableSource);
-		}
-		return sha256Hex(plugin.gson.toJson(canonical));
-	}
-
-	static String sha256Hex(String s)
-	{
-		try
-		{
-			byte[] digest = MessageDigest.getInstance("SHA-256")
-				.digest(s.getBytes(StandardCharsets.UTF_8));
-			StringBuilder hex = new StringBuilder(digest.length * 2);
-			for (byte b : digest)
-			{
-				hex.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
-			}
-			return hex.toString();
-		}
-		catch (NoSuchAlgorithmException e)
-		{
-			throw new IllegalStateException("SHA-256 unavailable", e); // JVM-mandatory algorithm
-		}
+		return EventSpool.sha256Hex(plugin.gson.toJson(canonical));
 	}
 
 	/** Keep a populated bank read. An empty read is not evidence (see advanceBankSession) and keeps the last one. */
@@ -231,27 +193,12 @@ final class SnapshotBuilder
 	 * the parity). 6 is unranked group ironman, which that enum lacks, so it gets its own name rather than
 	 * being folded into GROUP_IRONMAN. Any other value is UNKNOWN_<n>: never guessed, never NORMAL.
 	 */
+	static final List<String> ACCOUNT_TYPES = Collections.unmodifiableList(Arrays.asList("NORMAL", "IRONMAN", "ULTIMATE_IRONMAN",
+		"HARDCORE_IRONMAN", "GROUP_IRONMAN", "HARDCORE_GROUP_IRONMAN", "UNRANKED_GROUP_IRONMAN"));
+
 	static String accountTypeName(int varbit)
 	{
-		switch (varbit)
-		{
-			case 0:
-				return "NORMAL";
-			case 1:
-				return "IRONMAN";
-			case 2:
-				return "ULTIMATE_IRONMAN";
-			case 3:
-				return "HARDCORE_IRONMAN";
-			case 4:
-				return "GROUP_IRONMAN";
-			case 5:
-				return "HARDCORE_GROUP_IRONMAN";
-			case 6:
-				return "UNRANKED_GROUP_IRONMAN";
-			default:
-				return "UNKNOWN_" + varbit;
-		}
+		return varbit >= 0 && varbit < ACCOUNT_TYPES.size() ? ACCOUNT_TYPES.get(varbit) : "UNKNOWN_" + varbit;
 	}
 
 	/**
@@ -394,13 +341,9 @@ final class SnapshotBuilder
 				log.debug("Unable to read quest state {}: {}", q.name(), e.toString());
 			}
 		}
-		Map<String, Object> quests = new LinkedHashMap<>();
-		quests.put("states", states);
-		// How many quests the client could read, so a quest missing from states is known to be unread, not absent.
-		quests.put("read_count", states.size());
-		quests.put("known_count", Quest.values().length);
-		quests.put("quest_points", plugin.client.getVarpValue(VARP_QUEST_POINTS));
-		snap.put("quests", quests);
+		// read_count: how many quests the client could read, so a quest missing from states is known to be unread, not absent.
+		snap.put("quests", Fields.of("states", states, "read_count", states.size(), "known_count", Quest.values().length,
+			"quest_points", plugin.client.getVarpValue(VARP_QUEST_POINTS)));
 
 		// ---- achievement diaries: raw completion varbit per region/tier ----
 		Map<String, Object> diaries = new LinkedHashMap<>();
@@ -571,8 +514,9 @@ final class SnapshotBuilder
 			}
 		}
 
-		Map<String, Object> groupStorage = groupStorageBlock();
-		if (groupStorage != null) snap.put("group_storage", groupStorage);
+		// Group Ironman shared storage is not built into the snapshot until its data policy is approved (0.7.69): a block
+		// built here but stripped at send made every sync look changed (audit 0.7.69 P2). The unused builder was removed;
+		// re-enabling group storage is a new change, not a switch.
 
 		// ---- collection log: obtained item ids (partial until the player opens the clog tabs) ----
 		Map<String, Object> collog = new LinkedHashMap<>();
@@ -674,23 +618,20 @@ final class SnapshotBuilder
 		{
 			return null;
 		}
-		Map<String, Object> loc = Fields.of("region_id", wp.getRegionID(), "plane", wp.getPlane());
-		return loc;
+		return Fields.of("region_id", wp.getRegionID(), "plane", wp.getPlane());
 	}
 
 	// ---- container helpers ----
 
 	Map<String, Object> itemMap(int id, int qty)
 	{
-		Map<String, Object> m = Fields.of("id", id, "qty", qty);
-		return m;
+		return Fields.of("id", id, "qty", qty);
 	}
 
 	/** itemMap variant for quantities that can exceed int range (bank diffs, large coin/token stacks). */
 	Map<String, Object> itemMapLong(int id, long qty)
 	{
-		Map<String, Object> m = Fields.of("id", id, "qty", qty);
-		return m;
+		return Fields.of("id", id, "qty", qty);
 	}
 
 	/**
@@ -707,20 +648,6 @@ final class SnapshotBuilder
 		}
 		ItemComposition c = plugin.itemManager == null ? null : plugin.itemManager.getItemComposition(item.getId());
 		return c == null || c.getPlaceholderTemplateId() == -1;
-	}
-
-	/** Shared visible contents, never attributed to personal ownership or added to personal wealth. */
-	Map<String, Object> groupStorageBlock()
-	{
-		if (!plugin.grants.broadCaptureEnabled() || plugin.client == null) return null;
-		int mode = plugin.client.getVarbitValue(ACCOUNT_TYPE_VARBIT);
-		if (mode < 4 || mode > 6) return null;
-		ItemContainer container = plugin.client.getItemContainer(InventoryID.GROUP_STORAGE);
-		if (container == null || observedAtSeconds(container.getId()) == null) return null;
-		Map<String, Object> block = Fields.of(
-			"items", itemList(container), "observed_at", observedAtSeconds(container.getId()),
-			"ownership", "shared_visible_contents");
-		return block;
 	}
 
 	private List<Map<String, Object>> itemList(ItemContainer c)
@@ -845,10 +772,9 @@ final class SnapshotBuilder
 				if (estimate != null && estimate > 9007199254740991L) estimate = null; // exact JSON integer range
 			}
 		}
-		Map<String,Object> block = new LinkedHashMap<>(); block.put("items", items); block.put("value_gp", estimate);
-		block.put("observed_at", observedAtSeconds(net.runelite.api.gameval.InventoryID.SEED_BOX));
-		block.put("basis", "client_cached_seed_box"); block.put("complete", false);
-		block.put("status", items.isEmpty() ? "observed_empty_cache" : "cached_items");
-		block.put("valuation_basis", "client_item_price_estimate"); return block;
+		return Fields.of("items", items, "value_gp", estimate,
+			"observed_at", observedAtSeconds(net.runelite.api.gameval.InventoryID.SEED_BOX),
+			"basis", "client_cached_seed_box", "complete", false,
+			"status", items.isEmpty() ? "observed_empty_cache" : "cached_items", "valuation_basis", "client_item_price_estimate");
 	}
 }

@@ -54,16 +54,15 @@ final class OwnLootKeysCapture
     }
     void poll(Client client,long at)
     {
-        Map<String,Object> value=new LinkedHashMap<>();value.put("basis","own_visible_key_cache");
-        value.put("complete",false);value.put("new_loot_verified",false);
+        Map<String,Object> value=Fields.of("basis","own_visible_key_cache","complete",false,"new_loot_verified",false);
         if(!visible(client)) { clearPackets();value.put("status","interface_unavailable");value.put("slots",null); }
         else
         {
             List<Map<String,Object>> slots=new ArrayList<>();
             for(int slot=0;slot<IDS.length;slot++)
             {
-                int id=IDS[slot];Map<String,Object> row=new LinkedHashMap<>();row.put("slot",slot);
-                row.put("status","not_observed_in_session");row.put("items",null);row.put("value_gp",null);row.put("observed_at_ms",null);
+                int id=IDS[slot];Map<String,Object> row=Fields.of("slot",slot,"status","not_observed_in_session","items",null,
+                    "value_gp",null,"observed_at_ms",null);
                 int[][] seen=packets.get(id);
                 if(seen!=null)
                 {
@@ -104,9 +103,8 @@ final class OwnLootKeysCapture
         if(!available) { journalStates.keySet().removeIf(key->!key.equals("interface"));return; }
         for(Object raw:(List<?>)value.get("slots"))
         {
-            Map<?,?> row=(Map<?,?>)raw;Map<String,Object> part=new LinkedHashMap<>();
-            part.put("slot",row.get("slot"));part.put("status",row.get("status"));part.put("items",row.get("items"));
-            part.put("container_observed_at_ms",row.get("observed_at_ms"));
+            Map<?,?> row=(Map<?,?>)raw;Map<String,Object> part=Fields.of("slot",row.get("slot"),"status",row.get("status"),
+                "items",row.get("items"),"container_observed_at_ms",row.get("observed_at_ms"));
             // Reference-price changes do not rewrite raw item history or imply new income.
             emitChanged("slot_"+row.get("slot"),"loot.key_slot",part,tick,at);
         }

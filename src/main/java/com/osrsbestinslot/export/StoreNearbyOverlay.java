@@ -1,18 +1,11 @@
 package com.osrsbestinslot.export;
 
 import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.Graphics2D;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import net.runelite.client.ui.overlay.OverlayLayer;
-import net.runelite.client.ui.overlay.OverlayPanel;
-import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
-import java.awt.Point;
-import java.awt.Rectangle;
 
 /**
  * Who is standing next to you while a shop is open, nearest first.
@@ -26,7 +19,7 @@ import java.awt.Rectangle;
  *
  * Shows ONLY while a shop interface is open. Movable, so placement is the user's choice.
  */
-class StoreNearbyOverlay extends OverlayPanel
+class StoreNearbyOverlay extends StoreOverlay
 {
 	/** Rows to draw. The event payload caps at 24; a panel that tall would cover the shop. */
 	static final int DISPLAY_CAP = 6;
@@ -54,42 +47,17 @@ class StoreNearbyOverlay extends OverlayPanel
 	private static final Color NEAR = new Color(190, 190, 190);
 	private static final Color DIM = new Color(140, 140, 140);
 
-	/** Matches StoreResetOverlay: one plate colour across both overlays. */
-	private static final Color PLATE = new Color(26, 26, 26, 235);
-
-	private final AccountConnectPlugin plugin;
-
 	StoreNearbyOverlay(AccountConnectPlugin plugin)
 	{
-		super(plugin);
-		this.plugin = plugin;
-		// Option D: sits under the reset timer on the right. Both stay draggable.
-		// DYNAMIC: the plugin supplies a live location each frame (under the shop's item grid) —
-		// see anchorUnderItems below. A fixed corner cannot follow a window that moves with the
-		// client size, and "below the items" is what was asked for.
-		setPosition(OverlayPosition.DYNAMIC);
-		setLayer(OverlayLayer.ABOVE_WIDGETS);
-		// Let the user drag it where they want in overlay edit mode. Placement is taste, not policy.
-		setMovable(true);
-		setSnappable(true);
-		panelComponent.setPreferredSize(new Dimension(PANEL_WIDTH, 0));	// 12-char RSN + "12 tiles  126"
-		// Same plate as the countdown so the two read as one design, not two accidents.
-		panelComponent.setBackgroundColor(PLATE);
-		panelComponent.setBorder(new Rectangle(6, 4, 6, 4));
-		panelComponent.setGap(new Point(0, 2));	// default 0 makes rows collide
+		// Sits under the reset timer on the right: the same grid edge as the countdown (width 12-char
+		// RSN + "12 tiles  126"), pushed down by the countdown's own height so the two stack without
+		// touching.
+		super(plugin, PANEL_WIDTH, 32);
 	}
 
 	@Override
-	public Dimension render(Graphics2D graphics)
+	void addRows()
 	{
-		anchorUnderItems();
-		// Two gates, both required: a shop is open, and the backend granted store tools to this
-		// token. The second is what keeps these overlays off every ordinary player's screen.
-		if (!plugin.store.isShopOpen() || !plugin.grants.storeToolsEnabled())
-		{
-			return null;
-		}
-
 		// No "Store" title any more: the countdown left for its own overlay, and "Nearby (N)"
 		// already names this panel. One less line covering the shop.
 		List<String[]> rows = visibleRows(plugin.store.nearbyPlayersForOverlay(DISPLAY_CAP));
@@ -109,42 +77,6 @@ class StoreNearbyOverlay extends OverlayPanel
 				.rightColor(distanceColor(dist))
 				.build());
 		}
-
-		builtRows = panelComponent.getChildren().size();
-		return super.render(graphics);
-	}
-
-	/**
-	 * Park this list under the reset timer, which itself sits under the shop's item grid, unless
-	 * the user has dragged it. setPreferredLocation is what RuneLite persists on a drag, so writing
-	 * it every frame would pin the overlay and silently undo their placement — hence once per visit.
-	 */
-	private void anchorUnderItems()
-	{
-		if (anchored)
-		{
-			return;
-		}
-		Point p = plugin.store.shopItemsBottomLeft();
-		if (p == null)
-		{
-			return;		// widget not laid out yet — try again next frame
-		}
-		if (getPreferredLocation() == null)
-		{
-			// Right-aligned to the same grid edge as the countdown (p.x is that edge), and pushed
-			// down by the countdown's own height so the two stack without touching.
-			setPreferredLocation(new Point(p.x - PANEL_WIDTH, p.y + 32));
-		}
-		anchored = true;
-	}
-
-	/** One anchor per visit; cleared when the shop closes so the next visit re-places it. */
-	private boolean anchored;
-
-	void resetAnchorForVisit()
-	{
-		anchored = false;
 	}
 
 	/** Gold for the tile next to you — the plausible counterparty — fading out with distance. */
@@ -155,14 +87,6 @@ class StoreNearbyOverlay extends OverlayPanel
 			return GOLD;
 		}
 		return dist <= 5 ? NEAR : DIM;
-	}
-
-	/** How many lines the last render BUILT, before OverlayPanel cleared them. Test seam only. */
-	private int builtRows;
-
-	int builtRowCountForTest()
-	{
-		return builtRows;
 	}
 
 	/**

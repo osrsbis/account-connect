@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -207,8 +208,8 @@ public class TriggerEventIdTest
 		arm(new OffBookPendings.InvDeltaPending("drop", BOW, null, 1L, 100L, null, Boolean.FALSE, tick));
 		arm(new OffBookPendings.InvDeltaPending("drop", STAFF, null, 1L, 100L, null, Boolean.FALSE, tick));
 		tick++;
-		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 1L, tick);	// spawns first, the loss not yet seen
-		plugin.offBook.resolveDropPendingOnGroundSpawn(STAFF, 0, 1L, tick);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,BOW, 0, 1L, tick);	// spawns first, the loss not yet seen
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,STAFF, 0, 1L, tick);
 		assertNull(plugin.uploader.lastBuiltSnapshot);
 		inventoryChange(container(COINS, 100, RUNE, 5));			// one change removes both
 
@@ -218,9 +219,10 @@ public class TriggerEventIdTest
 		for (int i = 0; i < 2; i++)
 		{
 			RecordedRequest req = server.takeRequest(5, TimeUnit.SECONDS);
-			assertNotNull("each drop forces a build", req);
+			assertNotNull("each drop gets a build: the first at once, a second held while the first was in flight", req);
 			Map<?, ?> body = new Gson().fromJson(req.getBody().readUtf8(), Map.class);
 			sent.add(((Map<?, ?>) body.get("snapshot")).get("trigger_event_id"));
+			if (i == 0) tickAfterAnswers();
 		}
 		assertEquals("one build names the first row", 1, sent.stream().filter(java.util.Objects::nonNull).count());
 		assertEquals(drops.get(0).get("event_id"), sent.stream().filter(java.util.Objects::nonNull).findFirst().get());
@@ -235,9 +237,10 @@ public class TriggerEventIdTest
 		tick++;
 		inventoryChange(container(COINS, 100, RUNE, 5));			// the loss first: no row yet
 		assertEquals(0, rows("drop").size());
-		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,BOW, 0, 0L, tick);
 		names.add(trigger());
-		plugin.offBook.resolveDropPendingOnGroundSpawn(STAFF, 0, 0L, tick);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,STAFF, 0, 0L, tick);
+		tickAfterAnswers();	// a second drop while the first upload is in flight is built on the tick after it answers
 		names.add(trigger());
 
 		List<Map<String, Object>> drops = rows("drop");
@@ -253,9 +256,85 @@ public class TriggerEventIdTest
 		tick++;
 		inventoryChange(container(COINS, 100, RUNE, 5, STAFF, 1));	// the loss first
 		plugin.syncTask();											// a periodic build already holds it
-		plugin.offBook.resolveDropPendingOnGroundSpawn(BOW, 0, 0L, tick);
+		OffBookHooks.resolveDropPendingOnGroundSpawn(plugin.offBook,BOW, 0, 0L, tick);
 		assertEquals(1, rows("drop").size());
 		assertNull(trigger());
+	}
+
+	/** Waits until no snapshot upload is in flight, then runs one game tick (which sends a held forced snapshot). */
+	private void tickAfterAnswers() throws Exception
+	{
+		long until = System.currentTimeMillis() + 5000;
+		while (plugin.uploader.snapshotsInFlight.get() > 0 && System.currentTimeMillis() < until)
+		{
+			TimeUnit.MILLISECONDS.sleep(10);
+		}
+		assertEquals("every upload answered", 0, plugin.uploader.snapshotsInFlight.get());
+		plugin.onGameTick(null);
+	}
+
+	@Test
+	public void aBurstOfForcedEventsSendsOneUploadThenOneWithTheNewestState() throws Exception
+	{
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		server.setDispatcher(new Dispatcher()
+		{
+			@Override
+			public MockResponse dispatch(RecordedRequest request) throws InterruptedException
+			{
+				release.await(5, TimeUnit.SECONDS);	// the first upload stays in flight until the burst is over
+				return new MockResponse().setResponseCode(200).setBody("{\"ok\":true}");
+			}
+		});
+		for (int i = 0; i < 6; i++)
+		{
+			plugin.uploader.maybeForceSnapshotForEvent("alch", null);
+		}
+		assertNotNull("the first event sends at once", server.takeRequest(5, TimeUnit.SECONDS));
+		assertNull("the other five wait for its answer", server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(true, plugin.uploader.deferredForce);
+		inv = container(COINS, 6100, RUNE, 5, BOW, 1);	// state moved on during the burst
+		release.countDown();
+		tickAfterAnswers();
+		RecordedRequest trailing = server.takeRequest(5, TimeUnit.SECONDS);
+		assertNotNull("one upload after the answer carries the burst", trailing);
+		assertFalse(plugin.uploader.deferredForce);
+		assertNull("and only one", server.takeRequest(300, TimeUnit.MILLISECONDS));
+		assertEquals(2, server.getRequestCount());
+		assertEquals("it holds the newest state", true, trailing.getBody().readUtf8().contains("6100"));
+	}
+
+	@Test
+	public void aHeldSendWaitsOutTheRetryAfterInsteadOfBeingDropped() throws Exception
+	{
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		server.setDispatcher(new Dispatcher()
+		{
+			@Override
+			public MockResponse dispatch(RecordedRequest request) throws InterruptedException
+			{
+				if (release.getCount() > 0)
+				{
+					release.await(5, TimeUnit.SECONDS);
+					return new MockResponse().setResponseCode(409).setHeader("Retry-After", "5")
+						.setBody("{\"ok\":false,\"error\":\"Another upload for this account was stored first. Retry later.\"}");
+				}
+				return new MockResponse().setResponseCode(200).setBody("{\"ok\":true}");
+			}
+		});
+		plugin.uploader.maybeForceSnapshotForEvent("drop", null);
+		assertNotNull(server.takeRequest(5, TimeUnit.SECONDS));
+		plugin.uploader.maybeForceSnapshotForEvent("drop", null);	// held: the first is in flight
+		assertTrue(plugin.uploader.deferredForce);
+		release.countDown();
+		tickAfterAnswers();
+		assertTrue("the 409's Retry-After is in force", System.currentTimeMillis() < plugin.uploader.backoffUntilMillis);
+		assertTrue("the held send is kept through the wait, not dropped", plugin.uploader.deferredForce);
+		assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS));
+		plugin.uploader.backoffUntilMillis = 0L;	// the wait ends
+		plugin.onGameTick(null);
+		assertNotNull("then it goes", server.takeRequest(5, TimeUnit.SECONDS));
+		assertFalse(plugin.uploader.deferredForce);
 	}
 
 	@Test

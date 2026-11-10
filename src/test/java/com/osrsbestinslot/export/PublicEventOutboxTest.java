@@ -36,10 +36,10 @@ public class PublicEventOutboxTest
         box.crashForTest(); box = fresh();
         assertTrue(box.pending(null, "own-history-v1", 100).isEmpty());
         List<Map<String,Object>> rows = box.pending(owner, "own-history-v1", 100); assertEquals(2, rows.size());
-        box.settle(owner, rows, EventQueueProtocol.receipts("{\"ok\":true,\"stored\":2}", rows));
+        box.settle(owner, rows, EventQueueProtocol.parseReceipts("{\"ok\":true,\"stored\":2}", rows).outcomes);
         assertEquals(2, box.size());
         String receipt = "{\"receipt_version\":1,\"results\":[{\"index\":0,\"event_id\":\""+A+"\",\"status\":\"queued\",\"broker_ack\":true}]}";
-        box.settle(owner, rows, EventQueueProtocol.receipts(receipt, rows)); box.crashForTest(); box = fresh();
+        box.settle(owner, rows, EventQueueProtocol.parseReceipts(receipt, rows).outcomes); box.crashForTest(); box = fresh();
         rows = box.pending(owner, "own-history-v1", 100); assertEquals(1, rows.size()); assertEquals(B, rows.get(0).get("event_id"));
     }
     @Test public void localDiskContainsOnlyProjectedRowsAndNoToken() throws Exception
@@ -167,7 +167,7 @@ public class PublicEventOutboxTest
         java.lang.reflect.Field field = PublicEventOutbox.class.getDeclaredField("journal"); field.setAccessible(true);
         EventSpool journal = (EventSpool)field.get(box);
         journal.ack(Collections.singletonList(A));
-        journal.setReopenerForTest(path -> { throw new java.io.IOException("temporary reopen failure"); });
+        journal.reopener = path -> { throw new java.io.IOException("temporary reopen failure"); };
         try { journal.compactNow(); fail("fault must surface"); }
         catch (java.io.IOException expected) { assertTrue(journal.isFailed()); }
         List<Map<String,Object>> recovered = box.pending(owner, "ge-v1", 100);

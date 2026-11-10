@@ -29,13 +29,10 @@ final class OwnGroundClueCapture
             out.append("clues.ground_gap","bounded_self_ground_clue_capacity",client.getTickCount(),at,
                 Collections.singletonMap("gap","observation_capacity"));
         }
-        Map<String,Object> row=new LinkedHashMap<>();
-        row.put("observation_id",UUID.randomUUID().toString()); row.put("item_id",id); row.put("quantity",quantity);
-        row.put("ownership","self_at_observation"); row.put("drop_origin","unverified");
         int despawn=item.getDespawnTime();
-        row.put("despawn_server_tick",despawn>0?despawn:null);
-        row.put("clock_scope","current_client_session_only");
-        row.put("observation","appeared");
+        Map<String,Object> row=Fields.of("observation_id",UUID.randomUUID().toString(),"item_id",id,"quantity",quantity,
+            "ownership","self_at_observation","drop_origin","unverified","despawn_server_tick",despawn>0?despawn:null,
+            "clock_scope","current_client_session_only","observation","appeared");
         seen.put(item,row);
         out.append("clues.owned_ground","RuneLite1.13.1:TileItem_ownership_and_server_ticks",client.getTickCount(),at,row);
     }

@@ -22,9 +22,8 @@ final class OwnRunePouchCapture
     };
     static Map<String,Object> read(Client client, int[] vars)
     {
-        Map<String,Object> out = new LinkedHashMap<>();
-        out.put("decoder_version", "own-carried-rune-pouch-v1");
-        out.put("contents_semantics", "client_cached_slots");out.put("complete", false);
+        Map<String,Object> out = Fields.of("decoder_version", "own-carried-rune-pouch-v1",
+            "contents_semantics", "client_cached_slots", "complete", false);
         ItemContainer inventory = client.getItemContainer(InventoryID.INVENTORY);
         Item[] carried = inventory == null ? null : inventory.getItems();
         if (carried == null) { out.put("possession", "inventory_unavailable");return out; }
@@ -62,7 +61,7 @@ final class OwnRunePouchCapture
         List<Map<String,Object>> items = new ArrayList<>();
         for(Map.Entry<Integer,Long> entry:totals.entrySet())
         {
-            Map<String,Object> item=new LinkedHashMap<>();item.put("id",entry.getKey());item.put("qty",entry.getValue());items.add(item);
+            items.add(Fields.of("id",entry.getKey(),"qty",entry.getValue()));
         }
         out.put("slots",slots);out.put("observed_items",items);out.put("all_slots_decoded",fullyDecoded);
         return out;

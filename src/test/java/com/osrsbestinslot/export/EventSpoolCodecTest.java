@@ -160,7 +160,7 @@ public class EventSpoolCodecTest
 		EventSpool b = open();
 		assertEquals(2, b.recover());
 		assertEquals(Arrays.asList(id(1), id(2)), ids(b.pending()));
-		assertEquals("a torn tail is not corruption", 0L, b.counters().corrupt.get());
+		assertEquals("a torn tail is not corruption", 0L, b.counters.corrupt.get());
 	}
 
 	@Test
@@ -183,9 +183,9 @@ public class EventSpoolCodecTest
 		EventSpool c = open();
 		assertEquals("a file with middle corruption is never replayed", 0, c.recover());
 		assertTrue(c.pending().isEmpty());
-		assertEquals(1L, c.counters().corrupt.get());
+		assertEquals(1L, c.counters.corrupt.get());
 		assertFalse(Files.exists(a.shardFile()));
-		Path corrupt = dir.resolve("shard-" + a.shardId() + ".corrupt");
+		Path corrupt = dir.resolve("shard-" + a.shardId + ".corrupt");
 		assertTrue("renamed aside, not deleted silently", Files.exists(corrupt));
 
 		append(c, 9);
@@ -212,7 +212,7 @@ public class EventSpoolCodecTest
 			// the process dies between the forced .next and the rename
 		}
 		a.crashForTest();
-		Path next = dir.resolve("shard-" + a.shardId() + ".spl.next");
+		Path next = dir.resolve("shard-" + a.shardId + ".spl.next");
 		assertTrue(Files.exists(next));
 		assertTrue(Files.exists(a.shardFile()));
 		byte[] nextBytes = Files.readAllBytes(next);
@@ -226,7 +226,7 @@ public class EventSpoolCodecTest
 		// Same crash, but the .next is torn: the older generation wins, and its tombstone still holds.
 		b.crashForTest();
 		deleteShards();
-		Files.write(dir.resolve("shard-" + a.shardId() + ".spl"), splBytes);
+		Files.write(dir.resolve("shard-" + a.shardId + ".spl"), splBytes);
 		Files.write(next, Arrays.copyOf(nextBytes, nextBytes.length - 3));
 		EventSpool c = open();
 		assertEquals("torn .next is discarded; the acked row stays acked", Collections.singletonList(id(2)),
@@ -245,8 +245,8 @@ public class EventSpoolCodecTest
 
 		assertFalse("a failed rename is not a successful compaction", a.compactNow());
 		assertEquals("the old generation is untouched: no in-place rewrite", before, sha(a.shardFile()));
-		assertFalse(Files.exists(dir.resolve("shard-" + a.shardId() + ".spl.next")));
-		assertEquals(1L, a.counters().compactionFailed.get());
+		assertFalse(Files.exists(dir.resolve("shard-" + a.shardId + ".spl.next")));
+		assertEquals(1L, a.counters.compactionFailed.get());
 
 		append(a, 3);
 		a.crashForTest();
@@ -282,7 +282,7 @@ public class EventSpoolCodecTest
 			append(a, i);
 		}
 		assertEquals(Arrays.asList(id(3), id(4), id(5)), ids(a.pending()));
-		assertEquals(2L, a.counters().dropped.get());
+		assertEquals(2L, a.counters.dropped.get());
 		a.crashForTest();
 		assertEquals("the drop is durable", Arrays.asList(id(3), id(4), id(5)), idsAfterRecover(open()));
 	}
@@ -296,7 +296,7 @@ public class EventSpoolCodecTest
 		append(a, 2);
 		append(a, 3);
 		assertEquals(Arrays.asList(id(2), id(3)), ids(a.pending()));
-		assertEquals(1L, a.counters().dropped.get());
+		assertEquals(1L, a.counters.dropped.get());
 	}
 
 	@Test
@@ -315,7 +315,7 @@ public class EventSpoolCodecTest
 		clock.addAndGet(EventSpool.MAX_AGE_MS + 1);
 		append(a, 2);
 		assertEquals(Collections.singletonList(id(2)), ids(a.pending()));
-		assertEquals(1L, a.counters().dropped.get());
+		assertEquals(1L, a.counters.dropped.get());
 
 		append(a, 3);
 		a.crashForTest();
@@ -333,7 +333,7 @@ public class EventSpoolCodecTest
 		Path shard = a.shardFile();
 		clock.addAndGet(EventSpool.MAX_AGE_MS + 1);
 		Files.setLastModifiedTime(shard, java.nio.file.attribute.FileTime.fromMillis(T0 - EventSpool.MAX_AGE_MS - 1));
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertFalse(Files.exists(shard));
 	}
 
@@ -345,7 +345,7 @@ public class EventSpoolCodecTest
 		a.crashForTest();
 		Path shard = a.shardFile();
 		Files.setLastModifiedTime(shard, java.nio.file.attribute.FileTime.fromMillis(T0 - 3 * EventSpool.MAX_AGE_MS));
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertTrue("age is decided by the record time, never the file time", Files.exists(shard));
 	}
 
@@ -358,7 +358,7 @@ public class EventSpoolCodecTest
 		Path shard = a.shardFile();
 		clock.addAndGet(EventSpool.MAX_AGE_MS + 1);
 		Files.setLastModifiedTime(shard, java.nio.file.attribute.FileTime.fromMillis(clock.get()));
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertFalse("a fresh mtime does not keep old records alive", Files.exists(shard));
 	}
 
@@ -372,7 +372,7 @@ public class EventSpoolCodecTest
 		torn.crashForTest();
 		Files.write(torn.shardFile(), new byte[]{0, 0, 0, 40, 1, 2}, java.nio.file.StandardOpenOption.APPEND);
 		clock.addAndGet(EventSpool.MAX_AGE_MS + 1);
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertTrue("a live writer's shard is never swept", Files.exists(live.shardFile()));
 		assertFalse("the torn shard's valid prefix is old, so it ages out", Files.exists(torn.shardFile()));
 	}
@@ -391,7 +391,7 @@ public class EventSpoolCodecTest
 		EventSpool.Counters c = new EventSpool.Counters();
 		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, c);
 		assertFalse(Files.exists(a.shardFile()));
-		assertTrue(Files.exists(dir.resolve("shard-" + a.shardId() + ".corrupt")));
+		assertTrue(Files.exists(dir.resolve("shard-" + a.shardId + ".corrupt")));
 		assertEquals(1L, c.corrupt.get());
 	}
 
@@ -451,7 +451,7 @@ public class EventSpoolCodecTest
 		String k = EventSpool.identityKey(TOKEN, "12345");
 		assertTrue(k.matches("^[0-9a-f]{32}$"));
 		assertFalse(k.contains(TOKEN.substring(0, 12)));
-		assertEquals(SnapshotBuilder.sha256Hex("spool-identity:" + TOKEN + ":12345").substring(0, 32), k);
+		assertEquals(EventSpool.sha256Hex("spool-identity:" + TOKEN + ":12345").substring(0, 32), k);
 		assertNotEquals(k, EventSpool.identityKey(TOKEN, "12346"));
 		assertNotEquals(k, EventSpool.identityKey("fedcba9876543210fedcba9876543210", "12345"));
 	}
@@ -535,13 +535,13 @@ public class EventSpoolCodecTest
 		append(dead, 1);
 		dead.crashForTest();
 		writeMarker();
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertFalse("a marked directory with no live shard is finished by the sweep", Files.exists(dir));
 
 		EventSpool live = open();
 		append(live, 2);
 		writeMarker();
-		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS);
+		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
 		assertTrue(Files.exists(live.shardFile()));
 		assertTrue(Files.exists(dir.resolve(EventSpool.MARKER)));
 	}
@@ -576,7 +576,7 @@ public class EventSpoolCodecTest
 		append(a, 1);
 		append(a, 2);
 		a.ack(Collections.singletonList(id(1)));
-		a.setReopenerForTest(p -> { throw new IOException("reopen refused"); });
+		a.reopener = p -> { throw new IOException("reopen refused"); };
 		try
 		{
 			a.compactNow();
@@ -587,7 +587,7 @@ public class EventSpoolCodecTest
 			// fails closed
 		}
 		assertTrue(a.isFailed());
-		assertEquals(1L, a.counters().reopenFailed.get());
+		assertEquals(1L, a.counters.reopenFailed.get());
 		assertFalse("a failed shard takes no new rows", a.append(id(3), "trade", T0, json(id(3), "trade")));
 		a.crashForTest();
 		assertEquals("the compacted rows are recovered by the next instance", Collections.singletonList(id(2)),

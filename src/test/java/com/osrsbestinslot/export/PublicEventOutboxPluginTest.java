@@ -32,7 +32,7 @@ public class PublicEventOutboxPluginTest
     }
     @After public void close() throws Exception
     {
-        for (AccountConnectPlugin plugin : plugins) plugin.spooler.crashSpoolForTest();
+        for (AccountConnectPlugin plugin : plugins) SpoolHooks.crash(plugin.spooler);
         server.shutdown(); http.dispatcher().executorService().shutdownNow(); http.connectionPool().evictAll();
         try (java.util.stream.Stream<Path> paths = Files.walk(data))
         { for (Path path : (Iterable<Path>) paths.sorted(Comparator.reverseOrder())::iterator) Files.deleteIfExists(path); }
@@ -46,7 +46,7 @@ public class PublicEventOutboxPluginTest
         when(profile.getId()).thenReturn(profileId); when(manager.getProfile()).thenReturn(profile);
         set(plugin, "config", config); set(plugin, "configManager", manager); set(plugin, "gson", new Gson());
         set(plugin, "okHttpClient", http); set(plugin, "activeHash", "123"); set(plugin, "activeProfileType", mode);
-        plugin.session.sessionActive = true; plugin.spooler.setSpoolDataRootForTest(data); return plugin;
+        plugin.session.sessionActive = true; SpoolHooks.dataRoot(plugin.spooler,data); return plugin;
     }
     private static void set(AccountConnectPlugin plugin, String name, Object value) throws Exception
     { Field f = AccountConnectPlugin.class.getDeclaredField(name); f.setAccessible(true); f.set(plugin, value); }
@@ -54,12 +54,12 @@ public class PublicEventOutboxPluginTest
     {
         Response r = new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue", "own-history-v1").build();
-        p.grants.applyServerPolicy(r, token.get()); p.spooler.awaitSpoolIdleForTest();
+        p.grants.applyServerPolicy(r, token.get()); SpoolHooks.awaitIdle(p.spooler);
     }
     private void emit() throws Exception
     {
         Map<String,Object> fields = new LinkedHashMap<>(); fields.put("item", 2); fields.put("qty", 1);
-        fields.put("other_player_name", "must-not-send"); p.events.emitEvent("ge_progress", fields); p.spooler.awaitSpoolIdleForTest();
+        fields.put("other_player_name", "must-not-send"); p.events.emitEvent("ge_progress", fields); SpoolHooks.awaitIdle(p.spooler);
     }
     private JsonObject request() throws Exception
     {
@@ -71,7 +71,7 @@ public class PublicEventOutboxPluginTest
     {
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         while (p.events.eventPostInFlight && System.nanoTime() < until) Thread.sleep(5);
-        assertFalse(p.events.eventPostInFlight); p.spooler.awaitSpoolIdleForTest();
+        assertFalse(p.events.eventPostInFlight); SpoolHooks.awaitIdle(p.spooler);
     }
     private String receipt(String id)
     { return "{\"receipt_version\":1,\"results\":[{\"index\":0,\"event_id\":\""+id+"\",\"status\":\"queued\",\"broker_ack\":true}]}"; }
@@ -80,7 +80,7 @@ public class PublicEventOutboxPluginTest
     {
         Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Own-Gameplay",gameplay?"on":"off").build();
-        p.grants.applyServerPolicy(r,token.get());p.spooler.awaitSpoolIdleForTest();
+        p.grants.applyServerPolicy(r,token.get());SpoolHooks.awaitIdle(p.spooler);
     }
     @Test public void anOwnQueueScopeNoServerSendsGrantsNothingAndOwnRowsKeepTheLegacyReceiver() throws Exception
     {
@@ -88,11 +88,11 @@ public class PublicEventOutboxPluginTest
         Response r=new Response.Builder().request(new Request.Builder().url(server.url("/api/ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK").header("X-Event-Queue","own-combat-v1")
             .header("X-Own-Gameplay","on").build();
-        p.grants.applyServerPolicy(r,token.get());p.spooler.awaitSpoolIdleForTest();
+        p.grants.applyServerPolicy(r,token.get());SpoolHooks.awaitIdle(p.spooler);
         Map<String,Object> hit=new LinkedHashMap<>(Map.of("type","combat_hit","combat_schema",1,
             "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
             "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","received","amount",0,"hitsplat_type",16));
-        assertTrue(p.emitOwnCombat(hit));p.spooler.awaitSpoolIdleForTest();
+        assertTrue(p.emitOwnGameplayEvent(hit));SpoolHooks.awaitIdle(p.spooler);
         assertEquals(1,p.events.pendingEvents.size());
         assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));p.events.flushEvents();
@@ -106,39 +106,39 @@ public class PublicEventOutboxPluginTest
             "gameplay_session","e".repeat(32),"source_sequence",1,"source_tick",42,
             "observed_at_ms",System.currentTimeMillis(),"source","HitsplatApplied","direction","dealt_to_npc","amount",3,"hitsplat_type",16));
         gameplayOnlyGrant(false);
-        assertFalse("no grant, nothing on the legacy path",p.emitOwnCombat(hit));p.spooler.awaitSpoolIdleForTest();
+        assertFalse("no grant, nothing on the legacy path",p.emitOwnGameplayEvent(hit));SpoolHooks.awaitIdle(p.spooler);
         assertTrue(p.events.pendingEvents.isEmpty());
         gameplayOnlyGrant(true);
-        assertTrue(p.emitOwnCombat(hit));p.spooler.awaitSpoolIdleForTest();
+        assertTrue(p.emitOwnGameplayEvent(hit));SpoolHooks.awaitIdle(p.spooler);
         assertEquals(1,p.events.pendingEvents.size());assertEquals("combat_hit",p.events.pendingEvents.get(0).get("type"));
         assertNotNull("legacy combat carries an event_id for server dedupe",p.events.pendingEvents.get(0).get("event_id"));
         p.events.pendingEvents.clear();
         Map<String,Object> state=OwnStateEventTest.goalEvent();
         assertTrue("closed own_state uses the granted legacy receiver",p.emitOwnGameplayEvent(state));
-        p.spooler.awaitSpoolIdleForTest();assertEquals(1,p.events.pendingEvents.size());
+        SpoolHooks.awaitIdle(p.spooler);assertEquals(1,p.events.pendingEvents.size());
         assertEquals("own_state",p.events.pendingEvents.get(0).get("type"));p.events.pendingEvents.clear();
-        p.events.emitEvent("own_state",Map.of("state_schema",1));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("own_state",Map.of("state_schema",1));SpoolHooks.awaitIdle(p.spooler);
         assertTrue(p.events.pendingEvents.isEmpty());
         gameplayOnlyGrant(false);
-        p.events.emitEvent("combat_hit",Map.of("combat_schema",1));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("combat_hit",Map.of("combat_schema",1));SpoolHooks.awaitIdle(p.spooler);
         assertTrue("a revoked grant stops the legacy combat path",p.events.pendingEvents.isEmpty());
     }
     @Test public void grantedOwnSignalWithoutQueueScopeUsesLegacyWriterOnlyWhenValid() throws Exception
     {
         Map<String,Object> signal=new LinkedHashMap<>(OwnSignalEventTest.event("farming.compost"));
         gameplayOnlyGrant(false);
-        assertFalse("no grant, no legacy signal",p.emitOwnGameplayEvent(signal));p.spooler.awaitSpoolIdleForTest();
+        assertFalse("no grant, no legacy signal",p.emitOwnGameplayEvent(signal));SpoolHooks.awaitIdle(p.spooler);
         assertTrue(p.events.pendingEvents.isEmpty());
         gameplayOnlyGrant(true);
-        assertTrue(p.emitOwnGameplayEvent(signal));p.spooler.awaitSpoolIdleForTest();
+        assertTrue(p.emitOwnGameplayEvent(signal));SpoolHooks.awaitIdle(p.spooler);
         assertEquals(1,p.events.pendingEvents.size());assertEquals("own_signal",p.events.pendingEvents.get(0).get("type"));
         assertNotNull(p.events.pendingEvents.get(0).get("event_id"));
         p.events.pendingEvents.clear();
         Map<String,Object> broken=new LinkedHashMap<>(signal);broken.remove("signal_value");
         assertFalse("an invalid signal never reaches the legacy writer",p.emitOwnGameplayEvent(broken));
-        p.spooler.awaitSpoolIdleForTest();assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.awaitIdle(p.spooler);assertTrue(p.events.pendingEvents.isEmpty());
         gameplayOnlyGrant(false);
-        p.events.emitEvent("own_signal",Map.of("signal_schema",1));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("own_signal",Map.of("signal_schema",1));SpoolHooks.awaitIdle(p.spooler);
         assertTrue("a revoked grant stops the legacy signal path",p.events.pendingEvents.isEmpty());
     }
     @Test public void combatCannotUsePreviousAccountOrWorldProfileBeforeSessionTaskCatchesUp() throws Exception
@@ -148,10 +148,10 @@ public class PublicEventOutboxPluginTest
         when(client.getLocalPlayer()).thenReturn(mock(net.runelite.api.Player.class));
         when(client.getWorldType()).thenReturn(EnumSet.noneOf(net.runelite.api.WorldType.class));
         when(client.getAccountHash()).thenReturn(456L);
-        assertFalse(p.emitOwnCombat(Map.of("type","combat_hit")));assertTrue(p.events.pendingEvents.isEmpty());
+        assertFalse(p.emitOwnGameplayEvent(Map.of("type","combat_hit")));assertTrue(p.events.pendingEvents.isEmpty());
         when(client.getAccountHash()).thenReturn(123L);
         when(client.getWorldType()).thenReturn(EnumSet.of(net.runelite.api.WorldType.SEASONAL));
-        assertFalse(p.emitOwnCombat(Map.of("type","combat_hit")));assertTrue(p.events.pendingEvents.isEmpty());
+        assertFalse(p.emitOwnGameplayEvent(Map.of("type","combat_hit")));assertTrue(p.events.pendingEvents.isEmpty());
     }
     @Test public void ownVarbitContextSurvivesCrashAndCannotBeForgedByCallerFields() throws Exception
     {
@@ -170,61 +170,61 @@ public class PublicEventOutboxPluginTest
         when(client.getVarbit(SnapshotBuilder.ACCOUNT_TYPE_VARBIT)).thenReturn(def);
         p.events.refreshEventObservationContext();grant();
         p.events.emitEvent("pickup",Map.of("item",2,"qty",1,"observation_context",Map.of("other_player","must-not-send")));
-        p.spooler.awaitSpoolIdleForTest();Map<?,?> before=(Map<?,?>)p.events.pendingEvents.get(0).get("observation_context");
+        SpoolHooks.awaitIdle(p.spooler);Map<?,?> before=(Map<?,?>)p.events.pendingEvents.get(0).get("observation_context");
         assertEquals("IRONMAN",before.get("account_mode"));assertEquals("varbit_1777",before.get("account_mode_source"));
         Field version = AccountConnectPlugin.class.getDeclaredField("PLUGIN_VERSION"); version.setAccessible(true);
         assertEquals(version.get(null), before.get("plugin_version")); // artifact equality is covered by VersionDriftTest
         assertEquals("STANDARD",p.events.pendingEvents.get(0).get("profile_type"));
         assertFalse(before.toString().contains("must-not-send"));
         String session=(String)before.get("collector_session");Object sequence=before.get("sequence");
-        p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);grant();
+        SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);grant();
         Map<?,?> replay=(Map<?,?>)p.events.pendingEvents.get(0).get("observation_context");
         assertEquals(session,replay.get("collector_session"));
         assertEquals(((Number)sequence).longValue(),((Number)replay.get("sequence")).longValue());
         assertEquals("IRONMAN",replay.get("account_mode"));
-        p.events.emitEvent("pickup",Map.of("item",3,"qty",1));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("pickup",Map.of("item",3,"qty",1));SpoolHooks.awaitIdle(p.spooler);
         Map<?,?> newProcess=(Map<?,?>)p.events.pendingEvents.get(1).get("observation_context");
         assertNotEquals(session,newProcess.get("collector_session"));assertNull(newProcess.get("account_mode"));
         // Early callbacks can already identify a new account/profile before the slower
         // session tracker. Never attach the previous account's context to those rows.
-        p.events.emitEvent("pickup",Map.of("item",3,"qty",1,"account_hash","456"));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("pickup",Map.of("item",3,"qty",1,"account_hash","456"));SpoolHooks.awaitIdle(p.spooler);
         assertFalse(p.events.pendingEvents.get(2).containsKey("observation_context"));
-        p.events.emitEvent("pickup",Map.of("item",3,"qty",1,"profile_type","LEAGUE"));p.spooler.awaitSpoolIdleForTest();
+        p.events.emitEvent("pickup",Map.of("item",3,"qty",1,"profile_type","LEAGUE"));SpoolHooks.awaitIdle(p.spooler);
         assertFalse(p.events.pendingEvents.get(3).containsKey("observation_context"));
     }
     @Test public void emittedEventSurvivesProcessDeathAndGeneric200CannotRemoveIt() throws Exception
     {
         grant(); emit(); String id = (String)p.events.pendingEvents.get(0).get("event_id");
         assertEquals(1, ((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7);
-        p.outbox.pumpPublicOutbox(); p.spooler.awaitSpoolIdleForTest(); assertTrue(p.events.pendingEvents.isEmpty()); // no fresh grant
+        SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7);
+        p.outbox.pumpPublicOutbox(); SpoolHooks.awaitIdle(p.spooler); assertTrue(p.events.pendingEvents.isEmpty()); // no fresh grant
         grant(); assertEquals(id, p.events.pendingEvents.get(0).get("event_id"));
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}")); p.events.flushEvents();
         assertEquals("queue-v1", request().get("ack_protocol").getAsString()); done();
         assertEquals(1, p.events.pendingEvents.size()); assertEquals(1, ((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
         p.events.queueRetryBackoffUntilMs = 0; server.enqueue(new MockResponse().setBody(receipt(id))); p.events.flushEvents(); request(); done();
         assertEquals(0, ((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
     }
     @Test public void logoutPausesAndModeOrRuneLiteProfileCannotReplayPriorRows() throws Exception
     {
         grant(); emit(); String standardId = (String)p.events.pendingEvents.get(0).get("event_id");
         p.session.sessionActive = false; p.events.flushEvents(); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
-        p.spooler.crashSpoolForTest(); p = fresh("LEAGUE", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler); p = fresh("LEAGUE", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
         emit(); String leagueId = (String)p.events.pendingEvents.get(0).get("event_id");
-        p.spooler.crashSpoolForTest(); p = fresh("LEAGUE", 8); grant(); assertTrue(p.events.pendingEvents.isEmpty());
-        p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7); grant();
+        SpoolHooks.crash(p.spooler); p = fresh("LEAGUE", 8); grant(); assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7); grant();
         assertEquals(1, p.events.pendingEvents.size()); assertEquals(standardId, p.events.pendingEvents.get(0).get("event_id"));
         server.enqueue(new MockResponse().setBody(receipt(standardId))); p.events.flushEvents();
         assertEquals(standardId, request().getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString()); done();
-        p.spooler.crashSpoolForTest(); p = fresh("LEAGUE", 7); grant();
+        SpoolHooks.crash(p.spooler); p = fresh("LEAGUE", 7); grant();
         assertEquals(1, p.events.pendingEvents.size()); assertEquals(leagueId, p.events.pendingEvents.get(0).get("event_id"));
     }
     @Test public void revokedTokenPurgesBeforeAnyRestartReplay() throws Exception
     {
         grant(); emit(); server.enqueue(new MockResponse().setResponseCode(403).setBody("{\"error\":\"revoked\"}"));
         p.events.flushEvents(); request(); done(); assertEquals(0, ((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7); grant(); assertTrue(p.events.pendingEvents.isEmpty());
     }
     @Test public void tokenConfigWithdrawalCannotSendOldRowsUnderNewToken() throws Exception
     {
@@ -234,7 +234,7 @@ public class PublicEventOutboxPluginTest
         Field group = AccountConnectPlugin.class.getDeclaredField("CONFIG_GROUP"); group.setAccessible(true);
         when(e.getGroup()).thenReturn((String)group.get(null)); when(e.getKey()).thenReturn("linkToken");
         when(e.getOldValue()).thenReturn(TOKEN); when(e.getNewValue()).thenReturn(replacement);
-        p.onConfigChanged(e); p.spooler.awaitSpoolIdleForTest(); grant(); p.events.flushEvents();
+        p.onConfigChanged(e); SpoolHooks.awaitIdle(p.spooler); grant(); p.events.flushEvents();
         assertTrue(p.events.pendingEvents.isEmpty()); assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
     }
     @Test public void publicDurableRowsAreNotMixedWithUnjournaledQueueRows() throws Exception
@@ -250,10 +250,10 @@ public class PublicEventOutboxPluginTest
     }
     @Test public void coldRevocationPurgesDiskBeforeAnyFreshGrantOrAccount() throws Exception
     {
-        grant(); emit(); p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7);
+        grant(); emit(); SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7);
         p.session.sessionActive = false; set(p, "activeHash", null);
-        p.spooler.spoolOnRevoked(TOKEN); p.spooler.awaitSpoolIdleForTest();
-        p.spooler.crashSpoolForTest(); p = fresh("STANDARD", 7); grant();
+        p.spooler.spoolOnRevoked(TOKEN); SpoolHooks.awaitIdle(p.spooler);
+        SpoolHooks.crash(p.spooler); p = fresh("STANDARD", 7); grant();
         assertTrue(p.events.pendingEvents.isEmpty());
         try (java.util.stream.Stream<Path> paths = Files.walk(data))
         { assertFalse(paths.anyMatch(path -> path.toString().endsWith(".spl"))); }
@@ -322,20 +322,20 @@ public class PublicEventOutboxPluginTest
             .header("X-Bank-Evidence", enabled ? "on" : "off");
         if (enabled) r.header("X-Bank-Receipt", "event-id-v1");
         if (queue) r.header("X-Event-Queue", "own-history-v1");
-        p.grants.applyServerPolicy(r.build(), token.get()); p.spooler.awaitSpoolIdleForTest();
+        p.grants.applyServerPolicy(r.build(), token.get()); SpoolHooks.awaitIdle(p.spooler);
     }
     private String emitBank() throws Exception
     {
         p.events.emitEvent("bank_visit_close", Map.of("visit_id", "a".repeat(32), "closed_at_ms", System.currentTimeMillis(),
             "close_reason", "logout", "manifest_complete", true, "moves_complete", false));
-        p.spooler.awaitSpoolIdleForTest(); return (String)p.events.pendingEvents.get(p.events.pendingEvents.size()-1).get("event_id");
+        SpoolHooks.awaitIdle(p.spooler); return (String)p.events.pendingEvents.get(p.events.pendingEvents.size()-1).get("event_id");
     }
     @Test public void publicBankSurvivesCrashAndOnlyItsOwnLegacyReceiptSettlesIt() throws Exception
     {
         bankGrant(true, false); String id=emitBank();
         assertEquals(1, ((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest(); p=fresh("STANDARD", 7);
-        p.outbox.pumpPublicOutbox(); p.spooler.awaitSpoolIdleForTest(); assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler); p=fresh("STANDARD", 7);
+        p.outbox.pumpPublicOutbox(); SpoolHooks.awaitIdle(p.spooler); assertTrue(p.events.pendingEvents.isEmpty());
         bankGrant(true, false); assertEquals(id,p.events.pendingEvents.get(0).get("event_id"));
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}")); p.events.flushEvents();
         assertFalse("bank replay uses the existing legacy per-ID endpoint", request().has("ack_protocol")); done();
@@ -344,16 +344,16 @@ public class PublicEventOutboxPluginTest
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+id+"\",\"status\":\"duplicate\"}]}"));
         p.events.flushEvents(); request(); done();
         assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);assertTrue(p.events.pendingEvents.isEmpty());
+        SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);bankGrant(true,false);assertTrue(p.events.pendingEvents.isEmpty());
     }
     @Test public void publicBankGrantDoesNotJournalUnrelatedTrafficOrWidenQueue()
         throws Exception
     {
         emitBank(); assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);bankGrant(true,false);
         emit();String bankId=emitBank();
         assertEquals(1,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);bankGrant(true,false);
         assertEquals(1,p.events.pendingEvents.size());assertEquals(bankId,p.events.pendingEvents.get(0).get("event_id"));
         bankGrant(false,true);p.events.flushEvents();done();assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
         bankGrant(true,false);server.enqueue(new MockResponse().setBody("{\"ok\":true}"));p.events.flushEvents();
@@ -382,17 +382,17 @@ public class PublicEventOutboxPluginTest
                 "close_reason","logout","manifest_complete",true,"moves_complete",false));
             p.session.sessionActive = false;set(p,"activeProfileType",null);
         } finally {release.countDown();}
-        p.spooler.awaitSpoolIdleForTest();assertEquals(1,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
-        assertTrue(p.events.pendingEvents.isEmpty());p.spooler.crashSpoolForTest();p=fresh("LEAGUE",7);bankGrant(true,false);
-        assertTrue(p.events.pendingEvents.isEmpty());p.spooler.crashSpoolForTest();p=fresh("STANDARD",8);bankGrant(true,false);
-        assertTrue(p.events.pendingEvents.isEmpty());p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        SpoolHooks.awaitIdle(p.spooler);assertEquals(1,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
+        assertTrue(p.events.pendingEvents.isEmpty());SpoolHooks.crash(p.spooler);p=fresh("LEAGUE",7);bankGrant(true,false);
+        assertTrue(p.events.pendingEvents.isEmpty());SpoolHooks.crash(p.spooler);p=fresh("STANDARD",8);bankGrant(true,false);
+        assertTrue(p.events.pendingEvents.isEmpty());SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);bankGrant(true,false);
         assertEquals(1,p.events.pendingEvents.size());
     }
     @Test public void aBankCloseCapturedAtLogoutIsSentBeforeTheNextLogin() throws Exception
     {
         // Live 0.7.62: a close journaled at logout waited for the same account's next login, often days.
-        bankGrant(true,false);String id=emitBank();p.session.trackLogout("manual");p.spooler.awaitSpoolIdleForTest();
-        p.outbox.pumpPublicOutbox();p.spooler.awaitSpoolIdleForTest();
+        bankGrant(true,false);String id=emitBank();p.session.trackLogout("manual");SpoolHooks.awaitIdle(p.spooler);
+        p.outbox.pumpPublicOutbox();SpoolHooks.awaitIdle(p.spooler);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"results\":[{\"event_id\":\""+id+"\",\"status\":\"stored\"}]}"));
         p.events.flushEvents();JsonObject sent=request();
         assertEquals(id,sent.getAsJsonArray("events").get(0).getAsJsonObject().get("event_id").getAsString());done();
@@ -413,26 +413,26 @@ public class PublicEventOutboxPluginTest
     }
     @Test public void anEndedSessionsRowsWaitForTheirOwnProfile() throws Exception
     {
-        bankGrant(true,false);emitBank();p.session.trackLogout("manual");p.spooler.awaitSpoolIdleForTest();
+        bankGrant(true,false);emitBank();p.session.trackLogout("manual");SpoolHooks.awaitIdle(p.spooler);
         ConfigManager other=mock(ConfigManager.class);ConfigProfile profile=mock(ConfigProfile.class);
         when(profile.getId()).thenReturn(8L);when(other.getProfile()).thenReturn(profile);set(p,"configManager",other);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
-        p.outbox.pumpPublicOutbox();p.spooler.awaitSpoolIdleForTest();p.events.flushEvents();
+        p.outbox.pumpPublicOutbox();SpoolHooks.awaitIdle(p.spooler);p.events.flushEvents();
         RecordedRequest r=server.takeRequest(500,TimeUnit.MILLISECONDS);
         assertTrue("only the logout row may go",r==null||!r.getBody().readUtf8().contains("bank_visit_close"));done();
         p.events.flushEvents();assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
     }
     @Test public void anEndedSessionsRowsWaitWhenTheTokenChanges() throws Exception
     {
-        bankGrant(true,false);emitBank();p.session.trackLogout("manual");p.spooler.awaitSpoolIdleForTest();
-        token.set("ffffffffffffffffffffffffffffffff");p.outbox.pumpPublicOutbox();p.spooler.awaitSpoolIdleForTest();p.events.flushEvents();
+        bankGrant(true,false);emitBank();p.session.trackLogout("manual");SpoolHooks.awaitIdle(p.spooler);
+        token.set("ffffffffffffffffffffffffffffffff");p.outbox.pumpPublicOutbox();SpoolHooks.awaitIdle(p.spooler);p.events.flushEvents();
         assertNull(server.takeRequest(100,TimeUnit.MILLISECONDS));
         assertEquals(1,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
     }
     @Test public void publicBankRevocationPurgesBeforeColdRecovery() throws Exception
     {
         bankGrant(true,false);emitBank();server.enqueue(new MockResponse().setResponseCode(403).setBody("{\"error\":\"revoked\"}"));
-        p.events.flushEvents();request();done();p.spooler.crashSpoolForTest();p=fresh("STANDARD",7);bankGrant(true,false);
+        p.events.flushEvents();request();done();SpoolHooks.crash(p.spooler);p=fresh("STANDARD",7);bankGrant(true,false);
         assertTrue(p.events.pendingEvents.isEmpty());assertEquals(0,((Number)p.events.captureHealthSnapshot().get("public_outbox_pending")).intValue());
     }
     @Test public void publicBankDiskFailureKeepsBoundedLegacyRetryWithoutClaimingDurability() throws Exception
@@ -447,7 +447,7 @@ public class PublicEventOutboxPluginTest
     }
     @Test public void publicBankJournalIsSeparateFromAnOlderQueueClientRoot() throws Exception
     {
-        bankGrant(true,false);String id=emitBank();p.spooler.crashSpoolForTest();
+        bankGrant(true,false);String id=emitBank();SpoolHooks.crash(p.spooler);
         assertTrue(Files.isDirectory(data.resolve("osrsbis/public-bank-events-v1")));
         PublicEventOutbox.Context owner=new PublicEventOutbox.Context(TOKEN,"123","STANDARD","7");
         PublicEventOutbox queueOnly=new PublicEventOutbox(data,new Gson(),System::currentTimeMillis);

@@ -23,16 +23,14 @@ import net.runelite.api.events.GraphicsObjectCreated;
 import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ProjectileMoved;
 import net.runelite.client.util.Text;
+import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
 
 /** Own ground piles: tracking after a drop, the scene reads, telegrab sightings and the removal rows. */
+@RequiredArgsConstructor
 final class OwnPiles
 {
 	private final AccountConnectPlugin plugin;
-
-	OwnPiles(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	/** Own dropped piles still believed to be on the ground. Same bound as the inventory that fed them. */
 	static final int GROUND_TRACK_MAX = 28;
@@ -129,6 +127,7 @@ final class OwnPiles
 	 * BELOW |S| means one of OURS left; a count at or above |S| means a stranger's pile may be the
 	 * one that went. The QUANTITIES say WHICH of ours, where the reader can supply them.
 	 */
+	@AllArgsConstructor
 	static final class SceneTileItems
 	{
 		/** UNKNOWN when the scene could not be read; NONE for a count of zero; PRESENT otherwise. */
@@ -137,13 +136,6 @@ final class OwnPiles
 		final int count;
 		/** One quantity per counted pile, or null when this reader cannot say. */
 		final long[] quantities;
-
-		private SceneTileItems(ScenePileState state, int count, long[] quantities)
-		{
-			this.state = state;
-			this.count = count;
-			this.quantities = quantities;
-		}
 
 		static SceneTileItems unknown()
 		{
@@ -169,21 +161,16 @@ final class OwnPiles
 	{
 		/**
 		 * @param excluding a TileItem to IGNORE while counting, or null. See
-		 *                  {@link #scenePileState} for why the despawn path passes one.
+		 *                  {@link #sceneTileItems} for why the despawn path passes one.
 		 */
 		SceneTileItems itemsOnTile(int item, int x, int y, int plane, Object excluding);
 	}
 
-	/** Defaults to the live client read; swapped in tests through {@link #setSceneReaderForTest}. */
-	private volatile SceneGroundReader sceneReader = this::readSceneTileItems;
-
-	void setSceneReaderForTest(SceneGroundReader r)
-	{
-		sceneReader = r == null ? this::readSceneTileItems : r;
-	}
+	/** Defaults to the live client read; tests assign their own reader. */
+	volatile SceneGroundReader sceneReader = this::readSceneTileItems;
 
 	/**
-	 * The callers' view of the scene. Never throws; answers UNKNOWN when it cannot read.
+	 * The callers' view of the scene, with the item count. Never throws; answers UNKNOWN when it cannot read.
 	 *
 	 * WHY {@code excluding} EXISTS. RuneLite fires ItemDespawned from inside the client's own scene
 	 * update, and nothing in the 1.12.39 obfuscated client proves whether the TileItem being
@@ -193,12 +180,6 @@ final class OwnPiles
 	 * OBJECT IDENTITY makes the answer the same either way, so this does not depend on an ordering
 	 * we cannot verify without a live client. The poll path passes null: nothing is going there.
 	 */
-	ScenePileState scenePileState(int item, int x, int y, int plane, Object excluding)
-	{
-		return sceneTileItems(item, x, y, plane, excluding).state;
-	}
-
-	/** The counting form of {@link #scenePileState}. Never throws; answers UNKNOWN when it cannot read. */
 	SceneTileItems sceneTileItems(int item, int x, int y, int plane, Object excluding)
 	{
 		SceneGroundReader r = sceneReader;
@@ -426,24 +407,9 @@ final class OwnPiles
 	/**
 	 * Record a pile WE dropped, so a later ItemDespawned on the same tile can be attributed to it.
 	 * Called only from the own-tile OWNERSHIP_SELF spawn path, so a foreign pile is never tracked.
-	 */
-	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
-		int dropTick, int despawnTick)
-	{
-		trackGroundDrop(item, qty, x, y, plane, location, dropTick, despawnTick, false);
-	}
-
-	/**
 	 * @param quantityMerge true when this arrived as an ItemQuantityChanged growth, meaning the game
 	 *                      merged the drop into an existing stack instead of spawning a new pile.
 	 */
-	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
-		int dropTick, int despawnTick, boolean quantityMerge)
-	{
-		trackGroundDrop(item, qty, x, y, plane, location, dropTick, despawnTick, quantityMerge,
-			plugin.dropProof.pendingDropSessionId, plugin.dropProof.pendingDropSeq);
-	}
-
 	void trackGroundDrop(int item, long qty, int x, int y, int plane, Map<String, Object> location,
 		int dropTick, int despawnTick, boolean quantityMerge, String sid, int seq)
 	{
@@ -578,16 +544,11 @@ final class OwnPiles
 	 * as a rival pile here would make every R1 route ambiguous again and strand the recorder exactly
 	 * as round 3 measured. So only a NON-shadow unowned record can make a despawn ambiguous.
 	 */
+	@AllArgsConstructor
 	static final class GroundDespawnMatch
 	{
 		final DroppedGroundItem record;
 		final boolean ambiguous;
-
-		GroundDespawnMatch(DroppedGroundItem record, boolean ambiguous)
-		{
-			this.record = record;
-			this.ambiguous = ambiguous;
-		}
 	}
 
 	/** Pure: picks the record and classifies the choice. Changes no state. */
@@ -630,15 +591,6 @@ final class OwnPiles
 			}
 		}
 		return new GroundDespawnMatch(findGroundDrop(item, x, y, plane), false);
-	}
-
-	/**
-	 * Resolve a despawn and APPLY the refusal when the choice was a guess. The one entry point the
-	 * despawn path uses, so nothing can resolve a despawn and forget to record the ambiguity.
-	 */
-	DroppedGroundItem resolveDespawnedGroundDrop(int item, int x, int y, int plane)
-	{
-		return resolveDespawnedGroundDrop(item, x, y, plane, null);
 	}
 
 	/**
@@ -718,7 +670,7 @@ final class OwnPiles
 	 * tile and this must not invent certainty from a failed read.
 	 *
 	 * @param despawnedItem the TileItem that is going, excluded from the scene count by identity, or
-	 *                      null. See {@link #scenePileState}.
+	 *                      null. See {@link #sceneTileItems}.
 	 */
 	DroppedGroundItem resolveDespawnedGroundDrop(int item, int x, int y, int plane,
 		Object despawnedItem)
@@ -943,14 +895,6 @@ final class OwnPiles
 		}
 		recordTelegrabSighting(new DropCandidates.TelegrabSighting(wp.getX(), wp.getY(), go.getLevel(),
 			plugin.client.getTickCount(), "impact", null, false, wp.getX(), wp.getY()));
-	}
-
-	int groundDropCount()
-	{
-		synchronized (groundDrops)
-		{
-			return groundDrops.size();
-		}
 	}
 
 	/**

@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Consumer;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
@@ -31,14 +32,10 @@ import okhttp3.Response;
 
 /** The memory event queue and its sender: emit, priority-bounded buffer, coalesced flush, retry ladders, the exit file, the close flush and capture health. */
 @Slf4j
+@RequiredArgsConstructor
 final class EventQueue
 {
 	private final AccountConnectPlugin plugin;
-
-	EventQueue(AccountConnectPlugin plugin)
-	{
-		this.plugin = plugin;
-	}
 
 	/**
 	 * Own-account activity log (syncActivityLog opt-in): buffered structured events — logins/logouts,
@@ -98,7 +95,7 @@ final class EventQueue
 	String currentEventTokenFingerprint()
 	{
 		String token = plugin.currentLinkToken();
-		return token.matches("^[a-f0-9]{32}$") ? SnapshotBuilder.sha256Hex("event-token:" + token) : null;
+		return token.matches("^[a-f0-9]{32}$") ? EventSpool.sha256Hex("event-token:" + token) : null;
 	}
 
 	/**
@@ -111,6 +108,11 @@ final class EventQueue
 	 * row overall, so a long 429 run keeps GE, trade, store, death and session rows (EventPriority). Caller holds
 	 * the pendingEvents lock.
 	 */
+	void trimPending()
+	{
+		while (pendingEvents.size() > MAX_PENDING_EVENTS) evictOneForOverflow();
+	}
+
 	void evictOneForOverflow()
 	{
 		int i = EventPriority.evictIndex(pendingEvents);
@@ -199,14 +201,14 @@ final class EventQueue
 		Map<String,Object> context = plugin.eventObservationContext.event(contextOwner, AccountConnectPlugin.PLUGIN_VERSION,
 			((Number)ev.get("ts")).longValue());
 		if (context != null) ev.put("observation_context", context);
-		if (plugin.grants.verificationGranted() && plugin.client != null && plugin.activeHash != null && plugin.client.getAccountHash() != -1L
-			&& plugin.activeHash.equals(Long.toString(plugin.client.getAccountHash())))
+		boolean verifyAccount = plugin.grants.verificationGranted() && plugin.client != null && plugin.activeHash != null && plugin.client.getAccountHash() != -1L
+			&& plugin.activeHash.equals(Long.toString(plugin.client.getAccountHash()));
+		if (verifyAccount)
 		{
 			plugin.verificationDiscovery.bind(plugin.currentLinkToken(), plugin.activeHash, plugin.verificationEpoch.get());
 			if ("activity_counter".equals(type)) plugin.verificationDiscovery.counter(ev, plugin.client.getTickCount());
 		}
-		boolean eventEvidence = plugin.grants.verificationGranted() && EventVerification.TYPES.contains(type) && plugin.client != null && plugin.client.getAccountHash() != -1L
-			&& plugin.activeHash != null && plugin.activeHash.equals(Long.toString(plugin.client.getAccountHash()));
+		boolean eventEvidence = verifyAccount && EventVerification.TYPES.contains(type);
 		if (eventEvidence)
 		{
 			if (plugin.verificationMessage != null && !"verification_discovery".equals(type)) plugin.verificationMessageHandled = true;
@@ -249,10 +251,7 @@ final class EventQueue
 		synchronized (pendingEvents)
 		{
 			pendingEvents.add(ev);
-			while (pendingEvents.size() > MAX_PENDING_EVENTS)
-			{
-				evictOneForOverflow();
-			}
+			trimPending();
 		}
 		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
 		// event schedules a coalesced flush so it ships in ~1s instead of on the next 5s tick.
@@ -322,14 +321,7 @@ final class EventQueue
 				completeFinalFlush();
 			}
 		};
-		if (plugin.clientThread != null)
-		{
-			plugin.clientThread.invoke(closeSession);
-		}
-		else
-		{
-			closeSession.run();
-		}
+		plugin.onClientThread(closeSession);
 		// What the final batch could not deliver (a 429 when the global hour is full, a 5xx, no network, or
 		// more than one batch) goes to disk, and the next start sends it. RuneLite waits at most 10 s for all
 		// plugins, so the write does not wait longer than EXIT_FLUSH_WAIT_MS for the POST.
@@ -442,10 +434,7 @@ final class EventQueue
 			synchronized (pendingEvents)
 			{
 				pendingEvents.addAll(0, keep);
-				while (pendingEvents.size() > MAX_PENDING_EVENTS)
-				{
-					evictOneForOverflow();
-				}
+				trimPending();
 			}
 			scheduleCoalescedFlush();
 		}
@@ -613,12 +602,12 @@ final class EventQueue
 		{
 			return;		// upload switch off — send nothing
 		}
-		String token = plugin.config.linkToken() == null ? "" : plugin.config.linkToken().trim();
+		String token = plugin.currentLinkToken();
 		if (!token.matches("^[a-f0-9]{32}$"))
 		{
 			return;
 		}
-		String tokenFingerprint = SnapshotBuilder.sha256Hex("event-token:" + token);
+		String tokenFingerprint = EventSpool.sha256Hex("event-token:" + token);
 		List<Map<String, Object>> batch;
 		// The in-flight claim and the buffer drain happen under ONE lock. Tested separately they are
 		// check-then-act: the coalesced-flush executor and the 5s scheduler can both pass the guard
@@ -773,7 +762,7 @@ final class EventQueue
 	/** The shared sender: one {token, events} request to /event-ingest, with the queue-v1 envelope when asked. */
 	Request eventRequest(String tokenJson, List<String> encoded, boolean queue, SpoolDriver.SpoolReplayAge age)
 	{
-		String base = plugin.config.apiBaseUrl() == null ? "" : plugin.config.apiBaseUrl().replaceAll("/+$", "");
+		String base = plugin.apiBase();
 		Request.Builder request = new Request.Builder().url(base + "/event-ingest")
 			.post(RequestBody.create(AccountConnectPlugin.JSON, eventBatchBody(tokenJson, encoded, queue)));
 		return (age == null ? request : request.tag(SpoolDriver.SpoolReplayAge.class, age)).build();
@@ -896,22 +885,22 @@ final class EventQueue
 		synchronized (pendingEvents)
 		{
 			pendingEvents.addAll(0, batch);
-			while (pendingEvents.size() > MAX_PENDING_EVENTS)
-			{
-				evictOneForOverflow();
-			}
+			trimPending();
 		}
 		boolean queue = !batch.isEmpty() && Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE));
 		long prior = queue ? queueRetryBackoffMs : eventRetryBackoffMs;
-		long next = prior <= 0 ? EVENT_RETRY_BASE_BACKOFF_MS : Math.min(prior * 2, EVENT_RETRY_MAX_BACKOFF_MS);
-		if (retryAfterMs > 0)
-		{
-			next = Math.max(next, Math.min(retryAfterMs, EVENT_RETRY_MAX_BACKOFF_MS));
-		}
+		long next = nextBackoff(prior, retryAfterMs);
 		if (queue) { queueRetryBackoffMs = next; queueRetryBackoffUntilMs = plugin.nowMs() + next; }
 		else { eventRetryBackoffMs = next; eventRetryBackoffUntilMs = plugin.nowMs() + next; }
 		eventPostInFlight = false;
 		completeFinalFlush();
+	}
+
+	/** The doubling retry ladder from the base to the cap, never shorter than a server Retry-After (itself capped). */
+	static long nextBackoff(long prior, long retryAfterMs)
+	{
+		long next = prior <= 0 ? EVENT_RETRY_BASE_BACKOFF_MS : Math.min(prior * 2, EVENT_RETRY_MAX_BACKOFF_MS);
+		return retryAfterMs > 0 ? Math.max(next, Math.min(retryAfterMs, EVENT_RETRY_MAX_BACKOFF_MS)) : next;
 	}
 
 	/** Integer Retry-After, capped before conversion so a large header cannot overflow. */
@@ -936,11 +925,6 @@ final class EventQueue
 	}
 
 	/** How many of these encoded events fit in one request: at most 100 and under 256 KiB, at least one. */
-	static int fitEventBatch(String tokenJson, List<String> encoded)
-	{
-		return fitEventBatch(tokenJson, encoded, false);
-	}
-
 	static int fitEventBatch(String tokenJson, List<String> encoded, boolean queue)
 	{
 		long bytes = eventBatchBody(tokenJson, Collections.emptyList(), queue).getBytes(StandardCharsets.UTF_8).length;
@@ -963,25 +947,11 @@ final class EventQueue
 	}
 
 	/** The request body, byte-identical to gson's encoding of {token, events}. */
-	static String eventBatchBody(String tokenJson, List<String> encoded)
-	{
-		return eventBatchBody(tokenJson, encoded, false);
-	}
-
 	static String eventBatchBody(String tokenJson, List<String> encoded, boolean queue)
 	{
 		StringBuilder sb = new StringBuilder("{\"token\":").append(tokenJson);
 		if (queue) sb.append(",\"ack_protocol\":\"queue-v1\",\"schema_version\":1");
-		sb.append(",\"events\":[");
-		for (int i = 0; i < encoded.size(); i++)
-		{
-			if (i > 0)
-			{
-				sb.append(',');
-			}
-			sb.append(encoded.get(i));
-		}
-		return sb.append("]}").toString();
+		return sb.append(",\"events\":[").append(String.join(",", encoded)).append("]}").toString();
 	}
 
 	Map<String, Object> captureHealthSnapshot()

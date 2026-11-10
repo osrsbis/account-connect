@@ -44,8 +44,8 @@ public class DropEvidenceLinkageTest
         inject(p, "activeHash", "12345");
         p.grants.staffApiBase = ServerGrants.OFFICIAL_API_BASE;
         p.grants.setStaffCapture(TOKEN, "12345");
-        p.grants.setStoreToolsForTest(true);
-        p.grants.setDropProofRolloutForTest(true);
+        p.grants.serverStoreToolsEnabled = true;
+        p.grants.serverDropProofEnabled = true;
         assertTrue("fixture has a staff grant", p.grants.staffCaptureEnabled());
         assertTrue("fixture has the media grant", p.grants.dropProofEnabled());
         return p;
@@ -112,11 +112,11 @@ public class DropEvidenceLinkageTest
 
     private static void assertCompletedWithoutExpiredClicks(AccountConnectPlugin p) throws Exception
     {
-        assertEquals("every observed drop resolves its own pending click", 0, p.dropProof.dropSession.pendingDropCount());
+        assertEquals("every observed drop resolves its own pending click", 0, p.dropProof.dropSession.pendingDrops.size());
         p.dropProof.dropSession.settle(System.currentTimeMillis() + DropSessionRecorder.PENDING_DROP_EXPIRY_MILLIS + 1);
         assertFalse("observed drops must not expire under a later click's identity", p.dropProof.dropSession.unprovable());
         for (OwnPiles.DroppedGroundItem g : piles(p)) p.piles.emitGroundRemoval(g, 400, false);
-        assertEquals(0, p.dropProof.dropSession.activePileCount());
+        assertEquals(0, p.dropProof.dropSession.activePiles.size());
         assertEquals(DropSessionRecorder.Outcome.COMPLETE, p.dropProof.dropSession.finish());
     }
 
@@ -189,7 +189,7 @@ public class DropEvidenceLinkageTest
         assertEquals(2, ground.size());
         assertEquals(1, p.dropProof.dropSeqForPile(ground.get(0)));
         assertEquals(2, p.dropProof.dropSeqForPile(ground.get(1)));
-        assertEquals(0, p.dropProof.dropSession.pendingDropCount());
+        assertEquals(0, p.dropProof.dropSession.pendingDrops.size());
     }
 
 }

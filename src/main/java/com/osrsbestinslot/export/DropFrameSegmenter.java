@@ -64,7 +64,8 @@ public class DropFrameSegmenter
 	private final int maxFrameBytes;
 	private final long unackedByteBudget;
 
-	private final List<byte[]> current = new ArrayList<>();
+	/** Frames held in memory right now. The memory bound this class exists to enforce. */
+	final List<byte[]> current = new ArrayList<>();
 	private int currentBytes;
 	private int nextSegmentIndex;
 	private long sessionBytes;
@@ -278,12 +279,6 @@ public class DropFrameSegmenter
 	public synchronized boolean truncated()
 	{
 		return truncated;
-	}
-
-	/** Frames held in memory right now. The memory bound this class exists to enforce. */
-	public synchronized int bufferedFrames()
-	{
-		return current.size();
 	}
 
 	/** Drop everything held. Used when a session ends with nothing worth uploading. */
