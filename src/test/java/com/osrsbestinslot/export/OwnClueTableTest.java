@@ -35,7 +35,7 @@ public class OwnClueTableTest
         Map<String,List<Object>> actual=table();assertEquals(173,actual.size());assertEquals(locked.get("table"),new com.google.gson.Gson().toJsonTree(actual));
         for(Map.Entry<String,List<Object>> e:actual.entrySet()) {
             List<Object> a=e.getValue();Map<String,Object> row=Map.of("kind",a.get(0),"x",a.get(1),"y",a.get(2),"plane",a.get(3),"qualification","library_base_location_not_resolved_quest_alternative");
-            assertNotNull(OwnStateEvent.projectValue("clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of(e.getKey(),row))));
+            assertNotNull(OwnEvent.value("own_state","clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of(e.getKey(),row))));
         }
     }
     @Test public void exportPinnedPublicPrimaryClueTableWithoutClientState() throws Exception

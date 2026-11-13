@@ -76,22 +76,27 @@ final class AccountProgressCapture
             storageRecovery.gap();
             return false;
         }
-        if (client == null || client.getGameState() != GameState.LOGGED_IN
-            || client.getLocalPlayer() == null || (client.getAccountHash() == -1L || client.getAccountHash() == 0L)
-            || client.getRealSkillLevel(Skill.HITPOINTS) <= 0)
-        {
-            reset();
-            return false;
-        }
-        String key = token + ":" + client.getAccountHash() + ":" + RuneScapeProfileType.getCurrent(client).name();
-        if (!Objects.equals(identity, key))
+        String key = account(client, token);
+        if (key == null || !key.equals(identity))
         {
             reset();
             identity = key;
-            settleTick = client.getTickCount();
+            settleTick = key == null ? settleTick : client.getTickCount();
             return false;
         }
         return client.getTickCount() - settleTick >= 2;
+    }
+
+    /**
+     * The capture identity "grant:account:profile" when the account can be read (logged in, a local player, a real
+     * account hash, hitpoints known), else null. Shared by the own-account capture gates.
+     */
+    static String account(Client client, String grant)
+    {
+        return client == null || client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
+            || client.getAccountHash() == -1L || client.getAccountHash() == 0L
+            || client.getRealSkillLevel(Skill.HITPOINTS) <= 0
+            ? null : grant + ":" + client.getAccountHash() + ":" + RuneScapeProfileType.getCurrent(client).name();
     }
 
     void collectionSlot(Client client, Object[] args, long now)

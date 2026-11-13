@@ -9,7 +9,6 @@ import net.runelite.api.InventoryID;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
-import net.runelite.api.Skill;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.client.config.RuneScapeProfileType;
 import java.util.ArrayList;
@@ -86,20 +85,18 @@ final class OwnGameplayCapture
     {
         if (client != null && client.getGameState() == GameState.LOADING)
         {
-            gap(); return false;
+            sceneGap(); return false;
         }
-        if (client == null || client.getGameState() != GameState.LOGGED_IN
-            || client.getLocalPlayer() == null || client.getAccountHash() == 0
-            || client.getAccountHash() == -1 || client.getRealSkillLevel(Skill.HITPOINTS) <= 0)
+        String account = AccountProgressCapture.account(client, grantIdentity);
+        if (account == null)
         {
             reset(); return false;
         }
-        String nextProfile = RuneScapeProfileType.getCurrent(client).name();
         Integer nextType = AccountProgressCapture.bit(client, client.getVarps(), 1777);
-        String next = grantIdentity + ":" + client.getAccountHash() + ":" + nextProfile + ":" + nextType;
+        String next = account + ":" + nextType;
         if (!next.equals(identity))
         {
-            reset(); identity = next; session = UUID.randomUUID().toString(); profile = nextProfile;
+            reset(); identity = next; session = UUID.randomUUID().toString(); profile = RuneScapeProfileType.getCurrent(client).name();
             accountType = nextType; settledAt = client.getTickCount();
             gapReason = "session_baseline";
             return false;
@@ -108,10 +105,20 @@ final class OwnGameplayCapture
         return client.getTickCount() - settledAt >= 2;
     }
 
+    /** A lost or reversed tick: nothing observed before it connects to what follows, so every state re-baselines. */
     void gap()
     {
-        // A scene reload cannot connect an NPC index or an absolute state to the previous scene.
-        targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; states.clear(); activities.reset(); interfaces.reset(); sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset(); bankTabs.reset(); lootKeys.reset();
+        sceneGap(); states.clear(); activities.reset(); interfaces.reset(); bankTabs.reset(); lootKeys.reset();
+    }
+
+    /**
+     * A scene reload cannot connect an NPC index, a hitsplat or a scene object to the previous scene. Account
+     * states, variables and the bank and loot-key packets are not scene-bound: they are kept, so an unchanged value
+     * is not sent again as a new baseline and a value that changed during the load is sent as an update.
+     */
+    void sceneGap()
+    {
+        targets.clear(); splats.clear(); deaths.clear(); deathTick = -1; sequences.reset(); scene.reset(); consumption.reset(); groundClues.reset();
         gapReason = "scene_gap"; lastTick = splatTick = -1;
     }
 
@@ -218,9 +225,8 @@ final class OwnGameplayCapture
         Map<String,Object> combat = OwnCombatEvent.from(session, row);
         if (combat != null && wornAtHit != null && "combat_hit".equals(combat.get("type"))) combat.put("worn", wornAtHit);
         if (combat != null) handOff(0, () -> combat);
-        if (OwnStateEvent.supports(kind)) handOff(1, () -> OwnStateEvent.from(session, row));
-        if (OwnSignalEvent.supports(kind)) handOff(2, () -> OwnSignalEvent.from(session, row));
-        if (OwnVarsEvent.supports(kind)) handOff(3, () -> OwnVarsEvent.from(session, row));
+        int stream = OwnEvent.stream(kind);
+        if (stream > 0) handOff(stream, () -> OwnEvent.from(session, row));
     }
 
     /** Count one observed event of a stream, build it, and count whether the sink took it. */
@@ -258,52 +264,25 @@ final class OwnGameplayCapture
         if (lastTick >= 0 && tick < lastTick) gap();
         lastTick = tick; lastReadAt = at;
         int[] live = client.getVarps(), vars = live == null ? null : live.clone();
-        Map<String,Object> barrows = new LinkedHashMap<>();
-        String[] brothers = {"ahrim", "dharok", "guthan", "karil", "torag", "verac"};
-        for (int i = 0; i < brothers.length; i++) barrows.put(brothers[i], AccountProgressCapture.bit(client, vars, 457+i));
-        barrows.put("reward_potential_raw", AccountProgressCapture.bit(client, vars, 463));
-        barrows.put("npcs_slain_raw", AccountProgressCapture.bit(client, vars, 464));
-        state("combat.barrows_state", "varbits:457-464", barrows, tick, at);
+        varbits(client, vars, at, 0, 1);
 
         Map<String,Object> raids = new LinkedHashMap<>();
         Integer inRaid = AccountProgressCapture.bit(client, vars, 5432);
         raids.put("in_raid", inRaid);
         raids.put("personal_points", Integer.valueOf(1).equals(inRaid) ? AccountProgressCapture.varp(vars, 4609) : null);
         state("combat.raid_points", "varbit:5432,varp:4609", raids, tick, at);
-
-        Map<String,Object> surge = new LinkedHashMap<>();
-        surge.put("timer_raw", AccountProgressCapture.bit(client, vars, 16270));
-        state("effects.surge", "varbit:16270", surge, tick, at);
-        Map<String,Object> charge = Fields.of(
-            "active_raw", AccountProgressCapture.bit(client, vars, 12411),
-            "cooldown_raw", AccountProgressCapture.bit(client, vars, 12138));
-        state("effects.death_charge", "varbits:12411,12138", charge, tick, at);
-
-        Map<String,Object> escape = Fields.of(
-            "afk_mode_raw", AccountProgressCapture.bit(client, vars, 14838),
-            "afk_delay_raw", AccountProgressCapture.bit(client, vars, 14849),
-            "ring_of_life_raw", AccountProgressCapture.bit(client, vars, 14857));
-        // Settings are not possession, server idle time, or a promise that teleport will occur.
-        state("effects.escape_crystal", "varbits:14838,14849,14857", escape, tick, at);
-
-        Map<String,Object> arena = Fields.of(
-            "entry_paid_raw", AccountProgressCapture.bit(client, vars, 5964),
-            "cooldown_raw", AccountProgressCapture.bit(client, vars, 10732),
-            "ticket_available_raw", AccountProgressCapture.bit(client, vars, 5962));
-        // Ticket availability is not lifetime currency and no path/action is inferred.
-        state("minigame.arena_state", "varbits:5964,10732,5962", arena, tick, at);
+        varbits(client, vars, at, 1, 5);
 
         Map<String,Object> goals = new LinkedHashMap<>();
-        // The 24 skills in the XpTracker goal order (OwnStateEvent.SKILLS is the same list in the same order).
-        for (int i = 0; i < OwnStateEvent.SKILLS.size(); i++)
+        // The 24 skills in the XpTracker goal order (OwnEvent.SKILLS is the same list in the same order).
+        for (int i = 0; i < OwnEvent.SKILLS.size(); i++)
         {
-            String skill = OwnStateEvent.SKILLS.get(i);
+            String skill = OwnEvent.SKILLS.get(i);
             // Sailing is outside the original contiguous 23-skill ranges. Pinned1.13.1 XpTracker uses these named varps.
             Integer start = AccountProgressCapture.varp(vars, skill.equals("SAILING") ? VarPlayerID.XPDROPS_SAILING_START : 1229+i);
             Integer end = AccountProgressCapture.varp(vars, skill.equals("SAILING") ? VarPlayerID.XPDROPS_SAILING_END : 1253+i);
             // Preserve raw values; no division, fictional gain, or inferred completion.
-            goals.put(skill, Fields.of("start_xp", start, "end_xp", end, "status", start == null || end == null ? "unknown" : end == 0 ? "unset"
-                : start < 0 || end <= start || end > 200000000 ? "invalid" : "configured"));
+            goals.put(skill, Fields.of("start_xp", start, "end_xp", end, "status", OwnEvent.goalStatus(start, end)));
         }
         state("skills.goal_xp", "varps:1229-1251,1253-1275,4964,4965", goals, tick, at);
         state("storage.rune_pouch", "own_inventory,varbits,enum:982", OwnRunePouchCapture.read(client,vars), tick, at);
@@ -313,6 +292,18 @@ final class OwnGameplayCapture
         sequences.poll(client, at, System.nanoTime());
         scene.poll(client, at);
         consumption.poll(client, at);
+    }
+
+    /** OwnActivityMappings.VARBITS rows from (inclusive) to to (exclusive), in table order, each one absolute state. */
+    void varbits(Client client, int[] vars, long at, int from, int to)
+    {
+        for (Object[] f : Arrays.copyOfRange(OwnActivityMappings.VARBITS, from, to))
+        {
+            Map<String,Object> value = new LinkedHashMap<>();
+            int[] ids = new int[f.length / 2 - 1];
+            for (int i = 0; i < ids.length; i++) value.put((String) f[2 + 2 * i], AccountProgressCapture.bit(client, vars, ids[i] = (int) f[3 + 2 * i]));
+            state((String) f[0], f[1] != null ? (String) f[1] : "varbits:" + Arrays.toString(ids), value, client.getTickCount(), at);
+        }
     }
 
     void hit(Client client, Actor actor, Hitsplat splat, long at)

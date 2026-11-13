@@ -447,8 +447,9 @@ final class StoreTools
 	}
 
 	/**
-	 * Ephemeral rows for the staff store overlay only. The upload readers below stay empty;
-	 * rendering a visible player must not populate event context, journals or snapshots.
+	 * Ephemeral rows for the staff store overlay only, from the same read as the snapshot: named players in display
+	 * range, nearest first and by name at equal distance. Rendering a visible player must not populate event context,
+	 * journals or snapshots.
 	 */
 	List<Map<String, Object>> nearbyPlayersForOverlay(int cap)
 	{
@@ -457,23 +458,12 @@ final class StoreTools
 		{
 			return rows;
 		}
-		Player self = plugin.client.getLocalPlayer();
-		WorldPoint me = self == null ? null : self.getWorldLocation();
-		if (me == null)
+		for (Map<String, Object> row : nearbyPlayersSnapshot(Integer.MAX_VALUE))
 		{
-			return rows;
-		}
-		for (Player player : WildernessPlayers.otherPlayers(plugin.client))
-		{
-			String name = Text.removeTags(player.getName());
-			WorldPoint location = player.getWorldLocation();
-			int distance = location.distanceTo(me);
-			if (name.isEmpty() || distance > StoreNearbyOverlay.DISPLAY_RANGE_TILES)
+			if (!"".equals(row.get("rsn")) && (Integer) row.get("dist") <= StoreNearbyOverlay.DISPLAY_RANGE_TILES)
 			{
-				continue;
+				rows.add(row);
 			}
-			Map<String, Object> row = Fields.of("rsn", name, "dist", distance, "cb", player.getCombatLevel());
-			rows.add(row);
 		}
 		rows.sort(Comparator
 			.comparingInt((Map<String, Object> row) -> (Integer) row.get("dist"))

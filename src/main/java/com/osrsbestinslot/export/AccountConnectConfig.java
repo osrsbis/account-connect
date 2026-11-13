@@ -47,6 +47,18 @@ public interface AccountConnectConfig extends Config
 		return "https://www.osrsbestinslot.com/wp-json/osrsbis/v1";
 	}
 
+	// The same key the Flipper sidebar checkbox stores; FlipperController follows it through ConfigChanged.
+	@ConfigItem(
+		keyName = "flipper",
+		name = "Enable Flipper",
+		description = "Enable Flipper",
+		position = 4
+	)
+	default boolean flipper()
+	{
+		return false;
+	}
+
 	// Delivery-proof screenshots are no longer a separate tick box (2026-09-02). They are part of core
 	// sync, active whenever a link token is set — the SAME gate as the
 	// account upload and the activity log — so what they capture is disclosed in the linkToken

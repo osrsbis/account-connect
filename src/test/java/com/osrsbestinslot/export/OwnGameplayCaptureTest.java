@@ -70,7 +70,7 @@ public class OwnGameplayCaptureTest
         net.runelite.api.widgets.Widget dialog=mock(net.runelite.api.widgets.Widget.class);when(dialog.getText()).thenReturn("The barrel is empty.");when(client.getWidget(193,2)).thenReturn(dialog);
         capture.interfaces.clientTick(client,OwnSignalEventTest.AT);capture.interfaces.clientTick(client,OwnSignalEventTest.AT);assertEquals(7,sent.size());
         assertEquals(7L,capture.snapshot().get("signal_events_handed_off"));
-        for(Map<String,Object> e:sent){assertNotNull(OwnSignalEvent.wire(e));assertFalse(new com.google.gson.Gson().toJson(e).contains("Your current"));}
+        for(Map<String,Object> e:sent){assertNotNull(OwnEvent.wire(e));assertFalse(new com.google.gson.Gson().toJson(e).contains("Your current"));}
         ChatMessage privateChat=new ChatMessage();privateChat.setType(ChatMessageType.PUBLICCHAT);privateChat.setMessage(texts[0]);capture.activities.chat(client,privateChat,OwnSignalEventTest.AT);assertEquals(7,sent.size());
         capture.reset();assertEquals(0L,capture.snapshot().get("signal_events_observed"));
         verify(client,never()).getPlayers();
@@ -81,7 +81,7 @@ public class OwnGameplayCaptureTest
         List<Map<String,Object>> sent=new ArrayList<>();
         capture=new OwnGameplayCapture(e->{if(!"own_vars".equals(e.get("type")))return false;sent.add(e);return true;});settle();
         long at=OwnStateEventTest.AT;capture.poll(client,at);assertEquals(17,sent.size());
-        for(Map<String,Object> event:sent)assertNotNull(OwnVarsEvent.wire(event));
+        for(Map<String,Object> event:sent)assertNotNull(OwnEvent.wire(event));
         Map<String,Object> surge=sent.stream().filter(e->"effects.surge".equals(e.get("var_family"))).findFirst().get();
         assertNull(((Map<?,?>)surge.get("values")).get("timer_raw"));String session=(String)surge.get("gameplay_session");
         tick++;capture.poll(client,at+600);assertEquals(17,sent.size());
@@ -132,7 +132,7 @@ public class OwnGameplayCaptureTest
         assertEquals(9L,capture.snapshot().get("state_events_observed"));
         assertEquals(8L,capture.snapshot().get("state_events_handed_off"));
         assertEquals(1L,capture.snapshot().get("state_events_not_handed_off"));
-        for(Map<String,Object> e:sent)assertNotNull(OwnStateEvent.wire(e));
+        for(Map<String,Object> e:sent)assertNotNull(OwnEvent.wire(e));
         capture.reset();assertEquals(0L,capture.snapshot().get("state_events_observed"));
     }
 
@@ -153,6 +153,51 @@ public class OwnGameplayCaptureTest
         capture.gap();tick++;capture.poll(client,2800);
         for(Map<String,Object> r:rows())if("storage.rune_pouch".equals(r.get("kind")))last=r;
         assertEquals("baseline",((Map<?,?>)last.get("value")).get("observation"));
+    }
+
+    /** The plugin's own LOADING event (not only ready()) keeps the states; a hop still re-baselines them. */
+    @Test public void thePluginsLoadingEventKeepsAccountStatesButAHopClearsThem() throws Exception
+    {
+        AccountConnectPlugin p=new AccountConnectPlugin();
+        Field f=AccountConnectPlugin.class.getDeclaredField("ownGameplay");f.setAccessible(true);f.set(p,capture);
+        settle();ItemContainer inventory=mock(ItemContainer.class);
+        when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inventory);
+        when(inventory.getItems()).thenReturn(new Item[]{new Item(ItemID.RUNE_POUCH,1)});
+        capture.poll(client,1000);tick++;capture.poll(client,1600);
+        Set<String> kept=new HashSet<>(((Map<String,?>)capture.snapshot().get("states")).keySet());
+        assertFalse(kept.isEmpty());
+        GameStateChanged loading=new GameStateChanged();loading.setGameState(GameState.LOADING);
+        p.onGameStateChanged(loading);
+        assertEquals("scene_gap",capture.snapshot().get("gap_reason"));
+        assertEquals(kept,((Map<String,?>)capture.snapshot().get("states")).keySet());
+        GameStateChanged hop=new GameStateChanged();hop.setGameState(GameState.HOPPING);
+        p.onGameStateChanged(hop);
+        assertTrue(((Map<String,?>)capture.snapshot().get("states")).isEmpty());
+    }
+
+    @Test public void aPlainSceneLoadKeepsAccountStatesSoOnlyChangedValuesAreSentAgain()
+    {
+        settle();ItemContainer inventory=mock(ItemContainer.class);
+        when(client.getItemContainer(InventoryID.INVENTORY)).thenReturn(inventory);
+        when(inventory.getItems()).thenReturn(new Item[]{new Item(ItemID.RUNE_POUCH,1)});
+        capture.poll(client,1000);tick++;capture.poll(client,1600);
+        int before=rows().size();
+        Map<String,Object> stateKinds=new HashMap<>(); // every state kind seen so far and its last row
+        for(Map<String,Object> r:rows())if(r.get("value") instanceof Map&&((Map<?,?>)r.get("value")).containsKey("observation"))stateKinds.put((String)r.get("kind"),r);
+        assertFalse(stateKinds.isEmpty());
+        when(client.getGameState()).thenReturn(GameState.LOADING);
+        assertFalse(capture.ready(client,TOKEN));
+        assertEquals("scene_gap",capture.snapshot().get("gap_reason"));
+        when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
+        assertTrue(capture.ready(client,TOKEN)); // same identity: no new session after a plain load
+        tick++;capture.poll(client,2200);
+        for(Map<String,Object> r:rows().subList(before,rows().size()))
+            assertFalse("unchanged "+r.get("kind")+" re-sent after a scene load",stateKinds.containsKey(r.get("kind"))
+                &&"baseline".equals(((Map<?,?>)r.get("value")).get("observation")));
+        when(inventory.getItems()).thenReturn(new Item[0]);tick++;capture.poll(client,2800);
+        Map<?,?> last=null;
+        for(Map<String,Object> r:rows())if("storage.rune_pouch".equals(r.get("kind")))last=r;
+        assertEquals("absolute_update",((Map<?,?>)last.get("value")).get("observation"));
     }
 
     @Test public void rejectsOtherPlayersAndOtherPlayersNpcHitsBeforeReadingTheirFields()

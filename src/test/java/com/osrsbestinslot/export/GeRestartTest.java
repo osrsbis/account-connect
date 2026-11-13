@@ -1,6 +1,7 @@
 package com.osrsbestinslot.export;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -195,7 +196,7 @@ public class GeRestartTest
 		assertEquals(40L, obs(buy).get("delta_from_qty"));
 		assertEquals(20L, obs(buy).get("delta_qty"));
 		assertEquals(1880L, obs(buy).get("delta_gp"));
-		assertEquals("unknown", obs(buy).get("fill_time"));
+		assertFalse("no constant fill_time label (0.7.72)", obs(buy).containsKey("fill_time"));
 		assertTrue("the interval starts before the restart",
 			((Number) obs(buy).get("interval_start_ms")).longValue() < ((Number) obs(buy).get("interval_end_ms")).longValue());
 
@@ -319,7 +320,7 @@ public class GeRestartTest
 		Map<String, Object> row = ge().get(0);
 		assertEquals(key, row.get("offer_key"));
 		assertEquals("never shown as an observed same-session fill", "inferred_across_gap", obs(row).get("identity"));
-		assertEquals("unknown", obs(row).get("fill_time"));
+		assertFalse(obs(row).containsKey("fill_time"));
 	}
 
 	/** A relist below the saved counter cannot continue the saved offer: nothing is credited from it. */

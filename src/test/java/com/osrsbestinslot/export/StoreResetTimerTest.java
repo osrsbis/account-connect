@@ -567,6 +567,29 @@ public class StoreResetTimerTest
 		assertTrue("an absent header must not silently revoke", plugin.grants.storeToolsEnabled());
 	}
 
+	/** Like the staff grant, the overlays count only on the official endpoint and only for the link that was granted. */
+	@Test
+	public void theGrantNeedsTheOfficialEndpointAndEndsWithTheLink() throws Exception
+	{
+		AccountConnectPlugin custom = new AccountConnectPlugin();
+		inject(custom, "config", new AccountConnectConfig()
+		{
+			@Override public String linkToken() { return "0123456789abcdef0123456789abcdef"; }
+			@Override public String apiBaseUrl() { return "https://example.invalid/api"; }
+		});
+		custom.grants.applyServerPolicy(policyResponse("on"));
+		assertFalse("a custom API base cannot turn the overlays on", custom.grants.storeToolsEnabled());
+
+		AccountConnectPlugin plugin = plugin();
+		plugin.grants.applyServerPolicy(policyResponse("on"));
+		assertTrue(plugin.grants.storeToolsEnabled());
+		net.runelite.client.events.ConfigChanged change = new net.runelite.client.events.ConfigChanged();
+		change.setGroup(AccountConnectPlugin.CONFIG_GROUP); change.setKey("linkToken");
+		change.setOldValue("0123456789abcdef0123456789abcdef"); change.setNewValue("ffffffffffffffffffffffffffffffff");
+		plugin.onConfigChanged(change);
+		assertFalse("another link does not inherit the grant", plugin.grants.storeToolsEnabled());
+	}
+
 	/** Build a 200 carrying (or omitting) the X-Store-Tools header. */
 	private static okhttp3.Response policyResponse(String storeTools)
 	{

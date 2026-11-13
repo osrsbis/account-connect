@@ -128,7 +128,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	static final String PLUGIN_VERSION = "0.7.69";
+	static final String PLUGIN_VERSION = "0.7.72";
 	static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
@@ -156,9 +156,7 @@ public class AccountConnectPlugin extends Plugin
 		if (!grants.gameplayGranted()) return false;
 		String legacyType = String.valueOf(observation.get("type"));
 		if (!legacyOwnCombatAllowed(legacyType)) return false;
-		if ("own_signal".equals(legacyType) && OwnSignalEvent.wire(observation) == null) return false;
-		if ("own_state".equals(legacyType) && OwnStateEvent.wire(observation) == null) return false;
-		if ("own_vars".equals(legacyType) && OwnVarsEvent.wire(observation) == null) return false;
+		if (OwnEvent.handles(legacyType) && OwnEvent.wire(observation) == null) return false;
 		Map<String,Object> fields = new LinkedHashMap<>(observation); fields.remove("type");
 		events.emitEvent(String.valueOf(observation.get("type")), fields); return true;
 	}
@@ -166,7 +164,7 @@ public class AccountConnectPlugin extends Plugin
 	/**
 	 * Own combat and own signals on the legacy event writer: only combat_hit / combat_npc_end / own_signal, only
 	 * with the own-gameplay grant for the current token, only when no Queue scope is active and the live client
-	 * still matches the active account and profile. State and vars must pass their closed wire projection.
+	 * still matches the active account and profile. State, signal and vars must pass their closed wire projection.
 	 */
 	boolean legacyOwnCombatAllowed(String type)
 	{
@@ -330,10 +328,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	void clearClientThreadStateOnShutdown()
 	{
-		grants.clearDeliveryCaptureGrant();
-		grants.collectionGrantAccount = null;
-		grants.pluginInventoryGrantToken = null;
-		grants.clearVerificationGrant();
+		grants.clearCollectionGrants();
 		store.shopOpen = false; // re-enable must wait for a new shop-open event
 		ge.reset();
 		session.lastSkillLevel.clear();		// re-enabled on another account: its levels are a baseline, not level-ups
@@ -478,20 +473,14 @@ public class AccountConnectPlugin extends Plugin
 		if (event != null && CONFIG_GROUP.equals(event.getGroup()) && "linkToken".equals(event.getKey())
 			&& !trimmed(event.getOldValue()).equals(trimmed(event.getNewValue())))
 		{
-			grants.clearVerificationGrant();
-			grants.clearDeliveryCaptureGrant();
-			grants.collectionGrantAccount = null;
-			grants.pluginInventoryGrantToken = null;
+			grants.clearCollectionGrants();
 			spooler.spoolOnTokenChangedWithoutAccount();
-			outbox.revokePublicOutbox(null);
-			grants.eventQueueGrantToken = null;
-			grants.eventQueueScope = null;
-			grants.progressGrantToken = null;
-			grants.progressGrantEpoch++;
-			grants.gameplayGrantToken = null;
-			grants.gameplayGrantEpoch++;
+			outbox.revokePublicOutbox(null);	// ends the Queue and journal grants too
+			grants.clearGameplayGrants();
 			grants.setBroadCaptureGrant(null, false);
 			grants.clearStaffCaptureGrant();
+			grants.serverStoreToolsEnabled = false;
+			store.removeResetTimer();
 			uploader.snapshotRetryPending = false;
 			// A visit belongs to the token that was granted at its open: never finish it under another one.
 			bankVisit.bankEvidenceToken = null;
@@ -612,8 +601,8 @@ public class AccountConnectPlugin extends Plugin
 	public void eventFlushTask()
 	{
 		outbox.pumpPublicOutbox();
+		spooler.pumpSpool();
 		events.flushEvents();
-		spooler.replaySpoolTick();
 	}
 
 	@Schedule(period = 5, unit = ChronoUnit.SECONDS)
@@ -889,60 +878,11 @@ public class AccountConnectPlugin extends Plugin
 		}
 		else if (groupId == TradeCapture.TRADE_MAIN_GROUP_ID)
 		{
-			// A 335-load ALWAYS begins a fresh trade, so clear the other-player pendings first.
-			//
-			// Without this, a trade that ends WITHOUT acceptance leaks into the next one. A decline routes
-			// through handleTradeChat, which early-returns when screenshots are off (the DEFAULT), so
-			// resetTradeState() never runs; and handleTradeWidgetClosed only resets when tradeArmed, which
-			// is set at confirm-load with screenshots on — so a trade abandoned at the first screen never
-			// arms either. Combined with 0.7.4's last-non-empty-wins poll and its "only fill if empty"
-			// confirm guards, the stale values then SURVIVE a next trade whose partner offers nothing —
-			// the classic gold-delivery shape. Demonstrated: Bob declines offering a Bandos chestplate,
-			// the player then gives an item to Alice who offers nothing, and the emitted event reads
-			// counterparty=Alice received=[Bandos chestplate].
-			//
-			// That is worse than the bug 0.7.4 fixes: 0.7.3 emitted EMPTY fields, this would write
-			// confidently WRONG trade rows on staff delivery accounts, and attribute a third player's RSN
-			// to a trade he was never in. Clearing at 335-open closes it at the only point that is
-			// guaranteed to run for every trade.
-			trade.pendingCounterparty = null;
-			trade.pendingCounterpartyCombatLevel = null;
-			trade.pendingTradeReceived = null;
-			trade.pendingReceivedText = null;
-			// Main trade screen open: begin polling the other player's side (readable here, gone by confirm).
-			// onGameTick keeps the buffer current; the last read before the 334 transition = the final offer.
-			trade.tradeMainOpen = true;
-			trade.captureOtherOfferWhileMainOpen();	// initial read (offer may still be empty; the poll catches it)
+			trade.mainLoaded();
 		}
 		else if (groupId == TradeCapture.TRADE_CONFIRM_GROUP_ID)
 		{
-			trade.tradeMainOpen = false;	// moved to confirm — stop polling; the last 335 poll holds the final offer
-			trade.pendingTradeGiven = trade.readOwnOffer();	// own offer container (90) persists across the transition
-			// Counterparty + received[] come from the 335 poll above (the only place they are readable). Fall
-			// back to the confirm screen ONLY when the poll captured nothing — counterpartyName() is usually
-			// null here (335 title gone) and readReceivedOffer() reads the value-text column.
-			if (!grants.captureEnabled())
-			{
-				trade.pendingCounterparty = null;
-				trade.pendingCounterpartyCombatLevel = null;
-			}
-			else if (trade.pendingCounterparty == null || trade.pendingCounterparty.isEmpty())
-			{
-				trade.pendingCounterparty = trade.counterpartyName();
-				trade.pendingCounterpartyCombatLevel = trade.visibleCounterpartyCombatLevel(trade.pendingCounterparty);
-			}
-			if (trade.pendingTradeReceived == null || trade.pendingTradeReceived.isEmpty())
-			{
-				trade.pendingTradeReceived = trade.readReceivedOffer();
-			}
-			// Lossless text fallback only when we still have no structured items (e.g. big "Lots!" trade the
-			// poll missed) — keeps the existing "no received_text when items exist" contract. Staff only:
-			// the text is the other player's offer as the game wrote it.
-			if (grants.captureEnabled() && (trade.pendingTradeReceived == null || trade.pendingTradeReceived.isEmpty())
-				&& (trade.pendingReceivedText == null || trade.pendingReceivedText.isEmpty()))
-			{
-				trade.pendingReceivedText = trade.readReceivedText();
-			}
+			trade.confirmLoaded();
 		}
 	}
 

@@ -11,14 +11,14 @@ public class OwnStateEventTest
     static Map<String,Object> goalEvent()
     {
         Map<String,Object> goals = new LinkedHashMap<>();
-        for (String skill : OwnStateEvent.SKILLS)
+        for (String skill : OwnEvent.SKILLS)
             goals.put(skill, new LinkedHashMap<>(Map.of("start_xp", 0, "end_xp", 100, "status", "configured")));
         return from("skills.goal_xp", goals);
     }
     static Map<String,Object> from(String kind, Map<String,Object> values)
     {
         Map<String,Object> v = new LinkedHashMap<>(values); v.put("observation", "baseline");
-        return OwnStateEvent.from("12345678-1234-1234-1234-123456789abc",
+        return OwnEvent.from("12345678-1234-1234-1234-123456789abc",
             Map.of("kind",kind,"value",v,"sequence",1,"tick",42,"observed_at_ms",AT));
     }
     static Map<String,Object> bankEvent()
@@ -57,23 +57,23 @@ public class OwnStateEventTest
             Map<String,Object> event=from(entry.getKey(),entry.getValue());assertNotNull(event);event.put("event_id","a".repeat(32));event.put("ts",AT);
             ((Map<String,Object>)event.get("state_value")).put("name","PRIVATE");Map<String,Object> projected=PublicTransport.event(event);
             assertNotNull(projected);assertFalse(gson.toJson(projected).contains("PRIVATE"));
-            assertEquals(OwnStateEvent.wire(projected),OwnStateEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
+            assertEquals(OwnEvent.wire(projected),OwnEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
         }
-        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of()).get("orders_observed"));
-        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of()).get("visible_destinations"));
-        assertEquals(List.of(),OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of())).get("visible_destinations"));
-        assertNull(OwnStateEvent.projectValue("raid_context",Map.of()).get("room_observed"));
+        assertNull(OwnEvent.value("own_state","mixology_orders",Map.of()).get("orders_observed"));
+        assertNull(OwnEvent.value("own_state","spirit_destinations",Map.of()).get("visible_destinations"));
+        assertEquals(List.of(),OwnEvent.value("own_state","spirit_destinations",Map.of("visible_destinations",List.of())).get("visible_destinations"));
+        assertNull(OwnEvent.value("own_state","raid_context",Map.of()).get("room_observed"));
     }
     @Test public void malformedInterfaceShapesAndStaleRaidRoomNeverBecomeState()
     {
-        assertNull(OwnStateEvent.projectValue("fairy_favourites",Map.of("favourite_codes_visible",List.of("BKS"))));
-        assertNull(OwnStateEvent.projectValue("fairy_favourites",Map.of("favourite_codes_visible",Collections.nCopies(10,"PRIVATE"))));
-        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of("orders_observed",List.of("AAA","AAA","PRIVATE"))));
-        assertNull(OwnStateEvent.projectValue("mixology_orders",Map.of("orders_observed",List.of("AAA","MAL"))));
-        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","PRIVATE house","disabled_style_observed",false)))));
-        assertNull(OwnStateEvent.projectValue("spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","Grand Exchange")))));
-        assertNull(OwnStateEvent.projectValue("raid_context",Map.of("party_status_raw",0,"room_observed","Verzik Vitur")));
-        assertNull(OwnStateEvent.projectValue("raid_context",Map.of("party_status_raw",2,"room_observed","PRIVATE")));
+        assertNull(OwnEvent.value("own_state","fairy_favourites",Map.of("favourite_codes_visible",List.of("BKS"))));
+        assertNull(OwnEvent.value("own_state","fairy_favourites",Map.of("favourite_codes_visible",Collections.nCopies(10,"PRIVATE"))));
+        assertNull(OwnEvent.value("own_state","mixology_orders",Map.of("orders_observed",List.of("AAA","AAA","PRIVATE"))));
+        assertNull(OwnEvent.value("own_state","mixology_orders",Map.of("orders_observed",List.of("AAA","MAL"))));
+        assertNull(OwnEvent.value("own_state","spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","PRIVATE house","disabled_style_observed",false)))));
+        assertNull(OwnEvent.value("own_state","spirit_destinations",Map.of("visible_destinations",List.of(Map.of("destination","Grand Exchange")))));
+        assertNull(OwnEvent.value("own_state","raid_context",Map.of("party_status_raw",0,"room_observed","Verzik Vitur")));
+        assertNull(OwnEvent.value("own_state","raid_context",Map.of("party_status_raw",2,"room_observed","PRIVATE")));
     }
 
     @Test public void threeTypedFamiliesSurviveJsonReplayWithoutPrivateExtrasOrFalseGains()
@@ -98,14 +98,25 @@ public class OwnStateEventTest
     @Test public void contradictoryOrUnknownSourcesNeverBecomeAcceptedStatePayloads()
     {
         Map<String,Object> goal = goalEvent(); ((Map<?,?>)((List<?>)((Map<?,?>)goal.get("state_value")).get("goals")).get(0)).clear();
-        assertNull(OwnStateEvent.wire(goal));
-        Map<String,Object> bank = bankEvent(); bank.put("direct",true); assertNull(OwnStateEvent.wire(bank));
+        assertNull(OwnEvent.wire(goal));
+        Map<String,Object> bank = bankEvent(); bank.put("direct",true); assertNull(OwnEvent.wire(bank));
         bank = bankEvent(); ((Map<String,Object>)bank.get("state_value")).put("container_observed_at_ms",AT+1);
-        assertNull(OwnStateEvent.wire(bank));
+        assertNull(OwnEvent.wire(bank));
         Map<String,Object> pouch = pouchEvent(); ((Map<String,Object>)pouch.get("state_value")).put("pouch_item_ids",List.of(995));
-        assertNull(OwnStateEvent.wire(pouch));
+        assertNull(OwnEvent.wire(pouch));
         goal = goalEvent(); goal.put("source","NEVER_SEND"); assertNull(PublicTransport.event(goal));
         assertNull(from("unreviewed.family",Map.of()));
+        // Values the capture could never produce stay dropped: a status that contradicts its own numbers.
+        goal = goalEvent(); ((Map<String,Object>)((List<?>)((Map<?,?>)goal.get("state_value")).get("goals")).get(0)).put("status","unset");
+        assertNull(OwnEvent.wire(goal));
+        pouch = pouchEvent(); ((Map<String,Object>)((List<?>)((Map<?,?>)pouch.get("state_value")).get("slots")).get(2)).put("status","observed_cached");
+        assertNull(OwnEvent.wire(pouch));
+        bank = bankEvent(); ((Map<String,Object>)((List<?>)((Map<?,?>)bank.get("state_value")).get("tabs")).get(0)).put("currency_gp_equivalent",2101);
+        assertNull(OwnEvent.wire(bank));
+        bank = bankEvent(); ((Map<String,Object>)((List<?>)((Map<?,?>)bank.get("state_value")).get("tabs")).get(1)).put("start_slot",3);
+        assertNull(OwnEvent.wire(bank));
+        // A state body never passes under another event type.
+        goal = goalEvent(); goal.put("type","own_signal"); assertNull(OwnEvent.wire(goal)); assertNull(PublicTransport.event(goal));
     }
 
     @Test public void missingValuesStayUnknownAndNarrowerGrantsCannotDiscardTheirDurableRows() throws Exception

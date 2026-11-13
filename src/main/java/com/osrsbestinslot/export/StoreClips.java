@@ -4,7 +4,6 @@ import java.awt.Graphics2D;
 import java.awt.Image;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -12,13 +11,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.MultipartBody;
 import okhttp3.OkHttpClient;
-import okhttp3.Request;
 import okhttp3.RequestBody;
-import okhttp3.Response;
 
 /** Staff store clips: frame sampling during a shop visit and the chunked upload after a buy or sell. */
 @Slf4j
@@ -76,14 +71,28 @@ final class StoreClips
 	volatile boolean storeTxThisVisit;
 	/** The visit's kept frames (start, every moment, baseline); created per capture, cleared on stop. */
 	volatile StoreVisitClip clipVisit;
-	/** Wall time (ms) the frame in flight was sampled at. The frame is kept at THIS time, not its encode time. */
-	private volatile long clipFrameSampledAtMillis;
-	/** Wall-clock (nanoTime) of the next frame to sample; a render tick before this is skipped. */
-	private volatile long nextClipSampleAt;
-	/** Set on a sampled tick to request one frame from DrawManager; cleared when that frame arrives. */
-	volatile boolean clipFramePending;
-	/** Per-frame render callback, registered with DrawManager only while capturing. */
-	private final Runnable clipFrameTick = this::onClipFrameTick;
+	/** The visit's frame sampler; a frame is kept at the time its tick was sampled, not its encode time. */
+	final FrameSampler sampler = new FrameSampler()
+	{
+		AccountConnectPlugin plugin()
+		{
+			return plugin;
+		}
+
+		boolean capturing()
+		{
+			return clipCapturing;
+		}
+
+		void frame(byte[] jpeg, long sampledAtMillis)
+		{
+			StoreVisitClip visit = clipVisit;
+			if (visit != null)
+			{
+				visit.offer(jpeg, sampledAtMillis);	// null/empty is ignored
+			}
+		}
+	};
 
 	/**
 	 * Arm capture for a shop visit: fresh ring, reset the decimation clock + tx flag, and start listening
@@ -97,102 +106,8 @@ final class StoreClips
 		}
 		clipVisit = new StoreVisitClip(MAX_CLIP_FRAMES, MAX_CLIP_BURST_BYTES, MAX_CLIP_FRAME_BYTES);
 		storeTxThisVisit = false;
-		nextClipSampleAt = 0L;			// 0 => the first render tick samples immediately
-		clipFramePending = false;
 		clipCapturing = true;
-		plugin.drawManager.registerEveryFrameListener(clipFrameTick);
-	}
-
-	/**
-	 * Wall-clock 1-in-time decimation: returns true at most once per (1/CLIP_FPS) second regardless of
-	 * render fps (render fluctuates ~20-50fps, so a frame-count divisor would drift). Advances the gate
-	 * on every hit so it is a steady rate, not a one-shot.
-	 */
-	boolean shouldSampleClipFrame(long nowNanos)
-	{
-		if (nowNanos < nextClipSampleAt)
-		{
-			return false;
-		}
-		final long period = 1_000_000_000L / CLIP_FPS;
-		// Advance from the SCHEDULED boundary, not from the observed tick.
-		//
-		// `nextClipSampleAt = nowNanos + period` looks equivalent and is not: a render tick lands on its
-		// own grid (~20ms at 50fps), so each sample fires slightly AFTER its boundary and that remainder
-		// is then baked into the next deadline. The error compounds. At 1fps it hid — 20ms against a
-		// 1000ms period — but at 8fps it is 20ms against 125ms and it cost a real frame every two
-		// seconds: measured 15 samples where 16 were due, ~6% of a 25-second clip silently missing.
-		// Advancing the deadline by whole periods keeps the rate exact over any span.
-		//
-		// After a long gap (a hitch, or a client that was not rendering) the deadline can sit far in the
-		// past; walking it forward in whole periods would then fire a burst of catch-up samples on
-		// consecutive frames. Re-base to `nowNanos` in that case: a gap loses frames either way, and
-		// duplicating the same instant several times is not evidence.
-		if (nextClipSampleAt == 0L || nowNanos - nextClipSampleAt >= period)
-		{
-			nextClipSampleAt = nowNanos + period;
-		}
-		else
-		{
-			nextClipSampleAt += period;
-		}
-		return true;
-	}
-
-	/**
-	 * Render-loop callback (runs every frame while capturing). Decimates by wall clock, then asks
-	 * DrawManager for the next composited frame; that frame arrives on the consumer, is converted to an
-	 * RGB (no-alpha) buffer, downscaled, JPEG-ENCODED, and the BYTES are stored.
-	 *
-	 * ⚠ Encoding happens HERE, per frame, not at upload time — the ring must never hold decoded images
-	 * (see ClipRingBuffer's header: 360 raw frames is ~400MB and freezes the client). The encode runs on
-	 * the executor so the render thread is not blocked by ImageIO, and clipFramePending is cleared only
-	 * once that encode has finished, so at most ONE frame is ever in flight and the ring stays in
-	 * chronological order even though the executor is a shared pool.
-	 */
-	void onClipFrameTick()
-	{
-		if (!clipCapturing || clipFramePending)
-		{
-			return;
-		}
-		if (!shouldSampleClipFrame(System.nanoTime()))
-		{
-			return;
-		}
-		clipFramePending = true;
-		final long sampledAt = System.currentTimeMillis();
-		clipFrameSampledAtMillis = sampledAt;
-		plugin.drawManager.requestNextFrameListener(img ->
-		{
-			if (img == null)
-			{
-				clipFramePending = false;
-				return;
-			}
-			// Copy + downscale on this thread: `img` is DrawManager's buffer and is not ours to keep.
-			final BufferedImage scaled = downscaleRgb(toRgbFrame(img), MAX_FRAME_WIDTH);
-			if (scaled == null)
-			{
-				clipFramePending = false;
-				return;
-			}
-			plugin.executor.submit(() ->
-			{
-				try
-				{
-					StoreVisitClip visit = clipVisit;
-					if (visit != null)
-					{
-						visit.offer(AccountConnectPlugin.encodeJpeg(scaled), sampledAt);	// null/empty is ignored
-					}
-				}
-				finally
-				{
-					clipFramePending = false;
-				}
-			});
-		});
+		sampler.start();
 	}
 
 	/**
@@ -207,10 +122,9 @@ final class StoreClips
 			return;
 		}
 		clipCapturing = false;
-		plugin.drawManager.unregisterEveryFrameListener(clipFrameTick);
+		sampler.stop();
 		StoreVisitClip visit = clipVisit;
 		clipVisit = null;
-		clipFramePending = false;
 		boolean hadTx = storeTxThisVisit;
 		storeTxThisVisit = false;
 		if (visit == null)
@@ -403,60 +317,28 @@ final class StoreClips
 			endStoreClipChunk(chunk, held, false, "upload no longer allowed for this token", attempt);
 			return;
 		}
-		Request request = new Request.Builder()
-			.url(base + "/store-frames-ingest")
-			.post(ServerGrants.withMediaAccount(buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS), captureAccount))
-			.build();
-
-		uploadClient(plugin.okHttpClient).newCall(request).enqueue(new Callback()
+		FramesUpload.post(plugin.okHttpClient, base, buildStoreClipBody(chunk, token, capturedAt, CLIP_FPS), captureAccount, new FramesUpload.Answer()
 		{
 			@Override
-			public void onFailure(Call call, IOException e)
+			public void stored(boolean refused)
 			{
-				retryOrGiveUp(e == null ? "io" : String.valueOf(e.getMessage()), 0L);
+				// A 200 {"dropped":...} is a deliberate refusal (not staff, clips off).
+				// Retrying it is the error loop that 200 exists to prevent.
+				if (refused)
+				{
+					log.debug("OSRS BiS store-clip chunk refused by the server with a 200");
+				}
+				endStoreClipChunk(chunk, held, !refused, null, attempt);
 			}
 
 			@Override
-			public void onResponse(Call call, Response response)
+			public void rejected(int code)
 			{
-				try
-				{
-					int code = response.code();
-					if (response.isSuccessful())
-					{
-						// A 200 {"dropped":...} is a deliberate refusal (not staff, clips off).
-						// Retrying it is the error loop that 200 exists to prevent.
-						if (DropProof.dropSegmentWasRefused(response))
-						{
-							endStoreClipChunk(chunk, held, false, null, attempt);
-							log.debug("OSRS BiS store-clip chunk refused by the server with a 200");
-							return;
-						}
-						endStoreClipChunk(chunk, held, true, null, attempt);
-						return;
-					}
-					if (code == 429)
-					{
-						Long ra = SnapshotUploader.parseRetryAfterSeconds(response.header("Retry-After"));
-						retryOrGiveUp("http 429", ra == null ? 0L : ra * 1000L);
-					}
-					else if (code >= 500)
-					{
-						retryOrGiveUp("http " + code, 0L);
-					}
-					else
-					{
-						// Any other 4xx fails identically on every attempt.
-						endStoreClipChunk(chunk, held, false, "http " + code, attempt);
-					}
-				}
-				finally
-				{
-					response.close();
-				}
+				endStoreClipChunk(chunk, held, false, "http " + code, attempt);
 			}
 
-			private void retryOrGiveUp(String why, long retryAfterMs)
+			@Override
+			public void retry(String why, long retryAfterMs)
 			{
 				if (attempt + 1 >= CLIP_CHUNK_ATTEMPTS)
 				{

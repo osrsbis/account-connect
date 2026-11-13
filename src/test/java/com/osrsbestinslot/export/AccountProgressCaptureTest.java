@@ -402,8 +402,17 @@ public class AccountProgressCaptureTest
         AccountConnectPlugin p = plugin();
         p.grants.applyServerPolicy(policy("X-Account-Progress", "on").newBuilder().code(500).build(), TOKEN);
         assertFalse(p.grants.progressGranted());
-        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on").newBuilder().header("X-Own-Gameplay", "on")
+            .header("X-Broad-Capture", "on").build(), TOKEN);
         assertTrue(p.grants.progressGranted());
+        // A site error or a rate limit says nothing about a grant: capture stays on and nothing re-baselines.
+        for (int code : new int[]{429, 500, 503})
+        {
+            p.grants.applyServerPolicy(policy("X-Sync-Interval", "30").newBuilder().code(code).build(), TOKEN);
+            assertTrue(code + " keeps progress", p.grants.progressGranted());
+            assertEquals(code + " keeps gameplay", TOKEN, p.grants.gameplayGrantToken);
+            assertEquals(code + " keeps broad capture", TOKEN, p.grants.broadCaptureToken);
+        }
         p.grants.applyServerPolicy(policy("X-Sync-Interval", "30").newBuilder().code(403).build(), TOKEN);
         assertFalse(p.grants.progressGranted());
         assertNull(p.progressBlock());

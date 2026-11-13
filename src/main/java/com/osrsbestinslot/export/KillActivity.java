@@ -22,6 +22,7 @@ import net.runelite.api.Skill;
 import net.runelite.api.WorldType;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
@@ -40,25 +41,25 @@ final class KillActivity
 	// wildy loot chest. These NEVER fire LootManager (ServerNpcLoot) — RuneLite itself captures them only in
 	// the OPTIONAL LootTrackerPlugin via WidgetLoaded + a reward-container read, which a user can disable.
 	// We replicate the same widget-group -> container reads here (ids javap-verified vs 1.12.33 gameval). ----
-	private static final int RAIDS_REWARDS_GROUP = InterfaceID.RAIDS_REWARDS;			// 539 CoX
-	private static final int RAIDS_REWARDS_CONTAINER = net.runelite.api.gameval.InventoryID.RAIDS_REWARDS;		// 581
-	private static final int TOB_CHESTS_GROUP = InterfaceID.TOB_CHESTS;				// 23
-	private static final int TOB_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOB_CHESTS;			// 612
-	private static final int TOA_CHESTS_GROUP = InterfaceID.TOA_CHESTS;				// 771
-	private static final int TOA_CHESTS_CONTAINER = net.runelite.api.gameval.InventoryID.TOA_CHESTS;			// 811 (personal split)
-	private static final int BARROWS_REWARD_GROUP = InterfaceID.BARROWS_REWARD;		// 155
-	private static final int TRAIL_REWARDSCREEN_GROUP = InterfaceID.TRAIL_REWARDSCREEN;	// 73 (clue)
-	private static final int TRAIL_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.TRAIL_REWARDINV;		// 141 (Barrows + clues share it)
-	private static final int COLOSSEUM_REWARD_GROUP = InterfaceID.COLOSSEUM_REWARD_CHEST_2;	// 864
-	private static final int COLOSSEUM_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.COLOSSEUM_REWARDS;	// 843
-	private static final int PMOON_REWARD_GROUP = InterfaceID.PMOON_REWARD;			// 868 Lunar Chest
-	private static final int PMOON_REWARD_CONTAINER = net.runelite.api.gameval.InventoryID.PMOON_REWARDINV;		// 847
-	private static final int WILDY_LOOT_CHEST_GROUP = InterfaceID.WILDY_LOOT_CHEST;	// 742
-	private static final int[] WILDY_LOOT_CONTAINERS = {
-		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV0, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV1,
-		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV2, net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV3,
-		net.runelite.api.gameval.InventoryID.DEADMAN_LOOT_INV4,	// 558-562
+	// {widget group, loot source, one emit per instance visit, reward container ids...}. Barrows and clues share
+	// TRAIL_REWARDINV; ToA's container is the personal split.
+	private static final Object[][] CHESTS = {
+		{InterfaceID.RAIDS_REWARDS, "Chambers of Xeric", true, InventoryID.RAIDS_REWARDS},
+		{InterfaceID.TOB_CHESTS, "Theatre of Blood", true, InventoryID.TOB_CHESTS},
+		{InterfaceID.TOA_CHESTS, "Tombs of Amascut", true, InventoryID.TOA_CHESTS},
+		{InterfaceID.BARROWS_REWARD, "Barrows", false, InventoryID.TRAIL_REWARDINV},
+		{InterfaceID.TRAIL_REWARDSCREEN, "Clue Scroll", false, InventoryID.TRAIL_REWARDINV},
+		{InterfaceID.COLOSSEUM_REWARD_CHEST_2, "Fortis Colosseum", true, InventoryID.COLOSSEUM_REWARDS},
+		{InterfaceID.PMOON_REWARD, "Lunar Chest", true, InventoryID.PMOON_REWARDINV},
+		{InterfaceID.WILDY_LOOT_CHEST, "Loot Chest", false, InventoryID.DEADMAN_LOOT_INV0, InventoryID.DEADMAN_LOOT_INV1,
+			InventoryID.DEADMAN_LOOT_INV2, InventoryID.DEADMAN_LOOT_INV3, InventoryID.DEADMAN_LOOT_INV4},
 	};
+	/** The reward interface group of a chest loot source, or -1 (ground drops and every other source). */
+	static int rewardGroup(Object source)
+	{
+		for (Object[] c : CHESTS) if (c[1].equals(source)) return (int) c[0];
+		return -1;
+	}
 	private static final int TOB_REGION = 12867;		// Theatre of Blood — the chest widget only counts inside
 	private static final int TOB_LOBBY_REGION = 14642;
 	boolean chestLooted;		// one instanced-chest emit per visit; reset on LOADING (region change)
@@ -79,68 +80,38 @@ final class KillActivity
 		{
 			return;
 		}
-		String source;
-		int[] containers;
-		boolean instanced = false;
-		switch (groupId)
+		Object[] chest = null;
+		for (Object[] c : CHESTS)
 		{
-			case RAIDS_REWARDS_GROUP:
-				source = "Chambers of Xeric";
-				containers = new int[]{RAIDS_REWARDS_CONTAINER};
-				instanced = true;
-				break;
-			case TOB_CHESTS_GROUP:
+			if ((int) c[0] == groupId)
 			{
-				Map<String, Object> loc = plugin.snapshots.currentLocation();
-				int region = loc == null ? -1 : (Integer) loc.get("region_id");
-				if (region != TOB_REGION && region != TOB_LOBBY_REGION)
-				{
-					return;	// the group can load outside the chest room — only count in ToB itself
-				}
-				source = "Theatre of Blood";
-				containers = new int[]{TOB_CHESTS_CONTAINER};
-				instanced = true;
-				break;
+				chest = c;
 			}
-			case TOA_CHESTS_GROUP:
-				source = "Tombs of Amascut";
-				containers = new int[]{TOA_CHESTS_CONTAINER};
-				instanced = true;
-				break;
-			case BARROWS_REWARD_GROUP:
-				source = "Barrows";
-				containers = new int[]{TRAIL_REWARD_CONTAINER};
-				break;
-			case TRAIL_REWARDSCREEN_GROUP:
-				source = "Clue Scroll";
-				containers = new int[]{TRAIL_REWARD_CONTAINER};
-				break;
-			case COLOSSEUM_REWARD_GROUP:
-				source = "Fortis Colosseum";
-				containers = new int[]{COLOSSEUM_REWARD_CONTAINER};
-				instanced = true;
-				break;
-			case PMOON_REWARD_GROUP:
-				source = "Lunar Chest";
-				containers = new int[]{PMOON_REWARD_CONTAINER};
-				instanced = true;
-				break;
-			case WILDY_LOOT_CHEST_GROUP:
-				source = "Loot Chest";
-				containers = WILDY_LOOT_CONTAINERS;
-				break;
-			default:
-				return;
 		}
+		if (chest == null)
+		{
+			return;
+		}
+		if (groupId == InterfaceID.TOB_CHESTS)
+		{
+			Map<String, Object> loc = plugin.snapshots.currentLocation();
+			int region = loc == null ? -1 : (Integer) loc.get("region_id");
+			if (region != TOB_REGION && region != TOB_LOBBY_REGION)
+			{
+				return;	// the group can load outside the chest room — only count in ToB itself
+			}
+		}
+		String source = (String) chest[1];
+		boolean instanced = (boolean) chest[2];
 		if (instanced && chestLooted)
 		{
 			return;	// this instance visit's chest is already counted
 		}
 		List<ItemStack> stacks = new ArrayList<>();
 		StringBuilder key = new StringBuilder().append(groupId);
-		for (int containerId : containers)
+		for (int i = 3; i < chest.length; i++)
 		{
-			ItemContainer c = plugin.client.getItemContainer(containerId);
+			ItemContainer c = plugin.client.getItemContainer((int) chest[i]);
 			if (c == null)
 			{
 				continue;

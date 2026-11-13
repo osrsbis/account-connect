@@ -15,7 +15,7 @@ final class EventVerificationScreen
     static List<VerificationFrame.Region> regions(Client client, EventVerification.Source event)
     {
         List<VerificationFrame.Region> out = new ArrayList<>();
-        if (event.text != null)
+        if (event.text != null && !heldDiscovery(event))
         {
             List<Widget> matches = new ArrayList<>();
             if ("verification_discovery".equals(event.type) && event.fields.get("widget") instanceof Number
@@ -23,13 +23,12 @@ final class EventVerificationScreen
                 match(client, client.getWidget(((Number) event.fields.get("widget")).intValue()), event.text, matches);
             else
             {
-                for (int id = InterfaceID.Chatbox.LINE0; id <= InterfaceID.Chatbox.LINE199; id++)
-                    match(client, client.getWidget(id), event.text, matches);
-                // The static LINEn widgets hold only the sender; the message text is in the dynamic children of the
-                // chat scroll area (RuneLite ChatHistoryPlugin reads it there).
-                Widget scroll = client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
-                Widget[] lines = scroll == null ? null : scroll.getDynamicChildren();
-                if (lines != null) for (Widget line : lines) match(client, line, event.text, matches);
+                // The message text is in the dynamic children of the chat scroll area (RuneLite ChatHistoryPlugin reads
+                // it there); the static LINEn widgets hold only the sender, so they are not read. Only the newest copy
+                // of the line is used, and only when it is the one copy added since the event: an older identical line
+                // is never this event's evidence, and a clipped newest copy gives no region.
+                List<Widget> copies = chatCopies(client, event.text);
+                if (copies.size() == event.olderCopies + 1) match(client, copies.get(copies.size() - 1), event.text, matches);
                 for (int id : MinigameLines.DIALOGUE_TEXTS) match(client, client.getWidget(id), event.text, matches);
             }
             // Repeated identical lines are ambiguous, not proof of the current event.
@@ -62,6 +61,17 @@ final class EventVerificationScreen
         return out.size() > MAX_REGIONS ? new ArrayList<>(out.subList(0, MAX_REGIONS)) : out;
     }
 
+    /**
+     * Whether an event can ever have on-screen evidence: a game line, the level dialogue, a result screen or a reward
+     * panel. Death, slayer tasks and ground loot have none, so they take no admission and leave no screen row.
+     */
+    static boolean selectable(String type, Map<String, Object> fields, String text)
+    {
+        if ("level_up".equals(type) || "verification_discovery".equals(type)) return true;
+        if ("loot".equals(type)) return KillActivity.rewardGroup(fields.get("source_name")) >= 0;
+        return EventVerification.clean(text) != null || "minigame".equals(type) && fields.get("screen") instanceof Map;
+    }
+
     static final int[] LEVEL_TEXTS = {InterfaceID.LevelupDisplay.TEXT1, InterfaceID.LevelupDisplay.TEXT2};
     private static final Pattern LEVEL_LINE = Pattern.compile("(?i)^(?:.*\\s)?your ([a-z]+) level is now [0-9,]+[.!]?.*$");
 
@@ -74,17 +84,42 @@ final class EventVerificationScreen
         return skill instanceof String && m.group(1).trim().equalsIgnoreCase(((String) skill).trim());
     }
 
-    /** Why a level-up source had no evidence: another skill's level dialogue was on screen, or nothing was. */
-    static String levelUpUnseenReason(Client client, EventVerification.Source event)
+    /**
+     * Why a source had no evidence: another skill's level dialogue was on screen, or only a copy of its line that could
+     * not be told apart from the event's own (an older copy, or two new ones), or nothing was.
+     */
+    static String unseenReason(Client client, EventVerification.Source event)
     {
-        if (!"level_up".equals(event.type)) return "source_not_visible";
-        for (int id : LEVEL_TEXTS)
+        if (heldDiscovery(event)) return "unknown_activity_held";
+        if ("level_up".equals(event.type)) for (int id : LEVEL_TEXTS)
         {
             Widget w = client.getWidget(id);
             if (visible(client, w) && levelDialogueSkill(EventVerification.clean(w.getText()), event.fields.get("skill")) == Boolean.FALSE)
                 return "other_skill_dialogue";
         }
+        for (Widget w : chatCopies(client, event.text)) if (visible(client, w)) return "older_or_repeated_line";
         return "source_not_visible";
+    }
+
+    /**
+     * An unparsed line outside any known activity can name other players: it gets no frame until that is decided.
+     * Its text observation is unchanged.
+     */
+    static boolean heldDiscovery(EventVerification.Source event)
+    {
+        return "verification_discovery".equals(event.type) && "unknown".equals(event.fields.get("activity"));
+    }
+
+    /** The chat scroll area's lines whose text is exactly this text, from the top (oldest) to the bottom (newest). */
+    static List<Widget> chatCopies(Client client, String text)
+    {
+        List<Widget> out = new ArrayList<>();
+        Widget scroll = text == null ? null : client.getWidget(InterfaceID.Chatbox.SCROLLAREA);
+        Widget[] lines = scroll == null ? null : scroll.getDynamicChildren();
+        if (lines != null) for (Widget line : lines)
+            if (line != null && line.getBounds() != null && text.equals(EventVerification.clean(line.getText()))) out.add(line);
+        out.sort(Comparator.comparingInt(w -> w.getBounds().y));
+        return out;
     }
 
     private static void match(Client client, Widget w, String text, List<Widget> out)
@@ -153,21 +188,9 @@ final class EventVerificationScreen
 
     private static void reward(Client client, EventVerification.Source event, List<VerificationFrame.Region> out)
     {
-        int group;
-        String source = String.valueOf(event.fields.get("source_name"));
-        switch (source)
-        {
-            case "Chambers of Xeric": group = InterfaceID.RAIDS_REWARDS; break;
-            case "Theatre of Blood": group = InterfaceID.TOB_CHESTS; break;
-            case "Tombs of Amascut": group = InterfaceID.TOA_CHESTS; break;
-            case "Barrows": group = InterfaceID.BARROWS_REWARD; break;
-            case "Clue Scroll": group = InterfaceID.TRAIL_REWARDSCREEN; break;
-            case "Fortis Colosseum": group = InterfaceID.COLOSSEUM_REWARD_CHEST_2; break;
-            case "Lunar Chest": group = InterfaceID.PMOON_REWARD; break;
-            case "Loot Chest": group = InterfaceID.WILDY_LOOT_CHEST; break;
-            default: return; // Ground drops need a visible source; do not photograph an unrelated panel.
-        }
-        if (!(event.fields.get("items") instanceof List)) return;
+        // The reward interface the loot was read from; ground drops have none, and no unrelated panel is photographed.
+        int group = KillActivity.rewardGroup(event.fields.get("source_name"));
+        if (group < 0 || !(event.fields.get("items") instanceof List)) return;
         Map<Integer, Number> quantities = new LinkedHashMap<>();
         for (Object value : (List<?>) event.fields.get("items")) if (value instanceof Map)
         {

@@ -138,7 +138,8 @@ public class UploadGatingTest
 		plugin.syncTask();
 		RecordedRequest retry = server.takeRequest(5, TimeUnit.SECONDS);
 		assertNotNull("pending state retries after backoff", retry);
-		assertFalse("revoked sensitive block must not replay", retry.getBody().readUtf8().contains("game_vars"));
+		// A 500 says nothing about the grant, so the block it failed to deliver is still granted and is sent again.
+		assertTrue("a site error keeps the grant; the undelivered block replays", retry.getBody().readUtf8().contains("game_vars"));
 	}
 
 	@Test
@@ -256,9 +257,9 @@ public class UploadGatingTest
 		}
 	}
 
-	/** The settings panel shows exactly two items: the link token and the API base URL. */
+	/** The settings panel shows exactly three items: the link token, the API base URL and Enable Flipper. */
 	@Test
-	public void configDeclaresExactlyLinkTokenAndApiBaseUrl()
+	public void configDeclaresExactlyLinkTokenApiBaseUrlAndFlipper()
 	{
 		java.util.Set<String> keys = new java.util.HashSet<>();
 		for (java.lang.reflect.Method m : AccountConnectConfig.class.getDeclaredMethods())
@@ -270,7 +271,7 @@ public class UploadGatingTest
 				keys.add(item.keyName());
 			}
 		}
-		assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("linkToken", "apiBaseUrl")), keys);
+		assertEquals(new java.util.HashSet<>(java.util.Arrays.asList("linkToken", "apiBaseUrl", "flipper")), keys);
 	}
 
 	/** The approved linkToken description: the 0.7.13 text with the two upload-switch phrases removed. */

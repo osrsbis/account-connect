@@ -10,6 +10,8 @@ import static org.mockito.Mockito.*;
 public class OwnInferredSignalTest
 {
  static final long AT=1792254000000L;
+ static final Map<String,String> SOURCES=Map.of("session.stationary_ge","own_world_tile;System.nanoTime",
+  "skills.item_transformation","GameTick:own_inventory+MagicXP","effects.consumption","MenuOptionClicked:149.0+own_inventory");
  static Map<String,Map<String,Object>> examples() {
   Map<String,Map<String,Object>> out=new LinkedHashMap<>();
   out.put("session.stationary_ge",Map.of("start_tick",39,"end_tick",41,"monotonic_elapsed_ms",1200,"inference","same_tile_at_sample_times_not_game_aura_or_idle_input"));
@@ -18,7 +20,7 @@ public class OwnInferredSignalTest
   return out;
  }
  static Map<String,Object> event(String kind) {
-  return OwnSignalEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",OwnInferredSignal.source(kind),
+  return OwnEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",SOURCES.get(kind),
    "sequence",1,"tick",42,"observed_at_ms",AT,"direct",false,"value",examples().get(kind)));
  }
  @Test public void closedInferencesSurviveJsonAndNeverBecomeConfirmedSignalsOrPrivateText() {
@@ -27,23 +29,23 @@ public class OwnInferredSignalTest
    Map<String,Object> e=event(kind);assertNotNull(e);e.put("event_id","a".repeat(32));e.put("ts",AT);
    e.put("player_name","PRIVATE");((Map<String,Object>)e.get("signal_value")).put("coordinates","PRIVATE");
    Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));
-   assertEquals(OwnSignalEvent.wire(wire),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
+   assertEquals(OwnEvent.wire(wire),OwnEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
    assertEquals(false,wire.get("direct"));assertEquals("inferred_observation",wire.get("observation"));
    assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
   }
  }
  @Test public void inferenceLabelsSourcesPairsAndTimeContradictionsFailClosed() {
   for(String kind:examples().keySet())for(String key:List.of("direct","observation","source")) {
-   Map<String,Object> e=event(kind);e.put(key,key.equals("direct")?true:key.equals("source")?"own_client_system":"observed_signal");assertNull(OwnSignalEvent.wire(e));
+   Map<String,Object> e=event(kind);e.put(key,key.equals("direct")?true:key.equals("source")?"own_client_system":"observed_signal");assertNull(OwnEvent.wire(e));
   }
-  Map<String,Object> e=event("session.stationary_ge");e.put("source_tick",45);assertNull(OwnSignalEvent.wire(e));
-  e=event("effects.consumption");e.put("source_tick",43);assertNull(OwnSignalEvent.wire(e));
-  e=event("skills.item_transformation");((Map<String,Object>)e.get("signal_value")).put("output_item_id",2);assertNull(OwnSignalEvent.wire(e));
-  e=event("effects.consumption");((Map<String,Object>)e.get("signal_value")).put("action",null);assertNull(OwnSignalEvent.wire(e));
-  e=event("effects.consumption");((Map<String,Object>)e.get("signal_value")).put("inference","confirmed_effect");assertNull(OwnSignalEvent.wire(e));
+  Map<String,Object> e=event("session.stationary_ge");e.put("source_tick",45);assertNull(OwnEvent.wire(e));
+  e=event("effects.consumption");e.put("source_tick",43);assertNull(OwnEvent.wire(e));
+  e=event("skills.item_transformation");((Map<String,Object>)e.get("signal_value")).put("output_item_id",2);assertNull(OwnEvent.wire(e));
+  e=event("effects.consumption");((Map<String,Object>)e.get("signal_value")).put("action",null);assertNull(OwnEvent.wire(e));
+  e=event("effects.consumption");((Map<String,Object>)e.get("signal_value")).put("inference","confirmed_effect");assertNull(OwnEvent.wire(e));
   for(int[] pair:OwnActivityMappings.BOLTS) {
    Map<String,Object> v=new HashMap<>(examples().get("skills.item_transformation"));v.put("input_item_id",pair[0]);v.put("output_item_id",pair[1]);v.put("matched_quantity",28L*Integer.MAX_VALUE);
-   assertNotNull(OwnSignalEvent.value("skills.item_transformation",v));
+   assertNotNull(OwnEvent.value("own_signal","skills.item_transformation",v));
   }
  }
  @Test public void auditedOwnSourcesHandoffOnlyCompletedSampleEvidenceAndExposeSinkFailures() {
@@ -61,7 +63,7 @@ public class OwnInferredSignalTest
   when(inv.getItems()).thenReturn(new Item[]{new Item(385,1)});MenuOptionClicked menu=mock(MenuOptionClicked.class);
   when(menu.getMenuOption()).thenReturn("Eat");when(menu.getParam1()).thenReturn(149<<16);when(menu.getParam0()).thenReturn(0);when(menu.getItemId()).thenReturn(385);
   capture.consumption.menu(c,menu);when(inv.getItems()).thenReturn(new Item[0]);tick[0]++;capture.consumption.poll(c,AT+1800);capture.consumption.poll(c,AT+1801);
-  assertEquals(3,sent.size());for(Map<String,Object> e:sent)assertNotNull(OwnSignalEvent.wire(e));
+  assertEquals(3,sent.size());for(Map<String,Object> e:sent)assertNotNull(OwnEvent.wire(e));
   Map<?,?> health=capture.snapshot();assertEquals(3L,health.get("signal_events_observed"));assertEquals(2L,health.get("signal_events_handed_off"));assertEquals(1L,health.get("signal_events_not_handed_off"));
   verify(c,never()).getPlayers();verify(menu,never()).getMenuTarget();
  }

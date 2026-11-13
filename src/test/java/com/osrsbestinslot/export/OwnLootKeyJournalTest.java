@@ -19,7 +19,7 @@ public class OwnLootKeyJournalTest
             value.put("slot",Integer.parseInt(family.substring(4)));value.put("status","cached_items");value.put("container_observed_at_ms",1792254000000L);
             List<Map<String,Object>> items=new ArrayList<>();for(int i=0;i<128;i++)items.add(Map.of("id",2147483500+i,"qty",Integer.MAX_VALUE));value.put("items",items);
         }
-        return OwnStateEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",visibility?"loot.key_interface":"loot.key_slot",
+        return OwnEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",visibility?"loot.key_interface":"loot.key_slot",
             "source","own_key_packet+visible_fixed_chest","sequence",1,"tick",42,"observed_at_ms",1792254000001L,"direct",true,"value",value));
     }
     @Test public void projectedSlotsRejectOversizeContradictionsAndNeverCarryValuationOrVictimFields()
@@ -31,14 +31,14 @@ public class OwnLootKeyJournalTest
             Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));assertFalse(gson.toJson(wire).contains("value_gp"));
             assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
         }
-        Map<String,Object> e=event("slot0"),value=(Map<String,Object>)e.get("state_value");value.put("container_observed_at_ms",1792254000002L);assertNull(OwnStateEvent.wire(e));
-        e=event("slot0");value=(Map<String,Object>)e.get("state_value");value.put("slot",5);assertNull(OwnStateEvent.wire(e));
-        e=event("slot0");value=(Map<String,Object>)e.get("state_value");((List<Object>)value.get("items")).add(Map.of("id",2147483640,"qty",1));assertNull(OwnStateEvent.wire(e));
-        e=event("slot0");value=(Map<String,Object>)e.get("state_value");value.put("status","observed_empty_cache");assertNull(OwnStateEvent.wire(e));
+        Map<String,Object> e=event("slot0"),value=(Map<String,Object>)e.get("state_value");value.put("container_observed_at_ms",1792254000002L);assertNull(OwnEvent.wire(e));
+        e=event("slot0");value=(Map<String,Object>)e.get("state_value");value.put("slot",5);assertNull(OwnEvent.wire(e));
+        e=event("slot0");value=(Map<String,Object>)e.get("state_value");((List<Object>)value.get("items")).add(Map.of("id",2147483640,"qty",1));assertNull(OwnEvent.wire(e));
+        e=event("slot0");value=(Map<String,Object>)e.get("state_value");value.put("status","observed_empty_cache");assertNull(OwnEvent.wire(e));
         Map<String,Object> unknown=new LinkedHashMap<>();unknown.put("slot",0);unknown.put("status","cache_unverified");unknown.put("items",null);unknown.put("container_observed_at_ms",null);
-        assertNotNull(OwnStateEvent.projectValue("loot_key_slot",unknown));unknown.put("items",List.of());assertNull(OwnStateEvent.projectValue("loot_key_slot",unknown));
+        assertNotNull(OwnEvent.value("own_state","loot_key_slot",unknown));unknown.put("items",List.of());assertNull(OwnEvent.value("own_state","loot_key_slot",unknown));
         Map<String,Object> merged=Map.of("slot",0,"status","cached_items","items",List.of(Map.of("id",2,"qty",4294967294L)),"container_observed_at_ms",1792254000000L);
-        assertNotNull(OwnStateEvent.projectValue("loot_key_slot",merged));
+        assertNotNull(OwnEvent.value("own_state","loot_key_slot",merged));
     }
     @Test public void largeFiveSlotCacheUsesBoundedChangedSlotEventsWithoutPriceOrSnapshotDuplication()
     {
@@ -60,7 +60,7 @@ public class OwnLootKeyJournalTest
         assertEquals(6L,out.snapshot().get("state_events_observed"));assertEquals(5L,out.snapshot().get("state_events_handed_off"));assertEquals(1L,out.snapshot().get("state_events_not_handed_off"));
         com.google.gson.Gson gson=new com.google.gson.Gson();int maximum=0;
         for(Map<String,Object> e:sent) {
-            assertNotNull(OwnStateEvent.wire(e));int bytes=gson.toJson(e).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;maximum=Math.max(maximum,bytes);assertTrue(bytes<8192);
+            assertNotNull(OwnEvent.wire(e));int bytes=gson.toJson(e).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;maximum=Math.max(maximum,bytes);assertTrue(bytes<8192);
             assertFalse(gson.toJson(e).contains("value_gp"));
         }
         Map<?,?> full=(Map<?,?>)((Map<?,?>)((Map<?,?>)out.snapshot().get("states")).get("loot.owned_key_contents")).get("value");

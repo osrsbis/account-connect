@@ -21,9 +21,18 @@ public class OwnSignalEventTest
     }
     static Map<String,Object> event(String kind)
     {
-        return OwnSignalEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",kind.equals("storage.fish_barrel")
+        return OwnEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",kind.equals("storage.fish_barrel")
             ?"ClientTick:widget:193.2;own_inventory_possession":"ChatMessage:GAMEMESSAGE:exact_english_projection",
             "sequence",1,"tick",42,"observed_at_ms",AT,"direct",true,"value",examples().get(kind)));
+    }
+    @Test public void aSignalRowWithoutASourceIsDroppedNotThrown()
+    {
+        for(String kind:examples().keySet())
+        {
+            Map<String,Object> row=new HashMap<>();row.put("kind",kind);row.put("source",null);row.put("sequence",1);
+            row.put("tick",42);row.put("observed_at_ms",AT);row.put("direct",true);row.put("value",examples().get(kind));
+            assertNull(kind,OwnEvent.from("12345678-1234-1234-1234-123456789abc",row));
+        }
     }
     @Test public void sevenClosedSignalProjectionsSurviveJsonAndStripPrivateTextWithoutInventingDeltas()
     {
@@ -33,7 +42,7 @@ public class OwnSignalEventTest
             Map<String,Object> e=event(kind);assertNotNull(e);e.put("event_id","a".repeat(32));e.put("ts",AT);
             e.put("raw_chat","PRIVATE");((Map<String,Object>)e.get("signal_value")).put("player_name","PRIVATE");
             Map<String,Object> projected=PublicTransport.event(e);assertNotNull(projected);assertFalse(gson.toJson(projected).contains("PRIVATE"));
-            assertEquals(OwnSignalEvent.wire(projected),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
+            assertEquals(OwnEvent.wire(projected),OwnEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(projected),Map.class))));
             for(String scope:List.of("own-history-v1","ge-v1"))assertFalse(EventQueueProtocol.allows(scope,projected));
             assertEquals("observed_signal",projected.get("observation"));
         }
@@ -41,22 +50,22 @@ public class OwnSignalEventTest
     }
     @Test public void invalidSourcesCountsTargetsAndSyntheticCompletionAreRejected()
     {
-        Map<String,Object> e=event("hunter.rumour");((Map<String,Object>)e.get("signal_value")).put("target_observed","PRIVATE_PLAYER");assertNull(OwnSignalEvent.wire(e));
-        e=event("hunter.rumour");((Map<String,Object>)e.get("signal_value")).put("turn_in_verified",true);assertNull(OwnSignalEvent.wire(e));
-        e=event("storage.coal_bag");e.put("signal_value",Map.of("count_observed",55));assertNull(OwnSignalEvent.wire(e));
-        e=event("storage.fish_barrel");e.put("source","own_client_system");assertNull(OwnSignalEvent.wire(e));
-        e=event("combat.chompy_kc");e.put("signal_value",Map.of("signal","notch_observed","total_kills",1));assertNull(OwnSignalEvent.wire(e));
-        e=event("farming.compost");e.put("signal_value",Map.of("compost_type","super","patch_identity","private"));assertNull(OwnSignalEvent.wire(e));
-        e=event("storage.grape_barrel");e.put("signal_kind",null);assertNull(OwnSignalEvent.wire(e));
-        e=event("storage.grape_barrel");e.put("direct",false);assertNull(OwnSignalEvent.wire(e));
-        assertNull(OwnSignalEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind","hunter.rumour","source","PUBLICCHAT","value",examples().get("hunter.rumour"))));
+        Map<String,Object> e=event("hunter.rumour");((Map<String,Object>)e.get("signal_value")).put("target_observed","PRIVATE_PLAYER");assertNull(OwnEvent.wire(e));
+        e=event("hunter.rumour");((Map<String,Object>)e.get("signal_value")).put("turn_in_verified",true);assertNull(OwnEvent.wire(e));
+        e=event("storage.coal_bag");e.put("signal_value",Map.of("count_observed",55));assertNull(OwnEvent.wire(e));
+        e=event("storage.fish_barrel");e.put("source","own_client_system");assertNull(OwnEvent.wire(e));
+        e=event("combat.chompy_kc");e.put("signal_value",Map.of("signal","notch_observed","total_kills",1));assertNull(OwnEvent.wire(e));
+        e=event("farming.compost");e.put("signal_value",Map.of("compost_type","super","patch_identity","private"));assertNull(OwnEvent.wire(e));
+        e=event("storage.grape_barrel");e.put("signal_kind",null);assertNull(OwnEvent.wire(e));
+        e=event("storage.grape_barrel");e.put("direct",false);assertNull(OwnEvent.wire(e));
+        assertNull(OwnEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind","hunter.rumour","source","PUBLICCHAT","value",examples().get("hunter.rumour"))));
     }
     @Test public void rumourVariantsRemainSeparateAndMissingNotchTotalStaysUnknown()
     {
-        assertEquals(Map.of("whistle_charges_observed",0L),OwnSignalEvent.value("hunter.rumour",Map.of("whistle_charges_observed",0)));
-        Map<String,Object> none=OwnSignalEvent.value("hunter.rumour",Map.of("signal","whistle_no_active","turn_in_verified",false));
+        assertEquals(Map.of("whistle_charges_observed",0L),OwnEvent.value("own_signal","hunter.rumour",Map.of("whistle_charges_observed",0)));
+        Map<String,Object> none=OwnEvent.value("own_signal","hunter.rumour",Map.of("signal","whistle_no_active","turn_in_verified",false));
         assertTrue(none.containsKey("target_observed"));assertNull(none.get("target_observed"));
-        assertNull(OwnSignalEvent.value("hunter.rumour",Map.of("whistle_charges_observed",1,"signal","whistle_target","target_observed","red_chinchompa")));
-        assertEquals(9000L,OwnSignalEvent.value("combat.chompy_kc",Map.of("signal","absolute_check","total_kills",9000)).get("total_kills"));
+        assertNull(OwnEvent.value("own_signal","hunter.rumour",Map.of("whistle_charges_observed",1,"signal","whistle_target","target_observed","red_chinchompa")));
+        assertEquals(9000L,OwnEvent.value("own_signal","combat.chompy_kc",Map.of("signal","absolute_check","total_kills",9000)).get("total_kills"));
     }
 }

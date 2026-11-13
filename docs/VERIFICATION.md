@@ -11,20 +11,26 @@ The event queue keeps the actual projected event ID, type, account, token, grant
 original snapshot revision and a deep copy of expected fields. The originating event carries
 `verification_tick`, `verification_revision` and, for a recognized game line, bounded `verification_text`.
 Frame and screen rows carry `source_event_id`, `source_event_type`, `source_event_tick` and
-`source_event_revision`. These refer to the originating event, not the verification row's own event ID.
+`source_event_revision`. These refer to the originating event, not the verification row's own event ID. From 0.7.72
+(candidate) these rows also carry the originating event's `profile_type` (none when it had none), never the profile
+of the world the player is on when the row is written, so an upload retry after a world change keeps the original.
 The snapshot revision identifies the last built snapshot; it does not prove server persistence.
 
 A client-tick poll looks for relevant widgets immediately, for at most three game ticks after the event.
 It does not wait for the 20-second random-sample gap. At most eight events wait for rendering; overflow is
-explicit missing evidence (`pending_capacity`). Both event and random samples share the existing
-60-sample/30-frame rolling hour budgets. Relogging does not refill them. From 0.7.68 an event is
-charged one of the 60 only when the pending queue accepts it; pending sources already past their 3-tick delay are
+explicit missing evidence (`pending_capacity`). Up to 0.7.70 event and random samples shared 60-sample/30-frame
+rolling hour budgets. From 0.7.72 (candidate) the same totals are split: events have 48 admissions and 24 region
+frames an hour, random and occasion samples 12 samples and 6 region frames, so samples cannot use up the slots of
+event evidence. Relogging does not refill them. The split does not separate the timing: each admitted event still
+restarts the 20-second sample gap, as before, so events admitted every 20 seconds or less keep samples from starting
+even while the sample budget has room (limit, unchanged). From 0.7.68 an event is
+charged an admission only when the pending queue accepts it; pending sources already past their 3-tick delay are
 recorded as UNKNOWN and make room first. A frame slot is taken only when a frame is about to be uploaded, so a frame
 that is skipped, blank, blocked, failed or cancelled (grant cleared, link changed) takes none. A trade or bank PIN
 screen that opens after the frame was selected still blocks it (`frame_blocked`). A frame whose selected regions are
 still one colour (nothing drawn there yet, e.g. right after login) is not uploaded: a sample says `regions_blank`; an
 event looks again within its delay and, if they stay blank, ends UNKNOWN `regions_blank`. Samples beyond the hourly budget are not
-captured; the first event refused by the 60-an-hour budget after an admitted one is recorded as UNKNOWN
+captured; the first event refused by its hourly admission budget after an admitted one is recorded as UNKNOWN
 `event_budget`, so each gap is on record. This is sampling, not a complete activity history. A repeated event retains its own event ID and expected values.
 
 In the region frame only the selected widget rectangles remain; all other pixels are black (the full window, below,
@@ -36,14 +42,14 @@ A delayed source remains attached to its original revision and source tick.
 
 | Event | Selected evidence | Comparison and limits |
 |---|---|---|
-| Boss/activity kill count | The individual visible chat line exactly matching the recognized game message | OCR count and grammar compared with the event count. No unrelated chat rows or orbs. Repeated identical visible lines are ambiguous. |
+| Boss/activity kill count | The individual visible chat line exactly matching the recognized game message | OCR count and grammar compared with the event count. No unrelated chat rows or orbs. An older identical line is never used (see below). |
 | Level increase | Level-up dialogue TEXT1/TEXT2 when the level message materializes | OCR skill/level compared with the stat event. A suppressed or dismissed dialogue is unknown. |
 | Minigame game lines | Exact matching game-message widget, indexed by the existing anchored `MinigameLines.LINES` grammar | OCR independently parses the declared grammar and event count/total/result. |
 | Minigame dialogues | Exact known dialogue/message widget matching `MinigameLines.DIALOGUE` | Same indexed grammar comparison. Unparsed contextual text uses the bounded discovery path below. |
 | Minigame result screens | Named components in `MinigameLines.SCREENS` | Screen numbers compared with the immutable event's screen map; component meaning remains provisional until observed in real data. |
 | Loot/reward panels | Item widgets in the existing CoX, ToB, ToA, Barrows, clue, Colosseum, Lunar and loot-chest groups | Item quantity pixels and expected item metadata retained. Quantity OCR does not establish sprite/item identity and must not produce an item-identity match. |
 | Progress, pet, attempt-end game messages | Exact matching recognized own game-message line | Text corroboration only; equal text does not independently validate all semantic fields. |
-| Death, slayer or loot without a visible matching source | No unrelated screenshot fallback | Explicit source-not-visible outcome after the short render window. Ground loot and settled death events need not have a result panel. |
+| Death, slayer task, loot other than the reward panels above, and a count without its game line | No unrelated screenshot fallback | From 0.7.72 (candidate) these are not admitted: they take none of the hourly admissions and get no screen row, since no selector exists for them. The event itself still carries `verification_tick`, so a reader can count it and its type says why it has no evidence. Up to 0.7.70 each was admitted and ended UNKNOWN `source_not_visible`. |
 
 The capture selectors support the listed existing parser tables and reward groups, not every activity or
 all UI layouts. Frames use actual game pixels; there is no OCR text rendering or reconstruction. Wrapped,
@@ -67,6 +73,9 @@ the client has an unrelated Queue scope. It does not obtain staff access or a ne
 - Activities with no known counter/interface still have a low-priority fallback: an unparsed
   GAMEMESSAGE/SPAM line may be sampled as `activity=unknown`, with the local player's region and world.
   No semantic activity is invented from the region. Player/public/private chat channels are excluded.
+  - From 0.7.72 (candidate) such an `activity=unknown` line gets no frame: its text can name other players, and
+    whether to photograph it is not decided. The discovery event and its text are sent as before; the source ends
+    UNKNOWN `unknown_activity_held`.
 - Text is normalized and limited to 384 characters. Only an exact matching visible game-message widget,
   or the specific named result/dialogue widget, supplies pixels. There is no whole-screen/chatbox fallback.
 - When the selected widgets change between selection and the drawn frame (a reward screen often settles a tick after
@@ -80,9 +89,14 @@ the client has an unrelated Queue scope. It does not obtain staff access or a ne
   timer plugin's own kill counter) is never parsed as game data.
 - Chat lines are matched in the chat scroll area's dynamic children, where the game keeps each line's message text
   (the static `Chatbox.LINEn` widgets hold only the sender). The same visibility, clipping and single-match rules apply.
+- From 0.7.72 (candidate) an older identical line is never an event's evidence. The plugin counts the copies of the
+  line already in the chat when the event is made (the game adds the event's own line after it). Only the newest
+  (bottom-most) copy is used, only when it is the one copy added since the event, and only when it is complete and
+  unclipped. Otherwise there is no region, and the source ends UNKNOWN `older_or_repeated_line` when a copy was
+  visible, else `source_not_visible`.
 - Contextual fields share a twelve-per-hour quota and thirty-second spacing between panel opportunities.
   Unknown-context fields have a separate four-per-hour quota and fifteen-minute spacing. Both remain
-  inside the existing shared sixty-sample/thirty-frame limits. All quotas survive relog/toggle resets.
+  inside the event admission and event frame budgets above. All quotas survive relog/toggle resets.
 - Dedupe is bounded to 64 entries and one hour. Different named fields with equal text stay distinct.
   A field refused by the shared sample/frame/pending admission does not consume its discovery reservation
   or visibility transition: an unchanged field can be admitted later. A later render/encode failure is
@@ -117,8 +131,17 @@ Numeric random samples retain the original `screen/ocr_numeric` contract. Event 
 carry `pattern_table` and `pattern_index`. Event screen rows are split into at most four results to stay
 below the receiver's 8KB event-field cap. Unknown outcomes carry a reason without a fabricated rectangle.
 
-A `frame/capture` row records the actual drawn tick, delay and image dimensions. A random 16-hex reference
-joins this row, screen results and `kind=verify` PNG media. Screenshots retain their actual capture time;
+A `frame/capture` row records the actual drawn tick, delay and image dimensions. From 0.7.72 (candidate) a region
+frame's capture row, and a sample's skip row once its frame was drawn, also say how the client drew it, as numbers and
+booleans inside `results` (no new row field): `display_scale_x`/`display_scale_y` (the canvas display transform, null
+when unknown), `stretched` with `stretched_width`/`stretched_height`, `gpu`, `canvas_width`/`canvas_height` (the
+space the widget bounds are in) and `drawn_width`/`drawn_height`. These fields are sent only under the account-bound
+staff grant (the one full windows need): together they describe the player's device, so a public link's capture rows
+carry none of them and look as they did before. A random 16-hex reference
+joins this row, screen results and `kind=verify` PNG media. From 0.7.72 (candidate) the image upload also carries its
+own numbers-only copy of what its rows say (`pairing`: the source event's id, type, tick and revision, the frame tick,
+and per region its widget, box, reader, field, skill or item id, expected number and `widget_value`), so an image whose
+rows were dropped can still be paired and compared. Text values are never in it. Screenshots retain their actual capture time;
 source revision and expected operands are never replaced with current client values after encoding.
 The offline report checks identity, source-event pairing, tick bounds, revision and image hash before
 comparing independently read pixels. Expected values, actual displayed values, inputs, source identity and
@@ -133,7 +156,7 @@ UNKNOWN; mismatches are review leads, not automatic proof of a game bug.
   logged-in account) as well as `X-Verification-Frames`; a public link gets region frames only. The grant is checked
   when the window is chosen, after encoding and again before every upload attempt, retries included; a retry after the
   grant ended sends nothing and its upload row says `dropped` `staff_grant_cleared`. At most 6 an hour, on
-  its own budget; it never takes one of the 30 region-frame slots, so it cannot crowd out the small evidence frames.
+  its own budget; it never takes one of the region-frame slots, so it cannot crowd out the small evidence frames.
   It is the whole drawn frame, for kill counts, reward-screen
   loot, minigame results, interrupted attempts, unfamiliar result screens or dialogues (`verification_discovery`), and a
   random sample that found a mismatch. It comes from the drawn frame because in GPU mode only that image holds the 3D
@@ -155,6 +178,10 @@ UNKNOWN; mismatches are review leads, not automatic proof of a game bug.
   During a resize the drawn frame can lag the canvas, and resizable-layout bounds do not scale with the window, so the
   evidence regions would point at the wrong pixels. The event retries within its delay or ends
   `screen_changed_before_frame`; a sample says `frame_size_mismatch`.
+- From 0.7.72 (candidate) this size check applies only where the drawn pixels are used: region frames without a
+  client buffer, and the full window. Region pixels from the client buffer are taken whatever size the drawn frame has;
+  a full window whose drawn size does not fit is then not taken, and the region frame's capture row says
+  `full_window_skipped: frame_size_mismatch` (staff grant only, like the full window itself).
 - The full-window budget is charged only for a frame that is uploaded. A renderer that draws the interface but leaves
   the 3D scene black is not detected (limit).
 
@@ -172,6 +199,24 @@ otherwise re-send a delivered POST on a pooled connection.
 A frame belongs to the link token, account and verification epoch it was taken under. Every attempt sends that account
 and stops when any of the three has changed (an account switch on the same token, a revoke and regrant); its outcome row
 is written only under the same owner.
+
+### Rows of an uploaded frame during an upload hold
+
+Verification rows wait in the plugin's memory buffer of 500 rows. When it is full, the oldest row of the lowest priority
+class goes first (P2, then P1, then P0). Up to 0.7.71 every verification row was P2, so during a long 429 hold on event
+uploads the capture and screen rows of an image that was stored were dropped, and the image could not be paired.
+
+From 0.7.72 (candidate):
+- the capture, screen and upload rows of a frame taken for upload (a region frame or a full window) stay P2 but go last
+  within P2: every other P2 row is dropped first, oldest first;
+- they never push out a P0 or P1 game event: once only P0/P1 rows and frame rows are left, the oldest frame row goes;
+- a frame whose upload then fails keeps the same place, because the mark is set when the frame is taken;
+- other verification rows are ordinary P2 rows: sample data rows, the UNKNOWN rows of an event without a frame, and the
+  capture row of a sample frame that was not taken;
+- the mark is local, so the rows sent are unchanged; buffer order, batching, retries and the overflow counters are
+  unchanged too (an evicted frame row still counts in `events_overflow_p2_total`);
+- the hourly frame budgets bound these rows: 24 event and 6 sample region frames, plus 6 full windows on staff links, at
+  about 3 to 5 rows each, so at most about 170 rows an hour per client (an estimate from the budgets).
 
 A level-up frame selects only the level dialogue that names the event's skill; its number is not filtered, so a wrong
 level stays a mismatch. Another skill's dialogue is not used, and a source that expires with one on screen is UNKNOWN
@@ -193,10 +238,26 @@ substitute these generic numbers for their activity-specific evidence.
   `screen_changed_before_frame`, `canvas_resized`, `frame_size_mismatch`, `frame_unavailable`, `drawn_blank` or `frame_encoding_failed`.
 - The next drawn frame often already carries the next tick number (every sample on the rig, 11-07). That frame is used
   when every selected widget still shows the sampled value in the same bounds; its frame and screen rows carry the
-  frame's `tick`, plus `sample_tick`.
+  frame's `tick`, plus `sample_tick`. From 0.7.72 (candidate) the same check applies to a frame drawn on the sample's
+  own tick, since an orb can change within a tick.
 - Right after a login an orb text can still read 0 before it is drawn; the orbs are not drawn together. One orb's
   reading is unknown, not a mismatch, only when it reads 0, its value is not 0 and the sample is within 25 ticks of the
   login. A zero later in a session, or any non-zero wrong reading, stays a mismatch lead.
+- From 0.7.72 (candidate) four checks run less often: `skills/xp_to_level`, `skills/derived_levels`,
+  `counters/server_vs_client` and `account/server_vs_client`. They found no mismatch in 23.4 million results. They run on
+  the first sample after each login or world hop, then on 1 sample in 10; a sample without them has no rows for them.
+  The other checks run on every sample. They are thinned, not removed.
+- From 0.7.72 (candidate) the orb regions expect the client's own value, so the image compares the pixels with a second
+  source:
+  - boosted hitpoints and prayer, run energy / 100, special attack energy / 10;
+  - up to 0.7.71 they expected the number the orb itself showed, so a match only proved that the widget drew its text;
+  - the widget's number stays in the result's `inputs.widget_value`. Activity counter regions have no client value and
+    still expect their own number;
+  - the bank's occupied-slot region also still expects its own number. How the game counts placeholders and bank
+    fillers in it is not established, and real rows show the container count differing from it, so a client count
+    could make every bank sample a false mismatch. The `bank/container_vs_widget` data row still compares the two;
+  - an orb that reads 0 within 25 ticks of a login while its client value is not 0 is not a region, as in its data row;
+  - the frame is still taken only when every widget shows the number it showed at the sample.
 
 No notifications or recurring analysis jobs are introduced. Real incoming evidence validates supported
 layouts and readers after release; source tests and fixture OCR do not claim broad live accuracy.

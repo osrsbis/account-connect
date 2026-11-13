@@ -88,14 +88,14 @@ public class StoreClipCaptureTest
 	public void wallClockDecimationYieldsOneSamplePerSecond()
 	{
 		AccountConnectPlugin plugin = new AccountConnectPlugin();
-		// nextClipSampleAt defaults to 0; walk 50 evenly-spaced nanoTime ticks over exactly one second
+		// the sampler deadline starts at 0; walk 50 evenly-spaced nanoTime ticks over exactly one second
 		// (~50fps render). Only every (1/CLIP_FPS)s boundary should cross the gate.
 		long oneSecond = 1_000_000_000L;
 		int trues = 0;
 		for (int i = 0; i < 50; i++)
 		{
 			long now = i * (oneSecond / 50);	// 0ms, 20ms, ... 980ms
-			if (plugin.clips.shouldSampleClipFrame(now))
+			if (plugin.clips.sampler.due(now))
 			{
 				trues++;
 			}
@@ -144,7 +144,7 @@ public class StoreClipCaptureTest
 		for (int i = 50; i < 100; i++)
 		{
 			long now = i * (oneSecond / 50);	// 1000ms .. 1980ms
-			if (plugin.clips.shouldSampleClipFrame(now))
+			if (plugin.clips.sampler.due(now))
 			{
 				trues2++;
 			}
@@ -162,7 +162,7 @@ public class StoreClipCaptureTest
 		int over10s = 0;
 		for (int i = 0; i < 500; i++)
 		{
-			if (p2.clips.shouldSampleClipFrame(i * (oneSecond / 50)))
+			if (p2.clips.sampler.due(i * (oneSecond / 50)))
 			{
 				over10s++;
 			}
@@ -174,10 +174,10 @@ public class StoreClipCaptureTest
 		// is not evidence. After a 5-second gap the next tick samples once, and the tick right after it
 		// (20ms later, well inside the 125ms period) must not.
 		AccountConnectPlugin p3 = new AccountConnectPlugin();
-		assertTrue("first call always samples", p3.clips.shouldSampleClipFrame(0L));
-		assertTrue("the tick after a long stall samples once", p3.clips.shouldSampleClipFrame(5 * oneSecond));
+		assertTrue("first call always samples", p3.clips.sampler.due(0L));
+		assertTrue("the tick after a long stall samples once", p3.clips.sampler.due(5 * oneSecond));
 		assertFalse("...and does not fire again 20ms later",
-			p3.clips.shouldSampleClipFrame(5 * oneSecond + oneSecond / 50));
+			p3.clips.sampler.due(5 * oneSecond + oneSecond / 50));
 	}
 
 	// (d) RGB conversion: an ARGB frame becomes TYPE_INT_RGB (the JDK JPEG writer corrupts ARGB rasters).
@@ -199,12 +199,12 @@ public class StoreClipCaptureTest
 	}
 
 	/**
-	 * WEDGE ARM (added 2026-09-02 after mutation testing): clipFramePending is a one-in-flight latch, so
+	 * WEDGE ARM (added 2026-09-02 after mutation testing): the sampler's pending flag is a one-in-flight latch, so
 	 * ANY path out of the frame callback must clear it. A DrawManager that hands back a null image — the
 	 * documented shape when the GPU plugin owns the surface — must not leave the latch set, or capture
 	 * silently stops for the rest of the visit after one bad frame and the clip is short or empty.
 	 *
-	 * Falsified: removing the `clipFramePending = false` from the null branch of onClipFrameTick makes
+	 * Falsified: removing the `pending = false` from the empty-frame branch of FrameSampler.onFrame makes
 	 * this arm fail. Without it that mutation survived the whole suite.
 	 */
 	@Test
@@ -225,16 +225,16 @@ public class StoreClipCaptureTest
 		plugin.clips.clipVisit = new StoreVisitClip(StoreClips.MAX_CLIP_FRAMES,
 			StoreClips.MAX_CLIP_BURST_BYTES, StoreClips.MAX_CLIP_FRAME_BYTES);
 
-		plugin.clips.onClipFrameTick();		// first sample: null frame comes back
+		plugin.clips.sampler.onFrame();		// first sample: null frame comes back
 		assertFalse("a null frame must release the in-flight latch", pending(plugin));
 
-		plugin.clips.onClipFrameTick();		// a wedged latch would make this a no-op forever
+		plugin.clips.sampler.onFrame();		// a wedged latch would make this a no-op forever
 		assertFalse("capture must still be able to request further frames", pending(plugin));
 	}
 
 	private static boolean pending(AccountConnectPlugin plugin)
 	{
-		return plugin.clips.clipFramePending;
+		return plugin.clips.sampler.pending;
 	}
 
 	private static void inject(AccountConnectPlugin plugin, String fieldName, Object value) throws Exception

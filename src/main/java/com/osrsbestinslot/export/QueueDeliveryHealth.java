@@ -15,14 +15,7 @@ final class QueueDeliveryHealth
     private String family(Map<String,Object> event)
     {
         Object type = event.get("type");
-        if (TYPES.contains(type)) return (String)type;
-        Object kind = event.get("state_kind");
-        if("own_signal".equals(type)&&OwnSignalEvent.supports(event.get("signal_kind")))return "own_signal_"+event.get("signal_kind");
-        if ("own_vars".equals(type) && OwnVarsEvent.supports(event.get("var_family")))
-            return "own_vars_" + event.get("var_family");
-        if ("own_state".equals(type) && OwnStateEvent.supportsWireKind(kind))
-            return "own_state_" + kind;
-        return null;
+        return TYPES.contains(type) ? (String)type : OwnEvent.family(event);
     }
     private void count(Map<String,Object> event, int counter)
     {

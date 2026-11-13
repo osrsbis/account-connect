@@ -22,7 +22,6 @@ import net.runelite.api.Prayer;
 import net.runelite.api.Quest;
 import net.runelite.api.Skill;
 import net.runelite.api.VarPlayer;
-import net.runelite.api.Varbits;
 import net.runelite.api.WorldType;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.gameval.VarbitID;
@@ -37,34 +36,41 @@ final class SnapshotBuilder
 
 	static final int COINS_ID = 995;
 
-	// VarPlayer ids verified against RuneLite gameval.VarPlayerID (no named legacy constant).
+	// VarPlayer and varbit ids are gameval ids; SnapshotVarIdsTest pins each one against its named constant.
 	static final int VARP_SLAYER_TARGET = 395;    // current task creature id
 	static final int VARP_SLAYER_COUNT = 394;     // remaining kills on current task
-	private static final int VARP_SLAYER_UNLOCKS = 1076;  // bitfield (decode server-side)
-	private static final int VARP_SLAYER_BLOCKED = 1096;  // bitfield (decode server-side)
-	private static final int VARP_SLAYER_UNLOCKS1 = 1344; // gameval SLAYER_REWARDS_UNLOCKS1, bitfield
-	private static final int VARP_SLAYER_UNLOCKS2 = 5587; // gameval SLAYER_REWARDS_UNLOCKS2, bitfield
 	static final int VARP_QUEST_POINTS = 101;     // gameval QP
 	static final int VARBIT_CA_POINTS = 14815;    // gameval CA_POINTS
-	// {snapshot key, gameval VarbitID}
-	private static final Object[][] MINIGAME_VARBITS = {
-		{"ba_attacker_base", 4759}, {"ba_collector_base", 4760}, {"ba_healer_base", 4761}, {"ba_defender_base", 4762},
-		{"ba_attacker_extra", 4763}, {"ba_collector_extra", 4764}, {"ba_healer_extra", 4765}, {"ba_defender_extra", 4766},
-		{"colosseum_highest_wave", 11410}, {"hallowed_final_chests", 10423}, {"hallowed_normal_chests", 10446},
-		{"tempoross_permits", 11936},
+	// Raw game-value blocks, in wire order: name and id pairs. A negative id is that varp, any other a varbit.
+	static final Object[] CA_TIERS = {"easy", 12863, "medium", 12864, "hard", 12865, "elite", 12866, "master", 12867,
+		"grandmaster", 12868};
+	// unlocks1/unlocks2 hold the rewards bought after the first varp filled; the bitfields are decoded server-side.
+	static final Object[] SLAYER = {"points", 4068, "streak", 4069, "task_target_id", -395, "task_remaining", -394,
+		"unlocks_raw", -1076, "blocked_raw", -1096, "unlocks1_raw", -1344, "unlocks2_raw", -5587};
+	// Kourend house favour (server divides by 10 for the %).
+	static final Object[] KOUREND_FAVOUR = {"arceuus", 4896, "hosidius", 4895, "lovakengj", 4898, "piscarilius", 4899,
+		"shayzien", 4894};
+	// NMZ and Tithe points, then own milestones the game keeps in vars (gameval ids, runelite-api 1.13.4). LMS has no
+	// points var, so LMS points are omitted rather than invented. Boss kill counts and minigame scores are not in vars:
+	// the server reads those from the official hiscores.
+	static final Object[] MINIGAME_POINTS = {"nmz", 3949, "tithe", 4893,
+		"ba_attacker_base", 4759, "ba_collector_base", 4760, "ba_healer_base", 4761, "ba_defender_base", 4762,
+		"ba_attacker_extra", 4763, "ba_collector_extra", 4764, "ba_healer_extra", 4765, "ba_defender_extra", 4766,
+		"colosseum_highest_wave", 11410, "hallowed_final_chests", 10423, "hallowed_normal_chests", 10446,
+		"tempoross_permits", 11936, "soul_wars_zeal", -2871, "giants_foundry", -3436,
+		"mixology_lye", -4414, "mixology_aga", -4415, "mixology_mox", -4416};
+	// Rune pouch slots: {rune type varbit, amount varbit}.
+	static final int[][] RUNE_POUCH = {{29, 1624}, {1622, 1625}, {1623, 1626}, {14285, 14286}, {15373, 15375}, {15374, 15376}};
+	// Off-book containers sent for every linked player, in wire order (gameval ids, so they match
+	// ItemContainerChanged.getContainerId()). Bonds and quiver ammo are real wealth a bank, inventory and
+	// equipment snapshot cannot see (gap audit 2026-07-18).
+	private static final Object[][] CONTAINERS = {
+		{"looting_bag", net.runelite.api.gameval.InventoryID.LOOTING_BAG},
+		{"seed_vault", net.runelite.api.gameval.InventoryID.SEED_VAULT},
+		{"bonds_pouch", net.runelite.api.gameval.InventoryID.BONDS_POUCH},
+		{"bonds_escrow", net.runelite.api.gameval.InventoryID.BONDS_ESCROW},
+		{"quiver_ammo", net.runelite.api.gameval.InventoryID.DIZANAS_QUIVER_AMMO},
 	};
-	// {snapshot key, gameval VarPlayerID}
-	private static final Object[][] MINIGAME_VARPS = {
-		{"soul_wars_zeal", 2871}, {"giants_foundry", 3436},
-		{"mixology_lye", 4414}, {"mixology_aga", 4415}, {"mixology_mox", 4416},
-	};
-	// Off-book snapshot containers (verified vs runelite-api 1.12.32 gameval enums, javap). gameval int ids so
-	// they match ItemContainerChanged.getContainerId().
-	private static final int LOOTING_BAG_CONTAINER_ID = net.runelite.api.gameval.InventoryID.LOOTING_BAG;	// 516
-	private static final int SEED_VAULT_CONTAINER_ID = net.runelite.api.gameval.InventoryID.SEED_VAULT;		// 626
-	private static final int BONDS_POUCH_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_POUCH;	// 536
-	private static final int BONDS_ESCROW_CONTAINER_ID = net.runelite.api.gameval.InventoryID.BONDS_ESCROW;	// 534
-	private static final int QUIVER_AMMO_CONTAINER_ID = net.runelite.api.gameval.InventoryID.DIZANAS_QUIVER_AMMO; // 879
 	/** Snapshot key -> container id for the player's own storage (broad capture batch 1). Order is the wire order. */
 	static final Map<String, Integer> OWN_STORAGE_CONTAINERS;
 	static
@@ -84,20 +90,12 @@ final class SnapshotBuilder
 		OWN_STORAGE_CONTAINERS = Collections.unmodifiableMap(m);
 	}
 
-	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (Varbits.DIARY_*).
+	// region -> {easy, medium, hard, elite} achievement-diary completion varbits (the Varbits.DIARY_* ids).
 	static final Object[][] DIARIES = {
-		{"ardougne", Varbits.DIARY_ARDOUGNE_EASY, Varbits.DIARY_ARDOUGNE_MEDIUM, Varbits.DIARY_ARDOUGNE_HARD, Varbits.DIARY_ARDOUGNE_ELITE},
-		{"desert", Varbits.DIARY_DESERT_EASY, Varbits.DIARY_DESERT_MEDIUM, Varbits.DIARY_DESERT_HARD, Varbits.DIARY_DESERT_ELITE},
-		{"falador", Varbits.DIARY_FALADOR_EASY, Varbits.DIARY_FALADOR_MEDIUM, Varbits.DIARY_FALADOR_HARD, Varbits.DIARY_FALADOR_ELITE},
-		{"fremennik", Varbits.DIARY_FREMENNIK_EASY, Varbits.DIARY_FREMENNIK_MEDIUM, Varbits.DIARY_FREMENNIK_HARD, Varbits.DIARY_FREMENNIK_ELITE},
-		{"kandarin", Varbits.DIARY_KANDARIN_EASY, Varbits.DIARY_KANDARIN_MEDIUM, Varbits.DIARY_KANDARIN_HARD, Varbits.DIARY_KANDARIN_ELITE},
-		{"karamja", Varbits.DIARY_KARAMJA_EASY, Varbits.DIARY_KARAMJA_MEDIUM, Varbits.DIARY_KARAMJA_HARD, Varbits.DIARY_KARAMJA_ELITE},
-		{"kourend", Varbits.DIARY_KOUREND_EASY, Varbits.DIARY_KOUREND_MEDIUM, Varbits.DIARY_KOUREND_HARD, Varbits.DIARY_KOUREND_ELITE},
-		{"lumbridge", Varbits.DIARY_LUMBRIDGE_EASY, Varbits.DIARY_LUMBRIDGE_MEDIUM, Varbits.DIARY_LUMBRIDGE_HARD, Varbits.DIARY_LUMBRIDGE_ELITE},
-		{"morytania", Varbits.DIARY_MORYTANIA_EASY, Varbits.DIARY_MORYTANIA_MEDIUM, Varbits.DIARY_MORYTANIA_HARD, Varbits.DIARY_MORYTANIA_ELITE},
-		{"varrock", Varbits.DIARY_VARROCK_EASY, Varbits.DIARY_VARROCK_MEDIUM, Varbits.DIARY_VARROCK_HARD, Varbits.DIARY_VARROCK_ELITE},
-		{"western", Varbits.DIARY_WESTERN_EASY, Varbits.DIARY_WESTERN_MEDIUM, Varbits.DIARY_WESTERN_HARD, Varbits.DIARY_WESTERN_ELITE},
-		{"wilderness", Varbits.DIARY_WILDERNESS_EASY, Varbits.DIARY_WILDERNESS_MEDIUM, Varbits.DIARY_WILDERNESS_HARD, Varbits.DIARY_WILDERNESS_ELITE},
+		{"ardougne", 4458, 4459, 4460, 4461}, {"desert", 4483, 4484, 4485, 4486}, {"falador", 4462, 4463, 4464, 4465},
+		{"fremennik", 4491, 4492, 4493, 4494}, {"kandarin", 4475, 4476, 4477, 4478}, {"karamja", 3578, 3599, 3611, 4566},
+		{"kourend", 7925, 7926, 7927, 7928}, {"lumbridge", 4495, 4496, 4497, 4498}, {"morytania", 4487, 4488, 4489, 4490},
+		{"varrock", 4479, 4480, 4481, 4482}, {"western", 4471, 4472, 4473, 4474}, {"wilderness", 4466, 4467, 4468, 4469},
 	};
 	/**
 	 * FRESHNESS. When the client last saw each item container change (ItemContainerChanged), in ms. A container
@@ -357,13 +355,7 @@ final class SnapshotBuilder
 		snap.put("diaries_raw", diaries);
 
 		// ---- combat achievements: raw per-tier varbit ----
-		Map<String, Object> ca = Fields.of(
-			"easy", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_EASY),
-			"medium", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_MEDIUM),
-			"hard", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_HARD),
-			"elite", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_ELITE),
-			"master", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_MASTER),
-			"grandmaster", plugin.client.getVarbitValue(Varbits.COMBAT_ACHIEVEMENT_TIER_GRANDMASTER));
+		Map<String, Object> ca = vars(CA_TIERS);
 		// Every task's completion bit (one bit per task id), so a task-gated item is known, not only the tier.
 		List<Integer> caWords = new ArrayList<>();
 		for (int varp : AccountProgressCapture.CA_TASK_VARPS)
@@ -373,38 +365,17 @@ final class SnapshotBuilder
 		ca.put("task_words", caWords);
 		ca.put("points", plugin.client.getVarbitValue(VARBIT_CA_POINTS));
 		snap.put("combat_achievements_raw", ca);
-
-		// ---- slayer ----
-		Map<String, Object> slayer = Fields.of(
-			"points", plugin.client.getVarbitValue(Varbits.SLAYER_POINTS),
-			"streak", plugin.client.getVarbitValue(Varbits.SLAYER_TASK_STREAK),
-			"task_target_id", plugin.client.getVarpValue(VARP_SLAYER_TARGET),
-			"task_remaining", plugin.client.getVarpValue(VARP_SLAYER_COUNT),
-			"unlocks_raw", plugin.client.getVarpValue(VARP_SLAYER_UNLOCKS),
-			"blocked_raw", plugin.client.getVarpValue(VARP_SLAYER_BLOCKED));
-		// The later reward words: unlocks1/unlocks2 hold the rewards bought after the first varp filled.
-		slayer.put("unlocks1_raw", plugin.client.getVarpValue(VARP_SLAYER_UNLOCKS1));
-		slayer.put("unlocks2_raw", plugin.client.getVarpValue(VARP_SLAYER_UNLOCKS2));
-		snap.put("slayer", slayer);
+		snap.put("slayer", vars(SLAYER));
 
 		// ---- rune pouch: raw type-index + amount per slot (server maps type-index -> rune item) ----
-		int[][] rpSlots = {
-			{Varbits.RUNE_POUCH_RUNE1, Varbits.RUNE_POUCH_AMOUNT1},
-			{Varbits.RUNE_POUCH_RUNE2, Varbits.RUNE_POUCH_AMOUNT2},
-			{Varbits.RUNE_POUCH_RUNE3, Varbits.RUNE_POUCH_AMOUNT3},
-			{Varbits.RUNE_POUCH_RUNE4, Varbits.RUNE_POUCH_AMOUNT4},
-			{Varbits.RUNE_POUCH_RUNE5, Varbits.RUNE_POUCH_AMOUNT5},
-			{Varbits.RUNE_POUCH_RUNE6, Varbits.RUNE_POUCH_AMOUNT6},
-		};
 		List<Map<String, Object>> runePouch = new ArrayList<>();
-		for (int[] s : rpSlots)
+		for (int[] slot : RUNE_POUCH)
 		{
-			int type = plugin.client.getVarbitValue(s[0]);
-			int amt = plugin.client.getVarbitValue(s[1]);
+			int type = plugin.client.getVarbitValue(slot[0]);
+			int amt = plugin.client.getVarbitValue(slot[1]);
 			if (type > 0 && amt > 0)
 			{
-				Map<String, Object> m = Fields.of("type_raw", type, "amount", amt);
-				runePouch.add(m);
+				runePouch.add(Fields.of("type_raw", type, "amount", amt));
 			}
 		}
 		snap.put("rune_pouch_raw", runePouch);
@@ -493,14 +464,10 @@ final class SnapshotBuilder
 		// ---- off-book / niche containers (verified gameval ids; legacy enum for GIM shared storage). Included
 		// only when non-null = opened at least once this session, so a normal snapshot never carries empty blocks.
 		// Shared Group Ironman storage is deliberately excluded from this public artifact. ----
-		addContainerSnapshot(snap, "looting_bag", plugin.client.getItemContainer(LOOTING_BAG_CONTAINER_ID));
-		addContainerSnapshot(snap, "seed_vault", plugin.client.getItemContainer(SEED_VAULT_CONTAINER_ID));
-		// Shared group storage is outside the public own-player transport contract.
-		// Storage-visibility (gap audit 2026-07-18): real wealth a bank+inv+equip snapshot can't see — a bond
-		// is ~30M+ parked invisibly; quiver ammo can be a large stacked value. False-residual sources closed.
-		addContainerSnapshot(snap, "bonds_pouch", plugin.client.getItemContainer(BONDS_POUCH_CONTAINER_ID));
-		addContainerSnapshot(snap, "bonds_escrow", plugin.client.getItemContainer(BONDS_ESCROW_CONTAINER_ID));
-		addContainerSnapshot(snap, "quiver_ammo", plugin.client.getItemContainer(QUIVER_AMMO_CONTAINER_ID));
+		for (Object[] c : CONTAINERS)
+		{
+			addContainerSnapshot(snap, (String) c[0], plugin.client.getItemContainer((int) c[1]));
+		}
 		// Broad capture batch 1: the player's OWN storage containers that the game sends once opened or
 		// checked (ids from gameval, matched against runelite-api 1.13.1). Each block is present only once the
 		// game has sent that container this session, and carries observed_at. Trade, duel, Deadman loot
@@ -561,7 +528,7 @@ final class SnapshotBuilder
 		snap.put("wealth", wealth);
 
 		// ---- WAVE 5: live state (all ids javap-verified vs runelite-api 1.12.32; raw values, decoded server-side) ----
-		snap.put("spellbook", plugin.client.getVarbitValue(Varbits.SPELLBOOK));          // 0 standard / 1 ancient / 2 lunar / 3 arceuus
+		snap.put("spellbook", plugin.client.getVarbitValue(4070));          // 0 standard / 1 ancient / 2 lunar / 3 arceuus
 		snap.put("attack_style", plugin.client.getVarpValue(VarPlayer.ATTACK_STYLE));    // 0..3 = the selected style slot
 		snap.put("world", plugin.client.getWorld());
 		snap.put("location", currentLocation());                                  // {region_id, plane} or null if unreadable
@@ -576,33 +543,22 @@ final class SnapshotBuilder
 		}
 		snap.put("prayer_active", activePrayers);
 
-		// Kourend house favour — 5 raw varbits (server divides by 10 for the %). Spelled FAVOR in the api enum.
-		Map<String, Object> favour = Fields.of(
-			"arceuus", plugin.client.getVarbitValue(Varbits.KOUREND_FAVOR_ARCEUUS),
-			"hosidius", plugin.client.getVarbitValue(Varbits.KOUREND_FAVOR_HOSIDIUS),
-			"lovakengj", plugin.client.getVarbitValue(Varbits.KOUREND_FAVOR_LOVAKENGJ),
-			"piscarilius", plugin.client.getVarbitValue(Varbits.KOUREND_FAVOR_PISCARILIUS),
-			"shayzien", plugin.client.getVarbitValue(Varbits.KOUREND_FAVOR_SHAYZIEN));
-		snap.put("kourend_favour", favour);
-
-		// Minigame points. NMZ + Tithe have clean point varbits; LMS has none in this jar (only IN_LMS state) so
-		// LMS points are omitted rather than invented.
-		Map<String, Object> minigames = Fields.of(
-			"nmz", plugin.client.getVarbitValue(Varbits.NMZ_POINTS),
-			"tithe", plugin.client.getVarbitValue(Varbits.TITHE_FARM_POINTS));
-		// Own milestones the game keeps in vars (gameval ids, runelite-api 1.13.4), raw. Boss kill counts and
-		// minigame scores are not in vars: the server reads those from the official hiscores.
-		for (Object[] m : MINIGAME_VARBITS)
-		{
-			minigames.put((String) m[0], plugin.client.getVarbitValue((int) m[1]));
-		}
-		for (Object[] m : MINIGAME_VARPS)
-		{
-			minigames.put((String) m[0], plugin.client.getVarpValue((int) m[1]));
-		}
-		snap.put("minigame_points", minigames);
+		snap.put("kourend_favour", vars(KOUREND_FAVOUR));
+		snap.put("minigame_points", vars(MINIGAME_POINTS));
 
 		return snap;
+	}
+
+	/** One raw block from name and id pairs (a negative id is that varp, any other a varbit), in table order. */
+	private Map<String, Object> vars(Object[] pairs)
+	{
+		Map<String, Object> values = new LinkedHashMap<>();
+		for (int i = 0; i < pairs.length; i += 2)
+		{
+			int id = (int) pairs[i + 1];
+			values.put((String) pairs[i], id < 0 ? plugin.client.getVarpValue(-id) : plugin.client.getVarbitValue(id));
+		}
+		return values;
 	}
 
 	/** {region_id, plane} of the local player's world location, or null if it isn't currently readable. */

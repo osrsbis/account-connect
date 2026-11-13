@@ -113,15 +113,32 @@ final class EventQueue
 		while (pendingEvents.size() > MAX_PENDING_EVENTS) evictOneForOverflow();
 	}
 
+	/**
+	 * The newest row the staff pump staged from disk goes first: it is not lost and is staged again later. Then the
+	 * oldest memory-only P2 row that is not a verification frame's. Then the newest row a public journal
+	 * still holds: it is not lost and is staged again after the rows before it, so a journal's order holds. Only then
+	 * the oldest row of the lowest class (EventPriority, a frame's rows last within P2). Only a row that is lost counts.
+	 */
 	void evictOneForOverflow()
 	{
-		int i = EventPriority.evictIndex(pendingEvents);
-		Map<String, Object> gone = pendingEvents.remove(i < 0 ? 0 : i);
-		Object t = gone.get("type");
-		healthOverflowByClass.incrementAndGet(EventPriority.classOf(t == null ? null : String.valueOf(t)));
+		int i = -1;
+		for (int j = pendingEvents.size() - 1; j >= 0 && i < 0; j--) if (pendingEvents.get(j).containsKey(SpoolDriver.EVENT_STAFF_SPOOL)) i = j;
+		for (int j = 0; j < pendingEvents.size() && i < 0; j++)
+		{
+			Map<String, Object> row = pendingEvents.get(j);
+			if (!journaled(row) && EventPriority.rowClass(row) == EventPriority.P2 && !Boolean.TRUE.equals(row.get(EventPriority.FRAME_BOUND))) i = j;
+		}
+		for (int j = pendingEvents.size() - 1; j >= 0 && i < 0; j--) if (journaled(pendingEvents.get(j))) i = j;
+		Map<String, Object> gone = pendingEvents.remove(i < 0 ? Math.max(0, EventPriority.evictIndex(pendingEvents)) : i);
 		plugin.spooler.spoolReleaseFromMemory(gone);
-		if (!gone.containsKey(EVENT_PUBLIC_OUTBOX) || Boolean.TRUE.equals(gone.get(EVENT_PUBLIC_VOLATILE)))
-			healthEventsLost.incrementAndGet();
+		if (journaled(gone)) return;
+		healthOverflowByClass.incrementAndGet(EventPriority.rowClass(gone));
+		healthEventsLost.incrementAndGet();
+	}
+
+	private static boolean journaled(Map<String, Object> event)
+	{
+		return event.containsKey(SpoolDriver.EVENT_STAFF_SPOOL) || event.containsKey(EVENT_PUBLIC_OUTBOX) && !Boolean.TRUE.equals(event.get(EVENT_PUBLIC_VOLATILE));
 	}
 
 	/**
@@ -219,10 +236,14 @@ final class EventQueue
 		}
 		ev = PublicTransport.event(ev, plugin.grants.captureEnabled());
 		if (ev == null) { healthEventsLost.incrementAndGet(); return; }
-		if (eventEvidence)
+		if (Boolean.TRUE.equals(fields == null ? null : fields.get(EventPriority.FRAME_BOUND))) ev.put(EventPriority.FRAME_BOUND, true);
+		// The event keeps its verification_tick either way; only a source that can show evidence takes an admission.
+		if (eventEvidence && EventVerificationScreen.selectable(type, ev, plugin.verificationMessage))
 		{
 			EventVerification.Source source = new EventVerification.Source(ev, plugin.currentLinkToken(), plugin.activeHash,
 				plugin.verificationEpoch.get(), plugin.client.getTickCount(), plugin.lastSnapshotCapturedAtMs, System.currentTimeMillis(), plugin.verificationMessage);
+			// The game adds the line to the chat after this event, so every copy already there is an older one.
+			source.olderCopies = EventVerificationScreen.chatCopies(plugin.client, source.text).size();
 			// The hourly admission is charged only for a source the pending queue accepts (client thread: room, then offer).
 			boolean queued = false;
 			plugin.verify.evictExpiredSources();
@@ -247,11 +268,13 @@ final class EventQueue
 			// A grant/identity race cannot send own-player events after permission is withdrawn.
 			healthEventsLost.incrementAndGet(); return;
 		}
-		plugin.spooler.spoolOnEmit(type, ev, eventId);
-		synchronized (pendingEvents)
+		if (!plugin.spooler.spoolCapture(type, ev, eventId))
 		{
-			pendingEvents.add(ev);
-			trimPending();
+			synchronized (pendingEvents)
+			{
+				pendingEvents.add(ev);
+				trimPending();
+			}
 		}
 		// WAVE 2: real-time. A state-changing event forces a fresh snapshot so wealth/state lands now; every
 		// event schedules a coalesced flush so it ships in ~1s instead of on the next 5s tick.
@@ -364,7 +387,8 @@ final class EventQueue
 			{
 				Map<String, Object> ev = it.next();
 				Object id = ev.get("event_id");
-				if (ev.containsKey(EVENT_PUBLIC_OUTBOX) || !(ev.get(EVENT_TOKEN_FP) instanceof String)
+				// A staged staff row stays on disk (or was withdrawn): never into the plaintext exit file.
+				if (ev.containsKey(EVENT_PUBLIC_OUTBOX) || ev.containsKey(SpoolDriver.EVENT_STAFF_SPOOL) || !(ev.get(EVENT_TOKEN_FP) instanceof String)
 					|| id != null && plugin.spooler.spoolMemoryOwned.containsKey(String.valueOf(id)))
 				{
 					continue;
@@ -632,16 +656,24 @@ final class EventQueue
 			{
 				Map<String, Object> ev = it.next();
 				Object eid = ev.get("event_id");
-				if (eid != null && !plugin.spooler.durabilityGateOpen(String.valueOf(eid)))
+				int restaged = plugin.spooler.restaged(ev);
+				if (restaged == 1) continue; // a staff row from disk waits for its own identity
+				if (restaged == 3)
 				{
-					// Not durable yet: it stays in place and keeps its order. Nothing behind it may
-					// overtake it either, so the batch stops here.
-					break;
+					it.remove();	// withdrawn while in flight: the spool already counted and let it go
+					continue;
+				}
+				if (restaged == 2)
+				{
+					plugin.spooler.spoolReleaseFromMemory(ev);
+					it.remove();
+					continue;
 				}
 				if (!PublicTransport.allowsEvent(String.valueOf(ev.get("type")), plugin.grants.captureEnabled()))
 				{
-					// Legacy memory rows are dropped locally; durable rows are quarantined on replay.
-					healthEventsLost.incrementAndGet();
+					// Legacy memory rows are dropped locally; durable rows are quarantined on replay. A staged row
+					// is counted once, by the spool, like every other staged row.
+					if (!ev.containsKey(SpoolDriver.EVENT_STAFF_SPOOL)) healthEventsLost.incrementAndGet();
 					plugin.spooler.spoolReleaseFromMemory(ev);
 					it.remove();
 					continue;
@@ -674,6 +706,7 @@ final class EventQueue
 					if (!batch.isEmpty() && !Objects.equals(batch.get(0).get(EVENT_QUEUE), ev.get(EVENT_QUEUE))) break;
 					if (!batch.isEmpty() && !Objects.equals(PublicOutboxDriver.publicOutboxIdentity(batch.get(0)), PublicOutboxDriver.publicOutboxIdentity(ev))) break;
 					if (!batch.isEmpty() && !Objects.equals(batch.get(0).get(EVENT_PUBLIC_VOLATILE), ev.get(EVENT_PUBLIC_VOLATILE))) break;
+					if (!batch.isEmpty() && !Objects.equals(batch.get(0).get(EVENT_PUBLIC_BANK), ev.get(EVENT_PUBLIC_BANK))) break;
 					batch.add(ev);
 				}
 				else
@@ -734,7 +767,8 @@ final class EventQueue
 					pendingEvents.addAll(0, overflow);
 				}
 			}
-			Request request = eventRequest(plugin.gson.toJson(token), encoded.subList(0, kept), queue, null);
+			Request request = new Request.Builder().url(plugin.apiBase() + "/event-ingest").post(RequestBody.create(AccountConnectPlugin.JSON,
+				eventBatchBody(plugin.gson.toJson(token), encoded.subList(0, kept), queue))).build();
 			String outboxIdentity = PublicOutboxDriver.publicOutboxIdentity(batch.get(0));
 			PublicEventOutbox.Context liveOwner = outboxIdentity == null ? null : plugin.outbox.publicSendContext();
 			if (outboxIdentity != null && (liveOwner == null || !outboxIdentity.equals(liveOwner.identity)
@@ -757,15 +791,6 @@ final class EventQueue
 			log.debug("OSRS BiS event sync could not be dispatched — requeueing {} events", batch.size(), t);
 			requeueEvents(batch, 0);
 		}
-	}
-
-	/** The shared sender: one {token, events} request to /event-ingest, with the queue-v1 envelope when asked. */
-	Request eventRequest(String tokenJson, List<String> encoded, boolean queue, SpoolDriver.SpoolReplayAge age)
-	{
-		String base = plugin.apiBase();
-		Request.Builder request = new Request.Builder().url(base + "/event-ingest")
-			.post(RequestBody.create(AccountConnectPlugin.JSON, eventBatchBody(tokenJson, encoded, queue)));
-		return (age == null ? request : request.tag(SpoolDriver.SpoolReplayAge.class, age)).build();
 	}
 
 	/** The shared answer path: a network failure, or a response that is always closed after its lane read it. */
@@ -797,14 +822,15 @@ final class EventQueue
 	/** The memory and public-journal lane's answer. */
 	private void eventAnswer(List<Map<String, Object>> batch, String sentToken, Response response)
 	{
-		boolean bankReceipt = Boolean.TRUE.equals(batch.get(0).get(EVENT_PUBLIC_BANK));
+		Object receiptScope = batch.get(0).get(EVENT_PUBLIC_BANK);
+		boolean bankReceipt = receiptScope instanceof String;
 		if ((Boolean.TRUE.equals(batch.get(0).get(EVENT_QUEUE)) || bankReceipt)
 			&& response.code() != 403)
 		{
 			String queueBody = readBody(response);
 			EventQueueProtocol.ReceiptSet parsed = EventQueueProtocol.terminalError(response.code(), queueBody)
 				? EventQueueProtocol.ReceiptSet.rejected(batch.size()) : bankReceipt
-					? PublicBankProtocol.receipts(response.code(), queueBody, batch) : EventQueueProtocol.parseReceipts(queueBody, batch);
+					? PublicBankProtocol.receipts((String) receiptScope, response.code(), queueBody, batch) : EventQueueProtocol.parseReceipts(queueBody, batch);
 			List<EventQueueProtocol.Outcome> receipts = parsed.outcomes;
 			queueDeliveryHealth.response(batch, parsed);
 			plugin.outbox.settlePublicOutbox(batch, receipts, sentToken);
@@ -834,9 +860,9 @@ final class EventQueue
 		{
 			// Durable rows are settled ONLY by their own event_id in `results`. The memory
 			// copy is done either way, exactly as before; an unacked durable row stays on
-			// disk and becomes eligible for the paced replay.
+			// disk and the pump stages it again.
 			plugin.spooler.spoolOnMemoryBatchDone(batch, sentToken, readBody(response), response.code());
-			healthEventsSent.addAndGet(batch.size());
+			healthEventsSent.addAndGet(memoryRows(batch));
 			healthLastEventUploadMs.set(System.currentTimeMillis());
 			eventPostInFlight = false;
 			completeFinalFlush();
@@ -861,13 +887,21 @@ final class EventQueue
 		{
 			log.debug("OSRS BiS event sync HTTP {} — dropping {} events (not retryable)",
 				code, batch.size());
-			healthEventsLost.addAndGet(batch.size());
+			healthEventsLost.addAndGet(memoryRows(batch));
 			// 403 = the link is revoked: the identity's spool is purged. Any other 4xx:
-			// the durable copies go to terminal quarantine, metadata only, never retried.
+			// the durable copies are tombstoned and counted as quarantined, never retried.
 			plugin.spooler.spoolOnMemoryBatchDone(batch, sentToken, null, code);
 			eventPostInFlight = false;
 			completeFinalFlush();
 		}
+	}
+
+	/** Rows the event counters cover: not the staff rows the pump staged from disk (the spool counts those). */
+	private static int memoryRows(List<Map<String, Object>> batch)
+	{
+		int n = 0;
+		for (Map<String, Object> ev : batch) if (!ev.containsKey(SpoolDriver.EVENT_STAFF_SPOOL)) n++;
+		return n;
 	}
 
 	/**
@@ -987,6 +1021,7 @@ final class EventQueue
 		h.put("public_outbox_retired_identities_total", plugin.outbox.publicOutboxPurged);
 		h.put("public_outbox_not_durable_total", plugin.outbox.publicOutboxUndurable.get());
 		h.put("public_outbox_append_pending", plugin.outbox.publicOutboxWrites.get());
+		h.put("public_outbox_oldest_age_ms", plugin.outbox.publicOutboxOldestAgeMs());
 		plugin.spooler.addSpoolHealth(h);
 		return h;
 	}

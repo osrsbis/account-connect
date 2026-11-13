@@ -93,10 +93,11 @@ public class GeNativeTaxTest
 		Map<?, ?> o = lastObservation("ge_sell");
 		assertNotNull(o);
 		assertEquals(30_000L, o.get("native_tax_gp"));
-		assertEquals("varp_long_when_row_built", o.get("native_tax_source"));
-		// The existing fields keep their meaning: no exact tax or execution price is claimed.
-		assertEquals(null, o.get("tax_gp"));
-		assertEquals(null, o.get("execution_price"));
+		// No exact tax or execution price is claimed, and no constant label is sent (0.7.72).
+		for (String label : new String[]{"native_tax_source", "tax_gp", "execution_price", "source", "gp_semantics", "fill_time"})
+		{
+			assertFalse(label, o.containsKey(label));
+		}
 	}
 
 	@Test
@@ -219,7 +220,7 @@ public class GeNativeTaxTest
 	}
 
 	@Test
-	public void theNativeTaxSurvivesThePublicProjectionAndNothingElseIsAdded()
+	public void theNativeTaxSurvivesThePublicProjectionAndTheRetiredLabelsDoNot()
 	{
 		Map<String, Object> observation = new LinkedHashMap<>();
 		observation.put("native_tax_gp", 30_000L);
@@ -229,7 +230,7 @@ public class GeNativeTaxTest
 		event.put("ge_observation", observation);
 		Map<?, ?> out = (Map<?, ?>) PublicTransport.event(event).get("ge_observation");
 		assertEquals(30_000L, out.get("native_tax_gp"));
-		assertEquals("varp_long_when_row_built", out.get("native_tax_source"));
+		assertFalse("a journaled row from an older client loses the label at send", out.containsKey("native_tax_source"));
 		observation.put("native_tax_source", "a player name");
 		assertFalse(((Map<?, ?>) PublicTransport.event(event).get("ge_observation")).containsKey("native_tax_source"));
 	}

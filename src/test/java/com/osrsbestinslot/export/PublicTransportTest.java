@@ -129,6 +129,12 @@ public class PublicTransportTest
         assertEquals("/api/screenshot-ingest", request.getPath());
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("verify")); assertTrue(body.contains("0123456789abcdef")); assertTrue(body.contains("1234"));
+        assertFalse("no pairing part unless one is given", body.contains("name=\"pairing\""));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":2}"));
+        plugin.verify.uploadVerificationFrame(plugin.verify.currentOwner(TOKEN), new byte[]{1, 2}, "0123456789abcdef", 1234000L,
+            Fields.of("ref", "0123456789abcdef"), 1, false, "{\"v\":1,\"frame_tick\":5}");
+        String paired = server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8();
+        assertTrue(paired.contains("name=\"pairing\"")); assertTrue(paired.contains("{\"v\":1,\"frame_tick\":5}"));
         plugin.grants.applyServerPolicy(policy.newBuilder().header("X-Verification-Frames", "off").build());
         uploadFrame();
         assertNull(server.takeRequest(100, TimeUnit.MILLISECONDS));
@@ -275,31 +281,26 @@ public class PublicTransportTest
         RecordedRequest again = server.takeRequest(200, TimeUnit.MILLISECONDS);
         assertTrue("never retried", again == null || !again.getPath().endsWith("/screenshot-ingest"));
     }
-    @Test public void deliveryGrantAllowsCaptureWithoutStaffIdentityOrOverlays() throws Exception
+    @Test public void deliveryHeadersNeverOpenCaptureForAnOrdinaryPlayer() throws Exception
     {
         plugin.grants.staffApiBase = server.url("/api").toString();
+        // Old servers sent these to every 0.7.66+ token. Trade, store and drop capture is staff-only, so they open nothing.
         Response policy = new Response.Builder().request(new Request.Builder().url(server.url("/api/account-ingest")).build())
             .protocol(Protocol.HTTP_1_1).code(200).message("OK")
-            .header("X-Staff-Capture", "off").header("X-Store-Tools", "off").header("X-Screenshots", "off").header("X-Clips", "off")
+            .header("X-Staff-Capture", "off").header("X-Store-Tools", "off")
             .header("X-Delivery-Capture", "on").header("X-Delivery-Account", "12345")
             .header("X-Delivery-Screenshots", "allow").header("X-Delivery-Clips", "allow")
             .header("X-Delivery-Drop-Proof", "on").build();
         plugin.grants.applyServerPolicy(policy);
-        assertFalse(plugin.grants.staffCaptureEnabled()); assertFalse(plugin.grants.storeToolsEnabled());
-        assertTrue(plugin.grants.deliveryCaptureEnabled()); assertTrue(plugin.grants.screenshotsEnabled());
-        assertTrue(plugin.grants.storeClipsEnabled()); assertTrue(plugin.grants.dropProofEnabled());
+        assertFalse(plugin.grants.staffCaptureEnabled()); assertFalse(plugin.grants.captureEnabled());
+        assertFalse(plugin.grants.screenshotsEnabled()); assertFalse(plugin.grants.storeClipsEnabled());
+        assertFalse(plugin.grants.dropProofEnabled()); assertFalse(plugin.grants.storeToolsEnabled());
+        for (String type : new String[]{"store_taken", "drop_trade_clip", "drop_trade_clip_final"})
+            assertFalse(type, PublicTransport.allowsEvent(type, plugin.grants.captureEnabled()));
+        // Ordinary gameplay stays: the trade row is sent in its public shape, without the other player's name.
         plugin.events.emitEvent("trade", Map.of("given", List.of(), "received", List.of(), "counterparty", "OtherPlayer"));
-        assertEquals("OtherPlayer", plugin.events.pendingEvents.get(0).get("counterparty"));
-        server.enqueue(new MockResponse().setBody("{\"ok\":true,\"id\":1}"));
-        plugin.trade.uploadTradeScreenshot(TOKEN, new byte[]{1, 2}, "confirm", plugin.activeHash);
-        RecordedRequest request = server.takeRequest(3, TimeUnit.SECONDS);
-        assertNotNull(request); String body = request.getBody().readUtf8();
-        assertTrue(body.contains("account_hash")); assertTrue(body.contains("12345"));
-        put("activeHash", "999"); assertFalse(plugin.grants.deliveryCaptureEnabled());
-        put("activeHash", "12345");
-        plugin.grants.applyServerPolicy(policy.newBuilder().removeHeader("X-Delivery-Capture").build());
-        assertFalse(plugin.grants.deliveryCaptureEnabled()); assertFalse(plugin.grants.screenshotsEnabled());
-        assertFalse(plugin.grants.storeClipsEnabled()); assertFalse(plugin.grants.dropProofEnabled());
+        Map<String, Object> wire = PublicTransport.event(plugin.events.pendingEvents.get(0), plugin.grants.captureEnabled());
+        assertNotNull(wire); assertEquals("trade", wire.get("type")); assertFalse(wire.containsKey("counterparty"));
     }
     @Test public void optionalCollectionGrantsStayWithTheResponseAccount() throws Exception
     {
@@ -331,6 +332,7 @@ public class PublicTransportTest
         assertEquals(3L, result.get("delta_qty")); assertTrue(result.containsKey("delta_gp"));
         assertNull(result.get("delta_gp")); assertEquals("inferred_across_gap", result.get("identity"));
         assertFalse(result.containsKey("other_player")); assertFalse(result.containsKey("fill_time"));
+        assertFalse("a retired label from an older journaled row is not sent", result.containsKey("source"));
     }
     @Test public void staleMemoryTradeIsProjectedAtDispatch() throws Exception
     {
@@ -347,15 +349,11 @@ public class PublicTransportTest
         old.crashForTest();
         plugin.grants.applyServerPolicy(grant()); SpoolHooks.awaitIdle(plugin.spooler);
         server.enqueue(new MockResponse().setBody("{\"ok\":true,\"stored\":1}"));
-        plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
-        SpoolHooks.awaitIdle(plugin.spooler);
+        SpoolHooks.resend(plugin); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
         assertEquals(1, SpoolHooks.pendingIds(plugin.spooler).size());
-        plugin.spooler.spoolReplayNotBeforeMs=0; plugin.spooler.spoolReplayBackoffUntilMs=0;
         server.enqueue(new MockResponse().setBody("{\"results\":[{\"event_id\":\""+ID+"\",\"status\":\"stored\"}]}"));
-        plugin.spooler.replaySpoolTick(); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i=0; i<100 && plugin.spooler.spoolReplayInFlight; i++) Thread.sleep(10);
-        SpoolHooks.awaitIdle(plugin.spooler); assertEquals(0, SpoolHooks.pendingIds(plugin.spooler).size());
+        SpoolHooks.resend(plugin); assertOwnTrade(server.takeRequest(3, TimeUnit.SECONDS));
+        assertEquals(0, SpoolHooks.pendingIds(plugin.spooler).size());
     }
     @Test public void remoteGrantsCannotEnablePublicMediaOrFirehose() throws Exception
     {
@@ -426,16 +424,13 @@ public class PublicTransportTest
         Map<String,Object> e=legacyTrade(); e.put("type","store_taken");
         assertTrue(old.append(ID,"store_taken",System.currentTimeMillis(),gson.toJson(e))); old.crashForTest();
         plugin.grants.applyServerPolicy(grant()); SpoolHooks.awaitIdle(plugin.spooler);
-        plugin.spooler.replaySpoolTick(); SpoolHooks.awaitIdle(plugin.spooler);
+        SpoolHooks.resend(plugin);
         assertNull(server.takeRequest(200,TimeUnit.MILLISECONDS));
         assertEquals(0,SpoolHooks.pendingIds(plugin.spooler).size());
+        assertEquals(1L,plugin.events.captureHealthSnapshot().get("spool_quarantined_total"));
         try (java.util.stream.Stream<Path> files=Files.walk(dir))
         {
-            String q=files.filter(f -> f.getFileName().toString().contains("quarantine"))
-                .map(f -> {try {return Files.readString(f);} catch(Exception ex) {throw new RuntimeException(ex);}})
-                .collect(java.util.stream.Collectors.joining());
-            assertTrue(q,q.contains(ID)); assertTrue(q,q.contains("\"status\":-1"));
-            assertFalse(q,q.contains("OTHER_CANARY"));
+            assertFalse("no copy of a rejected row is kept",files.anyMatch(f -> f.getFileName().toString().contains("quarantine")));
         }
     }
 
@@ -457,7 +452,7 @@ public class PublicTransportTest
             EventSpool.ATOMIC,EventSpool.Limits.DEFAULT,new EventSpool.Counters());
         assertTrue(old.append(ID,"bank_visit_manifest_chunk",System.currentTimeMillis(),gson.toJson(bank)));old.crashForTest();
         plugin.grants.applyServerPolicy(grant());SpoolHooks.awaitIdle(plugin.spooler);
-        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));plugin.spooler.replaySpoolTick();
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));SpoolHooks.resend(plugin);
         RecordedRequest replay=server.takeRequest(3,TimeUnit.SECONDS); assertNotNull(replay);
         sent=new com.google.gson.JsonParser().parse(replay.getBody().readUtf8())
             .getAsJsonObject().getAsJsonArray("events").get(0).getAsJsonObject();
@@ -542,8 +537,9 @@ public class PublicTransportTest
         Map<String,Object> snap = new LinkedHashMap<>(); snap.put("account", Map.of("rsn", "OwnPlayer"));
         plugin.uploader.postSnapshot(TOKEN, snap, "h");
         assertNotNull(server.takeRequest(3, TimeUnit.SECONDS));
-        for (int i = 0; i < 100 && !plugin.grants.storeToolsEnabled(); i++) Thread.sleep(10);
-        assertTrue("the answer was applied", plugin.grants.storeToolsEnabled());
+        for (int i = 0; i < 100 && !plugin.grants.serverStoreToolsEnabled; i++) Thread.sleep(10);
+        assertTrue("the answer was applied", plugin.grants.serverStoreToolsEnabled);
+        assertFalse("a player's own server cannot show the shop overlays", plugin.grants.storeToolsEnabled());
         assertNoStaffTool("a player's own server granted staff capture");
 
         // Granted by the official endpoint, the grant ends the moment the setting names another server.
@@ -601,6 +597,7 @@ public class PublicTransportTest
         plugin.grants.applyServerPolicy(staffAnswer("on", "12345"), TOKEN);
         plugin.events.emitEvent("trade", new LinkedHashMap<>(fields));
         plugin.events.emitEvent("store_taken", new LinkedHashMap<>(taken));
+        SpoolHooks.awaitIdle(plugin.spooler); // the staff spool hands rows to the sender from its disk thread
         assertEquals(2, plugin.events.pendingEvents.size());
         assertEquals("OTHER_CANARY", plugin.events.pendingEvents.get(0).get("counterparty"));
         assertEquals("store_taken", plugin.events.pendingEvents.get(1).get("type"));

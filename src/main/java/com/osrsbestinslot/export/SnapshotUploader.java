@@ -319,10 +319,8 @@ final class SnapshotUploader
 			{
 				if (token.equals(plugin.currentLinkToken()))
 				{
-					plugin.grants.clearVerificationGrant();
-					plugin.grants.clearDeliveryCaptureGrant();
-					plugin.grants.pluginInventoryGrantToken = null;
-					if (plugin.grants.collectionAccountRequired) plugin.grants.collectionGrantAccount = null;
+					// The collection account is set only once the server requires it, so clearing it always is the same.
+					plugin.grants.clearCollectionGrants();
 					snapshotRetryPending = true;
 					applyRateLimitBackoff(null);
 				}

@@ -9,6 +9,9 @@
  *   P0  ge_*, trade, store_*, death, login, logout   money movements and session edges
  *   P1  loot, drop, pickup, alch, ground_removed, level_up, kill_count, pet, bank_session, bank_visit_*
  *   P2  everything else (region, equip_change, xp_gain, world_hop, fh_batch, ...)
+ *   A verification row of a frame taken for upload (its capture, screen and upload rows, marked FRAME_BOUND) stays
+ *   P2 but goes last within P2: a 429 hold drops every other P2 row first, so an image keeps its rows as long as
+ *   possible, and verification evidence never pushes out a P0 or P1 game event.
  *
  * Order inside the buffer is never changed: a row is removed, the others keep their positions.
  */
@@ -22,6 +25,8 @@ final class EventPriority
 	static final int P0 = 0;
 	static final int P1 = 1;
 	static final int P2 = 2;
+	/** Local delivery key (never sent): the row belongs to a verification frame taken for upload. */
+	static final String FRAME_BOUND = "__frame_bound";
 
 	private EventPriority()
 	{
@@ -48,25 +53,40 @@ final class EventPriority
 		return P2;
 	}
 
-	/** Index of the row overflow should drop: the oldest row of the lowest class present. -1 when empty. */
+	static int rowClass(Map<String, Object> row)
+	{
+		Object t = row.get("type");
+		return classOf(t == null ? null : String.valueOf(t));
+	}
+
+	/**
+	 * Index of the row overflow should drop: the oldest row of the lowest class present, where within P2 a frame's row
+	 * goes only when no other P2 row is left. -1 when empty.
+	 */
 	static int evictIndex(List<Map<String, Object>> pending)
 	{
 		int best = -1;
 		int bestClass = -1;
+		int oldestFrameRow = -1;
 		for (int i = 0; i < pending.size(); i++)
 		{
-			Object t = pending.get(i).get("type");
-			int c = classOf(t == null ? null : String.valueOf(t));
+			Map<String, Object> row = pending.get(i);
+			int c = rowClass(row);
+			if (c == P2 && Boolean.TRUE.equals(row.get(FRAME_BOUND)))
+			{
+				if (oldestFrameRow < 0) oldestFrameRow = i;
+				continue;
+			}
 			if (c > bestClass)
 			{
 				bestClass = c;
 				best = i;
 				if (c == P2)
 				{
-					break;	// the first P2 row is the oldest of the lowest possible class
+					return i;	// the oldest P2 row that is not a frame's
 				}
 			}
 		}
-		return best;
+		return oldestFrameRow >= 0 ? oldestFrameRow : best;
 	}
 }

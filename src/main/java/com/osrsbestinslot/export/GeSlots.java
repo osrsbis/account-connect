@@ -443,7 +443,6 @@ final class GeSlots
 		try
 		{
 			o.put("native_tax_gp", plugin.client.getVarpLongValue(VarPlayerID.GE_TAX_SLOT_LONG_0 + slot));
-			o.put("native_tax_source", "varp_long_when_row_built");
 		}
 		catch (RuntimeException e)
 		{

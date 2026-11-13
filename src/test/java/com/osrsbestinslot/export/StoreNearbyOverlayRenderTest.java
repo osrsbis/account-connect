@@ -290,4 +290,27 @@ public class StoreNearbyOverlayRenderTest
 		org.mockito.Mockito.verify(client, org.mockito.Mockito.never()).getPlayers();
 	}
 
+	/** Equal distances order by name, also across the cap; a name that is only tags is not a row. */
+	@Test
+	public void displayRowsTieBreakByNameAndSkipTagOnlyNames() throws Exception
+	{
+		AccountConnectPlugin plugin = plugin();
+		plugin.store.shopOpen = true;
+		plugin.grants.serverStoreToolsEnabled = true;
+		staff(plugin);
+		net.runelite.api.Client client = org.mockito.Mockito.mock(net.runelite.api.Client.class);
+		net.runelite.api.Player self = visiblePlayer("Self", 3210, 3210);
+		org.mockito.Mockito.when(client.getLocalPlayer()).thenReturn(self);
+		java.util.List<net.runelite.api.Player> players = java.util.Arrays.asList(self,
+			visiblePlayer("Delta", 3212, 3210), visiblePlayer("<col=ff0000></col>", 3211, 3210),
+			visiblePlayer("Charlie", 3212, 3210), visiblePlayer("Bravo", 3212, 3210), visiblePlayer("Alpha", 3212, 3210));
+		org.mockito.Mockito.when(client.getPlayers()).thenReturn(players);
+		java.lang.reflect.Field f = AccountConnectPlugin.class.getDeclaredField("client");
+		f.setAccessible(true);
+		f.set(plugin, client);
+		java.util.List<String> names = new java.util.ArrayList<>();
+		for (java.util.Map<String, Object> row : plugin.store.nearbyPlayersForOverlay(3)) names.add((String) row.get("rsn"));
+		org.junit.Assert.assertEquals(java.util.Arrays.asList("Alpha", "Bravo", "Charlie"), names);
+	}
+
 }

@@ -14,7 +14,7 @@ public class OwnCombatSignalTest {
   out.put("combat.tob_room_death",death);out.put("combat.toa_hazards",Map.of("object_id",45570,"spawn_tick",41,"classification","own_tile_overlap_not_proven_damage_or_mistake"));return out;
  }
  static Map<String,Object> event(String kind) {
-  return OwnSignalEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",kind.equals("combat.tob_room_death")?"ActorDeath:self":"own_tile+observed_acid_object",
+  return OwnEvent.from("12345678-1234-1234-1234-123456789abc",Map.of("kind",kind,"source",kind.equals("combat.tob_room_death")?"ActorDeath:self":"own_tile+observed_acid_object",
    "sequence",1,"tick",42,"observed_at_ms",AT,"direct",true,"value",examples().get(kind)));
  }
  @Test public void onlyClosedOwnActorAndSceneEvidenceCanEnterPublicWire() {
@@ -23,16 +23,16 @@ public class OwnCombatSignalTest {
    Map<String,Object> e=event(kind);assertNotNull(e);e.put("event_id","a".repeat(32));e.put("ts",AT);
    ((Map<String,Object>)e.get("signal_value")).put("player_name","PRIVATE");e.put("location","PRIVATE");
    Map<String,Object> wire=PublicTransport.event(e);assertNotNull(wire);assertFalse(gson.toJson(wire).contains("PRIVATE"));
-   assertEquals(OwnSignalEvent.wire(wire),OwnSignalEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
+   assertEquals(OwnEvent.wire(wire),OwnEvent.wire(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class))));
    assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
-   e.put("source","own_client_system");assertNull(OwnSignalEvent.wire(e));
+   e.put("source","own_client_system");assertNull(OwnEvent.wire(e));
   }
-  Map<String,Object> e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("room_observed","PRIVATE");assertNull(OwnSignalEvent.wire(e));
-  e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("party_status_raw",1);assertNull(OwnSignalEvent.wire(e));
-  e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("actor","other");assertNull(OwnSignalEvent.wire(e));
-  e=event("combat.toa_hazards");e.put("source_tick",41);assertNull(OwnSignalEvent.wire(e));
-  e=event("combat.toa_hazards");((Map<String,Object>)e.get("signal_value")).put("classification","confirmed_damage");assertNull(OwnSignalEvent.wire(e));
-  e=OwnSignalEventTest.event("storage.coal_bag");e.put("source","own_client_actor");assertNull(OwnSignalEvent.wire(e));
+  Map<String,Object> e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("room_observed","PRIVATE");assertNull(OwnEvent.wire(e));
+  e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("party_status_raw",1);assertNull(OwnEvent.wire(e));
+  e=event("combat.tob_room_death");((Map<String,Object>)e.get("signal_value")).put("actor","other");assertNull(OwnEvent.wire(e));
+  e=event("combat.toa_hazards");e.put("source_tick",41);assertNull(OwnEvent.wire(e));
+  e=event("combat.toa_hazards");((Map<String,Object>)e.get("signal_value")).put("classification","confirmed_damage");assertNull(OwnEvent.wire(e));
+  e=OwnSignalEventTest.event("storage.coal_bag");e.put("source","own_client_actor");assertNull(OwnEvent.wire(e));
  }
  @Test public void actualOwnCallbacksHandoffOnceWithoutReadingAnotherActorOrInventingDamage() {
   List<Map<String,Object>> sent=new ArrayList<>();OwnGameplayCapture capture=new OwnGameplayCapture(e->{if("own_signal".equals(e.get("type")))sent.add(e);return true;});
@@ -50,7 +50,7 @@ public class OwnCombatSignalTest {
   when(self.getWorldLocation()).thenReturn(new WorldPoint(100,100,0));capture.scene.spawned(c,acid,AT+602);capture.scene.poll(c,AT+603);assertEquals(1,sent.size());
   tick[0]++;capture.scene.poll(c,AT+1200);capture.scene.poll(c,AT+1201);assertEquals(2,sent.size());
   capture.scene.despawned(acid);tick[0]++;capture.scene.poll(c,AT+1800);assertEquals(2,sent.size());
-  assertEquals(2L,capture.snapshot().get("signal_events_handed_off"));for(Map<String,Object> e:sent)assertNotNull(OwnSignalEvent.wire(e));
+  assertEquals(2L,capture.snapshot().get("signal_events_handed_off"));for(Map<String,Object> e:sent)assertNotNull(OwnEvent.wire(e));
   verify(c,never()).getPlayers();verify(self,never()).getName();
  }
 }

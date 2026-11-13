@@ -27,13 +27,28 @@ import lombok.AllArgsConstructor;
 final class VerificationProbe
 {
 	static final long MIN_GAP_MS = 20_000L;
-	static final int MAX_SAMPLES_PER_HOUR = 60;
-	static final int MAX_FRAMES_PER_HOUR = 30;
+	/*
+	 * Hourly budgets. Events and samples were one shared 60 admissions and 30 region frames; they are split without
+	 * raising either total, so random samples can no longer use up the slots of event evidence. Events keep most of
+	 * both: their expected values come from the event itself, while most sample regions compare a widget with its own text.
+	 */
+	static final int MAX_SAMPLES_PER_HOUR = 12;
+	static final int MAX_EVENTS_PER_HOUR = 48;
+	static final int MAX_FRAMES_PER_HOUR = 6;
+	static final int MAX_EVENT_FRAMES_PER_HOUR = 24;
 	/** On a tick with no occasion, a random sample with probability 1 in RANDOM_ONE_IN (about once in 5 minutes). */
 	static final int RANDOM_ONE_IN = 500;
 	/** Results per row: a large check (128 vars) is split into parts, so no row nears the event size cap. */
 	static final int RESULTS_PER_ROW = 32;
 	static final long HOUR_MS = 3_600_000L;
+
+	/**
+	 * xp_to_level, derived_levels and both server_vs_client checks found no mismatch in 23.4M results. They run on the first
+	 * sample after a login (or world hop) and then on 1 sample in ZERO_YIELD_ONE_IN; the other checks run on every sample.
+	 */
+	static final int ZERO_YIELD_ONE_IN = 10;
+	private int zeroYieldLogin = Integer.MIN_VALUE;
+	private int zeroYieldSamples;
 
 	/** Event types whose arrival is an occasion for a sample. Verification rows are never one. */
 	static final Set<String> OCCASIONS = new HashSet<>(Arrays.asList(
@@ -43,6 +58,8 @@ final class VerificationProbe
 	private final IntUnaryOperator random;
 	private final ArrayDeque<Long> samples = new ArrayDeque<>();
 	private final ArrayDeque<Long> frames = new ArrayDeque<>();
+	private final ArrayDeque<Long> events = new ArrayDeque<>();
+	private final ArrayDeque<Long> eventFrames = new ArrayDeque<>();
 	private final ArrayDeque<Long> fullWindows = new ArrayDeque<>();
 	private boolean eventBudgetReported;
 	private long lastSampleMs = Long.MIN_VALUE / 2;
@@ -95,11 +112,21 @@ final class VerificationProbe
 		return s;
 	}
 
-	/** Transient activity evidence bypasses the random-sample spacing, never the shared hourly budget. */
+	/** True when this sample runs the zero-yield checks: the first one after the login at loginTick, then 1 in ZERO_YIELD_ONE_IN. */
+	synchronized boolean zeroYieldDue(int loginTick)
+	{
+		if (loginTick != zeroYieldLogin)
+		{
+			zeroYieldLogin = loginTick;
+			zeroYieldSamples = 0;
+		}
+		return zeroYieldSamples++ % ZERO_YIELD_ONE_IN == 0;
+	}
+
+	/** Transient activity evidence bypasses the random-sample spacing, never its own hourly budget. */
 	synchronized boolean takeEvent(long nowMs)
 	{
-		if (prune(samples, nowMs) >= MAX_SAMPLES_PER_HOUR) return false;
-		samples.addLast(nowMs);
+		if (!take(events, MAX_EVENTS_PER_HOUR, nowMs)) return false;
 		lastSampleMs = nowMs;
 		eventBudgetReported = false;
 		return true;
@@ -116,23 +143,24 @@ final class VerificationProbe
 		return true;
 	}
 
-	/** Room for a region frame now, without counting it: the slot is taken only when the frame is uploaded. */
-	synchronized boolean frameRoom(long nowMs)
+	/**
+	 * Room for a region frame now (an event's, or a sample's), without counting it: the slot is taken only when the
+	 * frame is uploaded.
+	 */
+	synchronized boolean frameRoom(boolean event, long nowMs)
 	{
-		return prune(frames, nowMs) < MAX_FRAMES_PER_HOUR;
+		return event ? prune(eventFrames, nowMs) < MAX_EVENT_FRAMES_PER_HOUR : prune(frames, nowMs) < MAX_FRAMES_PER_HOUR;
 	}
 
 	synchronized boolean eventRoom(long nowMs)
 	{
-		prune(samples, nowMs);
-		prune(frames, nowMs);
-		return samples.size() < MAX_SAMPLES_PER_HOUR && frames.size() < MAX_FRAMES_PER_HOUR;
+		return prune(events, nowMs) < MAX_EVENTS_PER_HOUR && frameRoom(true, nowMs);
 	}
 
-	/** True when this sample may also take a frame; counts it. */
-	synchronized boolean takeFrame(long nowMs)
+	/** True when this event or sample may take a region frame; counts it. */
+	synchronized boolean takeFrame(boolean event, long nowMs)
 	{
-		return take(frames, MAX_FRAMES_PER_HOUR, nowMs);
+		return event ? take(eventFrames, MAX_EVENT_FRAMES_PER_HOUR, nowMs) : take(frames, MAX_FRAMES_PER_HOUR, nowMs);
 	}
 
 	/** Room for a full-window frame now, without counting it. */
@@ -142,7 +170,7 @@ final class VerificationProbe
 	}
 
 	/**
-	 * A full-window frame: its own hourly budget only. It never takes one of the 30 region-frame slots, so the
+	 * A full-window frame: its own hourly budget only. It never takes one of the region-frame slots, so the
 	 * optional full window can never crowd out the small evidence frames. Counts it when allowed.
 	 */
 	synchronized boolean takeFullWindow(long nowMs)

@@ -42,13 +42,6 @@ final class OwnActivityCapture
     OwnActivityCapture(OwnGameplayCapture out) { this.out = out; }
     void reset() { messageTick = deathTick = -1; messages.clear(); }
 
-    private void bits(Client c, int[] vars, String family, String[] keys, int[] ids, long at)
-    {
-        Map<String,Object> value = new LinkedHashMap<>();
-        for (int i=0; i<ids.length; i++) value.put(keys[i], AccountProgressCapture.bit(c,vars,ids[i]));
-        out.state(family, "varbits:"+Arrays.toString(ids), value, c.getTickCount(), at);
-    }
-
     void poll(Client c, int[] vars, long at)
     {
         Map<String,Object> potions = Fields.of(
@@ -70,13 +63,7 @@ final class OwnActivityCapture
         port.put("interpretation","task_identity_and_reward_unverified");
         out.state("sailing.port_tasks", "RuneLite1.13.1:8_named_varps;varbits:19589,19591", port,c.getTickCount(),at);
 
-        bits(c,vars,"minigame.tears",new String[]{"countdown_raw","tears_raw","collecting_raw"},new int[]{5099,455,453},at);
-        // Only the local player's contribution, never team bottles or other players' scoreboards.
-        bits(c,vars,"minigame.brewing",new String[]{"own_contribution_raw"},new int[]{2290},at);
-        bits(c,vars,"minigame.restaurant_order",new String[]{"started_raw","customer_id_raw","order_id_raw","refused_hard_raw"},new int[]{2478,2484,2483,2485},at);
-        bits(c,vars,"minigame.plunder_state",new String[]{"timer_raw","room_raw"},new int[]{2375,2377},at);
-        bits(c,vars,"sailing.trial_progress",new String[]{"tempor_tantrum_raw","jubbly_jive_raw","gwenith_glide_raw"},new int[]{18427,18432,18437},at);
-        bits(c,vars,"storage.bank_tabs",new String[]{"tab_1_slots","tab_2_slots","tab_3_slots","tab_4_slots","tab_5_slots","tab_6_slots","tab_7_slots","tab_8_slots","tab_9_slots"},new int[]{4171,4172,4173,4174,4175,4176,4177,4178,4179},at);
+        out.varbits(c,vars,at,5,OwnActivityMappings.VARBITS.length);
 
         Map<String,Object> totems = new LinkedHashMap<>();
         totems.put("research_points_raw", AccountProgressCapture.varp(vars,4764));

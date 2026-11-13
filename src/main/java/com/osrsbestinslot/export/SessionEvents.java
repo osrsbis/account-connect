@@ -369,7 +369,8 @@ final class SessionEvents
 	void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
-		if (state == GameState.LOADING) { plugin.accountProgress.storageRecovery.gap(); plugin.ownGameplay.gap(); }
+		// A plain load keeps the account states (sceneGap); a hop, logout or disconnect resets them below.
+		if (state == GameState.LOADING) { plugin.accountProgress.storageRecovery.gap(); plugin.ownGameplay.sceneGap(); }
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			plugin.grants.clearVerificationGrant();

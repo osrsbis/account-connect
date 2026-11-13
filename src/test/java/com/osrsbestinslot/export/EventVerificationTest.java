@@ -29,17 +29,41 @@ public class EventVerificationTest
         when(w.getBounds()).thenReturn(new Rectangle(10, 20, 400, 30)); return w;
     }
 
-    @Test public void eventInsideRandomGapIsImmediateAndSharesHourlyBudgets()
+    @Test public void eventInsideRandomGapIsImmediateAndHasItsOwnHourlyBudget()
     {
         VerificationProbe p = new VerificationProbe(n -> 0);
         assertNotNull(p.due(0));
         assertTrue(p.takeEvent(10));
         assertTrue(p.takeEvent(10));
         assertNull(p.due(11));
-        for (int i = 3; i < 60; i++) assertTrue(p.takeEvent(i));
+        for (int i = 2; i < VerificationProbe.MAX_EVENTS_PER_HOUR; i++) assertTrue(p.takeEvent(i));
         p.reset();
         assertFalse(p.takeEvent(200));
-        assertTrue(p.takeEvent(3600000));
+        assertTrue(p.takeEvent(3600010));
+    }
+    @Test public void eventsAndSamplesSplitTheFormerSharedBudgetsWithoutRaisingThem()
+    {
+        assertEquals(60, VerificationProbe.MAX_EVENTS_PER_HOUR + VerificationProbe.MAX_SAMPLES_PER_HOUR);
+        assertEquals(30, VerificationProbe.MAX_EVENT_FRAMES_PER_HOUR + VerificationProbe.MAX_FRAMES_PER_HOUR);
+        // Samples spent to their limit leave every event admission and event frame.
+        VerificationProbe p = new VerificationProbe(n -> 0);
+        for (int i = 0; i < VerificationProbe.MAX_SAMPLES_PER_HOUR; i++) assertNotNull(p.due(i * VerificationProbe.MIN_GAP_MS));
+        assertNull(p.due(VerificationProbe.MAX_SAMPLES_PER_HOUR * VerificationProbe.MIN_GAP_MS));
+        for (int i = 0; i < VerificationProbe.MAX_FRAMES_PER_HOUR; i++) assertTrue(p.takeFrame(false, 1));
+        assertFalse(p.frameRoom(false, 1));
+        assertTrue(p.eventRoom(1));
+        int events = 0, frames = 0;
+        while (p.takeEvent(2)) events++;
+        while (p.takeFrame(true, 2)) frames++;
+        assertEquals(VerificationProbe.MAX_EVENTS_PER_HOUR, events);
+        assertEquals(VerificationProbe.MAX_EVENT_FRAMES_PER_HOUR, frames);
+        assertFalse(p.eventRoom(3));
+        // Events spent to their limit leave the samples' own.
+        VerificationProbe q = new VerificationProbe(n -> 0);
+        while (q.takeEvent(0)) { }
+        while (q.takeFrame(true, 0)) { }
+        assertTrue(q.frameRoom(false, 0));
+        assertNotNull(q.due(VerificationProbe.MIN_GAP_MS));
     }
     @Test public void sourceRetainsDistinctIdsExpectedValuesAndRevisionAcrossLaterMutations()
     {
@@ -65,9 +89,10 @@ public class EventVerificationTest
     @Test public void bossEvidenceSelectsOnlyMatchingSystemLineAndRejectsDuplicatesOrChangedPixels()
     {
         Client c = client(); String message = "Your Vorkath kill count is: 42.";
-        Widget w = text("<col=ff0000>"+message+"</col>", InterfaceID.Chatbox.LINE0);
-        when(c.getWidget(InterfaceID.Chatbox.LINE0)).thenReturn(w);
-        Widget bystander = text("Someone: Hi", InterfaceID.Chatbox.LINE1);when(c.getWidget(InterfaceID.Chatbox.LINE1)).thenReturn(bystander);
+        Widget w = text("<col=ff0000>"+message+"</col>", InterfaceID.Chatbox.SCROLLAREA);
+        Widget bystander = text("Someone: Hi", InterfaceID.Chatbox.SCROLLAREA);
+        Widget scroll = mock(Widget.class); when(scroll.getDynamicChildren()).thenReturn(new Widget[]{bystander, w});
+        when(c.getWidget(InterfaceID.Chatbox.SCROLLAREA)).thenReturn(scroll);
         List<VerificationFrame.Region> regions = EventVerificationScreen.regions(c, source(event("kill_count"), message));
         assertEquals(1,regions.size());assertEquals(42,regions.get(0).value);
         assertEquals("kill_count",regions.get(0).inputs.get("reader"));assertTrue(EventVerificationScreen.unchanged(c,regions));
@@ -94,6 +119,70 @@ public class EventVerificationTest
         Widget box = text("", 0); when(box.getBounds()).thenReturn(new Rectangle(0, 0, 5, 5)); when(body.getParent()).thenReturn(box);
         assertTrue(EventVerificationScreen.regions(c, source(event("kill_count"), message)).isEmpty());
     }
+    @Test public void anOlderIdenticalLineIsNeverTheEventsEvidence()
+    {
+        // One older copy of the same line was already in the chat (a repeatable line would look the same).
+        Client c = client(); String message = "Your Vorkath kill count is: 42.";
+        Widget older = text(message, InterfaceID.Chatbox.SCROLLAREA); when(older.getBounds()).thenReturn(new Rectangle(10, 300, 400, 14));
+        Widget scroll = mock(Widget.class); when(scroll.getDynamicChildren()).thenReturn(new Widget[]{older});
+        when(c.getWidget(InterfaceID.Chatbox.SCROLLAREA)).thenReturn(scroll);
+        EventVerification.Source s = source(event("kill_count"), message);
+        s.olderCopies = EventVerificationScreen.chatCopies(c, message).size();
+        assertEquals(1, s.olderCopies);
+        // The new line is not in the chat yet: the visible older copy is not taken.
+        assertTrue(EventVerificationScreen.regions(c, s).isEmpty());
+        assertEquals("older_or_repeated_line", EventVerificationScreen.unseenReason(c, s));
+        // The new line arrives below it but is clipped (chat scrolled up): still nothing, never the older copy.
+        Widget box = text("", 0); when(box.getBounds()).thenReturn(new Rectangle(0, 250, 520, 70));
+        Widget newest = text(message, InterfaceID.Chatbox.SCROLLAREA); when(newest.getBounds()).thenReturn(new Rectangle(10, 330, 400, 14));
+        when(newest.getParent()).thenReturn(box); when(older.getParent()).thenReturn(box);
+        when(scroll.getDynamicChildren()).thenReturn(new Widget[]{newest, older});
+        assertTrue(EventVerificationScreen.regions(c, s).isEmpty());
+        assertEquals("older_or_repeated_line", EventVerificationScreen.unseenReason(c, s));
+        // Scrolled back down, the new line is complete: it is the one selected.
+        when(newest.getBounds()).thenReturn(new Rectangle(10, 300, 400, 14)); when(older.getBounds()).thenReturn(new Rectangle(10, 286, 400, 14));
+        EventVerification.Source t = source(event("kill_count"), message); t.olderCopies = 1;
+        List<VerificationFrame.Region> regions = EventVerificationScreen.regions(c, t);
+        assertEquals(1, regions.size()); assertSame(newest, regions.get(0).sourceWidget);
+        // Two new copies since the event cannot be told apart.
+        t.olderCopies = 0;
+        assertTrue(EventVerificationScreen.regions(c, t).isEmpty());
+        // Nothing of the line on screen at all.
+        when(scroll.getDynamicChildren()).thenReturn(new Widget[0]);
+        assertEquals("source_not_visible", EventVerificationScreen.unseenReason(c, t));
+    }
+    @Test public void onlyEventsThatCanBeOnScreenAreSelectable()
+    {
+        Map<String, Object> none = new HashMap<>();
+        assertTrue(EventVerificationScreen.selectable("level_up", none, null));
+        assertTrue(EventVerificationScreen.selectable("verification_discovery", none, null));
+        assertTrue(EventVerificationScreen.selectable("kill_count", none, "Your Vorkath kill count is: 42."));
+        assertTrue(EventVerificationScreen.selectable("pet", none, "You have a funny feeling like you're being followed."));
+        assertTrue(EventVerificationScreen.selectable("loot", Collections.singletonMap("source_name", "Clue Scroll"), null));
+        assertTrue(EventVerificationScreen.selectable("minigame", Collections.singletonMap("screen", Collections.singletonMap("points", 4)), null));
+        assertFalse(EventVerificationScreen.selectable("loot", Collections.singletonMap("source_name", "Goblin"), null));
+        assertFalse(EventVerificationScreen.selectable("death", none, null));
+        assertFalse(EventVerificationScreen.selectable("slayer_task", none, null));
+        assertFalse("a count without its line", EventVerificationScreen.selectable("kill_count", none, null));
+        assertFalse(EventVerificationScreen.selectable("minigame", none, " "));
+    }
+    @Test public void anUnparsedLineOutsideAKnownActivityGetsNoFrame()
+    {
+        // Such a line can start with another player's name; its text observation is kept, its picture is not taken.
+        Client c = client(); String message = "Someone has reached a milestone.";
+        Widget line = text(message, InterfaceID.Chatbox.SCROLLAREA);
+        Widget scroll = mock(Widget.class); when(scroll.getDynamicChildren()).thenReturn(new Widget[]{line});
+        when(c.getWidget(InterfaceID.Chatbox.SCROLLAREA)).thenReturn(scroll);
+        Map<String, Object> e = event("verification_discovery"); e.remove("count");
+        e.put("activity", "unknown"); e.put("surface", "system_message"); e.put("widget", -1); e.put("verification_text", message);
+        EventVerification.Source unknown = source(e, message);
+        assertTrue(EventVerificationScreen.regions(c, unknown).isEmpty());
+        assertEquals("unknown_activity_held", EventVerificationScreen.unseenReason(c, unknown));
+        // The same line in a known activity's context is still photographed.
+        e.put("activity", "pest_control");
+        List<VerificationFrame.Region> regions = EventVerificationScreen.regions(c, source(e, message));
+        assertEquals(1, regions.size()); assertEquals("discovery_text", regions.get(0).inputs.get("reader"));
+    }
     @Test public void levelDialogueMayMaterializeLaterButUnrelatedOrbsAreNeverEvidence()
     {
         Client c=client();Map<String,Object> e=event("level_up");e.put("skill","Mining");e.put("level",9);
@@ -113,7 +202,7 @@ public class EventVerificationTest
         Widget w=text("Your Slayer level is now 9.", InterfaceID.LevelupDisplay.TEXT2);
         when(c.getWidget(InterfaceID.LevelupDisplay.TEXT2)).thenReturn(w);
         assertTrue(EventVerificationScreen.regions(c,source).isEmpty());
-        assertEquals("other_skill_dialogue",EventVerificationScreen.levelUpUnseenReason(c,source));
+        assertEquals("other_skill_dialogue",EventVerificationScreen.unseenReason(c,source));
         // The event's own skill with a different number is still selected: the discrepancy is kept for the reader.
         when(w.getText()).thenReturn("Your Hunter level is now 10.");
         List<VerificationFrame.Region> regions=EventVerificationScreen.regions(c,source);
@@ -122,7 +211,7 @@ public class EventVerificationTest
         when(w.getText()).thenReturn("<col=000080>Congratulations, you've just advanced your Hunter level.</col> Your Hunter level is now 9.");
         assertEquals(1,EventVerificationScreen.regions(c,source).size());
         when(w.isHidden()).thenReturn(true);
-        assertEquals("source_not_visible",EventVerificationScreen.levelUpUnseenReason(c,source));
+        assertEquals("source_not_visible",EventVerificationScreen.unseenReason(c,source));
         assertEquals(Boolean.FALSE,EventVerificationScreen.levelDialogueSkill("Your Hunter level is now 9.","Slayer"));
         assertNull(EventVerificationScreen.levelDialogueSkill("Congratulations!","Hunter"));
     }

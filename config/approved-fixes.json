@@ -1,0 +1,170 @@
+{
+  "schema": "osrsbis-approved-fixes/1",
+  "fixes": [
+    {
+      "id": "scene-load-keeps-account-states",
+      "since": "0.7.70",
+      "what": "a plain scene load keeps account states; only a hop or logout clears them",
+      "present": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/SessionEvents.java",
+          "text": "plugin.ownGameplay.sceneGap()"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/OwnGameplayCapture.java",
+          "text": "void sceneGap()"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/OwnGameplayCapture.java",
+          "text": "GameState.LOADING) { sceneGap(); return false; }"
+        }
+      ],
+      "absent": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/SessionEvents.java",
+          "text": "ownGameplay.gap()"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/OwnGameplayCapture.java",
+          "text": "GameState.LOADING) { gap(); return false; }"
+        }
+      ],
+      "tests": [
+        {
+          "path": "src/test/java/com/osrsbestinslot/export/OwnGameplayCaptureTest.java",
+          "methods": [
+            "thePluginsLoadingEventKeepsAccountStatesButAHopClearsThem",
+            "aPlainSceneLoadKeepsAccountStatesSoOnlyChangedValuesAreSentAgain"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "own-event-journal",
+      "since": "0.7.72",
+      "what": "own gameplay events are journaled on disk and replayed after a throttled or interrupted upload",
+      "present": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/PublicBankProtocol.java",
+          "text": "OWN_SCOPE = \"own-p01-v1\""
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/ServerGrants.java",
+          "text": "ownJournalGrantToken"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/PublicOutboxDriver.java",
+          "text": "PublicBankProtocol.OWN_SCOPE"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/EventQueue.java",
+          "text": "if (journaled(gone)) return;"
+        }
+      ],
+      "absent": [],
+      "tests": [
+        {
+          "path": "src/test/java/com/osrsbestinslot/export/PublicOwnJournalTest.java",
+          "methods": [
+            "aProcessKillInThe429RunReplaysEveryRowAfterRestartInOrder",
+            "aStaffSpoolGrantNeverUsesTheOwnJournal"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "staff-only-clips",
+      "since": "0.7.72",
+      "what": "trade, store and drop capture needs the account-bound staff grant; no other grant opens it",
+      "present": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/ServerGrants.java",
+          "text": "boolean captureEnabled() { return staffCaptureEnabled(); }"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/PublicTransport.java",
+          "text": "STAFF_EVENT_TYPES = keys(\"store_taken drop_trade_clip drop_trade_clip_final\")"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/PublicTransport.java",
+          "text": "verifiedStaff && STAFF_EVENT_TYPES.contains(type)"
+        }
+      ],
+      "absent": [
+        {
+          "path": "src/main",
+          "text": "X-Delivery-Capture"
+        },
+        {
+          "path": "src/main",
+          "text": "deliveryCaptureEnabled"
+        },
+        {
+          "path": "src/main",
+          "text": "deliveryClipsAllowed"
+        }
+      ],
+      "tests": [
+        {
+          "path": "src/test/java/com/osrsbestinslot/export/PublicTransportTest.java",
+          "methods": [
+            "deliveryHeadersNeverOpenCaptureForAnOrdinaryPlayer"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "frame-rows-stay-lowest-class",
+      "since": "0.7.72",
+      "what": "a frame's verification rows stay in the lowest class and never push out a game event",
+      "present": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/EventPriority.java",
+          "text": "FRAME_BOUND = \"__frame_bound\""
+        }
+      ],
+      "absent": [],
+      "tests": [
+        {
+          "path": "src/test/java/com/osrsbestinslot/export/EventVerificationWiringTest.java",
+          "methods": [
+            "aFrameBoundRowStaysP2AndGoesLastWithinP2ButBeforeAnyGameEvent"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "staff-journal-withdrawn-rows",
+      "since": "0.7.72",
+      "what": "a staged staff row the journal no longer owns is never sent again, never written to the exit file, and counted once",
+      "present": [
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/SpoolDriver.java",
+          "text": "if (!r.identity.equals(spoolMemoryOwned.get(String.valueOf(ev.get(\"event_id\")))))"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/EventQueue.java",
+          "text": "if (restaged == 3)"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/EventQueue.java",
+          "text": "ev.containsKey(SpoolDriver.EVENT_STAFF_SPOOL) || !(ev.get(EVENT_TOKEN_FP) instanceof String)"
+        },
+        {
+          "path": "src/main/java/com/osrsbestinslot/export/EventQueue.java",
+          "text": "if (!ev.containsKey(SpoolDriver.EVENT_STAFF_SPOOL)) healthEventsLost.incrementAndGet();"
+        }
+      ],
+      "tests": [
+        {
+          "path": "src/test/java/com/osrsbestinslot/export/StaffSpoolWithdrawalTest.java",
+          "methods": [
+            "withdrawnRowsInAFailedInFlightBatchAreNeverSentAfterARegrant",
+            "withdrawnStagedRowsNeverReachTheExitFileOrALaterStart",
+            "aStagedRowDroppedAtTheFlushIsCountedOnceByTheSpool"
+          ]
+        }
+      ]
+    }
+  ]
+}

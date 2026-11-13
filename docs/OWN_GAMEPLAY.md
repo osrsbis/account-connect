@@ -28,7 +28,8 @@ in the current session. Missing, empty and changed-without-packet caches remain
 distinct. Duplicate item quantities use long totals; unpriced or unsafe reference
 values stay unknown. No labels, victim fields or original-owner information are
 read. This is a cache valuation, not new loot or realized income. Closing the UI,
-a scene gap, account switch or grant reset clears the source cache. Exact-client
+a lost game tick, a logout or world hop, an account switch or a grant reset clears the source cache; from 0.7.70 a
+plain scene load keeps it. Exact-client
 verification remains open. These caches are also sent as `own_state` events, described below.
 Source: [pinned personal-key container mapping](https://github.com/pk-enjoyer/real-loot-key-value/blob/938d5157fb8202f3766b358466743048e0ce44c4/src/main/java/com/reallootkeyvalue/LootKeyValueCalculator.java).
 
@@ -53,8 +54,8 @@ Source: [RuneLite1.13.1 rune-pouch overlay](https://github.com/runelite/runelite
 The same granted snapshot now qualifies bank-tab ranges and currency quantities.
 It requires an own-bank container callback in the current gameplay session, a
 normal bank-build callback and matching cached contents. Missing counts, an
-out-of-range total, a changed cache without a packet, potion storage and scene
-gaps remain unknown. The nine raw tab counts stay available separately. Derived
+out-of-range total, a changed cache without a packet, potion storage and gameplay
+gaps (a lost game tick, a logout or world hop; from 0.7.70 not a plain scene load) remain unknown. The nine raw tab counts stay available separately. Derived
 ranges are explicitly inferred; tab 0 displays the whole bank, so the remainder
 is labelled untabbed. Only coins and platinum quantities are summed, using long
 values. Inventory is not added, and no gain, item-price valuation or spendable
@@ -154,8 +155,8 @@ marks visibility unavailable; reopening requires fresh packet evidence. The
 original snapshot is preserved without duplicating split item arrays in its
 recent-history buffer. Unknown and empty remain distinct. Records keep
 item IDs, long quantities and packet time; estimates, victim fields and income
-claims are excluded. Scene/account/grant resets clear the six bounded dedupe
-states. These additions ship in 0.7.67; source-specific exact-client acceptance remains unverified.
+claims are excluded. A lost game tick, a logout or world hop, an account switch or a grant reset clears the six
+bounded dedupe states; from 0.7.70 a plain scene load keeps them, so only changed values are sent again. These additions ship in 0.7.67; source-specific exact-client acceptance remains unverified.
 
 Each source baseline/change is one event with its own `event_id` on the legacy receiver.
 Process-local observed/handed-off/failure counters are not durable delivery counts.

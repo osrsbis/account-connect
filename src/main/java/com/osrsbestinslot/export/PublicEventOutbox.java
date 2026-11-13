@@ -7,12 +7,10 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.function.LongSupplier;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.DirectoryStream;
-import java.nio.file.LinkOption;
 
 /**
  * The journal adapter for every durable event scope: the staff spool, the public Queue journal and the public bank
- * journal, each in its own root with its own identity, purge and receipt rules. All methods run on the plugin's disk
+ * and own-events journals, each in its own root with its own identity, purge and receipt rules. All methods run on the plugin's disk
  * executor. Uses the existing forced journal and tombstones. It owns projected event rows only, never snapshots,
  * credentials or gameplay actions. Staff identities are opened by key (token and account); public ones by Context.
  */
@@ -47,7 +45,8 @@ final class PublicEventOutbox
     private final Gson gson;
     private final LongSupplier clock;
     private final EventSpool.Limits limits;
-    private final boolean bankOnly;
+    /** The event-id receipt scope (PublicBankProtocol) this journal holds, or null for the Queue journal. */
+    private final String receiptScope;
     final EventSpool.Counters counters;
     /** The open journal and its identity key, or null. */
     EventSpool journal;
@@ -60,26 +59,28 @@ final class PublicEventOutbox
 
     PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits)
     {
-        this(data,gson,clock,limits,false);
+        this(data,gson,clock,limits,null);
     }
 
-    PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits, boolean bankOnly)
+    /** Each scope has its own root, so an older client never reads rows of a scope it does not know. */
+    PublicEventOutbox(Path data, Gson gson, LongSupplier clock, EventSpool.Limits limits, String receiptScope)
     {
-        this(data, bankOnly ? "public-bank-events-v1" : "public-events-v1", gson, clock, limits, bankOnly, new EventSpool.Counters());
+        this(data, receiptScope == null ? "public-events-v1" : PublicBankProtocol.SCOPE.equals(receiptScope)
+            ? "public-bank-events-v1" : "public-own-events-v1", gson, clock, limits, receiptScope, new EventSpool.Counters());
     }
 
     /** The staff spool: root "spool", the plugin's spool counters. Rows are appended by the plugin, never by Context. */
     PublicEventOutbox(Path data, LongSupplier clock, EventSpool.Counters counters)
     {
-        this(data, "spool", null, clock, EventSpool.Limits.DEFAULT, false, counters);
+        this(data, "spool", null, clock, EventSpool.Limits.DEFAULT, null, counters);
     }
 
     private PublicEventOutbox(Path data, String root, Gson gson, LongSupplier clock, EventSpool.Limits limits,
-        boolean bankOnly, EventSpool.Counters counters)
+        String receiptScope, EventSpool.Counters counters)
     {
         this.data = data;
         this.root = data.resolve("osrsbis").resolve(root);
-        this.bankOnly = bankOnly;
+        this.receiptScope = receiptScope;
         this.gson = gson;
         this.clock = clock;
         this.limits = limits;
@@ -92,13 +93,11 @@ final class PublicEventOutbox
 
     /**
      * Staff: open `id` after the caller purged the other identities. Ages out foreign shards, waits for a marked
-     * directory's live writer, recovers this identity's abandoned shards and indexes it once the root exists.
+     * directory's live writer and recovers this identity's abandoned shards.
      */
     boolean openStaff(String id) throws IOException
     {
-        if (!open(id, true)) return false;
-        if (Files.isDirectory(root)) EventSpool.writePointer(data, root, id, clock.getAsLong());
-        return true;
+        return open(id, true);
     }
 
     /**
@@ -128,7 +127,6 @@ final class PublicEventOutbox
         Path dir = root.resolve(id);
         boolean existed = Files.isDirectory(dir);
         boolean gone = withdrawn ? EventSpool.purgeIdentityDir(dir, clock) : EventSpool.purgeIfIdle(dir);
-        if (gone || withdrawn) EventSpool.deletePointerIf(root, id);
         return existed && (gone || withdrawn);
     }
 
@@ -151,7 +149,7 @@ final class PublicEventOutbox
         }
         close();
         // A normal account/profile change is not an erasure or ACK. Retain recent
-        // identities for a later matching grant; age and append-time index bounds still apply.
+        // identities for a later matching grant; the 48 h age bound still applies.
         return open(next.identity, false);
     }
 
@@ -171,37 +169,12 @@ final class PublicEventOutbox
             return false;
         }
         if (!activate(owner)) return false;
-        // Persist the hashed recovery/purge pointer before the first sensitive row.
-        EventSpool.writePointer(data, root, owner.identity, clock.getAsLong());
+        // The first append forces the hashed identity directory into the root before the row is written.
         String id = (String) event.get("event_id");
         long created = Math.min(((Number) timestamp).longValue(), clock.getAsLong());
         boolean appended = journal.append(id, String.valueOf(event.get("type")), created, json);
         journal.maybeCompact();
-        boolean retained = appended && journal.get(id) != null;
-        if (retained) retireOutsideIndex(owner.identity);
-        return retained;
-    }
-
-    private void retireOutsideIndex(String active) throws IOException
-    {
-        // writePointer has already forced this identity into the existing newest16 index.
-        // Do not evict for an empty pending() probe, or if index integrity is unavailable.
-        EventSpool.Locked index = EventSpool.lock(root.resolve(EventSpool.INDEX_LOCK));
-        if (index == null) return; // retry cleanup on a later append; this row is already durable
-        try
-        {
-            Set<String> retained = new HashSet<>(EventSpool.readIndex(root));
-            // A missing/short index is not evidence that unknown older directories exceeded
-            // the bound. Keep them until a complete recent index or explicit withdrawal.
-            if (retained.size() != EventSpool.MAX_INDEX || !retained.contains(active)) return;
-            for (String old : knownIdentities())
-                if (!retained.contains(old)
-                    && Files.isDirectory(root.resolve(old), LinkOption.NOFOLLOW_LINKS)
-                    && EventSpool.purgeIfIdle(root.resolve(old)))
-                    counters.purged.incrementAndGet();
-        }
-        finally { index.close(); }
-        // Live sibling locks are never overridden; they may temporarily exceed the index bound.
+        return appended && journal.get(id) != null;
     }
 
     /** Re-project recovered rows and re-check ownership before exposing any payload. */
@@ -213,6 +186,7 @@ final class PublicEventOutbox
         List<String> rejected = new ArrayList<>();
         for (EventSpool.Record row : journal.pending())
         {
+            if (result.size() >= maximum) break; // later rows are checked when they come up
             Map<String, Object> event;
             try { event = PublicTransport.event(gson.fromJson(row.eventJson, Map.class)); }
             catch (RuntimeException invalid) { event = null; }
@@ -223,20 +197,20 @@ final class PublicEventOutbox
                 continue;
             }
             // A narrower grant pauses retained broader rows; it does not acknowledge them.
-            if (allows(scope, event) && result.size() < maximum) result.add(event);
+            if (allows(scope, event)) result.add(event);
         }
-        journal.quarantine(rejected, -1);
+        journal.quarantine(rejected);
         return result;
     }
 
     static boolean allows(String scope, Map<String,Object> event)
     {
-        return PublicBankProtocol.SCOPE.equals(scope) ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows(scope,event);
+        return PublicBankProtocol.handles(scope) ? PublicBankProtocol.allows(scope, event) : EventQueueProtocol.allows(scope,event);
     }
 
     private boolean knownType(Map<String,Object> event)
     {
-        return bankOnly ? PublicBankProtocol.allows(event) : EventQueueProtocol.allows("own-history-v1",event);
+        return allows(receiptScope == null ? "own-history-v1" : receiptScope, event);
     }
 
     /** Only validated per-ID queue outcomes settle rows, including partial non-2xx receipts. */
@@ -261,7 +235,7 @@ final class PublicEventOutbox
             }
         }
         counters.acked.addAndGet(journal.ack(accepted));
-        journal.quarantine(rejected, -2);
+        journal.quarantine(rejected);
         journal.maybeCompact();
     }
 
@@ -270,26 +244,9 @@ final class PublicEventOutbox
     {
         if (openId != null) drop(openId, true);
         // A cold client can receive revocation or clear its token before any grant/recovery.
-        // Use only hashed pointers; never open payloads or mark an unrelated live writer.
-        for (String old : knownIdentities())
-            if (EventSpool.purgeIfIdle(root.resolve(old)))
-                EventSpool.deletePointerIf(root, old);
+        // Use only the hashed directory names; never open payloads or mark an unrelated live writer.
+        for (String old : EventSpool.identities(root)) EventSpool.purgeIfIdle(root.resolve(old));
         counters.purged.incrementAndGet();
-    }
-
-    /** The bounded index is a hint, not proof that no older local identity exists. */
-    private Set<String> knownIdentities() throws IOException
-    {
-        Set<String> identities = new LinkedHashSet<>(EventSpool.readIndex(root));
-        if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS))
-            try (DirectoryStream<Path> dirs = Files.newDirectoryStream(root))
-            {
-                for (Path dir : dirs)
-                    if (dir.getFileName().toString().matches("[a-f0-9]{32}")
-                        && Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS))
-                        identities.add(dir.getFileName().toString());
-            }
-        return identities;
     }
 
     /** A late account-erased receipt may only retire the identity that was sent. */
@@ -318,5 +275,7 @@ final class PublicEventOutbox
 
     int size() { return journal == null ? 0 : journal.pendingCount(); }
     long bytes() { return journal == null ? 0 : journal.pendingPayloadBytes(); }
+    /** Created time of the oldest unsettled row of the open identity, or -1. */
+    long oldest() { return journal == null ? -1 : journal.oldestCreatedMs(); }
     void crashForTest() { if (journal != null) journal.crashForTest(); journal = null; openId = null; }
 }

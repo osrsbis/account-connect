@@ -24,6 +24,8 @@ final class EventVerification
         boolean fullWindowPaid;
         /** Why the last look was retried (changed screen, blank regions); reported if the delay runs out. */
         String retryReason;
+        /** Copies of the source's line already in the chat when the event was made; the line's own copy is the next one. */
+        int olderCopies;
         Source(Map<String, Object> event, String token, String account, long epoch, int tick,
             long revision, long at, String text)
         {
@@ -43,7 +45,9 @@ final class EventVerification
             Map<String, Object> out = Fields.of(
                 "source_event_id", id, "source_event_type", type, "source_event_tick", tick,
                 "source_event_revision", revision > 0 ? revision : null,
-                "snapshot_revision", revision > 0 ? revision : null, "tick", readTick);
+                "snapshot_revision", revision > 0 ? revision : null, "tick", readTick,
+                // The source event's own profile: rows written later (an upload retry after a world change) keep it.
+                "profile_type", fields.get("profile_type"));
             return out;
         }
         boolean matches(String token, String account, long epoch)

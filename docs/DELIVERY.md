@@ -1,19 +1,42 @@
 # Event delivery and retry
 
-How events reach the server: delivery counters, the public bank journal, the latest bank in the snapshot (0.7.62)
-and the public Queue journal. Each section states its own release state.
+How events reach the server: delivery counters, the public bank and own-events journals, the latest bank in the
+snapshot (0.7.62) and the public Queue journal. Each section states its own release state.
 
 ## Transient responses (0.7.68)
 
-The legacy memory sender and the staff replay spool retain events after HTTP 404 or 408, using their
-existing bounded retry delays. This matches the queue-v1 treatment of unavailable routes and request
+The legacy memory sender, which also sends the staff journal's rows (see "Staff journal" below), retains events
+after HTTP 404 or 408, using its existing bounded retry delays. This matches the queue-v1 treatment of unavailable routes and request
 timeouts. Retried events keep their original event IDs; durable rows are not quarantined by these responses.
 Integer Retry-After values are honored on transient responses and capped at the existing five-minute ceiling
 before conversion to milliseconds, including headers large enough to overflow an uncapped multiplication.
 
+From 0.7.70 a snapshot answered with 429 or any 5xx leaves every server grant as it was, and the rows those
+grants allow keep being captured and retried. Earlier builds treated such an answer as a policy without the grant
+headers and switched the grants off until the next accepted snapshot.
+
 HTTP 403 retains the existing identity-revocation handling. Permanent application rejections, including
 HTTP 400, retain their terminal handling. This adds no collection grant, field, event or request type.
 This change is new in 0.7.68; 0.7.67 did not have it.
+
+## Staff journal (0.7.72)
+
+The staff journal (`osrsbis/spool`, only under `X-Event-Spool: on` for the current token and a real account) uses the
+public journals' model. While it is on, every event goes to the one memory sender through the disk thread, in emit
+order; an allowlisted row is appended and forced first, so nothing is sent before it is durable. A pump on the
+5-second tick stages the forced rows the sender does not hold: rows a stopped or killed client left, rows the
+500-row memory cap dropped, and rows a 2xx did not settle by their own `event_id`. It stages at most 100 per tick,
+only into free buffer room, and backs off after such a 2xx; staged rows are the first the cap drops, and they are
+not counted in `events_sent_total` or `events_lost_total`.
+
+Up to 0.7.72 a second sender replayed those rows, one request at most every 5 seconds, with its own backoff. Now
+they share the sender's batches and its retry ladder; the request bodies, `event_id`s, ack rules, purge triggers,
+48-hour bound and on-disk format are unchanged, so a journal an older client left is sent after the upgrade. A
+staged row waits while its token and account are not the live ones or the operator pause holds, and is dropped
+from memory (`spool_replay_aged_at_dispatch_total`) and then tombstoned once it is past 48 hours. An event the
+disk thread has not handed over within 3 seconds goes out anyway (`spool_gate_timeout_total`), as before. A staged
+row the journal no longer owns (a withdrawal or purge let it go while its request was in flight) is dropped when it
+comes back from a failed request, is never written to the exit file, and is counted only by the journal.
 
 ## Queue delivery health (local candidate)
 
@@ -57,6 +80,33 @@ and the session's `complete` flag are false without a reliable closing read.
 `close_reason: closed` records an observed widget close when its later teardown
 cause was not known; it does not establish a normal complete visit. No ending
 inventory is invented. Actual final-build account/crash acceptance remains required.
+
+## Public own-events retry contract (0.7.71)
+
+A successful token-bound `X-Event-Receipt: own-p01-v1` snapshot answer, on a token without the staff spool, and a
+settled own account/mode/RuneLite profile enable a second bounded public journal. It holds the public P0 and P1 rows
+and `xp_gain` and `world_hop`: the six `ge_*` types, `store_buy`, `store_sell`, `trade`, `death`, `login`, `logout`,
+`loot`, `drop`, `pickup`, `alch`, `ground_removed`, `level_up`, `kill_count`, `pet` and `bank_session`.
+- `bank_visit_*` rows keep the bank journal. Every other P2 row, `own_signal` included, keeps the memory path.
+- The rows use the existing event endpoint and its exact per-ID `stored`, `duplicate` or `filtered` results, with the
+  bank journal's parser; a generic success settles nothing. `filtered` is terminal, as for bank rows.
+- Its `osrsbis/public-own-events-v1` root is separate from the bank and Queue roots, so 0.7.70 and older never read
+  it and their bank journal keeps working after a downgrade.
+- When the token also holds a Queue grant, these types use this journal, so one session's rows share one journal.
+- The projection before disk and on recovery, the hashed identity, the 5,000-row, 5 MiB and 48-hour bounds, the
+  logout window and the purges on revocation, token change and withdrawal are the bank journal's.
+- `off`, a missing header or a refused snapshot ends the grant and pauses replay without purging; a 429 or 5xx answer
+  keeps it, as from 0.7.70. A 403 or a token change purges the journal.
+- Without the header the rows keep the 0.7.70 memory path. No event, field or request type is added.
+
+The journal replays in append order, so a session's logout reaches the server after the rows before it, also after a
+throttled run and after a process kill. From 0.7.71 a full 500-row memory buffer first drops the oldest memory-only
+P2 row, then the newest row a public journal still holds (it stays on disk and is staged again after the rows before
+it), and only then the oldest row of the lowest class. `events_overflow_p0/p1/p2_total` and `events_lost_total` count
+only rows that are lost; in 0.7.70 and older, `events_overflow_p1_total` also counted bank-journal rows that left
+memory but stayed on disk (`events_lost_total` did not).
+`public_outbox_oldest_age_ms` in capture health is the age of the oldest unsettled row across the public journals
+this process has open, 0 when there is none.
 
 ## Latest bank in the snapshot (0.7.62)
 
@@ -114,19 +164,24 @@ exact lost-row count is unknown for unopened shards. Counters are process-local,
 not a durable completeness denominator.
 
 Only exact per-ID Queue receipts settle durable rows. Generic 2xx and retryable
-failures retain them; permanent rejected rows become metadata-only quarantine.
+failures retain them; permanent rejected rows are tombstoned and counted as
+quarantined, and no copy of them is kept. A shard with middle corruption is counted
+and never replayed; a clean compaction output of it (`.spl.next`) replays instead,
+otherwise the shard is deleted. (0.7.69 and older also wrote `quarantine.jsonl` and kept
+`shard-*.corrupt` files that nothing read; 0.7.70 deletes them.)
 Restart needs a fresh grant for the same identity. A logout pauses delivery, except for rows the ended
 session already captured (see "Sending after a logout" below). Changing
 account/mode/profile cannot replay old rows into the new identity. Unacknowledged
-rows remain for a later matching identity and grant. After a successful append,
-idle identities outside the newest 16 are retired and counted as gaps. A missing
-or incomplete index and an empty read never cause identity retirement. Live
-sibling writers remain protected and may temporarily exceed the identity bound.
-The index lock keeps a stable file and covers the retirement decision. Older
-binaries that delete that lock file must not share this root during rollout.
-Token withdrawal or 403 purges the current identity and idle retry files (including
-unindexed directories), including a cold start
-before any grant. An account-erased receipt targets only the sent identity. Purge
+rows remain for a later matching identity and grant. An idle prior identity stays
+until the 48-hour age bound or an explicit withdrawal; from 0.7.70 there is no bound
+on the number of identities. The hashed identity directories are the list of
+identities, and each one is forced into its root before its first row. (0.7.69 and
+older also kept an `active.json` index with `index.lock` and retired idle identities
+outside the newest 16 after an append; 0.7.70 deletes a leftover index under that
+client's own lock and leaves the lock file, whose inode those clients rely on.) Live
+sibling writers remain protected.
+Token withdrawal or 403 purges the current identity and every idle identity
+directory, including a cold start before any grant. An account-erased receipt targets only the sent identity. Purge
 markers and age bounds are checked again before dispatch; restored rows still need
 a valid fresh server grant and are subject to the server's deletion tombstones.
 The 48-hour local retry bound does not change indefinite eligible server history

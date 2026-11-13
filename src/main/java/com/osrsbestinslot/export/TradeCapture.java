@@ -1,7 +1,6 @@
 package com.osrsbestinslot.export;
 
 import java.awt.image.BufferedImage;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,13 +16,10 @@ import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
 import okhttp3.Request;
 import okhttp3.RequestBody;
-import okhttp3.Response;
 
 /** Own trades: both offers, the counterparty, the trade row and the staff confirm-screen screenshot. */
 @Slf4j
@@ -125,6 +121,73 @@ final class TradeCapture
 				pendingCounterpartyCombatLevel = observedCombat;
 			}
 		}
+	}
+
+	/** Activity log: the main trade screen (335) loaded. */
+	void mainLoaded()
+	{
+		// A 335-load ALWAYS begins a fresh trade, so clear the other-player pendings first.
+		//
+		// Without this, a trade that ends WITHOUT acceptance leaks into the next one. A decline routes
+		// through handleTradeChat, which early-returns when screenshots are off (the DEFAULT), so
+		// resetTradeState() never runs; and handleTradeWidgetClosed only resets when tradeArmed, which
+		// is set at confirm-load with screenshots on — so a trade abandoned at the first screen never
+		// arms either. Combined with 0.7.4's last-non-empty-wins poll and its "only fill if empty"
+		// confirm guards, the stale values then SURVIVE a next trade whose partner offers nothing —
+		// the classic gold-delivery shape. Demonstrated: Bob declines offering a Bandos chestplate,
+		// the player then gives an item to Alice who offers nothing, and the emitted event reads
+		// counterparty=Alice received=[Bandos chestplate].
+		//
+		// That is worse than the bug 0.7.4 fixes: 0.7.3 emitted EMPTY fields, this would write
+		// confidently WRONG trade rows on staff delivery accounts, and attribute a third player's RSN
+		// to a trade he was never in. Clearing at 335-open closes it at the only point that is
+		// guaranteed to run for every trade.
+		clearOtherSide();
+		// Main trade screen open: begin polling the other player's side (readable here, gone by confirm).
+		// onGameTick keeps the buffer current; the last read before the 334 transition = the final offer.
+		tradeMainOpen = true;
+		captureOtherOfferWhileMainOpen();	// initial read (offer may still be empty; the poll catches it)
+	}
+
+	/** Activity log: the confirm screen (334) loaded. */
+	void confirmLoaded()
+	{
+		tradeMainOpen = false;	// moved to confirm — stop polling; the last 335 poll holds the final offer
+		pendingTradeGiven = readOwnOffer();	// own offer container (90) persists across the transition
+		// Counterparty + received[] come from the 335 poll above (the only place they are readable). Fall
+		// back to the confirm screen ONLY when the poll captured nothing — counterpartyName() is usually
+		// null here (335 title gone) and readReceivedOffer() reads the value-text column.
+		if (!plugin.grants.captureEnabled())
+		{
+			pendingCounterparty = null;
+			pendingCounterpartyCombatLevel = null;
+		}
+		else if (pendingCounterparty == null || pendingCounterparty.isEmpty())
+		{
+			pendingCounterparty = counterpartyName();
+			pendingCounterpartyCombatLevel = visibleCounterpartyCombatLevel(pendingCounterparty);
+		}
+		if (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
+		{
+			pendingTradeReceived = readReceivedOffer();
+		}
+		// Lossless text fallback only when we still have no structured items (e.g. big "Lots!" trade the
+		// poll missed) — keeps the existing "no received_text when items exist" contract. Staff only:
+		// the text is the other player's offer as the game wrote it.
+		if (plugin.grants.captureEnabled() && (pendingTradeReceived == null || pendingTradeReceived.isEmpty())
+			&& (pendingReceivedText == null || pendingReceivedText.isEmpty()))
+		{
+			pendingReceivedText = readReceivedText();
+		}
+	}
+
+	/** The other player's side and name, which only a later read of the same trade may fill. */
+	private void clearOtherSide()
+	{
+		pendingCounterparty = null;
+		pendingCounterpartyCombatLevel = null;
+		pendingTradeReceived = null;	// WAVE 1b: received side — drop with the rest so it never leaks across trades
+		pendingReceivedText = null;
 	}
 
 	/** Snapshot the items in our own trade offer (container 90) as [{id, qty}]. */
@@ -467,10 +530,7 @@ final class TradeCapture
 		tradeMainOpen = false;
 		pendingTradeFrame.set(null);
 		pendingTradeGiven = null;	// activity-log trade capture — drop on decline/abandon/hop so it never leaks
-		pendingCounterparty = null;
-		pendingCounterpartyCombatLevel = null;
-		pendingTradeReceived = null;	// WAVE 1b: received side — drop with the rest so it never leaks across trades
-		pendingReceivedText = null;
+		clearOtherSide();
 	}
 
 	/**
@@ -513,46 +573,32 @@ final class TradeCapture
 			return;		// upload switch off — send nothing
 		}
 		long capturedAt = System.currentTimeMillis() / 1000L;
-		RequestBody body = new MultipartBody.Builder()
-			.setType(MultipartBody.FORM)
-			.addFormDataPart("token", token)
-			.addFormDataPart("account_hash", captureAccount == null ? "" : captureAccount)
-			.addFormDataPart("kind", "trade")
-			.addFormDataPart("phase", phase)	// "confirm" = trade window; "completed" = post-accept chat frame
-			.addFormDataPart("captured_at", Long.toString(capturedAt))
+		RequestBody body = screenshotForm(token, captureAccount, "trade", "phase", phase, capturedAt)	// phase "confirm" = trade window; "completed" = post-accept chat frame
 			.addFormDataPart("file", "trade-" + phase + "-" + capturedAt + ".png", RequestBody.create(PNG, pngBytes))
 			.build();
-
-		String base = plugin.apiBase();
-		Request request = new Request.Builder()
-			.url(base + "/screenshot-ingest")
-			.post(body)
-			.build();
-
-		plugin.okHttpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
+		Request request = new Request.Builder().url(plugin.apiBase() + "/screenshot-ingest").post(body).build();
+		plugin.okHttpClient.newCall(request).enqueue(EventQueue.answered(
+			e -> log.debug("OSRS BiS trade screenshot upload failed", e),
+			response ->
 			{
-				log.debug("OSRS BiS trade screenshot upload failed", e);
-			}
+				if (response.isSuccessful())
+				{
+					plugin.events.healthLastMediaUploadMs.set(System.currentTimeMillis());
+				}
+				log.debug("OSRS BiS trade screenshot upload response: {}", response.code());
+			}));
+	}
 
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try
-				{
-					if (response.isSuccessful())
-					{
-						plugin.events.healthLastMediaUploadMs.set(System.currentTimeMillis());
-					}
-					log.debug("OSRS BiS trade screenshot upload response: {}", response.code());
-				}
-				finally
-				{
-					response.close();
-				}
-			}
-		});
+	/** The /screenshot-ingest form before its image: token, account, kind, one part of the kind, capture second. */
+	static MultipartBody.Builder screenshotForm(String token, String account, String kind, String name, String value,
+		long capturedAt)
+	{
+		return new MultipartBody.Builder()
+			.setType(MultipartBody.FORM)
+			.addFormDataPart("token", token)
+			.addFormDataPart("account_hash", account == null ? "" : account)
+			.addFormDataPart("kind", kind)
+			.addFormDataPart(name, value)
+			.addFormDataPart("captured_at", Long.toString(capturedAt));
 	}
 }

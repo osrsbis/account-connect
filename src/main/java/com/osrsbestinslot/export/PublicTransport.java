@@ -46,7 +46,7 @@ final class PublicTransport
         allow("combat_hit combat_npc_end", "combat_schema gameplay_session source_sequence source_tick observed_at_ms source direction amount hitsplat_type npc_id target_key worn first_own_hit_tick end kill_credit");
         allow("own_vars", "");
         allow("own_signal", "");
-        allow("own_state", ""); // the nested body uses the closed OwnStateEvent projection below
+        allow("own_state", ""); // the three own types use the closed OwnEvent projection below
         allow("bank_visit_open", "visit_id opened_at_ms read_at_ms bank_state item_stacks manifest_sha256 plugin_version manifest_in_snapshot");
         allow("bank_visit_close", "visit_id closed_at_ms close_reason manifest_complete moves_complete deposited_sha256 withdrawn_sha256 end_manifest_sha256 end_chunks end_item_stacks manifest_in_snapshot deposited withdrawn deposited_chunks withdrawn_chunks moves_chunks");
         allow("bank_visit_manifest_chunk", "visit_id phase chunk chunks manifest_sha256 items");
@@ -153,17 +153,16 @@ final class PublicTransport
         if ("loot".equals(type) && !"npc".equals(input.get("source_type")) && !"event".equals(input.get("source_type")))
             out.remove("source_name");
         if ("ground_removed".equals(type)) out.put("recipient", "UNKNOWN");
-        Map<String,Object> own = "own_signal".equals(type) ? OwnSignalEvent.wire(input) : "own_vars".equals(type) ? OwnVarsEvent.wire(input)
-            : "own_state".equals(type) ? OwnStateEvent.wire(input) : Collections.emptyMap();
+        Map<String,Object> own = OwnEvent.handles(type) ? OwnEvent.wire(input) : Collections.emptyMap();
         if (own == null) return null;
         out.putAll(own);
         return out;
     }
     private static Map<String,Object> geObservation(Object input)
     {
-        Set<String> numbers = keys("schema_v sequence cumulative_qty cumulative_gp delta_from_qty delta_from_gp observed_at_ms counter_observed_at_ms listing_price execution_price tax_gp delta_qty delta_gp interval_start_ms interval_end_ms native_tax_gp native_tax_server_gp steps_dropped server_date_minutes server_clock_read_ms server_minute_seen_at_ms");
-        Set<String> values = keys("runelite_grand_exchange_offer runelite_spent_tax_unknown ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session account_profile unknown baseline_only observed_counter_difference varp_long_when_row_built client_callback_receipt");
-        Set<String> labels = keys("source gp_semantics identity offer_key_scope delta_status fill_time native_tax_source step_time");
+        Set<String> numbers = keys("schema_v sequence cumulative_qty cumulative_gp delta_from_qty delta_from_gp observed_at_ms counter_observed_at_ms listing_price delta_qty delta_gp interval_start_ms interval_end_ms native_tax_gp native_tax_server_gp steps_dropped server_date_minutes server_clock_read_ms server_minute_seen_at_ms");
+        Set<String> values = keys("ambiguous_counter_regression inferred_across_gap inferred_session_slot collector_session account_profile unknown baseline_only observed_counter_difference");
+        Set<String> labels = keys("identity offer_key_scope delta_status");
         Map<String,Object> out = new LinkedHashMap<>();
         if (input instanceof Map) for (Map.Entry<?,?> e : ((Map<?,?>) input).entrySet())
         {

@@ -4,8 +4,12 @@ import java.awt.Rectangle;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.runelite.api.widgets.Widget;
 
 /** Numeric screenshot evidence. Pixels outside the selected widget interiors are never retained. */
@@ -106,6 +110,33 @@ final class VerificationFrame
         finally { g.dispose(); }
         return out;
     }
+
+    /**
+     * The upload's own copy of what its rows say, numbers only: the source event, the frame tick and, per region, its box
+     * and expected number. Those rows can be dropped while event uploads are refused; the image then still pairs.
+     * Text values (discovery lines) are never included.
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> pairing(Map<String, Object> common, Object frameTick, List<Map<String, Object>> results)
+    {
+        List<Map<String, Object>> regions = new ArrayList<>();
+        for (Map<String, Object> r : results)
+        {
+            if (!(r.get("inputs") instanceof Map) || !(r.get("expected") instanceof Number)) continue;
+            Map<String, Object> g = new LinkedHashMap<>((Map<String, Object>) r.get("inputs"));
+            g.keySet().retainAll(PAIRING_INPUTS);
+            g.put("key", r.get("key"));
+            g.put("expected", r.get("expected"));
+            if (g.get("width") != null) regions.add(g);
+        }
+        return Fields.of("v", 1, "source", Fields.of("id", common.get("source_event_id"), "type", common.get("source_event_type"),
+            "tick", common.get("source_event_tick"), "revision", common.get("source_event_revision") != null
+                ? common.get("source_event_revision") : common.get("snapshot_revision")),
+            "frame_tick", frameTick, "regions", regions);
+    }
+
+    static final Set<String> PAIRING_INPUTS = new HashSet<>(Arrays.asList("widget", "x", "y", "width", "height", "reader",
+        "field", "skill", "item_id", "pattern_table", "pattern_index", "widget_value"));
 
     static List<Map<String, Object>> results(List<Region> regions, int width, int height, int canvasWidth, int canvasHeight)
     {

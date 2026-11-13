@@ -19,9 +19,29 @@ final class SpoolHooks
 		s.spoolDataRootOverride = root;
 	}
 
-	static int durabilityPendingCount(SpoolDriver s)
+	/** Hold the writer thread (a hung disk) until the returned action runs. Everything queued behind it waits. */
+	static Runnable block(SpoolDriver s)
 	{
-		return s.spoolDurabilityPending.size();
+		java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+		s.onSpoolThread(() ->
+		{
+			try
+			{
+				go.await(10, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException ignored)
+			{
+			}
+		});
+		return go::countDown;
+	}
+
+	/** Process death while the writer thread is held: nothing queued behind the hold ever runs. */
+	static void crashWhileBlocked(SpoolDriver s, Runnable release) throws Exception
+	{
+		s.spoolDead = true;
+		release.run();
+		crash(s);
 	}
 
 	/** Simulate process death: drop the shard handle and lock, write nothing, do nothing ever again. */
@@ -38,6 +58,7 @@ final class SpoolHooks
 		{
 			if (plugin.outbox.publicOutbox != null) plugin.outbox.publicOutbox.crashForTest();
 			if (plugin.outbox.publicBankOutbox != null) plugin.outbox.publicBankOutbox.crashForTest();
+			if (plugin.outbox.publicOwnOutbox != null) plugin.outbox.publicOwnOutbox.crashForTest();
 			if (s.staffJournal != null) s.staffJournal.crashForTest();
 			s.spoolDead = true;
 		}).get(5, TimeUnit.SECONDS);
@@ -91,6 +112,19 @@ final class SpoolHooks
 			}
 			return out;
 		}, new ArrayList<>());
+	}
+
+	/** Send the durable rows the sender does not hold, and wait for the answer to settle. */
+	static void resend(AccountConnectPlugin p) throws Exception
+	{
+		SpoolDriver s = p.spooler;
+		s.spoolReplayBackoffUntilMs = 0L;
+		p.events.eventRetryBackoffUntilMs = 0L;
+		s.pumpSpool();
+		awaitIdle(s);
+		p.events.flushEvents();
+		EventSpoolPluginTest.waitFor(() -> !p.events.eventPostInFlight, "answer settled");
+		awaitIdle(s);
 	}
 
 	static Path shardFile(SpoolDriver s) throws Exception

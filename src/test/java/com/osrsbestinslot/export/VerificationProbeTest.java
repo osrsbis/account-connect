@@ -33,6 +33,20 @@ public class VerificationProbeTest
         assertEquals(true, VerificationProbe.result("level", null, 42, 42L).get("match"));
     }
 
+    @Test public void zeroYieldChecksAreDueOnTheFirstSampleAfterALoginThenOneInTen()
+    {
+        VerificationProbe probe = new VerificationProbe(n -> 1);
+        StringBuilder due = new StringBuilder();
+        for (int i = 0; i < 21; i++) due.append(probe.zeroYieldDue(500) ? 'x' : '.');
+        assertEquals("x.........x.........x", due.toString());
+        // A login (or hop) at another tick starts the count again; reset() between samples does not.
+        probe.zeroYieldDue(500);
+        probe.reset();
+        assertFalse(probe.zeroYieldDue(500));
+        assertTrue(probe.zeroYieldDue(700));
+        assertFalse(probe.zeroYieldDue(700));
+    }
+
     @Test public void occasionsAndRandomSamplesRespectBudgetsAcrossReset()
     {
         VerificationProbe probe = new VerificationProbe(n -> 1);
@@ -42,7 +56,7 @@ public class VerificationProbeTest
         probe.occasion("login", null);
         assertNull(probe.due(19999));
         assertEquals("login", probe.due(20000).trigger);
-        for (int i = 2; i < 60; i++)
+        for (int i = 2; i < VerificationProbe.MAX_SAMPLES_PER_HOUR; i++)
         {
             probe.occasion("login", null);
             assertNotNull(probe.due(i * 20000L));
@@ -51,10 +65,10 @@ public class VerificationProbeTest
         probe.occasion("login", null);
         assertNull(probe.due(1200000));
         assertNotNull(probe.due(3600000));
-        for (int i = 0; i < 30; i++) assertTrue(probe.takeFrame(i));
+        for (int i = 0; i < VerificationProbe.MAX_FRAMES_PER_HOUR; i++) assertTrue(probe.takeFrame(false, i));
         probe.reset();
-        assertFalse(probe.takeFrame(31));
-        assertTrue(probe.takeFrame(3600000));
+        assertFalse(probe.takeFrame(false, 31));
+        assertTrue(probe.takeFrame(false, 3600000));
         assertEquals("random", new VerificationProbe(n -> 0).due(0).trigger);
     }
 

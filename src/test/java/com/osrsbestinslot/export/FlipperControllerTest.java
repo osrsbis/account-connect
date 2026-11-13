@@ -94,14 +94,34 @@ public class FlipperControllerTest
                 .when(manager).add(any(Overlay.class));
             doAnswer(call -> { overlays.remove(call.getArgument(0)); return null; })
                 .when(manager).remove(any(Overlay.class));
+            // As RuneLite's ConfigManager: one stored string per key, read typed or raw, and a ConfigChanged
+            // on the event bus whenever a write changes it.
             when(configuration.getConfiguration(AccountConnectPlugin.CONFIG_GROUP, "flipper", Boolean.class))
                 .thenAnswer(call -> enabled.get());
-            doAnswer(call -> { enabled.set(call.getArgument(2)); return null; })
+            when(configuration.getConfiguration(AccountConnectPlugin.CONFIG_GROUP, "flipper"))
+                .thenAnswer(call -> enabled.get() == null ? null : enabled.get().toString());
+            doAnswer(call -> { store(call.getArgument(2)); return null; })
                 .when(configuration).setConfiguration(eq(AccountConnectPlugin.CONFIG_GROUP), eq("flipper"), any(Boolean.class));
+            doAnswer(call -> { store(Boolean.parseBoolean(call.getArgument(2))); return null; })
+                .when(configuration).setConfiguration(eq(AccountConnectPlugin.CONFIG_GROUP), eq("flipper"), anyString());
             controller = new FlipperController(client, configuration, thread, toolbar, manager, bus, tooltips);
             draft(100, 100, 10_500, 20, "1,029,000 coins (1,050,000 - 2%)");
             controller.startUp(owner);
             SwingUtilities.invokeAndWait(() -> {});
+        }
+
+        void store(Boolean value)
+        {
+            Boolean old = enabled.getAndSet(value);
+            if (!value.equals(old))
+            {
+                net.runelite.client.events.ConfigChanged event = new net.runelite.client.events.ConfigChanged();
+                event.setGroup(AccountConnectPlugin.CONFIG_GROUP);
+                event.setKey("flipper");
+                event.setOldValue(old == null ? null : old.toString());
+                event.setNewValue(value.toString());
+                bus.post(event);
+            }
         }
 
         void draft(int id, int count, long sell, int rate, String nativeTotal)
@@ -423,8 +443,140 @@ public class FlipperControllerTest
         throw new AssertionError("Missing sidebar toggle");
     }
 
+    /**
+     * The settings-panel checkbox as RuneLite 1.13.6 builds it (ConfigPanel.createCheckbox and changeConfiguration):
+     * built from the stored string each time the plugin's settings open, and a click stores "" + isSelected()
+     * under the item's group and key.
+     */
+    private static javax.swing.JCheckBox configPanelCheckbox(Fixture f) throws Exception
+    {
+        net.runelite.client.config.ConfigItem item = AccountConnectConfig.class.getDeclaredMethod("flipper")
+            .getAnnotation(net.runelite.client.config.ConfigItem.class);
+        String group = AccountConnectConfig.class.getAnnotation(net.runelite.client.config.ConfigGroup.class).value();
+        javax.swing.JCheckBox box = new javax.swing.JCheckBox();
+        box.setSelected(Boolean.parseBoolean(f.configuration.getConfiguration(group, item.keyName())));
+        box.addActionListener(event -> f.configuration.setConfiguration(group, item.keyName(), "" + box.isSelected()));
+        return box;
+    }
+
+    private static void click(javax.swing.JCheckBox box) throws Exception
+    {
+        SwingUtilities.invokeAndWait(box::doClick);
+        SwingUtilities.invokeAndWait(() -> {});
+    }
+
+    private static void restart(Fixture f) throws Exception
+    {
+        f.controller.shutDown();
+        f.controller.startUp(f.owner);
+        SwingUtilities.invokeAndWait(() -> {});
+        f.tick();
+        SwingUtilities.invokeAndWait(() -> {});
+    }
+
+    private static void assertOnlyTheFlipperKeyWasWritten(Fixture f)
+    {
+        mockingDetails(f.configuration).getInvocations().stream()
+            .filter(call -> call.getMethod().getName().equals("setConfiguration"))
+            .forEach(call ->
+            {
+                assertEquals(AccountConnectPlugin.CONFIG_GROUP, call.getArgument(0));
+                assertEquals("flipper", call.getArgument(1));
+            });
+    }
+
     @Test
-    public void absentLocalToggleDefaultsOffWithoutConfigItem() throws Exception
+    public void settingsItemIsTheSidebarKeyAndDefaultsOff() throws Exception
+    {
+        java.lang.reflect.Method method = AccountConnectConfig.class.getDeclaredMethod("flipper");
+        net.runelite.client.config.ConfigItem item = method.getAnnotation(net.runelite.client.config.ConfigItem.class);
+        assertEquals(AccountConnectPlugin.CONFIG_GROUP,
+            AccountConnectConfig.class.getAnnotation(net.runelite.client.config.ConfigGroup.class).value());
+        assertEquals("flipper", item.keyName());
+        assertEquals("Enable Flipper", item.name());
+        assertEquals("Enable Flipper", item.description());
+        assertEquals("", item.warning());
+        assertFalse(item.hidden());
+        assertFalse(item.secret());
+        assertEquals(boolean.class, method.getReturnType());
+        AccountConnectConfig defaults = (AccountConnectConfig) java.lang.reflect.Proxy.newProxyInstance(
+            AccountConnectConfig.class.getClassLoader(), new Class<?>[]{AccountConnectConfig.class},
+            (proxy, called, args) -> java.lang.invoke.MethodHandles
+                .privateLookupIn(AccountConnectConfig.class, java.lang.invoke.MethodHandles.lookup())
+                .unreflectSpecial(called, AccountConnectConfig.class).bindTo(proxy).invokeWithArguments(args));
+        assertFalse(defaults.flipper());
+    }
+
+    @Test
+    public void settingsCheckboxDrivesSidebarAndFlipperState() throws Exception
+    {
+        try (Fixture f = new Fixture(null))
+        {
+            f.tick();
+            javax.swing.JCheckBox settings = configPanelCheckbox(f);
+            assertFalse(settings.isSelected());
+            assertFalse(sidebarToggle(f.controller).isSelected());
+            click(settings);
+            assertEquals(Boolean.TRUE, f.enabled.get());
+            assertTrue(f.controller.view().enabled);
+            assertTrue(f.controller.showOverlay());
+            assertTrue(sidebarToggle(f.controller).isSelected());
+            f.tick();
+            f.cost("10000");
+            f.tick();
+            assertEquals(0, new BigDecimal("29000").compareTo(f.controller.view().result.profit));
+            click(settings);
+            assertEquals(Boolean.FALSE, f.enabled.get());
+            assertFalse(f.controller.view().enabled);
+            assertFalse(f.controller.showOverlay());
+            assertFalse(sidebarToggle(f.controller).isSelected());
+            assertNull(f.controller.view().result);
+            assertOnlyTheFlipperKeyWasWritten(f);
+        }
+    }
+
+    @Test
+    public void sidebarCheckboxShowsInTheSettingsCheckbox() throws Exception
+    {
+        try (Fixture f = new Fixture(null))
+        {
+            f.tick();
+            click(sidebarToggle(f.controller));
+            assertEquals(Boolean.TRUE, f.enabled.get());
+            assertTrue(configPanelCheckbox(f).isSelected());
+            assertTrue(f.controller.showOverlay());
+            click(sidebarToggle(f.controller));
+            assertEquals(Boolean.FALSE, f.enabled.get());
+            assertFalse(configPanelCheckbox(f).isSelected());
+            assertFalse(f.controller.showOverlay());
+            assertOnlyTheFlipperKeyWasWritten(f);
+        }
+    }
+
+    @Test
+    public void settingsCheckboxSurvivesRestart() throws Exception
+    {
+        try (Fixture f = new Fixture(null))
+        {
+            f.tick();
+            click(configPanelCheckbox(f));
+            restart(f);
+            assertTrue(f.controller.view().enabled);
+            assertTrue(f.controller.showOverlay());
+            assertTrue(sidebarToggle(f.controller).isSelected());
+            assertTrue(configPanelCheckbox(f).isSelected());
+            click(configPanelCheckbox(f));
+            restart(f);
+            assertFalse(f.controller.view().enabled);
+            assertFalse(f.controller.showOverlay());
+            assertFalse(sidebarToggle(f.controller).isSelected());
+            assertFalse(configPanelCheckbox(f).isSelected());
+            assertOnlyTheFlipperKeyWasWritten(f);
+        }
+    }
+
+    @Test
+    public void absentLocalToggleDefaultsOff() throws Exception
     {
         try (Fixture f = new Fixture(null))
         {

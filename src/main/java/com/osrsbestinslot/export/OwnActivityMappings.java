@@ -23,6 +23,29 @@ final class OwnActivityMappings
             TOTEMS[site] = IntStream.of(0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11).map(o -> base + o).toArray();
         }
     }
+    /**
+     * The plain varbit families, each {family, snapshot source or null for "varbits:" and the id list, then key and
+     * varbit id pairs in value order}. Poll order: row 0 (then raid points), rows 1-4 (then goals, rune pouch, potion
+     * store and port tasks), rows 5-10. OwnEvent builds the own_vars wire keys from the same rows.
+     */
+    static final Object[][] VARBITS = {
+        {"combat.barrows_state", "varbits:457-464", "ahrim", 457, "dharok", 458, "guthan", 459, "karil", 460, "torag", 461,
+            "verac", 462, "reward_potential_raw", 463, "npcs_slain_raw", 464},
+        {"effects.surge", "varbit:16270", "timer_raw", 16270},
+        {"effects.death_charge", "varbits:12411,12138", "active_raw", 12411, "cooldown_raw", 12138},
+        // Settings are not possession, server idle time, or a promise that teleport will occur.
+        {"effects.escape_crystal", "varbits:14838,14849,14857", "afk_mode_raw", 14838, "afk_delay_raw", 14849, "ring_of_life_raw", 14857},
+        // Ticket availability is not lifetime currency and no path/action is inferred.
+        {"minigame.arena_state", "varbits:5964,10732,5962", "entry_paid_raw", 5964, "cooldown_raw", 10732, "ticket_available_raw", 5962},
+        {"minigame.tears", null, "countdown_raw", 5099, "tears_raw", 455, "collecting_raw", 453},
+        // Only the local player's contribution, never team bottles or other players' scoreboards.
+        {"minigame.brewing", null, "own_contribution_raw", 2290},
+        {"minigame.restaurant_order", null, "started_raw", 2478, "customer_id_raw", 2484, "order_id_raw", 2483, "refused_hard_raw", 2485},
+        {"minigame.plunder_state", null, "timer_raw", 2375, "room_raw", 2377},
+        {"sailing.trial_progress", null, "tempor_tantrum_raw", 18427, "jubbly_jive_raw", 18432, "gwenith_glide_raw", 18437},
+        {"storage.bank_tabs", null, "tab_1_slots", 4171, "tab_2_slots", 4172, "tab_3_slots", 4173, "tab_4_slots", 4174,
+            "tab_5_slots", 4175, "tab_6_slots", 4176, "tab_7_slots", 4177, "tab_8_slots", 4178, "tab_9_slots", 4179},
+    };
     static final int[][] BOLTS = {
         {879, 9236},
         {9337, 9240},

@@ -1,6 +1,5 @@
 package com.osrsbestinslot.export;
 
-import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,10 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.util.Text;
-import okhttp3.Call;
-import okhttp3.Callback;
 import okhttp3.MultipartBody;
-import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
@@ -43,12 +39,27 @@ final class DropProof
 	volatile DropFrameSegmenter dropSegmenter;
 	/** Armed while drop capture is running. Separate from clipCapturing so the two never interfere. */
 	volatile boolean dropCapturing;
-	/** Set on a sampled tick to request one frame; cleared when that frame arrives. */
-	private volatile boolean dropFramePending;
-	/** Wall-clock (nanoTime) of the next drop frame to sample. */
-	private volatile long nextDropSampleAt;
-	/** Per-frame render callback, registered with DrawManager only while drop capture runs. */
-	private final Runnable dropFrameTick = this::onDropFrameTick;
+	/**
+	 * The drop frame sampler. Its own instance, so drop capture and store capture running at the same time
+	 * cannot steal each other's sample slots. A drop frame is kept at the time its encode finished.
+	 */
+	final FrameSampler sampler = new FrameSampler()
+	{
+		AccountConnectPlugin plugin()
+		{
+			return plugin;
+		}
+
+		boolean capturing()
+		{
+			return dropCapturing;
+		}
+
+		void frame(byte[] jpeg, long sampledAtMillis)
+		{
+			acceptDropFrame(jpeg, System.currentTimeMillis());
+		}
+	};
 	/**
 	 * Adaptive rate controller: 8fps baseline, 30fps around the Drop, the spawn, the removal and a
 	 * new drop inside the tail. The sampler still runs at 30fps, because the two seconds BEFORE a
@@ -236,68 +247,8 @@ final class DropProof
 		dropRate = new DropCaptureRate();
 		dropSegmentsSent.set(0);
 		dropSegmentsFailed.set(0);
-		nextDropSampleAt = 0L;		// first render tick samples immediately
-		dropFramePending = false;
 		dropCapturing = true;
-		if (plugin.drawManager != null)
-		{
-			plugin.drawManager.registerEveryFrameListener(dropFrameTick);
-		}
-	}
-
-	/**
-	 * Wall-clock decimation for drop frames. Its own gate, so drop capture and store capture running
-	 * at the same time cannot steal each other's sample slots.
-	 */
-	boolean shouldSampleDropFrame(long nowNanos)
-	{
-		if (nowNanos < nextDropSampleAt)
-		{
-			return false;
-		}
-		final long period = 1_000_000_000L / DROP_CLIP_FPS;
-		long next = nextDropSampleAt + period;
-		nextDropSampleAt = (next <= nowNanos) ? nowNanos + period : next;
-		return true;
-	}
-
-	/** Render-thread frame hook. Encodes off-thread; at most one frame is ever in flight. */
-	void onDropFrameTick()
-	{
-		if (!dropCapturing || dropFramePending)
-		{
-			return;
-		}
-		if (!shouldSampleDropFrame(System.nanoTime()))
-		{
-			return;
-		}
-		dropFramePending = true;
-		plugin.drawManager.requestNextFrameListener(img ->
-		{
-			if (img == null)
-			{
-				dropFramePending = false;
-				return;
-			}
-			final BufferedImage scaled = StoreClips.downscaleRgb(StoreClips.toRgbFrame(img), StoreClips.MAX_FRAME_WIDTH);
-			if (scaled == null)
-			{
-				dropFramePending = false;
-				return;
-			}
-			plugin.executor.submit(() ->
-			{
-				try
-				{
-					acceptDropFrame(AccountConnectPlugin.encodeJpeg(scaled), System.currentTimeMillis());
-				}
-				finally
-				{
-					dropFramePending = false;
-				}
-			});
-		});
+		sampler.start();
 	}
 
 	/**
@@ -380,12 +331,8 @@ final class DropProof
 			return;
 		}
 		dropCapturing = false;
-		if (plugin.drawManager != null)
-		{
-			plugin.drawManager.unregisterEveryFrameListener(dropFrameTick);
-		}
+		sampler.stop();
 		DropFrameSegmenter seg = dropSegmenter;
-		dropFramePending = false;
 		if (seg == null)
 		{
 			DropSessionAudit audit = audit(sessionId);
@@ -788,13 +735,10 @@ final class DropProof
 	void postDropSegment(String base, String token, DropFrameSegmenter.Segment segment,
 		String sessionId, int attempt, String captureAccount)
 	{
-		if (!plugin.uploadAllowed())
-		{
-			// The user turned uploads off mid-session. Nothing more will be sent, so release the
-			// bytes rather than leaving them held for the rest of the session.
-			finishDropSegment(segment, sessionId, "refused");
-			return;
-		}
+		// Each of these stops the attempt as "refused" and releases the bytes.
+		// THE USER SWITCH. Uploads turned off mid-session: nothing more will be sent, so the bytes are
+		// not held for the rest of the session.
+		//
 		// THE GRANT ARM, and it belongs here rather than only at the entry point. A retry runs this
 		// method again minutes later: DROP_SEGMENT_RETRIES attempts at a
 		// CLIP_UPLOAD_TIMEOUT_SECONDS call timeout each. discardDropSessionOnWithdrawnConsent
@@ -806,126 +750,100 @@ final class DropProof
 		// and never reads drop_proof, deliberately, because rollout is not authorization. A staff
 		// token is still staff after the operator withdraws the rollout flag, so the late POST is
 		// stored. Both components are self-consistent and the seam between them leaked.
-		if (!plugin.grants.dropProofEnabled())
-		{
-			finishDropSegment(segment, sessionId, "refused");
-			return;
-		}
+		//
 		// THE OUTSTANDING RETRY ARM. This segment's bytes were captured while `token` was configured,
 		// and `token` is what its form body carries. A retry that fires after the user swapped to a
 		// different token would file one account's footage under whoever is linked now, so the
 		// attempt is stranded instead. Retries are the only way a segment survives the swap at all:
 		// the segmenter refuses to produce a new one.
-		if (!token.equals(plugin.currentLinkToken()) || !plugin.grants.captureAccountMatches(captureAccount))
+		if (!plugin.uploadAllowed() || !plugin.grants.dropProofEnabled()
+			|| !token.equals(plugin.currentLinkToken()) || !plugin.grants.captureAccountMatches(captureAccount))
 		{
 			finishDropSegment(segment, sessionId, "refused");
 			return;
 		}
 		try
 		{
-			Request request = new Request.Builder()
-				.url(base + "/store-frames-ingest")
-			.post(ServerGrants.withMediaAccount(buildDropSegmentBody(segment, token, sessionId), captureAccount))
-			.build();
-		StoreClips.uploadClient(plugin.okHttpClient).newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
+			FramesUpload.post(plugin.okHttpClient, base, buildDropSegmentBody(segment, token, sessionId), captureAccount, new FramesUpload.Answer()
 			{
-				retryOrGiveUp(e == null ? "io" : String.valueOf(e.getMessage()));
-			}
-
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try
+				@Override
+				public void stored(boolean refused)
 				{
-					if (response.isSuccessful())
+					// A 200 IS NOT ALWAYS A STORE. /store-frames-ingest answers a deliberate
+					// refusal with 200 {ok:true, dropped:'not_staff'} or
+					// 200 {ok:true, dropped:'clips_disabled'}, on purpose: a 200 stops a public
+					// plugin error-retrying something the server meant to throw away. Counting
+					// those as sent made segments_uploaded_at_emit overstate what reached R2,
+					// so a manifest could read as a clean success for footage that does not
+					// exist. Reachable today the moment a staff token gets clips: 'off' in
+					// acct:policy_map, which account-ingest explicitly permits.
+					//
+					// A refusal is NOT retried. The server meant it, and retrying it would be
+					// the error loop the 200 exists to prevent. The bytes are released and the
+					// segment is counted as failed, which is what it is.
+					if (refused)
 					{
-						// A 200 IS NOT ALWAYS A STORE. /store-frames-ingest answers a deliberate
-						// refusal with 200 {ok:true, dropped:'not_staff'} or
-						// 200 {ok:true, dropped:'clips_disabled'}, on purpose: a 200 stops a public
-						// plugin error-retrying something the server meant to throw away. Counting
-						// those as sent made segments_uploaded_at_emit overstate what reached R2,
-						// so a manifest could read as a clean success for footage that does not
-						// exist. Reachable today the moment a staff token gets clips: 'off' in
-						// acct:policy_map, which account-ingest explicitly permits.
-						//
-						// A refusal is NOT retried. The server meant it, and retrying it would be
-						// the error loop the 200 exists to prevent. The bytes are released and the
-						// segment is counted as failed, which is what it is.
-						if (dropSegmentWasRefused(response))
-						{
-							finishDropSegment(segment, sessionId, "refused");
-							log.debug("OSRS BiS drop segment {} refused by the server with a 200",
-								segment.index);
-							return;
-						}
-						finishDropSegment(segment, sessionId, "uploaded");
+						finishDropSegment(segment, sessionId, "refused");
+						log.debug("OSRS BiS drop segment {} refused by the server with a 200",
+							segment.index);
 						return;
 					}
-					// A 4xx other than 429 will fail identically forever, so it is not retried.
-					int code = response.code();
-					if (code == 429 || code >= 500)
-					{
-						retryOrGiveUp("http " + code);
-					}
-					else
-					{
-						// FINDING E2. A 403 IS A REVOCATION, NOT AN ORDINARY FAILURE.
-						// /store-frames-ingest answers a revoked link with 403, from revocationBlock,
-						// which runs before anything is stored. So no data reaches the server — but
-						// without this the recorder keeps capturing the rendered screen and keeps
-						// posting segments that will all get the same 403, until the player logs out.
-						// Recording locally with nowhere to send is exactly what the grant being
-						// withdrawn is supposed to stop.
-						//
-						// It clears the rollout flag rather than tearing the session down here,
-						// because this runs on an OkHttp callback thread and the teardown touches
-						// the DrawManager and the segmenter, which belong to the client thread.
-						// Clearing the flag makes dropProofEnabled() false, and the next
-						// pollDropSession — the client thread, next game tick — runs the SAME
-						// withdrawal path an X-Drop-Proof: off header runs. One revocation path, not
-						// two. A server that has not in fact revoked the link restores the flag on
-						// its next policy response.
-						//
-						// The flag is cleared BEFORE the counters, so an observer that waits on the
-						// segment count can never read the flag in its old state.
-						if (code == 403)
-						{
-							plugin.grants.serverDropProofEnabled = false;
-							log.debug("OSRS BiS drop segment {} got a 403: treating the grant as "
-								+ "withdrawn", segment.index);
-						}
-						finishDropSegment(segment, sessionId, code == 403 ? "refused" : "failed");
-						log.debug("OSRS BiS drop segment {} rejected: {}", segment.index, code);
-					}
+					finishDropSegment(segment, sessionId, "uploaded");
 				}
-				finally
-				{
-					response.close();
-				}
-			}
 
-			private void retryOrGiveUp(String why)
-			{
-				if (attempt + 1 >= DROP_SEGMENT_RETRIES)
+				@Override
+				public void rejected(int code)
 				{
-					finishDropSegment(segment, sessionId, "failed");
-					log.debug("OSRS BiS drop segment {} lost after {} attempts: {}",
-						segment.index, DROP_SEGMENT_RETRIES, why);
-					return;
+					// FINDING E2. A 403 IS A REVOCATION, NOT AN ORDINARY FAILURE.
+					// /store-frames-ingest answers a revoked link with 403, from revocationBlock,
+					// which runs before anything is stored. So no data reaches the server — but
+					// without this the recorder keeps capturing the rendered screen and keeps
+					// posting segments that will all get the same 403, until the player logs out.
+					// Recording locally with nowhere to send is exactly what the grant being
+					// withdrawn is supposed to stop.
+					//
+					// It clears the rollout flag rather than tearing the session down here,
+					// because this runs on an OkHttp callback thread and the teardown touches
+					// the DrawManager and the segmenter, which belong to the client thread.
+					// Clearing the flag makes dropProofEnabled() false, and the next
+					// pollDropSession — the client thread, next game tick — runs the SAME
+					// withdrawal path an X-Drop-Proof: off header runs. One revocation path, not
+					// two. A server that has not in fact revoked the link restores the flag on
+					// its next policy response.
+					//
+					// The flag is cleared BEFORE the counters, so an observer that waits on the
+					// segment count can never read the flag in its old state.
+					if (code == 403)
+					{
+						plugin.grants.serverDropProofEnabled = false;
+						log.debug("OSRS BiS drop segment {} got a 403: treating the grant as "
+							+ "withdrawn", segment.index);
+					}
+					finishDropSegment(segment, sessionId, code == 403 ? "refused" : "failed");
+					log.debug("OSRS BiS drop segment {} rejected: {}", segment.index, code);
 				}
-				try
+
+				@Override
+				public void retry(String why, long retryAfterMs)
 				{
-					plugin.executor.submit(() -> postDropSegment(base, token, segment, sessionId, attempt + 1, captureAccount));
+					// A drop segment is retried at once, whatever a 429 asked for, up to DROP_SEGMENT_RETRIES.
+					if (attempt + 1 >= DROP_SEGMENT_RETRIES)
+					{
+						finishDropSegment(segment, sessionId, "failed");
+						log.debug("OSRS BiS drop segment {} lost after {} attempts: {}",
+							segment.index, DROP_SEGMENT_RETRIES, why);
+						return;
+					}
+					try
+					{
+						plugin.executor.submit(() -> postDropSegment(base, token, segment, sessionId, attempt + 1, captureAccount));
+					}
+					catch (RuntimeException e)
+					{
+						finishDropSegment(segment, sessionId, "failed");
+						log.debug("OSRS BiS drop segment {} retry could not be scheduled", segment.index, e);
+					}
 				}
-				catch (RuntimeException e)
-				{
-					finishDropSegment(segment, sessionId, "failed");
-					log.debug("OSRS BiS drop segment {} retry could not be scheduled", segment.index, e);
-				}
-			}
 			});
 		}
 		catch (RuntimeException e)
@@ -1463,11 +1381,7 @@ final class DropProof
 		}
 		endDropSessionTracking();
 		dropCapturing = false;
-		dropFramePending = false;
-		if (plugin.drawManager != null)
-		{
-			plugin.drawManager.unregisterEveryFrameListener(dropFrameTick);
-		}
+		sampler.stop();
 		DropFrameSegmenter seg = dropSegmenter;
 		dropSegmenter = null;
 		if (discardedAudit != null)

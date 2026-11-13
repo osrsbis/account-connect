@@ -330,9 +330,8 @@ final class GeObservationTracker
             "side", GeSlots.side(s.state), "offer_key", s.key, "offer_seen", s.seen);
         Map<String, Object> o = Fields.of(
             "schema_v", 1, "sequence", ++s.sequence, "cumulative_qty", s.value[1], "cumulative_gp", s.value[4],
-            "delta_from_qty", s.emittedQty, "delta_from_gp", s.emittedGp, "source", "runelite_grand_exchange_offer",
+            "delta_from_qty", s.emittedQty, "delta_from_gp", s.emittedGp,
             "observed_at_ms", at, "counter_observed_at_ms", s.observedAt, "listing_price", s.value[3],
-            "gp_semantics", "runelite_spent_tax_unknown", "execution_price", null, "tax_gp", null,
             "identity", s.uncertain ? "ambiguous_counter_regression" : s.gap ? "inferred_across_gap" : "inferred_session_slot",
             "offer_key_scope", s.restored ? "account_profile" : "collector_session");
         // Both ends must follow the previous row: the counter observation can predate it after a clock rollback.
@@ -343,7 +342,6 @@ final class GeObservationTracker
         // Bounds are observation bounds, conditional on the inferred identity; never exact fill times.
         o.put("interval_start_ms", !s.uncertain && clockOk ? s.emittedAt : null);
         o.put("interval_end_ms", !s.uncertain && clockOk ? s.observedAt : null);
-        o.put("fill_time", "unknown");
         // Per-callback steps since the previous row, when this row covers more than one change or a tax change. Each
         // keeps its own callback time (receipt in this client, not the exchange's execution time) and tick.
         boolean anyTax = false;
@@ -361,7 +359,6 @@ final class GeObservationTracker
             }
             o.put("steps", steps);
             o.put("steps_dropped", s.stepsDropped);
-            o.put("step_time", "client_callback_receipt");
         }
         s.steps.clear();
         s.stepsDropped = 0;

@@ -32,8 +32,8 @@ public class GeObservationTrackerTest
         assertEquals(100001L, meta(progress).get("interval_start_ms"));
         assertEquals(100101L, meta(progress).get("interval_end_ms"));
         assertEquals(300L, meta(progress).get("listing_price"));
-        assertNull(meta(progress).get("execution_price"));
-        assertNull(meta(progress).get("tax_gp"));
+        for (String label : new String[]{"source", "gp_semantics", "execution_price", "tax_gp", "fill_time"})
+            assertFalse("no constant label (0.7.72): " + label, meta(progress).containsKey(label));
         Map<String, Object> end = at(BOUGHT, 100, 21000, 102);
         assertEquals(60L, meta(end).get("delta_qty"));
         assertEquals(12000L, meta(end).get("delta_gp"));
@@ -210,7 +210,7 @@ public class GeObservationTrackerTest
         Map<?, ?> a = (Map<?, ?>) steps.get(0), b = (Map<?, ?>) steps.get(1);
         assertEquals(101200L, a.get("at_ms")); assertEquals(1L, a.get("cumulative_qty")); assertEquals(200L, a.get("cumulative_gp"));
         assertEquals(101800L, b.get("at_ms")); assertEquals(2L, b.get("cumulative_qty")); assertEquals(500L, b.get("cumulative_gp"));
-        assertEquals("client_callback_receipt", o.get("step_time"));
+        assertFalse("no constant step_time label (0.7.72)", o.containsKey("step_time"));
         assertEquals(0, o.get("steps_dropped"));
     }
 

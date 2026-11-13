@@ -1,6 +1,8 @@
 package com.osrsbestinslot.export;
 
 import com.google.common.primitives.Longs;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -35,16 +37,14 @@ final class MinigameLines
 	/**
 	 * {minigame, result, detail or null, pattern, group of count or 0, group of total or 0}. Filled from the source-
 	 * quoted research (evidence/minigame-signals-20261104.md); the comment above each entry gives its source.
+	 * A detail "a|b" is one row per label, in that order, and "%s" in its pattern is the label capitalised with "_"
+	 * as a space, so the expanded table and every row index are the same as when each row was written out.
 	 */
-	static final Object[][] LINES = {
+	static final Object[][] LINES = expand(new Object[][]{
 		// TzHaar-Ket-Rak's Challenges: RuneLite ChatCommandsPlugin KILLCOUNT_PATTERN, test line "Your completion count
 		// for TzHaar-Ket-Rak's First Challenge is: 1." (the kill_count gate also sends it; this row names the challenge).
-		{"tzhaar_ket_rak", "complete", "first", "^Your completion count for TzHaar-Ket-Rak's First Challenge is: " + NUM + "\\.$", 0, 1},
-		{"tzhaar_ket_rak", "complete", "second", "^Your completion count for TzHaar-Ket-Rak's Second Challenge is: " + NUM + "\\.$", 0, 1},
-		{"tzhaar_ket_rak", "complete", "third", "^Your completion count for TzHaar-Ket-Rak's Third Challenge is: " + NUM + "\\.$", 0, 1},
-		{"tzhaar_ket_rak", "complete", "fourth", "^Your completion count for TzHaar-Ket-Rak's Fourth Challenge is: " + NUM + "\\.$", 0, 1},
-		{"tzhaar_ket_rak", "complete", "fifth", "^Your completion count for TzHaar-Ket-Rak's Fifth Challenge is: " + NUM + "\\.$", 0, 1},
-		{"tzhaar_ket_rak", "complete", "sixth", "^Your completion count for TzHaar-Ket-Rak's Sixth Challenge is: " + NUM + "\\.$", 0, 1},
+		{"tzhaar_ket_rak", "complete", "first|second|third|fourth|fifth|sixth",
+			"^Your completion count for TzHaar-Ket-Rak's %s Challenge is: " + NUM + "\\.$", 0, 1},
 		// PvP Arena duels: ChatCommandsPlugin DUEL_ARENA_WINS_PATTERN and ScreenshotPlugin, test "You won! You have now
 		// won 1,909 duels." The total is the running count the line states.
 		{"pvp_arena", "win", null, "^You won! You have(?: now)? won (" + "\\d{1,3}(?:,\\d{3})+|\\d+|one" + ") duels?\\.$", 0, 1},
@@ -54,11 +54,8 @@ final class MinigameLines
 		// is: 206."
 		{"brimhaven_agility_arena", "points", "tickets_total", "^Your Agility Arena Total Ticket count is: " + NUM + "\\.$", 0, 1},
 		// Hallowed Sepulchre: ChatCommandsPlugin HS_KC_FLOOR_PATTERN / HS_KC_GHC_PATTERN (tests L797, L803).
-		{"hallowed_sepulchre", "complete", "floor_1", "^You have completed Floor 1 of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
-		{"hallowed_sepulchre", "complete", "floor_2", "^You have completed Floor 2 of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
-		{"hallowed_sepulchre", "complete", "floor_3", "^You have completed Floor 3 of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
-		{"hallowed_sepulchre", "complete", "floor_4", "^You have completed Floor 4 of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
-		{"hallowed_sepulchre", "complete", "floor_5", "^You have completed Floor 5 of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
+		{"hallowed_sepulchre", "complete", "floor_1|floor_2|floor_3|floor_4|floor_5",
+			"^You have completed %s of the Hallowed Sepulchre! Total completions: " + NUM + "\\.$", 0, 1},
 		{"hallowed_sepulchre", "complete", "grand_coffin", "^You have opened the Grand Hallowed Coffin " + NUM + " times?!$", 0, 1},
 		// Guardians of the Rift: GUARDIANS_OF_THE_RIFT_PATTERN "Amount of Rifts you have closed: N." A reward search is
 		// NOT matched here: "You found some loot: " is also Wintertodt's and Tempoross's line, and RewardLootCapture
@@ -91,7 +88,29 @@ final class MinigameLines
 		{"mahogany_homes", "complete", null, "^[A-Z][a-z]{1,20} seems happy with your work\\. Talk to (?:him|her) for your reward\\.$", 0, 0},
 		// Mahogany Homes: the running totals the game states when a reward is collected (total contracts; points not kept).
 		{"mahogany_homes", "total", "contracts", "^You have completed " + NUM + " contracts with a total of " + NUM + " points\\.$", 0, 1},
-	};
+	});
+
+	private static Object[][] expand(Object[][] rows)
+	{
+		List<Object[]> out = new ArrayList<>();
+		for (Object[] row : rows)
+		{
+			String detail = (String) row[2];
+			if (detail == null || !detail.contains("|"))
+			{
+				out.add(row);
+				continue;
+			}
+			for (String label : detail.split("\\|"))
+			{
+				Object[] one = row.clone();
+				one[2] = label;
+				one[3] = ((String) row[3]).replace("%s", Character.toUpperCase(label.charAt(0)) + label.substring(1).replace('_', ' '));
+				out.add(one);
+			}
+		}
+		return out.toArray(new Object[0][]);
+	}
 
 	private static final Pattern[] COMPILED = new Pattern[LINES.length];
 

@@ -209,7 +209,7 @@ public class ActivityRecordTest
             "tick", 101, "observed_at_ms", START + 1_000, "direct", false, "value", m("item_id_before", 385, "quantity_before", 1,
             "item_id_after", -1, "quantity_after", 0, "action", "eat", "intent_tick", 100,
             "inference", "own_menu_and_slot_change_not_confirmed_effect_or_cooldown"));
-        Map<String,Object> signal = OwnSignalEvent.from(uuid, row);
+        Map<String,Object> signal = OwnEvent.from(uuid, row);
         assertNotNull(signal);
         // The shared emitter assigns event_id and the account/profile envelope, never the domain.
         signal.put("event_id", "s1"); signal.put("account_hash", "42"); signal.put("profile_type", "STANDARD");

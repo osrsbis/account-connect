@@ -109,6 +109,23 @@ final class ServerGrants
 		return verificationFramesEnabled() && staffCaptureEnabled();
 	}
 
+	/** The collection-account grants a link change, a disable or a failed snapshot upload ends. */
+	void clearCollectionGrants()
+	{
+		collectionGrantAccount = null;
+		pluginInventoryGrantToken = null;
+		clearVerificationGrant();
+	}
+
+	/** End the progress and own-gameplay grants; each epoch moves so their capture re-baselines. */
+	void clearGameplayGrants()
+	{
+		progressGrantToken = null;
+		progressGrantEpoch++;
+		gameplayGrantToken = null;
+		gameplayGrantEpoch++;
+	}
+
 	void clearVerificationGrant()
 	{
 		verificationGrantToken = null;
@@ -135,6 +152,8 @@ final class ServerGrants
 	 * Defaults OFF and can only ever be turned ON by the backend, for a token whose linked RSN is on
 	 * the allowlist. A regular player therefore never sees these overlays, and there is no local
 	 * setting that grants them. Read from the X-Store-Tools response header on every accepted upload.
+	 * Like the staff grant it counts only while the plugin talks to the official endpoint, and a link
+	 * token change clears it, so a custom API base or another link cannot turn the overlays on.
 	 */
 	volatile boolean serverStoreToolsEnabled;
 
@@ -180,7 +199,7 @@ final class ServerGrants
 	 */
 	boolean storeToolsEnabled()
 	{
-		return (serverStoreToolsEnabled || storeToolsDevOverride()) && plugin.uploadAllowed();
+		return ((serverStoreToolsEnabled && configuredForStaffApi()) || storeToolsDevOverride()) && plugin.uploadAllowed();
 	}
 
 	/**
@@ -242,30 +261,10 @@ final class ServerGrants
 	}
 
 
-	private volatile String deliveryCaptureToken;
-	private volatile String deliveryCaptureAccount;
-	private volatile boolean deliveryScreenshotsAllowed;
-	private volatile boolean deliveryClipsAllowed;
-	private volatile boolean deliveryDropProofAllowed;
-
-	/** Collection permission only: never grants staff identity, overlays, API access or quota exemptions. */
-	boolean deliveryCaptureEnabled()
-	{
-		return accountGrant(deliveryCaptureToken, deliveryCaptureAccount);
-	}
-
+	/** Trade, store and drop capture is staff-only: no collection grant opens it for an ordinary player. */
 	boolean captureEnabled()
 	{
-		return staffCaptureEnabled() || deliveryCaptureEnabled();
-	}
-
-	void clearDeliveryCaptureGrant()
-	{
-		deliveryCaptureToken = null;
-		deliveryCaptureAccount = null;
-		deliveryScreenshotsAllowed = false;
-		deliveryClipsAllowed = false;
-		deliveryDropProofAllowed = false;
+		return staffCaptureEnabled();
 	}
 
 
@@ -286,15 +285,15 @@ final class ServerGrants
 	volatile String eventQueueGrantToken;
 	volatile String eventQueueScope;
 	volatile String bankJournalGrantToken;
+	volatile String ownJournalGrantToken;
 
 	/**
-	 * Trade screenshots require an account-bound staff or delivery collection grant to
+	 * Trade screenshots require the account-bound staff grant (never a collection grant) to
 	 * this token and the logged-in account (staffCaptureEnabled), including before the first server response.
 	 */
 	boolean screenshotsEnabled()
 	{
-		return (staffCaptureEnabled() && !serverScreenshotsDisabled)
-			|| (deliveryCaptureEnabled() && deliveryScreenshotsAllowed);
+		return staffCaptureEnabled() && !serverScreenshotsDisabled;
 	}
 
 	/** osrsbestinslot.com can force store-clip capture OFF for a token via the X-Clips response header
@@ -337,8 +336,7 @@ final class ServerGrants
 	boolean dropProofEnabled()
 	{
 		return (staffCaptureEnabled() && storeToolsEnabled() && serverDropProofEnabled
-			&& (!serverClipsDisabled || dropProofDevOverride()))
-			|| (deliveryCaptureEnabled() && deliveryClipsAllowed && deliveryDropProofAllowed);
+			&& (!serverClipsDisabled || dropProofDevOverride()));
 	}
 
 	/**
@@ -362,8 +360,7 @@ final class ServerGrants
 	/** Store-clip capture requires a linked token AND no server force-disable (both read live per call). */
 	boolean storeClipsEnabled()
 	{
-		return (staffCaptureEnabled() && !serverClipsDisabled)
-			|| (deliveryCaptureEnabled() && deliveryClipsAllowed);
+		return staffCaptureEnabled() && !serverClipsDisabled;
 	}
 
 	boolean broadCaptureEnabled()
@@ -450,6 +447,9 @@ final class ServerGrants
 	void applyServerPolicy(Response response, String sentToken)
 	{
 		if (sentToken == null || !sentToken.equals(plugin.currentLinkToken())) return;
+		// A 429 or a 5xx says nothing about any grant, as staff capture already treats it: every directive stays as the
+		// last real answer set it, so a site error neither switches capture off nor makes every client re-baseline.
+		if (response.code() == 429 || response.code() >= 500) return;
 		String collectionAccount = response.header("X-Collection-Account");
 		if (collectionAccount != null) collectionAccountRequired = true;
 		if (collectionAccountRequired) collectionGrantAccount = response.isSuccessful()
@@ -462,14 +462,14 @@ final class ServerGrants
 		}
 		else { eventQueueGrantToken = null; eventQueueScope = null; }
 
-		// No existing broad/progress grant widens the capture scope. Missing/failed response revokes.
+		// No existing broad/progress grant widens the capture scope. A refusal or an answer without the header revokes.
 		String gameplayGrant = grantFor(response, "X-Own-Gameplay", sentToken);
 		if (!Objects.equals(gameplayGrant, gameplayGrantToken)) gameplayGrantEpoch++;
 		gameplayGrantToken = gameplayGrant;
 
 		// Separate batch2 disclosure gate: batch1's X-Broad-Capture does not grant these fields.
 		String progress = response.header("X-Account-Progress");
-		if (progress != null && sentToken != null && sentToken.equals(plugin.currentLinkToken()))
+		if (progress != null && sentToken.equals(plugin.currentLinkToken()))
 		{
 			String grant = "on".equalsIgnoreCase(progress.trim()) && response.isSuccessful() ? sentToken : null;
 			if (!Objects.equals(grant, progressGrantToken))
@@ -478,13 +478,7 @@ final class ServerGrants
 			}
 			progressGrantToken = grant;
 		}
-		if (response.code() == 403 && sentToken != null && sentToken.equals(progressGrantToken))
-		{
-			progressGrantToken = null;
-			progressGrantEpoch++;
-			gameplayGrantToken = null;
-			gameplayGrantEpoch++;
-		}
+		if (response.code() == 403 && sentToken.equals(progressGrantToken)) clearGameplayGrants();
 		String contextGrant = grantFor(response, "X-Kill-Context", sentToken);
 		if (!Objects.equals(contextGrant, killContextGrantToken))
 		{
@@ -515,6 +509,9 @@ final class ServerGrants
 		bankJournalGrantToken = response.isSuccessful() && sentToken.equals(plugin.bankVisit.bankEvidenceToken)
 			&& !sentToken.equals(plugin.spooler.spoolGrantToken) && "event-id-v1".equals(response.header("X-Bank-Receipt"))
 			? sentToken : null;
+		// X-Event-Receipt: own-p01-v1 journals the public P0/P1 rows; "off", a missing header or a refusal ends it.
+		ownJournalGrantToken = response.isSuccessful() && !sentToken.equals(plugin.spooler.spoolGrantToken)
+			&& PublicBankProtocol.OWN_SCOPE.equals(response.header("X-Event-Receipt")) ? sentToken : null;
 
 
 		// The server grant binds this exact account and link token to staff media/evidence.
@@ -544,19 +541,6 @@ final class ServerGrants
 		{
 			clearStaffCaptureGrant();
 		}
-		// Independent delivery capture grant; the legacy staff grant and all staff access stay unchanged.
-		String deliveryAccount = response.header("X-Delivery-Account");
-		if (response.isSuccessful() && configuredForStaffApi() && onStaffApi(response.request().url().toString())
-			&& "on".equalsIgnoreCase(response.header("X-Delivery-Capture", ""))
-			&& deliveryAccount != null && deliveryAccount.matches("-?[0-9]{1,19}"))
-		{
-			deliveryCaptureAccount = deliveryAccount;
-			deliveryCaptureToken = sentToken;
-			deliveryScreenshotsAllowed = "allow".equalsIgnoreCase(response.header("X-Delivery-Screenshots", ""));
-			deliveryClipsAllowed = "allow".equalsIgnoreCase(response.header("X-Delivery-Clips", ""));
-			deliveryDropProofAllowed = "on".equalsIgnoreCase(response.header("X-Delivery-Drop-Proof", ""));
-		}
-		else clearDeliveryCaptureGrant();
 		if (response.header("X-Screenshots") != null)
 		{
 			serverScreenshotsDisabled = offValue(response.header("X-Screenshots"));

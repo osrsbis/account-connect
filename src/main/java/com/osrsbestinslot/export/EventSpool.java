@@ -13,21 +13,25 @@
  *   shard-<16 hex>.lock      held with an exclusive FileLock while the writer lives
  *   recovery.lock            taken while a process reads or deletes shards it does not own
  *   purge-requested          {"v":1,"requested_ms":N}: the identity was purged while a shard was still live
- *   quarantine.jsonl         terminal metadata only (event_id, type, created_ms, status), never event content
- * and one non-secret pointer <plugin-data>/osrsbis/spool/active.json naming the last granted identity.
+ * The identity directories themselves are the list of identities this install has used; there is no index file.
+ * (0.7.69 and older kept one, active.json with index.lock; the sweep deletes the index and leaves the lock file.)
  *
  * RECORD KINDS (payload JSON, fixed layout written and read here only):
  *   {"v":1,"k":"ev","id":"<32 hex>","c":<created ms>,"t":"<type>","e":<wire event JSON, byte-exact>}
  *   {"v":1,"k":"ack","ids":["<32 hex>",...]}   tombstone: the ids are no longer pending (acked, dropped
  *                                                by a bound, or quarantined). Acks are tombstones in the
  *                                                same file; compaction later removes both rows.
- *   {"v":1,"k":"end","n":<count>}               last record of a compaction output; a .next without a
- *                                                matching end record is not a complete generation.
+ * 0.7.69 and older also ended a compaction output with {"v":1,"k":"end","n":<count>}; it is skipped.
  *
  * RECOVERY RULES. A torn or CRC-bad TAIL is cut off (the valid prefix is kept). A bad record that is
- * followed by ANY valid record is middle corruption: the whole file is renamed .corrupt, counted, and
- * never replayed. With both .spl and .next present the .next wins only if it is a complete, clean
- * generation; otherwise it is discarded. The two are never merged, so an acked row cannot come back.
+ * followed by ANY valid record is middle corruption: the shard is deleted, counted, and never replayed.
+ * Compaction forces the .next before it moves it over the shard and never deletes the shard first, so a
+ * .next beside its .spl is discarded: the .spl is complete. A lone .next is a 0.7.69 or older load that
+ * died between deleting the .spl and moving the .next; it becomes the .spl when it scans clean, and so does
+ * a clean .next beside a corrupt .spl (still counted; a row acked after that compaction may replay, and the
+ * server dedupes by event_id). The two
+ * are never merged, so an acked row cannot come back. 0.7.69 and older also kept quarantine.jsonl and
+ * shard-*.corrupt files that nothing reads; the sweep deletes them.
  */
 package com.osrsbestinslot.export;
 
@@ -74,7 +78,7 @@ import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.NoSuchFileException;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.function.Consumer;
+import java.nio.file.LinkOption;
 import lombok.AllArgsConstructor;
 
 final class EventSpool
@@ -88,7 +92,6 @@ final class EventSpool
 	static final long COMPACT_DEAD_BYTES = 1024L * 1024L;
 	static final long COMPACT_RETRY_MS = 60_000L;
 	static final String MARKER = "purge-requested";
-	static final String POINTER = "active.json";
 	static final String RECOVERY_LOCK = "recovery.lock";
 	static final String QUARANTINE = "quarantine.jsonl";
 	/**
@@ -104,15 +107,9 @@ final class EventSpool
 		"^\\{\"v\":1,\"k\":\"ev\",\"id\":\"([0-9a-f]{32})\",\"c\":(\\d{1,19}),\"t\":\"([a-z0-9_]{1,32})\",\"e\":");
 	private static final Pattern ACK = Pattern.compile(
 		"^\\{\"v\":1,\"k\":\"ack\",\"ids\":\\[(\"[0-9a-f]{32}\"(,\"[0-9a-f]{32}\")*)?\\]\\}$");
-	private static final Pattern END = Pattern.compile("^\\{\"v\":1,\"k\":\"end\",\"n\":(\\d{1,9})\\}$");
+	private static final Pattern END = Pattern.compile("^\\{\"v\":1,\"k\":\"end\",\"n\":\\d{1,9}\\}$");
 	private static final Pattern ID_IN = Pattern.compile("\"([0-9a-f]{32})\"");
 	private static final Pattern SHARD_NAME = Pattern.compile("^shard-([0-9a-f]{16})\\.(spl|spl\\.next|lock|corrupt)$");
-	private static final Pattern INDEX_BODY = Pattern.compile(
-		"^\\{\"v\":2,\"identities\":\\[(\\{\"identity\":\"[0-9a-f]{32}\",\"updated_ms\":\\d{1,19}\\}"
-			+ "(,\\{\"identity\":\"[0-9a-f]{32}\",\"updated_ms\":\\d{1,19}\\}){0,15})\\]\\}$");
-	private static final Pattern INDEX_ENTRY = Pattern.compile(
-		"\\{\"identity\":\"([0-9a-f]{32})\",\"updated_ms\":(\\d{1,19})\\}");
-	static final String INDEX_LOCK = "index.lock";
 
 	/** The compaction rename. Production is ATOMIC_MOVE only; there is no in-place fallback. */
 	interface Mover
@@ -202,7 +199,6 @@ final class EventSpool
 	private Locked ownLock;
 	private boolean closed;
 	private long fileBytes;
-	private long overheadBytes;
 	private long liveFrameBytes;
 	private long payloadBytes;
 	private long noCompactBeforeMs;
@@ -335,75 +331,12 @@ final class EventSpool
 		return hit.size();
 	}
 
-	/**
-	 * Terminal quarantine: keep non-sensitive metadata only, then tombstone the rows. Bounded by the
-	 * same record and byte caps as the spool, oldest lines dropped first.
-	 */
-	int quarantine(Collection<String> eventIds, int statusCode) throws IOException
+	/** Terminal rejection: tombstone the rows and count them (spool_quarantined_total). Nothing else is kept. */
+	int quarantine(Collection<String> eventIds) throws IOException
 	{
-		List<String> hit = new ArrayList<>();
-		StringBuilder lines = new StringBuilder();
-		for (String id : eventIds)
-		{
-			Record r = id == null ? null : pending.get(id);
-			if (r == null || hit.contains(id))
-			{
-				continue;
-			}
-			hit.add(id);
-			lines.append("{\"event_id\":\"").append(r.eventId).append("\",\"type\":\"").append(r.type)
-				.append("\",\"created_ms\":").append(r.createdMs).append(",\"status\":").append(statusCode).append("}\n");
-		}
-		if (hit.isEmpty())
-		{
-			return 0;
-		}
-		Path q = dir.resolve(QUARANTINE);
-		try (FileChannel qc = open(q, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND))
-		{
-			writeFully(qc, ByteBuffer.wrap(lines.toString().getBytes(StandardCharsets.UTF_8)), -1L);
-			qc.force(false);
-		}
-		boundQuarantine(q);
-		tombstone(hit);
-		counters.quarantined.addAndGet(hit.size());
-		return hit.size();
-	}
-
-	private void boundQuarantine(Path q) throws IOException
-	{
-		List<String> all = Files.readAllLines(q, StandardCharsets.UTF_8);
-		long bytes = Files.size(q);
-		if (all.size() <= limits.maxRecords && bytes <= limits.maxBytes)
-		{
-			return;
-		}
-		int from = Math.max(0, all.size() - limits.maxRecords);
-		long kept = 0;
-		for (int i = all.size() - 1; i >= from; i--)
-		{
-			kept += all.get(i).getBytes(StandardCharsets.UTF_8).length + 1;
-			if (kept > limits.maxBytes)
-			{
-				from = i + 1;
-				break;
-			}
-		}
-		StringBuilder sb = new StringBuilder();
-		for (String l : all.subList(from, all.size()))
-		{
-			sb.append(l).append('\n');
-		}
-		Path tmp = dir.resolve(QUARANTINE + ".next");
-		writeForced(tmp, sb.toString());
-		try
-		{
-			mover.move(tmp, q);
-		}
-		catch (IOException e)
-		{
-			Files.deleteIfExists(tmp);	// fail closed: the old, longer file stays
-		}
+		int n = ack(eventIds);
+		counters.quarantined.addAndGet(n);
+		return n;
 	}
 
 	/** Compact when acked bytes exceed a quarter of the file or 1 MiB. Called by the owner's tick. */
@@ -413,7 +346,7 @@ final class EventSpool
 		{
 			return;
 		}
-		long dead = fileBytes - overheadBytes - liveFrameBytes;
+		long dead = fileBytes - HEADER - liveFrameBytes;
 		if (dead <= 0 || clock.getAsLong() < noCompactBeforeMs)
 		{
 			return;
@@ -443,7 +376,6 @@ final class EventSpool
 		{
 			payloads.add(evPayload(r));
 		}
-		String end = "{\"v\":1,\"k\":\"end\",\"n\":" + payloads.size() + "}";
 		try (FileChannel n = open(next, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE))
 		{
 			long pos = 0;
@@ -452,7 +384,6 @@ final class EventSpool
 			{
 				pos += writeFully(n, ByteBuffer.wrap(frame(p)), pos);
 			}
-			writeFully(n, ByteBuffer.wrap(frame(end)), pos);
 			n.force(true);
 		}
 		catch (IOException e)
@@ -499,8 +430,7 @@ final class EventSpool
 			return false;
 		}
 		fileBytes = ch.size();
-		overheadBytes = HEADER + frame(end).length;
-		liveFrameBytes = fileBytes - overheadBytes;
+		liveFrameBytes = fileBytes - HEADER;
 		return true;
 	}
 
@@ -555,10 +485,10 @@ final class EventSpool
 				}
 				try
 				{
-					Gen g = load(dir, sid);
+					Gen g = load(dir, sid, counters);
 					if (g.corrupt)
 					{
-						quarantineCorrupt(dir, sid, counters);
+						dropCorrupt(dir, sid, counters);
 						continue;
 					}
 					List<Record> add = new ArrayList<>();
@@ -853,8 +783,8 @@ final class EventSpool
 	/**
 	 * Age out abandoned shards in every identity directory under the spool root. Age is the created
 	 * time of the newest valid durable record, never the file time. A shard whose lock is held is
-	 * skipped; middle corruption is quarantined exactly as recovery does; a torn shard is aged by its
-	 * valid prefix. A directory left with no shard is removed.
+	 * skipped; middle corruption is dropped and counted exactly as recovery does; a torn shard is aged by
+	 * its valid prefix. A directory left with no shard is removed.
 	 */
 	static void sweepAged(Path root, LongSupplier clock, long maxAgeMs, Counters counters) throws IOException
 	{
@@ -862,20 +792,11 @@ final class EventSpool
 		{
 			return;
 		}
+		retireLegacyIndex(root);
 		long cutoff = clock.getAsLong() - maxAgeMs;
-		List<Path> dirs = new ArrayList<>();
-		try (DirectoryStream<Path> ds = Files.newDirectoryStream(root))
+		for (String name : identities(root))
 		{
-			for (Path d : ds)
-			{
-				if (Files.isDirectory(d) && HEX32.matcher(d.getFileName().toString()).matches())
-				{
-					dirs.add(d);
-				}
-			}
-		}
-		for (Path d : dirs)
-		{
+			Path d = root.resolve(name);
 			// A marked directory is a purge someone could not finish because a shard was live. Finish it
 			// now if every shard is free; if one is still live, leave it to its writer.
 			if (Files.exists(d.resolve(MARKER)))
@@ -904,10 +825,10 @@ final class EventSpool
 						Path next = d.resolve("shard-" + sid + ".spl.next");
 						if (Files.exists(spl) || Files.exists(next))
 						{
-							Gen g = load(d, sid);
+							Gen g = load(d, sid, counters);
 							if (g.corrupt)
 							{
-								quarantineCorrupt(d, sid, counters);
+								dropCorrupt(d, sid, counters);
 							}
 							else if (g.live.isEmpty() || g.newestCreated < cutoff)
 							{
@@ -915,11 +836,7 @@ final class EventSpool
 								Files.deleteIfExists(next);
 							}
 						}
-						Path corrupt = d.resolve("shard-" + sid + ".corrupt");
-						if (Files.exists(corrupt) && newestCreatedAnyValid(Files.readAllBytes(corrupt)) < cutoff)
-						{
-							Files.deleteIfExists(corrupt);
-						}
+						Files.deleteIfExists(d.resolve("shard-" + sid + ".corrupt"));
 					}
 					finally
 					{
@@ -933,6 +850,8 @@ final class EventSpool
 						}
 					}
 				}
+				Files.deleteIfExists(d.resolve(QUARANTINE));	// written by 0.7.69 and older, read by nothing
+				Files.deleteIfExists(d.resolve(QUARANTINE + ".next"));
 				empty = shardIds(d).isEmpty();
 				if (empty)
 				{
@@ -950,127 +869,59 @@ final class EventSpool
 		}
 	}
 
-	// ------------------------------------------------------------------ pointer
+	// ------------------------------------------------------------------ identities
 
 	/**
-	 * THE INDEX (active.json, format v2): {"v":2,"identities":[{"identity":"<key>","updated_ms":N},...]}, the
-	 * identity keys this install has used, newest last, at most MAX_INDEX entries (oldest dropped). Only keys
-	 * and times: never a token, never an account hash in clear. Staff only: it is written only while a spool
-	 * grant is active. It lets a grant for one identity purge OTHER identities whose token is no longer known,
-	 * without ever forgetting an older one because a newer one was recorded (two live clients may each hold a
-	 * different identity). Read-modify-write happens under index.lock, because two processes may both write it.
+	 * Every identity directory under a root, by name (32 hex, never a token). The directories are the list: a
+	 * grant for one identity purges the OTHER idle ones, and a cold withdrawal finds them all, with no index
+	 * file to keep in step. Empty when the root is absent or unreadable. A symbolic link is never followed.
 	 */
-	static final int MAX_INDEX = 16;
-
-	/** Record identity as the newest entry of the index; written + forced (file and directory). */
-	static void writePointer(Path pluginData, Path root, String identity, long nowMs) throws IOException
+	static List<String> identities(Path root)
 	{
-		if (identity == null || !HEX32.matcher(identity).matches())
+		List<String> out = new ArrayList<>();
+		if (Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS))
 		{
-			return;
-		}
-		createOwnerOnlyDirs(pluginData, root);
-		updateIndex(root, idx ->
-		{
-			idx.remove(identity);
-			idx.put(identity, nowMs);
-			while (idx.size() > MAX_INDEX)
+			try (DirectoryStream<Path> ds = Files.newDirectoryStream(root))
 			{
-				idx.remove(idx.keySet().iterator().next());
+				for (Path d : ds)
+				{
+					if (HEX32.matcher(d.getFileName().toString()).matches() && Files.isDirectory(d, LinkOption.NOFOLLOW_LINKS))
+					{
+						out.add(d.getFileName().toString());
+					}
+				}
 			}
-		});
-	}
-
-	/** The most recently recorded identity, or null. */
-	static String readPointer(Path root)
-	{
-		List<String> idx = readIndex(root);
-		return idx.isEmpty() ? null : idx.get(idx.size() - 1);
-	}
-
-	/** Every indexed identity, oldest first. Empty when absent or unreadable. */
-	static List<String> readIndex(Path root)
-	{
-		return new ArrayList<>(parseIndex(root).keySet());
-	}
-
-	/** Drop identity from the index; an index left empty is deleted. */
-	static void deletePointerIf(Path root, String identity) throws IOException
-	{
-		if (identity == null || !Files.isRegularFile(root.resolve(POINTER)) || !readIndex(root).contains(identity))
-		{
-			return;
-		}
-		updateIndex(root, idx -> idx.remove(identity));
-	}
-
-	private static LinkedHashMap<String, Long> parseIndex(Path root)
-	{
-		LinkedHashMap<String, Long> out = new LinkedHashMap<>();
-		Path p = root.resolve(POINTER);
-		if (!Files.isRegularFile(p))
-		{
-			return out;
-		}
-		try
-		{
-			String s = new String(Files.readAllBytes(p), StandardCharsets.UTF_8).trim();
-			if (!INDEX_BODY.matcher(s).matches())
+			catch (IOException e)
 			{
-				return out;
+				out.clear();
 			}
-			Matcher m = INDEX_ENTRY.matcher(s);
-			while (m.find())
-			{
-				out.put(m.group(1), Long.parseLong(m.group(2)));
-			}
-		}
-		catch (IOException | RuntimeException e)
-		{
-			out.clear();
 		}
 		return out;
 	}
 
-	private static void updateIndex(Path root, Consumer<LinkedHashMap<String, Long>> change) throws IOException
+	/**
+	 * Delete the identity index a 0.7.69 or older client kept (active.json and its .next). Only under that client's
+	 * own index.lock, so an older client still running on this OS user is never cut off mid-write. The lock file
+	 * itself stays: those clients rely on it keeping one inode.
+	 */
+	private static void retireLegacyIndex(Path root) throws IOException
 	{
-		// Never sleep or interrupt a RuneLite/plugin thread while waiting for another process. The
-		// spool is best-effort and the memory delivery path remains authoritative, so transient
-		// cross-process contention simply fails this spool operation and a later operation retries.
-		Locked il = lock(root.resolve(INDEX_LOCK));
+		if (!Files.exists(root.resolve("active.json")) && !Files.exists(root.resolve("active.json.next")))
+		{
+			return;
+		}
+		Locked il = lock(root.resolve("index.lock"));
 		if (il == null)
 		{
-			throw new IOException("index lock unavailable");
+			return;	// an older client holds it; a later sweep retries
 		}
 		try
 		{
-			LinkedHashMap<String, Long> idx = parseIndex(root);
-			change.accept(idx);
-			if (idx.isEmpty())
-			{
-				Files.deleteIfExists(root.resolve(POINTER));
-				forceDir(root);
-				return;
-			}
-			List<String> rows = new ArrayList<>();
-			idx.forEach((k, v) -> rows.add("{\"identity\":\"" + k + "\",\"updated_ms\":" + v + "}"));
-			Path tmp = root.resolve(POINTER + ".next");
-			writeForced(tmp, "{\"v\":2,\"identities\":[" + String.join(",", rows) + "]}");
-			try
-			{
-				Files.move(tmp, root.resolve(POINTER), StandardCopyOption.ATOMIC_MOVE);
-			}
-			catch (IOException e)
-			{
-				Files.deleteIfExists(tmp);
-				throw e;
-			}
-			forceDir(root);	// the rename itself is durable before any row it covers is written
+			Files.deleteIfExists(root.resolve("active.json"));
+			Files.deleteIfExists(root.resolve("active.json.next"));
 		}
 		finally
 		{
-			// Keep a stable inode: unlinking after unlock lets a concurrent waiter acquire
-			// the old file while a third process locks a newly created replacement.
 			il.close();
 		}
 	}
@@ -1184,22 +1035,28 @@ final class EventSpool
 		return false;
 	}
 
-	/** Load one shard id: the newest COMPLETE generation, tombstones applied. Never merges two files. */
-	static Gen load(Path dir, String sid) throws IOException
+	/** Load one shard id, tombstones applied. Never merges two files. */
+	static Gen load(Path dir, String sid, Counters counters) throws IOException
 	{
 		Path spl = dir.resolve("shard-" + sid + ".spl");
 		Path next = dir.resolve("shard-" + sid + ".spl.next");
 		if (Files.exists(next))
 		{
-			Scan sn = scan(next);
-			Gen gn = sn.status == ScanStatus.CLEAN ? apply(sn.payloads, true) : null;
-			if (gn != null)
+			boolean splCorrupt = Files.exists(spl) && scan(spl).status == ScanStatus.CORRUPT;
+			if (Files.exists(spl) && !splCorrupt)
 			{
-				Files.deleteIfExists(spl);
-				Files.move(next, spl, StandardCopyOption.ATOMIC_MOVE);
-				return gn;
+				Files.deleteIfExists(next);	// an unfinished compaction: the shard it was built from is complete
 			}
-			Files.deleteIfExists(next);	// incomplete compaction output: the older generation stands
+			else if (scan(next).status == ScanStatus.CLEAN)
+			{
+				// A lone .next (0.7.69 and older died between delete and move), or a clean compaction output
+				// beside a corrupt shard, which would replay nothing. The corrupt shard is still counted.
+				Files.move(next, spl, StandardCopyOption.ATOMIC_MOVE);
+				if (splCorrupt)
+				{
+					counters.corrupt.incrementAndGet();
+				}
+			}
 		}
 		Gen g = new Gen();
 		if (!Files.exists(spl))
@@ -1212,7 +1069,7 @@ final class EventSpool
 			g.corrupt = true;
 			return g;
 		}
-		Gen applied = apply(s.payloads, false);
+		Gen applied = apply(s.payloads);
 		return applied == null ? corruptGen() : applied;
 	}
 
@@ -1223,22 +1080,12 @@ final class EventSpool
 		return g;
 	}
 
-	/**
-	 * Apply records in order. requireEnd: a compaction output is complete only when its last record is
-	 * an end record counting exactly its rows, and it holds no tombstone. Returns null when a record
-	 * that passed the CRC is still not one of ours, or when a required end record is missing.
-	 */
-	private static Gen apply(List<String> payloads, boolean requireEnd)
+	/** Apply records in order. Returns null when a record that passed the CRC is still not one of ours. */
+	private static Gen apply(List<String> payloads)
 	{
 		Gen g = new Gen();
-		int evs = 0;
-		boolean ended = false;
 		for (String p : payloads)
 		{
-			if (ended)
-			{
-				return requireEnd ? null : g;
-			}
 			Matcher m = EV_HEAD.matcher(p);
 			if (m.find())
 			{
@@ -1250,15 +1097,10 @@ final class EventSpool
 				Record r = new Record(m.group(1), m.group(3), json, Long.parseLong(m.group(2)), false);
 				g.live.put(r.eventId, r);
 				g.newestCreated = Math.max(g.newestCreated, r.createdMs);
-				evs++;
 				continue;
 			}
 			if (ACK.matcher(p).matches())
 			{
-				if (requireEnd)
-				{
-					return null;
-				}
 				Matcher ids = ID_IN.matcher(p);
 				while (ids.find())
 				{
@@ -1266,65 +1108,18 @@ final class EventSpool
 				}
 				continue;
 			}
-			Matcher e = END.matcher(p);
-			if (e.matches())
+			if (!END.matcher(p).matches())
 			{
-				if (requireEnd)
-				{
-					if (Integer.parseInt(e.group(1)) != evs)
-					{
-						return null;
-					}
-					ended = true;
-				}
-				continue;
+				return null;
 			}
-			return null;
 		}
-		return requireEnd && !ended ? null : g;
+		return g;
 	}
 
-	/** Newest created_ms among frames that pass their own CRC, walking past bad ones where possible. */
-	private static long newestCreatedAnyValid(byte[] b)
+	/** Middle corruption: the shard is never replayed. Delete it and count it (spool_corrupt_total). */
+	private static void dropCorrupt(Path dir, String sid, Counters counters) throws IOException
 	{
-		long newest = -1L;
-		int pos = HEADER;
-		while (pos <= b.length - 8)
-		{
-			String p = frameAt(b, pos);
-			if (p != null)
-			{
-				Matcher m = EV_HEAD.matcher(p);
-				if (m.find())
-				{
-					newest = Math.max(newest, Long.parseLong(m.group(2)));
-				}
-				pos += 8 + p.getBytes(StandardCharsets.UTF_8).length;
-				continue;
-			}
-			long len = ByteBuffer.wrap(b, pos, 4).getInt() & 0xffffffffL;
-			if (len < 2 || len > b.length - pos - 8L)
-			{
-				break;
-			}
-			pos += 8 + (int) len;
-		}
-		return newest;
-	}
-
-	private static void quarantineCorrupt(Path dir, String sid, Counters counters) throws IOException
-	{
-		Path spl = dir.resolve("shard-" + sid + ".spl");
-		Path to = dir.resolve("shard-" + sid + ".corrupt");
-		try
-		{
-			Files.move(spl, to, StandardCopyOption.ATOMIC_MOVE);
-		}
-		catch (IOException e)
-		{
-			Files.move(spl, to, StandardCopyOption.REPLACE_EXISTING);
-		}
-		Files.deleteIfExists(dir.resolve("shard-" + sid + ".spl.next"));
+		deleteShardFiles(dir, sid);
 		counters.corrupt.incrementAndGet();
 	}
 
@@ -1360,8 +1155,10 @@ final class EventSpool
 		writeFully(ch, ByteBuffer.wrap(header()), 0L);
 		ch.force(true);
 		forceDir(dir);
+		// The identity directory is durable in its root before the first row: after a crash the next process
+		// still finds it, and can purge it without the token.
+		forceDir(dir.getParent());
 		fileBytes = HEADER;
-		overheadBytes = HEADER;
 		liveFrameBytes = 0;
 	}
 

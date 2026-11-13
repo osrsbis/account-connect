@@ -23,7 +23,7 @@ public class OwnClueEventTest {
   Object value=kind.equals("clues.destination")?largestInventory():kind.equals("clues.owned_ground")?ground():Map.of("gap",kind.equals("clues.ground_gap")?"observation_capacity":"object_capacity");
   String source=kind.equals("clues.destination")?"own_inventory+RuneLite1.13.1_map_coordinate_tables":kind.equals("clues.owned_ground")?"RuneLite1.13.1:TileItem_ownership_and_server_ticks":kind.equals("clues.ground_gap")?"bounded_self_ground_clue_capacity":"bounded object observation capacity";
   Map<String,Object> row=Map.of("kind",kind,"source",source,"sequence",1,"tick",42,"observed_at_ms",AT,"direct",true,"value",value);
-  return kind.equals("clues.destination")?OwnStateEvent.from("12345678-1234-1234-1234-123456789abc",row):OwnSignalEvent.from("12345678-1234-1234-1234-123456789abc",row);
+  return OwnEvent.from("12345678-1234-1234-1234-123456789abc",row);
  }
  @Test public void fixedClueProjectionsPreserveUnknownsAndRejectPrivateOrInventedMeaning() {
   com.google.gson.Gson gson=new com.google.gson.Gson();
@@ -34,18 +34,18 @@ public class OwnClueEventTest {
    assertNotNull(PublicTransport.event(gson.fromJson(gson.toJson(wire),Map.class)));assertFalse(EventQueueProtocol.allows("ge-v1",wire));assertFalse(EventQueueProtocol.allows("own-history-v1",wire));
   }
   Map<String,Object> unknown=new HashMap<>();unknown.put("inventory_map_coordinate_clues",null);
-  assertNull(OwnStateEvent.projectValue("clue_inventory",unknown).get("inventory_map_coordinate_clues"));
-  assertEquals(Map.of(),OwnStateEvent.projectValue("clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of())).get("inventory_map_coordinate_clues"));
+  assertNull(OwnEvent.value("own_state","clue_inventory",unknown).get("inventory_map_coordinate_clues"));
+  assertEquals(Map.of(),OwnEvent.value("own_state","clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of())).get("inventory_map_coordinate_clues"));
   Map<String,Object> bad=new HashMap<>((Map<String,Object>)((Map<?,?>)inventory().get("inventory_map_coordinate_clues")).get("12179"));bad.put("x",999);
-  assertNull(OwnStateEvent.projectValue("clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of("12179",bad))));
-  Map<String,Object> v=ground();v.put("ownership","other");assertNull(OwnSignalEvent.value("clues.owned_ground",v));
-  v=ground();v.put("observation","left_scene");v.put("outcome","picked_up");assertNull(OwnSignalEvent.value("clues.owned_ground",v));
-  v=ground();v.put("item_id",2);assertNull(OwnSignalEvent.value("clues.owned_ground",v));
-  v=ground();v.put("observation","left_scene");v.put("outcome","taken_expired_or_scene_change_unknown");assertNotNull(OwnSignalEvent.value("clues.owned_ground",v));
-  assertNull(OwnSignalEvent.value("clues.ground_gap",Map.of("gap","PRIVATE")));
+  assertNull(OwnEvent.value("own_state","clue_inventory",Map.of("inventory_map_coordinate_clues",Map.of("12179",bad))));
+  Map<String,Object> v=ground();v.put("ownership","other");assertNull(OwnEvent.value("own_signal","clues.owned_ground",v));
+  v=ground();v.put("observation","left_scene");v.put("outcome","picked_up");assertNull(OwnEvent.value("own_signal","clues.owned_ground",v));
+  v=ground();v.put("item_id",2);assertNull(OwnEvent.value("own_signal","clues.owned_ground",v));
+  v=ground();v.put("observation","left_scene");v.put("outcome","taken_expired_or_scene_change_unknown");assertNotNull(OwnEvent.value("own_signal","clues.owned_ground",v));
+  assertNull(OwnEvent.value("own_signal","clues.ground_gap",Map.of("gap","PRIVATE")));
  }
  @Test public void actualOwnInventoryAndGroundCallbacksKeepOwnershipGapsAndRemovalCauseVisible() {
-  List<Map<String,Object>> sent=new ArrayList<>();OwnGameplayCapture capture=new OwnGameplayCapture(e->{if("clue_inventory".equals(e.get("state_kind"))||OwnClueProjection.supports(e.get("signal_kind")))sent.add(e);return true;});
+  List<Map<String,Object>> sent=new ArrayList<>();OwnGameplayCapture capture=new OwnGameplayCapture(e->{if("clue_inventory".equals(e.get("state_kind"))||FAMILIES.contains(e.get("signal_kind")))sent.add(e);return true;});
   Client c=mock(Client.class);Player self=mock(Player.class);int[] tick={100};
   when(c.getGameState()).thenReturn(GameState.LOGGED_IN);when(c.getLocalPlayer()).thenReturn(self);when(c.getAccountHash()).thenReturn(123L);
   when(c.getRealSkillLevel(Skill.HITPOINTS)).thenReturn(10);when(c.getWorldType()).thenReturn(EnumSet.noneOf(WorldType.class));when(c.getWorld()).thenReturn(301);when(c.getTickCount()).thenAnswer(i->tick[0]);
@@ -61,7 +61,7 @@ public class OwnClueEventTest {
   assertEquals(1,sent.stream().filter(e->"clues.ground_gap".equals(e.get("signal_kind"))).count());
   for(int i=0;i<257;i++){GameObject object=mock(GameObject.class);when(object.getId()).thenReturn(45570);when(object.getWorldLocation()).thenReturn(new WorldPoint(100,100,0));capture.scene.spawned(c,object,AT+i);}
   assertEquals(1,sent.stream().filter(e->"world.scene_gap".equals(e.get("signal_kind"))).count());
-  for(Map<String,Object> e:sent)assertNotNull("own_state".equals(e.get("type"))?OwnStateEvent.wire(e):OwnSignalEvent.wire(e));
+  for(Map<String,Object> e:sent)assertNotNull(OwnEvent.wire(e));
   verify(c,never()).getPlayers();verify(self,never()).getName();
  }
 }

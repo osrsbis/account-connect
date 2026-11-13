@@ -10,7 +10,7 @@ import java.util.*;
  * Offline QA replay, test classpath only. Reads captured events (one JSON object per line) and a saved
  * Wiki /latest response, then prints one derived activity record. A line may be a wire event, or an
  * own_gameplay snapshot observation row with "collector_session" added; rows go through the real
- * OwnSignalEvent projection, so an invalid row is skipped exactly as the emitter would skip it.
+ * OwnEvent projection, so an invalid row is skipped exactly as the emitter would skip it.
  * Snapshot rows carry no account or profile. They count only when the operator states that the whole
  * capture came from the scope's account and profile (scope.bind_snapshot_rows_to_scope = true); the record
  * then shows adapter_bound_events and low confidence. Wire lines can never bind themselves.
@@ -32,7 +32,7 @@ public final class ActivityReplay
             {
                 Map<String,Object> row = new LinkedHashMap<>(e);
                 // Gson reads numbers as doubles; the projection requires whole numbers, which survive.
-                Map<String,Object> signal = OwnSignalEvent.from((String)row.remove("collector_session"), row);
+                Map<String,Object> signal = OwnEvent.from((String)row.remove("collector_session"), row);
                 if (signal == null) continue;
                 signal.put("event_id", String.valueOf(row.get("event_id")));
                 if (bindSnapshotRows) signal.put("identity_binding", "adapter");

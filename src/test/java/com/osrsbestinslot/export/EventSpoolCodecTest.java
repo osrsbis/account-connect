@@ -185,8 +185,7 @@ public class EventSpoolCodecTest
 		assertTrue(c.pending().isEmpty());
 		assertEquals(1L, c.counters.corrupt.get());
 		assertFalse(Files.exists(a.shardFile()));
-		Path corrupt = dir.resolve("shard-" + a.shardId + ".corrupt");
-		assertTrue("renamed aside, not deleted silently", Files.exists(corrupt));
+		assertFalse("deleted and counted, not set aside", Files.exists(dir.resolve("shard-" + a.shardId + ".corrupt")));
 
 		append(c, 9);
 		assertNotEquals(a.shardFile(), c.shardFile());
@@ -391,7 +390,7 @@ public class EventSpoolCodecTest
 		EventSpool.Counters c = new EventSpool.Counters();
 		EventSpool.sweepAged(spoolRoot(), clock::get, EventSpool.MAX_AGE_MS, c);
 		assertFalse(Files.exists(a.shardFile()));
-		assertTrue(Files.exists(dir.resolve("shard-" + a.shardId + ".corrupt")));
+		assertFalse(Files.exists(dir.resolve("shard-" + a.shardId + ".corrupt")));
 		assertEquals(1L, c.corrupt.get());
 	}
 
@@ -457,43 +456,57 @@ public class EventSpoolCodecTest
 	}
 
 	/**
-	 * Round 3 (F1) replaced the single v1 pointer with a bounded v2 INDEX of identity keys this install has
-	 * used, so a grant for one identity can still purge an older offline one. It holds only keys and times.
+	 * 0.7.70 (DEL-5): the identity directories are the list of identities this install has used, so a grant for
+	 * one identity can still purge an older offline one. Only hashed names; nothing else counts as an identity.
 	 */
 	@Test
-	public void indexHoldsOnlyVersionIdentitiesAndTimesBoundedTo16() throws Exception
+	public void identitiesAreTheHashedDirectoriesAndNothingElse() throws Exception
 	{
 		Path root = spoolRoot();
-		String k = EventSpool.identityKey(TOKEN, "12345");
-		EventSpool.writePointer(pluginData, root, k, T0);
-		assertEquals(k, EventSpool.readPointer(root));
-		assertEquals(Collections.singletonList(k), EventSpool.readIndex(root));
-		String text = new String(Files.readAllBytes(root.resolve(EventSpool.POINTER)), StandardCharsets.UTF_8);
-		assertEquals("{\"v\":2,\"identities\":[{\"identity\":\"" + k + "\",\"updated_ms\":" + T0 + "}]}", text);
-		EventSpool.writePointer(pluginData, root, k, T0 + 5);
-		assertEquals("an identity already indexed is not added twice", 1, EventSpool.readIndex(root).size());
-
+		assertEquals("no root, no identities", Collections.emptyList(), EventSpool.identities(root));
 		List<String> added = new ArrayList<>();
 		for (int i = 0; i < 20; i++)
 		{
 			String other = EventSpool.identityKey(TOKEN, "acct" + i);
 			added.add(other);
-			EventSpool.writePointer(pluginData, root, other, T0 + i);
+			EventSpool.createOwnerOnlyDirs(pluginData, root.resolve(other));
 		}
-		List<String> index = EventSpool.readIndex(root);
-		assertEquals("bounded", EventSpool.MAX_INDEX, index.size());
-		assertEquals(16, EventSpool.MAX_INDEX);
-		assertEquals("the oldest entries are dropped", added.subList(4, 20), index);
-		assertEquals("the latest identity", added.get(19), EventSpool.readPointer(root));
+		Files.write(root.resolve("ffffffffffffffffffffffffffffffff"), new byte[0]);	// a file, not a directory
+		Files.createDirectories(root.resolve("not-an-identity"));
+		Files.createDirectories(root.resolve("ABCDEF0123456789ABCDEF0123456789"));
+		Files.createSymbolicLink(root.resolve("0123456789abcdef0123456789abcdef"), root.resolve(added.get(0)));
+		assertEquals("every identity directory, with no bound on their number", new java.util.TreeSet<>(added),
+			new java.util.TreeSet<>(EventSpool.identities(root)));
+	}
 
-		EventSpool.deletePointerIf(root, "ffffffffffffffffffffffffffffffff");
-		assertEquals(16, EventSpool.readIndex(root).size());
-		for (String a : added)
+	/** A 0.7.69 index is deleted by the sweep, but never while that older client holds its index lock. */
+	@Test
+	public void theSweepRetiresALegacyIndexOnlyUnderItsOwnLock() throws Exception
+	{
+		Path root = spoolRoot();
+		Files.createDirectories(root);
+		String legacy = "{\"v\":2,\"identities\":[{\"identity\":\"" + EventSpool.identityKey(TOKEN, "12345") + "\",\"updated_ms\":" + T0 + "}]}";
+		Files.write(root.resolve("active.json"), legacy.getBytes(StandardCharsets.UTF_8));
+		Files.write(root.resolve("active.json.next"), legacy.getBytes(StandardCharsets.UTF_8));
+		EventSpool.Locked held = EventSpool.lock(root.resolve("index.lock"));
+		assertNotNull(held);
+		try
 		{
-			EventSpool.deletePointerIf(root, a);
+			EventSpool.sweepAged(root, clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
+			assertTrue("an older client mid-write keeps its index", Files.exists(root.resolve("active.json")));
 		}
-		assertNull(EventSpool.readPointer(root));
-		assertFalse("an empty index is deleted", Files.exists(root.resolve(EventSpool.POINTER)));
+		finally
+		{
+			held.close();
+		}
+		EventSpool.sweepAged(root, clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
+		assertFalse(Files.exists(root.resolve("active.json")));
+		assertFalse(Files.exists(root.resolve("active.json.next")));
+		assertTrue("the lock file keeps its inode for older clients", Files.exists(root.resolve("index.lock")));
+		Path fresh = Files.createTempDirectory("spool-root").resolve("osrsbis").resolve("spool");
+		Files.createDirectories(fresh);
+		EventSpool.sweepAged(fresh, clock::get, EventSpool.MAX_AGE_MS, new EventSpool.Counters());
+		assertFalse("a sweep with nothing to retire creates no lock file", Files.exists(fresh.resolve("index.lock")));
 	}
 
 	// ------------------------------------------------------------------ round 3

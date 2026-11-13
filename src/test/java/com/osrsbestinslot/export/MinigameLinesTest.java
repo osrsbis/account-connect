@@ -41,6 +41,37 @@ public class MinigameLinesTest
 		assertEquals("start", p("The mine is currently dormant, and will awaken within the next 30 seconds.").get("result"));
 	}
 
+	/** The templated TzHaar and Sepulchre rows expand to the rows written out before 0.7.72, at the same indices. */
+	@Test
+	public void templatedRowsExpandToTheWrittenOutRows()
+	{
+		String num = MinigameLines.NUM;
+		Object[][] written = {
+			{"tzhaar_ket_rak", "complete", "first", "^Your completion count for TzHaar-Ket-Rak's First Challenge is: " + num + "\\.$", 0, 1},
+			{"tzhaar_ket_rak", "complete", "second", "^Your completion count for TzHaar-Ket-Rak's Second Challenge is: " + num + "\\.$", 0, 1},
+			{"tzhaar_ket_rak", "complete", "third", "^Your completion count for TzHaar-Ket-Rak's Third Challenge is: " + num + "\\.$", 0, 1},
+			{"tzhaar_ket_rak", "complete", "fourth", "^Your completion count for TzHaar-Ket-Rak's Fourth Challenge is: " + num + "\\.$", 0, 1},
+			{"tzhaar_ket_rak", "complete", "fifth", "^Your completion count for TzHaar-Ket-Rak's Fifth Challenge is: " + num + "\\.$", 0, 1},
+			{"tzhaar_ket_rak", "complete", "sixth", "^Your completion count for TzHaar-Ket-Rak's Sixth Challenge is: " + num + "\\.$", 0, 1},
+		};
+		Object[][] floors = new Object[5][];
+		for (int f = 1; f <= 5; f++)
+		{
+			floors[f - 1] = new Object[]{"hallowed_sepulchre", "complete", "floor_" + f,
+				"^You have completed Floor " + f + " of the Hallowed Sepulchre! Total completions: " + num + "\\.$", 0, 1};
+		}
+		assertEquals(29, MinigameLines.LINES.length);
+		for (int i = 0; i < 6; i++) org.junit.Assert.assertArrayEquals(written[i], MinigameLines.LINES[i]);
+		for (int i = 0; i < 5; i++) org.junit.Assert.assertArrayEquals(floors[i], MinigameLines.LINES[10 + i]);
+		assertEquals("pvp_arena", MinigameLines.LINES[6][0]);
+		assertEquals("grand_coffin", MinigameLines.LINES[15][2]);
+		for (Object[] row : MinigameLines.LINES)
+		{
+			assertTrue("expanded: " + row[2], row[2] == null || ((String) row[2]).matches("[a-z0-9_]+"));
+			assertTrue("expanded: " + row[3], !((String) row[3]).contains("%s"));
+		}
+	}
+
 	@Test
 	public void dialogueAndMessageBoxesParse()
 	{

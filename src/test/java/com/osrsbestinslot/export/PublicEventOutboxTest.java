@@ -79,54 +79,49 @@ public class PublicEventOutboxTest
         restored=box.pending(other,"ge-v1",100);assertEquals(1,restored.size());assertEquals(B,restored.get(0).get("event_id"));
         assertEquals(0,box.counters.purged.get());
     }
-    @Test public void retainedIdentityBoundEvictsOnlyOldestIdleAndCountsTheGap() throws Exception
+    @Test public void manyIdleIdentitiesAreAllRetainedUntilAgeOrWithdrawal() throws Exception
     {
         List<PublicEventOutbox.Context> owners=new ArrayList<>();
-        for(int i=0;i<=EventSpool.MAX_INDEX;i++)
+        for(int i=0;i<=16;i++)
         {
             PublicEventOutbox.Context c=new PublicEventOutbox.Context(TOKEN,"123","STANDARD","bounded-"+i);owners.add(c);
             assertTrue(box.append(c,"ge-v1",event(A)));box.close();
         }
-        assertEquals(1,box.counters.purged.get());
-        assertTrue(box.pending(owners.get(0),"ge-v1",100).isEmpty()); // a read probe evicts no further owner
-        for(int i=1;i<owners.size();i++)assertEquals(1,box.pending(owners.get(i),"ge-v1",100).size());
-        assertEquals(1,box.counters.purged.get());
+        assertEquals("no identity count bound retires anything",0,box.counters.purged.get());
+        for(PublicEventOutbox.Context c:owners)assertEquals(1,box.pending(c,"ge-v1",100).size());
+        assertEquals(0,box.counters.purged.get());
         box.purge();
         for(PublicEventOutbox.Context c:owners)assertTrue(box.pending(c,"ge-v1",100).isEmpty());
     }
-    @Test public void incompleteIndexDoesNotTurnAnAppendIntoBulkRetirement() throws Exception
+    @Test public void aLeftoverLegacyIndexNeverTurnsAnAppendIntoRetirementAndIsDeleted() throws Exception
     {
         assertTrue(box.append(owner, "ge-v1", event(A)));
         box.close();
         Path root = dir.resolve("osrsbis/public-events-v1");
-        Files.write(root.resolve(EventSpool.POINTER), "broken index".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Files.write(root.resolve("active.json"), "broken index".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         PublicEventOutbox.Context other = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-b");
         assertTrue(box.append(other, "ge-v1", event(B)));
-        assertEquals(1, EventSpool.readIndex(root).size());
+        assertFalse("the sweep deleted the leftover index", Files.exists(root.resolve("active.json")));
+        assertEquals(2, EventSpool.identities(root).size());
         assertEquals(1, box.pending(owner, "ge-v1", 100).size());
         assertEquals(0, box.counters.purged.get());
-        box.purge(); // explicit withdrawal still finds the unindexed directory
+        box.purge(); // explicit withdrawal finds every directory
         assertTrue(box.pending(other, "ge-v1", 100).isEmpty());
     }
-    @Test public void indexLockStaysOnTheSameInodeAcrossUpdatesAndRefusesConcurrentWriters() throws Exception
+    @Test public void anOlderClientHoldingItsIndexLockNeitherBlocksAppendsNorLosesItsIndex() throws Exception
     {
         assertTrue(box.append(owner, "ge-v1", event(A)));
         Path root = dir.resolve("osrsbis/public-events-v1");
+        Files.write(root.resolve("active.json"), "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         try (java.nio.channels.FileChannel waiter = java.nio.channels.FileChannel.open(
-            root.resolve(EventSpool.INDEX_LOCK), StandardOpenOption.CREATE, StandardOpenOption.WRITE))
+            root.resolve("index.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            java.nio.channels.FileLock held = waiter.tryLock())
         {
+            assertNotNull(held);
+            PublicEventOutbox.Context other = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-b");
+            assertTrue(box.append(other, "ge-v1", event(A)));
             assertTrue(box.append(owner, "ge-v1", event(B)));
-            try (java.nio.channels.FileLock held = waiter.tryLock())
-            {
-                assertNotNull(held);
-                EventSpool.Locked contender = EventSpool.lock(root.resolve(EventSpool.INDEX_LOCK));
-                try { assertNull("a waiter on the old inode still excludes new index writers", contender); }
-                finally { if (contender != null) contender.close(); }
-                PublicEventOutbox.Context other = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-b");
-                try { box.append(other, "ge-v1", event(A)); fail("index contention must defer append"); }
-                catch (java.io.IOException expected) { assertEquals("index lock unavailable", expected.getMessage()); }
-                assertEquals(Collections.singletonList(owner.identity), EventSpool.readIndex(root));
-            }
+            assertTrue("the held index is left to its writer", Files.exists(root.resolve("active.json")));
         }
         assertEquals(2, box.pending(owner, "ge-v1", 100).size());
         assertEquals(0, box.counters.purged.get());
@@ -184,12 +179,12 @@ public class PublicEventOutboxTest
         try (java.util.stream.Stream<Path> paths = Files.walk(identity))
         { assertFalse(paths.anyMatch(path -> path.toString().endsWith(".spl"))); }
     }
-    @Test public void coldWithdrawalFindsIdleIdentitiesThatFellOutOfTheBoundedIndex() throws Exception
+    @Test public void coldWithdrawalFindsEveryIdleIdentity() throws Exception
     {
         List<PublicEventOutbox> writers = new ArrayList<>();
         try
         {
-            for (int i = 0; i <= EventSpool.MAX_INDEX; i++)
+            for (int i = 0; i <= 16; i++)
             {
                 PublicEventOutbox writer = fresh(); writers.add(writer);
                 PublicEventOutbox.Context context = new PublicEventOutbox.Context(TOKEN, "123", "STANDARD", "profile-" + i);
@@ -197,7 +192,7 @@ public class PublicEventOutboxTest
             }
         }
         finally { for (PublicEventOutbox writer : writers) writer.close(); }
-        assertEquals(EventSpool.MAX_INDEX, EventSpool.readIndex(dir.resolve("osrsbis/public-events-v1")).size());
+        assertEquals(17, EventSpool.identities(dir.resolve("osrsbis/public-events-v1")).size());
         box.purge();
         try (java.util.stream.Stream<Path> paths = Files.walk(dir))
         { assertFalse(paths.anyMatch(path -> path.toString().endsWith(".spl"))); }

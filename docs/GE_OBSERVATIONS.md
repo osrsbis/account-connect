@@ -18,15 +18,17 @@ side and offer key. `ge_observation.schema_v: 1` adds:
   credited delta, even when already filled. An observed empty slot supplies a
   zero baseline and earlier observation bound for an instant fill. These are counter differences, not individual trades.
 - `interval_start_ms` and `interval_end_ms`: bounds between observations,
-  conditional on inferred offer continuity. `fill_time` is always `unknown`.
+  conditional on inferred offer continuity. They are not fill times.
   Backward wall-clock steps or counter ambiguity remove the bounds.
-- `listing_price` explicitly identifies the limit price. `execution_price`
-  and `tax_gp` are unknown (null, possibly omitted by JSON serialization).
-  `gp_semantics` is `runelite_spent_tax_unknown`: no tax formula, gross/net
-  conversion, listing-price multiplication or per-fill price is invented.
+- `listing_price` explicitly identifies the limit price. The GP counters are RuneLite's spent values with the tax
+  unknown: no tax formula, gross/net conversion, listing-price multiplication, execution price or per-fill price is
+  invented.
+- 0.7.72 no longer sends the constant labels that said so, which nothing read: `source`, `gp_semantics`,
+  `execution_price` and `tax_gp` (always null), `fill_time` (always `unknown`), `native_tax_source` and
+  `step_time`. The values above keep their meaning.
 - `native_tax_gp` (0.7.68): the game's own cumulative sale tax for the slot, the long varp
   `GE_TAX_SLOT_LONG_<slot>` (5754-5761) that the GE interface subtracts from the gross to show the net, read when
-  the row is built (`native_tax_source: varp_long_when_row_built`). It is an observation, not `tax_gp`. On a real
+  the row is built. It is an observation, not an exact per-fill tax. On a real
   client (two sells, 0.7.68 test build) it is cumulative per offer (for example 10, 20 and then 250 GP for one offer of
   25 items at 516 GP that filled in three parts), the client and server values are equal, the tax step arrives 1-2 ms before the counter step on
   the same tick, and the collect does not clear it (the next offer does). The collected coins equal the gross counter
@@ -39,8 +41,8 @@ side and offer key. `ge_observation.schema_v: 1` adds:
   moment, and for a tax step `native_tax_gp` / `native_tax_server_gp`. So two fills inside one throttle window keep
   their own prices (e.g. 200 and 300 GP, not one 250 average) and times. At most 16 per row; `steps_dropped` counts
   the rest (the row's totals still cover them). An identical repeat callback no longer moves `counter_observed_at_ms`.
-- Times: `at_ms`, `observed_at_ms` and `counter_observed_at_ms` are when this client received the callback
-  (`step_time: client_callback_receipt`); the outer `ts` is when the row was queued; the server's `created_at` is
+- Times: `at_ms`, `observed_at_ms` and `counter_observed_at_ms` are when this client received the callback;
+  the outer `ts` is when the row was queued; the server's `created_at` is
   when it arrived. None of them is the exchange's execution time, which RuneLite's GE offer, its offer event and the
   GE scripts checked do not expose.
 - `server_date_minutes`, `server_clock_read_ms` and `server_minute_seen_at_ms` (0.7.68): the game's minute
