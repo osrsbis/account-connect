@@ -128,7 +128,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	static final String PLUGIN_VERSION = "0.7.72";
+	static final String PLUGIN_VERSION = "0.7.73";
 	static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
@@ -769,6 +769,8 @@ public class AccountConnectPlugin extends Plugin
 				collection.collectionSetup(client, System.currentTimeMillis());
 			}
 		}
+		AccountProgressCapture page = collectionLogOpenTick >= 0 ? activeCollection() : null;
+		if (page != null) page.collectionPage(client, System.currentTimeMillis() / 1000L);
 		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
 		if (progressReady())
 		{

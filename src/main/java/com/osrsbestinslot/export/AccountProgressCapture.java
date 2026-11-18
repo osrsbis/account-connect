@@ -35,6 +35,10 @@ final class AccountProgressCapture
     private static final Pattern COLLECTION = Pattern.compile("^New item added to your collection log: (.{1,160})$");
     private static final Pattern CA = Pattern.compile("^(?:CA_ID:([0-9]+)\\|)?Congratulations, you've completed an? (easy|medium|hard|elite|master|grandmaster) combat task: (.{1,160})\\.$", Pattern.CASE_INSENSITIVE);
     private static final Pattern SALVAGE = Pattern.compile("^You sort through the (Small|Fishy|Barracuda|Large|Plundered|Martial|Fremennik|Opulent) salvage and find: ([0-9,]+) x (.{1,160})\\.$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PAGE_OBTAINED = Pattern.compile("^Obtained: ([0-9][0-9,]{0,8})/([0-9][0-9,]{0,8})$");
+    private static final Pattern PAGE_COUNT = Pattern.compile("^([^:]{1,80}): ([0-9][0-9,]{0,14})$");
+    // Collection-log page title -> the counters its header showed (kill counts, completions), read this login.
+    private final Map<String, Map<String, Object>> pages = new TreeMap<>();
     private String identity;
     private int settleTick;
     private final Map<Integer, Integer> collectionItems = new TreeMap<>();
@@ -57,6 +61,7 @@ final class AccountProgressCapture
         identity = null;
         collectionItems.clear();
         collectionObservedAt = null;
+        pages.clear();
         signals.clear();
         evicted = 0;
         geHistory.reset();
@@ -163,6 +168,62 @@ final class AccountProgressCapture
             scanActive = false;
             scanStatus = "closed_before_verification";
         }
+    }
+
+    /** Client thread, own log open: keep the header of the page on screen. Unchanged values keep their time. */
+    void collectionPage(Client client, long now)
+    {
+        Widget header = scanActive || !ownLog(client) ? null : client.getWidget(InterfaceID.Collection.HEADER_TEXT);
+        Widget[] rows = header == null || header.isHidden() ? null : header.getChildren();
+        if (rows == null) return;
+        String[] lines = new String[rows.length];
+        for (int i = 0; i < rows.length; i++) lines[i] = rows[i] == null ? null : rows[i].getText();
+        Map<String, Object> page = parsePage(lines);
+        if (page == null) return;
+        String title = (String) page.remove("title");
+        Map<String, Object> old = pages.get(title);
+        page.put("observed_at", old == null ? now : old.get("observed_at"));
+        if (page.equals(old) || old == null && pages.size() >= 256) return;
+        page.put("observed_at", now);
+        pages.put(title, page);
+    }
+
+    /** Header lines: the page title, "Obtained: x/y", then counters such as "Zulrah kills: 1,234". Null when no page. */
+    static Map<String, Object> parsePage(String[] lines)
+    {
+        if (lines == null || lines.length < 2 || lines.length > 16) return null;
+        Long obtained = null, total = null;
+        Map<String, Long> counts = new LinkedHashMap<>();
+        for (int i = 1; i < lines.length; i++)
+        {
+            String line = clean(lines[i]);
+            Matcher m = PAGE_OBTAINED.matcher(line);
+            if (m.matches())
+            {
+                obtained = number(m.group(1));
+                total = number(m.group(2));
+            }
+            else if ((m = PAGE_COUNT.matcher(line)).matches()) counts.put(m.group(1), number(m.group(2)));
+        }
+        String title = clean(lines[0]);
+        return title.isEmpty() || title.length() > 80 || obtained == null && counts.isEmpty() || counts.containsValue(null) ? null
+            : Fields.of("title", title, "obtained", obtained, "total", total, "counts", counts);
+    }
+
+    private static Long number(String value)
+    {
+        return value.matches("[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+") ? Long.valueOf(value.replace(",", "")) : null;
+    }
+
+    private static String clean(String text)
+    {
+        return text == null ? "" : Text.removeTags(text).replaceAll("@\\w+@", "").replace('\u00a0', ' ').trim();
+    }
+
+    /** The pages read this login: absent means not read, a 0 counter is a read 0. */
+    Map<String, Map<String, Object>> pages()
+    {
+        return new TreeMap<>(pages);
     }
 
     private boolean ownLog(Client client)
@@ -309,7 +370,7 @@ final class AccountProgressCapture
         {
             return null;
         }
-        String text = Text.removeTags(message).replaceAll("@\\w+@", "").replace('\u00a0', ' ').trim();
+        String text = clean(message);
         Map<String, Object> out = new LinkedHashMap<>();
         Matcher m = CLUE.matcher(text);
         try

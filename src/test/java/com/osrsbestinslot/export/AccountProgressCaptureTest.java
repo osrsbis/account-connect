@@ -4,6 +4,7 @@ import java.lang.reflect.Field;
 import java.util.Map;
 import net.runelite.api.*;
 import net.runelite.api.events.*;
+import net.runelite.api.widgets.Widget;
 import okhttp3.*;
 import org.junit.Before;
 import org.junit.Test;
@@ -572,5 +573,22 @@ public class AccountProgressCaptureTest
         tick = 4; vars[2943] = 1; capture.poll(client, 4000);
         assertEquals(false, block("collection_log").get("complete"));
         assertEquals("counts_changed", block("collection_log").get("scan_status"));
+    }
+
+    @Test public void openOwnLogReadsThePageHeaderOnTheGameTick() throws Exception
+    {
+        AccountConnectPlugin p = plugin();
+        p.grants.applyServerPolicy(policy("X-Account-Progress", "on"), TOKEN);
+        p.progressBlock(); tick += 2;
+        Widget header = mock(Widget.class), title = mock(Widget.class), kc = mock(Widget.class);
+        when(title.getText()).thenReturn("Vorkath");
+        when(kc.getText()).thenReturn("Vorkath kills: 77");
+        when(header.getChildren()).thenReturn(new Widget[]{title, kc});
+        when(client.getWidget(net.runelite.api.gameval.InterfaceID.Collection.HEADER_TEXT)).thenReturn(header);
+        p.onGameTick(new GameTick());
+        assertTrue("closed log: nothing read", p.accountProgress.pages().isEmpty());
+        p.collectionLogOpenTick = tick;	// what onWidgetLoaded sets for the log's interface
+        p.onGameTick(new GameTick());
+        assertEquals(77L, ((Map<?, ?>) p.accountProgress.pages().get("Vorkath").get("counts")).get("Vorkath kills"));
     }
 }

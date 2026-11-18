@@ -1,84 +1,43 @@
 # Working on this plugin
 
-This repository is the OSRS Best in Slot RuneLite plugin (`osrs-best-in-slot` on the Plugin Hub). It links a player's
-account to osrsbestinslot.com so the calculators fill in from the real account.
+Rules owner: plugin maintainers. Last cleaned: 2026-11-18.
 
-## This tree is public
+This tree, its comments and commit messages are public (the Hub builds a mirror). Keep out people's names, internal
+operations, staff identities, link tokens, grant values, session IDs and tool or assistant attribution.
 
-- The Plugin Hub builds a public mirror of this tree, so every file, comment and commit message here is public.
-- Keep out of it: people's names, internal operations, staff identities, link tokens, grant values, session IDs and
-  tool or assistant attribution. Private notes stay in the maintainers' own records.
+## Build and release
 
-## Build and test
-
-- Use JDK 11 and the Gradle wrapper: `./gradlew build`. Tests write under `build/test-home`, never the real `~/.runelite`.
-- `./gradlew runClient` starts a RuneLite client with the plugin loaded, for a manual login check.
-- There is one plugin for everyone. The staff tools open only when the server grants staff capture to the linked token,
-  so a green build does not accept a release.
-  - Every release passes the staff acceptance gate in `docs/STAFF_ACCEPTANCE.md` on the exact JAR the Hub commit
-    builds. That suite cannot be narrowed.
-- Bump `version` in `build.gradle` with each release.
+- JDK 11 and the Gradle wrapper: `./gradlew build` (tests write under `build/test-home`); `./gradlew runClient` for a
+  manual login check. Bump `version` in `build.gradle` with each release.
+- Staff tools open only when the server grants staff capture, so a green build does not accept a release: every
+  release passes the full staff gate in `docs/STAFF_ACCEPTANCE.md` on the exact JAR the Hub commit builds.
+- Size: under 200,000 tokens as the Hub reviewer counts them (estimated with `cl100k_base` over comment-stripped
+  `src/main` Java; the release check refuses at or over the limit). 150,000 is a reported target, never a block.
 
 ## Engineering principles
 
-These rules come from the 0.7.67 simplification. They apply to every change.
-
-- The plugin owns what only the client can do: capture of transient game state, filtering before anything leaves the
-  client (the region frame keeps only the selected pixels), reliable delivery, and UI that must respond at once.
-- The server owns derived analysis: interpretation, history and comparisons.
-  - Before moving an analysis to the server, make sure ingest stores every input it needs. Send a missing input as
-    a field on a row the plugin already sends where that fits, rather than as a new row or request.
-  - Add the server reader in the same change, or record it as an open follow-up.
+- The plugin does only what the client must (transient state, filtering before data leaves, delivery, immediate UI);
+  analysis belongs on the server once ingest stores its inputs, preferably as a field on an existing row.
 - A new field or event is sent only after the server accepts it.
-- Reuse RuneLite events and the libraries the client already ships before writing new code.
-- Offline and replay models belong in `src/test` or outside the repository, never in the shipped plugin.
-- Merge two code paths only when their contracts match: the same account, tick and revision identity, storage and
-  purge rules, retries, receipts and behaviour for older clients. If any of these differ, keep the paths separate.
-- Prefer cohesive components with narrow interfaces. Split a class when that gives each part one job, not only to
-  meet a line count.
-- Measure a size or speed change before and after: the Plugin Hub reviewer's token count, JAR bytes, and any request,
-  payload or runtime cost the change touches. An estimate is not a result; label it as an estimate.
-- A release stays under 200,000 tokens as the Plugin Hub reviewer counts them; above that the Hub does not review it
-  automatically. The release check estimates the count with the `cl100k_base` tokenizer over the `src/main` Java
-  sources with comments removed, which reads slightly above the reviewer, and refuses a candidate at or over the limit.
-  - The optimization target is 150,000 on the same count. It is reported with every release, and it never blocks one.
-- Code that cannot run (hard-wired off, or with no production caller) is removed as unused. Retiring a shipped
-  capability that the server can still switch on is a product decision, not an engineering one: keep the capability
-  until it is made, and record it with the change.
-- A simplification changes no user-facing wording and no release gate (see "Build and test" and "Plugin Hub rules"),
-  and removes nothing that is collected.
+- Reuse RuneLite events and bundled libraries; offline and replay models stay out of `src/main`.
+- Merge code paths only when identity, storage, purge, retry, receipt and old-client behaviour all match.
+- Measure size or speed before and after (token count, JAR bytes, payload, runtime); label estimates.
+- Remove code that cannot run; retiring a capability the server can still switch on is a product decision.
+- A simplification changes no user-facing wording or release gate and removes nothing collected.
 
-## Plugin Hub rules
+## Plugin Hub rules (each from a review)
 
-Every Hub update is reviewed by a RuneLite maintainer. Each rule below came from a review; do not repeat a rejected
-pattern.
-- No `new Gson()` or `new GsonBuilder()`. Inject the client's Gson and customise it with `.newBuilder()`.
-- No `Thread.sleep` or `Thread.interrupt`; use a scheduled executor.
-- No runtime dependency in `build.gradle`, and nothing off RuneLite's allowlist.
-- No `KeyboardFocusManager` and no `client.hopToWorld`.
-- Exactly one `@PluginDescriptor` in `src/main`.
+- No `new Gson()`/`new GsonBuilder()` (inject the client's Gson, `.newBuilder()`); no `Thread.sleep`/`interrupt`
+  (use a scheduled executor); no `KeyboardFocusManager`, no `client.hopToWorld`.
+- No runtime dependency in `build.gradle`, nothing off RuneLite's allowlist; one `@PluginDescriptor` in `src/main`.
 - No overlay or panel about other players.
-- The Hub manifest change is the `commit=` line only. The `warning=` line stays byte-identical.
+- The Hub manifest change is the `commit=` line only; `warning=` stays byte-identical.
 - No new config item, warning, description, notice or chat text unless the project owner asks for that exact item.
-- Add each new reviewer rule here in the same change that records it.
+- Add each new reviewer rule here in the change that records it.
 
 ## Documentation
 
-Each document has one job. Put a fact in the one place that owns it and link to it from elsewhere.
-
-| File | Reader | Holds |
-|---|---|---|
-| `README.md` | players and Hub reviewers | what the plugin does, how to connect, what it sends, privacy, building |
-| `docs/STAFF_ACCEPTANCE.md` | release maintainers | the staff release gate and how to run it |
-| `docs/<topic>.md` | engineers | one engineering contract per topic: what is captured, when, retry and delivery rules |
-| `ops-reference-tests/README.md` | engineers | what the staff contract tests specify |
-| `AGENTS.md` | anyone changing the code | how to work here and these rules |
-
-- Update the document in the same commit as the behaviour it describes. A release whose docs describe an older build
-  is not ready.
-- `README.md` describes the released plugin. Work that is not released, or released but switched off, goes in
-  `docs/<topic>.md`, with its state in the heading (for example "inactive" or "candidate").
-- "What it sends" in `README.md` lists what the current release sends. When a release adds or removes a field, change
-  that list in the same release.
-- Name a version or commit for every claim about behaviour that changed between releases.
-- Keep lines under about 120 characters, one rule per bullet. Remove a section when its feature is removed.
+- One fact, one place: `README.md` (released behaviour, what it sends, privacy), `docs/STAFF_ACCEPTANCE.md`,
+  `docs/<topic>.md` (one contract each; unreleased work with its state in the heading), this file.
+- Update docs in the commit that changes the behaviour; "What it sends" lists exactly what the current release sends.
+- Name a version or commit for behaviour that changed between releases. Lines under about 120 characters.

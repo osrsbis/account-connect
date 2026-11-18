@@ -1,7 +1,9 @@
 package com.osrsbestinslot.export;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -124,5 +126,69 @@ public class AccountMembersTest
 		gs.setGameState(GameState.LOGGED_IN);
 		plugin.onGameStateChanged(gs);
 		assertEquals(Boolean.FALSE, members());
+	}
+
+	@SuppressWarnings("unchecked")
+	private Map<String, Object> snapshot() throws Exception
+	{
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
+		build.setAccessible(true);
+		return (Map<String, Object>) build.invoke(plugin.snapshots);
+	}
+
+	@Test
+	public void membershipDaysAreUnknownUntilTheVariablesSettle() throws Exception
+	{
+		days = 23;
+		world = EnumSet.of(WorldType.MEMBERS);
+		login();
+		assertNull(((Map<?, ?>) snapshot().get("account")).get("membership_days"));
+		assertNull("no tool store read before the variables settle", snapshot().get("tool_leprechaun_raw"));
+		tick += AccountConnectPlugin.MEMBERS_SETTLE_TICKS;
+		assertEquals(23, ((Map<?, ?>) snapshot().get("account")).get("membership_days"));
+		days = 0;
+		assertEquals("a settled zero is a known zero", 0, ((Map<?, ?>) snapshot().get("account")).get("membership_days"));
+	}
+
+	@Test
+	public void toolLeprechaunIsTheRawVarbitsAfterSettle() throws Exception
+	{
+		when(client.getVarbitValue(1441)).thenReturn(17);
+		when(client.getVarbitValue(5732)).thenReturn(250);
+		login();
+		tick += AccountConnectPlugin.MEMBERS_SETTLE_TICKS;
+		Map<?, ?> tools = (Map<?, ?>) snapshot().get("tool_leprechaun_raw");
+		assertEquals(17, tools.get("buckets"));
+		assertEquals(250, tools.get("ultracompost"));
+		assertEquals(0, tools.get("rake"));
+		assertEquals(SnapshotBuilder.TOOL_LEPRECHAUN.length / 2, tools.size());
+	}
+
+	@Test
+	public void jagexLauncherIsTrueOrUnknownAndNeverSendsTheName() throws Exception
+	{
+		login();
+		Map<String, Object> account = (Map<String, Object>) snapshot().get("account");
+		assertNull("no launcher name is unknown, never false", account.get("jagex_launcher"));
+		assertTrue(account.containsKey("jagex_launcher"));
+		when(client.getLauncherDisplayName()).thenReturn("Launcher Name");
+		Map<String, Object> snap = snapshot();
+		assertEquals(Boolean.TRUE, ((Map<?, ?>) snap.get("account")).get("jagex_launcher"));
+		assertFalse("the name is never sent", new com.google.gson.Gson().toJson(snap).contains("Launcher Name"));
+	}
+
+	@Test
+	public void killCountsAreTheRawVarpsByIdAfterSettle() throws Exception
+	{
+		when(client.getVarpValue(1691)).thenReturn(412);	// Vorkath
+		when(client.getVarpValue(2201)).thenReturn(7);	// beginner clues
+		login();
+		assertNull("no kill counts before the variables settle", snapshot().get("kill_counts_raw"));
+		tick += AccountConnectPlugin.MEMBERS_SETTLE_TICKS;
+		Map<?, ?> kills = (Map<?, ?>) snapshot().get("kill_counts_raw");
+		assertEquals(412, kills.get("1691"));
+		assertEquals(7, kills.get("2201"));
+		assertEquals("a read zero is sent", 0, kills.get("1503"));
+		assertEquals(SnapshotBuilder.KILL_COUNT_VARPS.length, kills.size());
 	}
 }

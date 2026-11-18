@@ -59,6 +59,21 @@ final class SnapshotBuilder
 		"colosseum_highest_wave", 11410, "hallowed_final_chests", 10423, "hallowed_normal_chests", 10446,
 		"tempoross_permits", 11936, "soul_wars_zeal", -2871, "giants_foundry", -3436,
 		"mixology_lye", -4414, "mixology_aga", -4415, "mixology_mox", -4416};
+	// Tool leprechaun storage varbits, raw (the server combines the extra_* parts).
+	static final Object[] TOOL_LEPRECHAUN = {"rake", 1435, "dibber", 1436, "spade", 1437, "secateurs", 1438,
+		"magic_secateurs", 1848, "watering_can", 1439, "trowel", 1440, "plant_cure", 6268, "buckets", 1441,
+		"extra_buckets", 4731, "extra2_buckets", 6265, "compost", 1442, "extra_compost", 6266, "supercompost", 1443,
+		"extra_supercompost", 6267, "ultracompost", 5732, "bottomless_bucket_type", 7915,
+		"bottomless_bucket_quantity", 7916, "extra_rakes", 8357, "extra_dibbers", 8358, "extra_secateurs", 8359,
+		"extra_trowels", 8360, "extra_spades", 8361};
+	// Boss kill counts, raid completions and clue completions the game keeps in varps, raw; the gameval names are in
+	// docs/ACCOUNT_LISTING.md.
+	static final int[] KILL_COUNT_VARPS = {
+		1111, 1112, 1116, 1354, 1503, 1504, 1505, 1506, 1507, 1508, 1509, 1510, 1511, 1512, 1513, 1514, 1515, 1516,
+		1517, 1518, 1519, 1520, 1521, 1522, 1523, 1524, 1525, 1526, 1527, 1528, 1529, 1532, 1533, 1534, 1585, 1661,
+		1669, 1691, 1733, 1735, 1748, 2074, 2075, 2201, 2221, 2233, 2352, 2353, 2354, 2664, 2671, 2934, 3057, 3058,
+		3269, 3397, 3645, 3646, 3647, 3752, 3761, 3762, 3763, 3967, 3968, 3969, 3970, 3971, 3972, 3973, 3974, 4079,
+		4148, 4149, 4150, 4186, 4187, 4260, 4403, 4404, 4648, 4701, 4825, 4945, 5407, 5408, 5614, 5712, 5894};
 	// Rune pouch slots: {rune type varbit, amount varbit}.
 	static final int[][] RUNE_POUCH = {{29, 1624}, {1622, 1625}, {1623, 1626}, {14285, 14286}, {15373, 15375}, {15374, 15376}};
 	// Off-book containers sent for every linked player, in wire order (gameval ids, so they match
@@ -285,7 +300,11 @@ final class SnapshotBuilder
 		account.put("current_world_members", onMembersWorld);
 		boolean varsSettled = plugin.client.getRealSkillLevel(Skill.HITPOINTS) > 0
 			&& plugin.client.getTickCount() - plugin.worldLoginTick >= AccountConnectPlugin.MEMBERS_SETTLE_TICKS;
-		account.put("members", accountMembers(onMembersWorld, varsSettled, plugin.client.getVarpValue(VarPlayer.MEMBERSHIP_DAYS)));
+		int days = plugin.client.getVarpValue(VarPlayer.MEMBERSHIP_DAYS);
+		account.put("members", accountMembers(onMembersWorld, varsSettled, days));
+		account.put("membership_days", varsSettled && days >= 0 ? days : null);
+		// Launched by the Jagex Launcher (a Jagex Account session): true, else unknown. The name itself is never sent.
+		account.put("jagex_launcher", plugin.client.getLauncherDisplayName() != null ? Boolean.TRUE : null);
 		snap.put("account", account);
 
 		// ---- capture completeness ----
@@ -515,6 +534,8 @@ final class SnapshotBuilder
 			collog.put("verified_at_ms", verified.get("verified_at_ms"));
 		}
 		snap.put("collection_log", collog);
+		// Ingest rebuilds collection_log with fixed keys, so the page counters are their own block.
+		if (collection != null) snap.put("collection_log_pages", collection.pages());
 
 		// ---- wealth (broken out: carried coins, inventory, worn gear, bank, total) ----
 		long invValue = containerValue(inv);
@@ -545,6 +566,14 @@ final class SnapshotBuilder
 
 		snap.put("kourend_favour", vars(KOUREND_FAVOUR));
 		snap.put("minigame_points", vars(MINIGAME_POINTS));
+		// Read like account.members: a login read can be zeros still on their way.
+		if (varsSettled)
+		{
+			snap.put("tool_leprechaun_raw", vars(TOOL_LEPRECHAUN));
+			Map<String, Object> kills = new LinkedHashMap<>();
+			for (int id : KILL_COUNT_VARPS) kills.put(Integer.toString(id), plugin.client.getVarpValue(id));
+			snap.put("kill_counts_raw", kills);
+		}
 
 		return snap;
 	}

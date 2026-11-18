@@ -32,16 +32,20 @@ or sent.
 The snapshot is tied to the link token you chose (not your real identity) and contains
 **game account state only**:
 
-- Display name, account hash, account type and membership, current world and location
+- Display name, account hash, account type, membership and membership days left, current world and location
+- Whether the game was started by the Jagex Launcher (only yes or unknown; the launcher's name for you is not sent)
 - Skills (levels, XP), total & combat level
 - Quest states and quest points, achievement-diary progress, and every combat-achievement task with its points
 - Slayer points, streak, current task and slayer reward unlocks
 - Spellbook, attack style, active prayers, Kourend favour, and minigame points and milestones the game keeps in game
   variables
 - Worn equipment, inventory, looting bag, seed vault, bonds pouch, rune pouch and bank contents (bank only after you
-  open it in-game), with their estimated value
+  open it in-game), with their estimated value, and the tool leprechaun's stored tools and compost
 - Grand Exchange offers
 - Collection-log entries you have obtained. Opening your own collection log reads the whole log.
+- Boss kill counts, raid completions and clue completions the game keeps in game variables
+- The kill counts and completion counts (bosses, raids, clues) shown on each page of your own collection log that you
+  open
 
 When the site turns on account progress for your link (by default it does for every linked player), the snapshot also
 carries:
@@ -80,6 +84,7 @@ credentials — RuneLite does not expose those to plugins.
 The details of each capture and its release state are in `docs/`:
 
 - [Account progress block](docs/ACCOUNT_PROGRESS.md)
+- [Account listing fields](docs/ACCOUNT_LISTING.md): membership days, collection-log page counters, tool leprechaun
 - [Grand Exchange observations](docs/GE_OBSERVATIONS.md)
 - [Event delivery and retry](docs/DELIVERY.md), including the latest bank in the snapshot (0.7.62)
 - [Own-gameplay capture](docs/OWN_GAMEPLAY.md), which needs a separate server grant
