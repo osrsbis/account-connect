@@ -209,6 +209,70 @@ public class BankPlaceholderTest
 		assertEquals(2, of("bank_visit_open").size());
 	}
 
+	@SuppressWarnings("unchecked")
+	private Map<String, Object> snapshotBank() throws Exception
+	{
+		when(client.getLocalPlayer()).thenReturn(mock(Player.class));
+		Method build = SnapshotBuilder.class.getDeclaredMethod("buildSnapshot");
+		build.setAccessible(true);
+		return (Map<String, Object>) ((Map<String, Object>) build.invoke(p.snapshots)).get("bank");
+	}
+
+	@Test
+	public void theBankLayoutListsPlaceholderSlotsAndTabSizesBesideTheSameItems() throws Exception
+	{
+		for (int tab = 0; tab < 9; tab++)
+		{
+			when(client.getVarbitValue(net.runelite.api.gameval.VarbitID.BANK_TAB_1 + tab)).thenReturn(tab == 0 ? 2 : tab == 2 ? 1 : 0);
+		}
+		open(container(new int[]{PLACEHOLDER, 1}, new int[]{COINS, 100}, new int[]{BONES, 3}, new int[]{PLACEHOLDER, 1},
+			new int[]{11832, 1}));
+		Map<String, Object> bank = snapshotBank();
+		assertEquals("items as before", List.of(COINS, BONES, 11832), snapshotBankIds());
+		assertEquals(3, bank.get("item_stacks"));
+		assertEquals(List.of(List.of(0, PLACEHOLDER), List.of(3, PLACEHOLDER)), bank.get("placeholders"));
+		assertEquals(List.of(2, 0, 1, 0, 0, 0, 0, 0, 0), bank.get("tab_sizes"));
+		assertEquals("[[0,19269],[3,19269]]", new Gson().toJson(bank.get("placeholders")));
+
+		// The site's walk: a listed slot is a placeholder, every other slot takes the next item.
+		List<Object> walk = new ArrayList<>();
+		List<Map<String, Object>> items = (List<Map<String, Object>>) bank.get("items");
+		int next = 0, listed = 0;
+		List<List<Integer>> holders = (List<List<Integer>>) bank.get("placeholders");
+		for (int slot = 0; slot < items.size() + holders.size(); slot++)
+		{
+			boolean holder = listed < holders.size() && holders.get(listed).get(0) == slot;
+			walk.add(holder ? -holders.get(listed++).get(1) : items.get(next++).get("id"));
+		}
+		assertEquals(List.of(-PLACEHOLDER, COINS, BONES, -PLACEHOLDER, 11832), walk);
+	}
+
+	@Test
+	public void anEmptySlotInsideTheBankIsListedButTheUnusedTailIsNot() throws Exception
+	{
+		open(container(new int[]{COINS, 100}, new int[]{-1, 0}, new int[]{PLACEHOLDER, 1}, new int[]{BONES, 0},
+			new int[]{11832, 1}, new int[]{-1, 0}, new int[]{-1, 0}));
+		Map<String, Object> bank = snapshotBank();
+		assertEquals("items as before", List.of(COINS, 11832), snapshotBankIds());
+		assertEquals(List.of(List.of(1, -1), List.of(2, PLACEHOLDER), List.of(3, -1)), bank.get("placeholders"));
+		open(container(new int[]{PLACEHOLDER, 1}, new int[]{-1, 0}));
+		assertEquals("a placeholder last ends the list", List.of(List.of(0, PLACEHOLDER)), snapshotBank().get("placeholders"));
+	}
+
+	@Test
+	public void aBankWithoutPlaceholdersSendsAnEmptyListAndNoLayoutWithoutABank() throws Exception
+	{
+		open(container(new int[]{COINS, 100}, new int[]{BONES, 3}));
+		Map<String, Object> bank = snapshotBank();
+		assertEquals(List.of(), bank.get("placeholders"));
+		assertEquals(List.of(0, 0, 0, 0, 0, 0, 0, 0, 0), bank.get("tab_sizes"));
+		p.snapshots.lastBankItems = null;
+		this.bank = null;
+		Map<String, Object> none = snapshotBank();
+		assertFalse(none.containsKey("placeholders"));
+		assertFalse(none.containsKey("tab_sizes"));
+	}
+
 	@Test
 	public void aPlaceholderIsNeverMappedToItsBaseItem() throws Exception
 	{

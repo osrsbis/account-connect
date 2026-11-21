@@ -128,7 +128,7 @@ public class AccountConnectPlugin extends Plugin
 	static final int SCHEMA_V = 1;
 	// MUST equal build.gradle's version — VersionDriftTest fails the build if the two ever diverge, so
 	// every snapshot's source.plugin_version honestly reports which build the account is running.
-	static final String PLUGIN_VERSION = "0.7.73";
+	static final String PLUGIN_VERSION = "0.7.74";
 	static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
 	// Collection-log: the client fires script 4100 once per OBTAINED slot as the clog UI renders.
@@ -137,6 +137,7 @@ public class AccountConnectPlugin extends Plugin
 	final Set<Integer> clogObtained = new HashSet<>();
 	boolean clogSeen = false;
 	final AccountProgressCapture accountProgress = new AccountProgressCapture();
+	final OwnHouseLayout house = new OwnHouseLayout();
 	// The collection-log search scan for a token without the account-progress grant. Only its collection part is
 	// used: it makes the snapshot's collection_log whole and says so. Nothing else of account progress is read.
 	final AccountProgressCapture collectionScan = new AccountProgressCapture();
@@ -291,6 +292,7 @@ public class AccountConnectPlugin extends Plugin
 	 */
 	private StoreNearbyOverlay nearbyOverlay;
 	private StoreResetOverlay resetOverlay;
+	private AccountCaptureOverlay accountCaptureOverlay;
 
 	@Override
 	protected void startUp()
@@ -319,6 +321,8 @@ public class AccountConnectPlugin extends Plugin
 			overlayManager.add(resetOverlay);
 			nearbyOverlay = new StoreNearbyOverlay(this);
 			overlayManager.add(nearbyOverlay);
+			accountCaptureOverlay = new AccountCaptureOverlay(this);
+			overlayManager.add(accountCaptureOverlay);
 		}
 	}
 
@@ -373,6 +377,8 @@ public class AccountConnectPlugin extends Plugin
 		{
 			overlayManager.remove(resetOverlay);
 		}
+		if (overlayManager != null && accountCaptureOverlay != null) overlayManager.remove(accountCaptureOverlay);
+		accountCaptureOverlay = null;
 		nearbyOverlay = null;
 		resetOverlay = null;
 		clips.stopStoreClipCapture(false);	// unregister the render listener + drop any buffered frames, no upload
@@ -479,6 +485,7 @@ public class AccountConnectPlugin extends Plugin
 			grants.clearGameplayGrants();
 			grants.setBroadCaptureGrant(null, false);
 			grants.clearStaffCaptureGrant();
+			grants.accountCaptureGrant = null;
 			grants.serverStoreToolsEnabled = false;
 			store.removeResetTimer();
 			uploader.snapshotRetryPending = false;
@@ -677,6 +684,7 @@ public class AccountConnectPlugin extends Plugin
 		if (progressReady()) accountProgress.storageRecovery.container(client, event.getContainerId(),
 			event.getItemContainer(), System.currentTimeMillis());
 		snapshots.containerObservedAtMs.put(event.getContainerId(), System.currentTimeMillis());
+		if (event.getContainerId() == net.runelite.api.gameval.InventoryID.POH_COSTUMES && grants.broadCaptureEnabled()) house.costumes(client);
 		trade.handleTradeContainerChanged(event.getContainerId());
 		if (store.shopOpen && event.getContainerId() != INVENTORY_CONTAINER_ID)
 		{
@@ -772,6 +780,7 @@ public class AccountConnectPlugin extends Plugin
 		AccountProgressCapture page = collectionLogOpenTick >= 0 ? activeCollection() : null;
 		if (page != null) page.collectionPage(client, System.currentTimeMillis() / 1000L);
 		if (gameplayReady()) ownGameplay.poll(client, System.currentTimeMillis());
+		if (grants.broadCaptureEnabled()) house.tick(client, System.currentTimeMillis());
 		if (progressReady())
 		{
 			accountProgress.poll(client, System.currentTimeMillis());

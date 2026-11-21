@@ -370,7 +370,7 @@ final class SessionEvents
 	{
 		GameState state = event.getGameState();
 		// A plain load keeps the account states (sceneGap); a hop, logout or disconnect resets them below.
-		if (state == GameState.LOADING) { plugin.accountProgress.storageRecovery.gap(); plugin.ownGameplay.sceneGap(); }
+		if (state == GameState.LOADING) { plugin.accountProgress.storageRecovery.gap(); plugin.ownGameplay.sceneGap(); plugin.house.loading(); }
 		if (state != GameState.LOGGED_IN && state != GameState.LOADING)
 		{
 			plugin.grants.clearVerificationGrant();
@@ -386,6 +386,7 @@ final class SessionEvents
 			plugin.accountProgress.reset();
 			plugin.collectionScan.reset();
 			plugin.ownGameplay.reset();
+			plugin.house.reset();
 			plugin.ge.observations.gap();
 			// Same token, next account: one account's counters must never be compared with another's, even when
 			// no game tick runs between the logout and the next login.

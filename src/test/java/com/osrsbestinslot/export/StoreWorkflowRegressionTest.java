@@ -104,7 +104,9 @@ public class StoreWorkflowRegressionTest
 
     private void captureRegisteredOverlays()
     {
-        assertEquals("startup must register both visible staff tools", 2, registered.size());
+        assertEquals("startup must register the three visible staff tools", 3, registered.size());
+        assertTrue("account capture panel missing from OverlayManager",
+            registered.stream().anyMatch(o -> o instanceof AccountCaptureOverlay));
         nearby = (StoreNearbyOverlay) registered.stream().filter(o -> o instanceof StoreNearbyOverlay).findFirst().orElse(null);
         reset = (StoreResetOverlay) registered.stream().filter(o -> o instanceof StoreResetOverlay).findFirst().orElse(null);
         assertNotNull("nearby overlay missing from OverlayManager", nearby);

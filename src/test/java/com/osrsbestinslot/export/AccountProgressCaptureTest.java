@@ -427,7 +427,7 @@ public class AccountProgressCaptureTest
             .thenReturn(mock(net.runelite.api.widgets.Widget.class));
     }
 
-    @Test public void ownScanNeedsDistinctCountQuietPeriodAndStableTotals()
+    @Test public void ownScanNeedsDistinctCountAndStableTotals()
     {
         searchable(2);
         capture.collectionSetup(client, 1000);
@@ -436,14 +436,65 @@ public class AccountProgressCaptureTest
         tick = 3; capture.poll(client, 4000);
         assertEquals(false, block("collection_log").get("complete"));
         capture.collectionSlot(client, new Object[]{4100, 11832, 1}, 4);
-        tick = 5; capture.poll(client, 6000);
-        assertEquals(false, block("collection_log").get("complete"));
-        tick = 6; capture.poll(client, 7000);
+        tick = 4; capture.poll(client, 5000);	// equal count: verified on the next tick, no quiet wait
         assertEquals(true, block("collection_log").get("complete"));
-        assertEquals(7000L, block("collection_log").get("scan_verified_at_ms"));
+        assertEquals("count_verified", block("collection_log").get("scan_status"));
+        assertEquals("own_search_scan_unique_count_matches_game", block("collection_log").get("completeness_basis"));
+        assertEquals(5000L, block("collection_log").get("scan_verified_at_ms"));
         vars[2943] = 3; capture.poll(client, 8000);
         vars[2943] = 2;
         assertEquals(false, block("collection_log").get("complete"));
+    }
+
+    @Test public void scanThatSeesMoreItemsThanTheGameCountIsVerified()
+    {
+        searchable(43);
+        capture.collectionSetup(client, 1000);
+        for (int id = 1; id <= 40; id++) capture.collectionSlot(client, new Object[]{4100, id, 1}, 1);
+        tick = 1; capture.poll(client, 2000);
+        assertEquals("scanning", block("collection_log").get("scan_status"));
+        for (int id = 41; id <= 45; id++) capture.collectionSlot(client, new Object[]{4100, id, 1}, 2);
+        tick = 2; capture.poll(client, 3000);	// slots still arriving every tick
+        assertEquals(true, block("collection_log").get("complete"));
+        capture.collectionSlot(client, new Object[]{4100, 46, 1}, 3);
+        capture.collectionSlot(client, new Object[]{4100, 47, 1}, 3);
+        tick = 3; capture.poll(client, 4000);
+        Map<?, ?> log = block("collection_log");
+        assertEquals("late ids of the same scan keep it verified", true, log.get("complete"));
+        assertEquals("count_verified", log.get("scan_status"));
+        assertEquals("own_search_scan_unique_count_matches_game", log.get("completeness_basis"));
+        assertEquals(43, log.get("scan_expected_obtained_count"));
+        assertEquals(47L, log.get("observed_positive_item_count"));
+        assertEquals(47, ((java.util.List<?>) capture.verifiedCollection(client).get("obtained_item_ids")).size());
+    }
+
+    @Test public void scanShortOfTheGameCountTimesOut()
+    {
+        searchable(43);
+        capture.collectionSetup(client, 1000);
+        for (int id = 1; id <= 42; id++) capture.collectionSlot(client, new Object[]{4100, id, 1}, 1);
+        for (tick = 1; tick <= 20; tick++) capture.poll(client, 1000 + tick * 600);
+        assertEquals("scanning", block("collection_log").get("scan_status"));
+        assertEquals(false, block("collection_log").get("complete"));
+        tick = 21; capture.poll(client, 14000);
+        assertEquals("timeout", block("collection_log").get("scan_status"));
+        assertEquals(false, block("collection_log").get("complete"));
+        assertEquals("unverified", block("collection_log").get("completeness_basis"));
+        assertNull(capture.verifiedCollection(client));
+    }
+
+    @Test public void scanWithUnknownGameCountIsNeverVerified()
+    {
+        searchable(2); vars[2944] = 0;	// no known maximum: the obtained count is unknown
+        capture.collectionSetup(client, 1000);
+        capture.collectionSlot(client, new Object[]{4100, 4151, 1}, 1);
+        capture.collectionSlot(client, new Object[]{4100, 11832, 1}, 1);
+        tick = 4; capture.poll(client, 5000);
+        assertEquals(false, block("collection_log").get("complete"));
+        tick = 21; capture.poll(client, 14000);
+        assertEquals("timeout", block("collection_log").get("scan_status"));
+        assertEquals(false, block("collection_log").get("complete"));
+        assertNull(capture.verifiedCollection(client));
     }
 
     @Test public void scanKnownZeroAndExplicitZeroSlotsDifferFromUnknown()

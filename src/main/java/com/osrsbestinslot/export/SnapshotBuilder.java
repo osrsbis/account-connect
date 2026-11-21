@@ -471,6 +471,30 @@ final class SnapshotBuilder
 			bankBlock.put("manifest_sha256", BankVisitManifest.sha256(manifest));
 			bankBlock.put("item_stacks", manifest.size());
 		}
+		if (bankSynced)
+		{
+			// The layout beside the unchanged items: every slot items skips before the unused tail, as [slot, id] for a
+			// placeholder and [slot, -1] for an empty one, and the sizes of tabs 1-9.
+			List<List<Integer>> placeholders = new ArrayList<>();
+			int end = bank.length;
+			while (end > 0 && (bank[end - 1] == null || bank[end - 1].getId() <= 0 || bank[end - 1].getQuantity() <= 0)) end--;
+			for (int slot = 0; slot < end; slot++)
+			{
+				Item item = bank[slot];
+				if (!realItem(item))
+				{
+					boolean held = item != null && item.getId() > 0 && item.getQuantity() > 0;
+					placeholders.add(Arrays.asList(slot, held ? item.getId() : -1));
+				}
+			}
+			List<Integer> tabs = new ArrayList<>();
+			for (int tab = 0; tab < 9; tab++)
+			{
+				tabs.add(plugin.client.getVarbitValue(VarbitID.BANK_TAB_1 + tab));
+			}
+			bankBlock.put("tab_sizes", tabs);
+			bankBlock.put("placeholders", placeholders);
+		}
 		// An open bank's live read that no change of this open has confirmed yet has no known time: the last
 		// change's time predates the open, and the bank may have changed while it was closed.
 		bankBlock.put("observed_at", bankSynced && !plugin.bankVisit.bankReadUnconfirmed(liveBank) ? observedAtSeconds(AccountConnectPlugin.BANK_CONTAINER_ID) : null);
@@ -498,6 +522,8 @@ final class SnapshotBuilder
 			{
 				addContainerSnapshot(snap, c.getKey(), plugin.client.getItemContainer(c.getValue()));
 			}
+			Map<String, Object> house = plugin.house.layout;
+			if (house != null) snap.put("poh_layout", house);
 		}
 
 		// Group Ironman shared storage is not built into the snapshot until its data policy is approved (0.7.69): a block

@@ -264,6 +264,7 @@ final class SnapshotUploader
 	{
 		snapshot.remove("game_vars");
 		snapshot.remove("group_storage");
+		snapshot.remove("poh_layout");
 		for (String key : SnapshotBuilder.OWN_STORAGE_CONTAINERS.keySet()) snapshot.remove(key);
 	}
 

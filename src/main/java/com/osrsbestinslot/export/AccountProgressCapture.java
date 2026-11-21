@@ -120,7 +120,8 @@ final class AccountProgressCapture
             return;
         }
         lastSlotTick = client.getTickCount();
-        if (!Objects.equals(collectionItems.get(id), quantity))
+        Integer old = collectionItems.get(id);
+        if (old != null && old != quantity) // a new id only adds to a verified scan
         {
             scanComplete = false;
             if (!scanActive && scanVerifiedAt != null) scanStatus = "slots_changed";
@@ -260,17 +261,11 @@ final class AccountProgressCapture
         }
         if (!scanActive) return;
         int tick = client.getTickCount();
-        if (tick - scanStartTick > 20)
-        {
-            scanActive = false;
-            scanStatus = "timeout";
-            return;
-        }
-        if (tick - lastSlotTick < 3) return;
+        // Checked every tick: ids only accrue, so reaching the game's count proves the scan. Zero waits 3 quiet ticks.
         Integer obtained = varp(client.getVarps(), 2943), total = varp(client.getVarps(), 2944);
         if (total != null && total > 0 && obtained != null && obtained >= 0 && obtained <= total
             && Objects.equals(scanTotal, total) && Objects.equals(scanObtained, obtained)
-            && positiveCollectionCount() == obtained)
+            && seenAll(obtained) && (obtained > 0 || tick - lastSlotTick >= 3))
         {
             scanActive = false;
             scanComplete = true;
@@ -278,7 +273,12 @@ final class AccountProgressCapture
             scanVerifiedAt = now;
             if (collectionObservedAt == null) collectionObservedAt = now / 1000L;
         }
-        // Mismatch is not completion; leave time for delayed transmissions until the timeout.
+        else if (tick - scanStartTick > 20)
+        {
+            scanActive = false;
+            scanStatus = "timeout";
+        }
+        // Short of the count is not completion; leave time for delayed transmissions until the timeout.
     }
 
     /** Where the search scan stands: not_scanned, scanning, count_verified, timeout, unsupported_client, ... */
@@ -294,7 +294,7 @@ final class AccountProgressCapture
             && Objects.equals(scanTotal, varp(client.getVarps(), 2944));
     }
 
-    /** The scan saw every obtained slot: own log, distinct positive items equal to the game's unchanged counts. */
+    /** The scan saw every obtained slot: own log, distinct positive items reaching the game's unchanged counts. */
     private boolean collectionVerified(Client client, int[] vars)
     {
         boolean own = Integer.valueOf(0).equals(bit(client, vars, 12061));
@@ -303,7 +303,14 @@ final class AccountProgressCapture
         boolean countsKnown = total != null && total > 0 && obtained != null && obtained >= 0 && obtained <= total;
         return scanComplete && own && countsKnown
             && Objects.equals(scanObtained, obtained) && Objects.equals(scanTotal, total)
-            && positiveCollectionCount() == obtained;
+            && seenAll(obtained);
+    }
+
+    /** At least the game's obtained count of distinct positive items (the search can draw more); none for zero. */
+    private boolean seenAll(int obtained)
+    {
+        long seen = positiveCollectionCount();
+        return obtained > 0 ? seen >= obtained : seen == 0;
     }
 
     /**

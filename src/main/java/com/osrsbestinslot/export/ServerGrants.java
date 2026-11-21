@@ -261,6 +261,21 @@ final class ServerGrants
 	}
 
 
+	/**
+	 * ACCOUNT CAPTURE: the panel that asks for the missing parts of one account. Off unless the official endpoint
+	 * answered this token with X-Account-Capture: on naming the logged-in account in X-Account-Capture-Account, and
+	 * broad capture is on (the same answer grants it; it carries the costume room). Same safety as staff capture.
+	 * Held as "token:account" so the pair is written at once.
+	 */
+	volatile String accountCaptureGrant;
+
+	boolean accountCaptureEnabled()
+	{
+		String g = accountCaptureGrant;
+		int i = g == null ? -1 : g.indexOf(':');
+		return i > 0 && accountGrant(g.substring(0, i), g.substring(i + 1)) && broadCaptureEnabled();
+	}
+
 	/** Trade, store and drop capture is staff-only: no collection grant opens it for an ordinary player. */
 	boolean captureEnabled()
 	{
@@ -519,7 +534,13 @@ final class ServerGrants
 		// An accepted upload without the grant ends it, and so does any refusal (4xx). Only a 429 or a 5xx
 		// says nothing about staff, so only those keep it and leave a running store clip alone.
 		boolean previouslyGranted = captureEnabled();
-		if (!configuredForStaffApi() || !onStaffApi(response.request().url().toString()))
+		boolean official = configuredForStaffApi() && onStaffApi(response.request().url().toString());
+		// Account capture: the same official answer only; a refusal or an answer without it ends it.
+		String captureAccount = official && response.isSuccessful()
+			&& "on".equalsIgnoreCase(response.header("X-Account-Capture", "").trim())
+			? response.header("X-Account-Capture-Account", "").trim() : "";
+		accountCaptureGrant = captureAccount.matches("-?[0-9]{1,19}") ? sentToken + ":" + captureAccount : null;
+		if (!official)
 		{
 			clearStaffCaptureGrant();
 		}

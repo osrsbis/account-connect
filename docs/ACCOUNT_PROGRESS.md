@@ -102,15 +102,17 @@ is used. API failure falls back to passive script-4100 observations.
 
 There is one attempt per open, at least 100 ticks between attempts, no automatic
 retry in that open, a 20-tick timeout, and a 4096-item ceiling. A scan starts with
-fresh item evidence. After three quiet ticks, **distinct positive-quantity items**
-must equal the game's obtained count, with unchanged, valid obtained/maximum
-counts from scan start. Only then is `complete: true` with
+fresh item evidence. From 0.7.74 it is checked on every tick of the scan:
+**distinct positive-quantity items** must reach at least the game's obtained count
+(a search can draw more ids than the count), with unchanged, valid obtained/maximum
+counts from scan start; a known zero needs no positive item and three quiet ticks
+(0.7.73 and earlier: equal, after three quiet ticks). Only then is `complete: true` with
 `completeness_basis: own_search_scan_unique_count_matches_game`. This verifies
 obtained-item coverage, not every unowned item definition or historical acquisition.
 Explicit zero-quantity transmissions during the scan are retained without counting
 as obtained; absent items in incomplete scans remain unknown. Zero obtained can be
-verified only against a known positive game maximum. Slot/count changes invalidate
-completion. Early close, timeout, host/unknown ownership, old-client failure or
+verified only against a known positive game maximum. Count changes and a changed
+quantity of a seen item invalidate completion; a new id after verification adds to it. Early close, timeout, host/unknown ownership, old-client failure or
 missed setup during login settlement cannot claim completeness. Last verified
 scan timestamps describe observation time, never acquisition time. No adventure
 log is scanned; both legacy and new slot handlers require positive own ownership.
